@@ -62,10 +62,20 @@ jobsearch/
 │   ├── profile.yaml      # master resume — single source of truth, tailored resumes are subsets
 │   └── answers.yaml      # logistics, reusable answers, STAR story bank
 ├── jobs/                 # one folder per application (posting, tailored resume, cover, answers, notes)
-├── out/                  # renders of the master resume (gitignored)
+├── out/                  # renders + autofill.json export (gitignored)
 ├── tracker.json          # application pipeline (managed via the CLI)
-└── tools/jobsearch.py    # tracker + renderer + cheat sheet CLI
+├── tools/jobsearch.py    # tracker + renderer + cheat sheet + export CLI
+└── extension/            # Chrome extension: auto-fills application forms (see its README)
 ```
+
+## Browser autofill (Chrome extension)
+
+`extension/` is an unpacked Chrome extension that fills application forms (Greenhouse,
+Lever, Ashby, and most label-based forms) from your data: run
+`python3 jobsearch/tools/jobsearch.py export`, import the resulting
+`out/autofill.json` in the extension popup, open a form, click **Fill this form**.
+Green = filled, orange = needs you. It never submits and never invents answers —
+see `extension/README.md` for install steps and limits.
 
 ## Ground rules baked into every command
 

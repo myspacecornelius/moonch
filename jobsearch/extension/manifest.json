@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Jobsearch Autofill (personal)",
+  "version": "0.1.0",
+  "description": "Fills job application forms from your jobsearch profile data. Highlights what it filled and what needs you. Never submits.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Jobsearch Autofill"
+  }
+}

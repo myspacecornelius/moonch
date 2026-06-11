@@ -481,6 +481,93 @@ def cmd_render(args):
     print("PDF: open resume.html in a browser and print → 'Save as PDF'.")
 
 
+# ------------------------------------------------------------------ export ---
+
+def cmd_export(args):
+    """Bundle profile + answers + per-job materials into autofill.json for the
+    Chrome extension (jobsearch/extension/)."""
+    profile = load_yaml(PROFILE_PATH)
+    answers = load_yaml(ANSWERS_PATH) if ANSWERS_PATH.exists() else {}
+    tracker = load_tracker()
+    basics = profile.get("basics", {}) or {}
+    logistics = dict(answers.get("logistics") or {})
+
+    tokens = str(basics.get("name", "")).split()
+    name_parts = {
+        "first": tokens[0] if tokens else "",
+        "last": tokens[-1] if len(tokens) > 1 else "",
+        "middle": " ".join(tokens[1:-1]) if len(tokens) > 2 else "",
+    }
+
+    links = {}
+    for link in basics.get("links", []) or []:
+        if link.get("url"):
+            links[link.get("label", "Link")] = link["url"]
+
+    auth = str(logistics.get("work_authorization", "")).lower()
+    logistics["authorized_us"] = bool(auth) and not any(k in auth for k in ("visa", "sponsor", "not auth"))
+    sponsor = str(logistics.get("visa_sponsorship_needed", "")).strip().lower()
+    logistics["sponsorship_needed"] = sponsor.startswith("y") if sponsor else None
+
+    education = []
+    for edu in profile.get("education", []) or []:
+        gpa = ""
+        for det in edu.get("details", []) or []:
+            m = re.search(r"gpa[:\s]*([0-9.]+(?:\s*/\s*[0-9.]+)?)", str(det), re.I)
+            if m:
+                gpa = m.group(1)
+        education.append({
+            "school": edu.get("school", ""),
+            "degree": edu.get("degree", ""),
+            "start": str(edu.get("start", "") or ""),
+            "end": str(edu.get("end", "") or ""),
+            "gpa": gpa,
+        })
+
+    experience = [{
+        "company": j.get("company", ""),
+        "title": j.get("title", ""),
+        "location": j.get("location", ""),
+        "start": str(j.get("start", "") or ""),
+        "end": str(j.get("end", "") or ""),
+    } for j in profile.get("experience", []) or []]
+
+    repo_root = ROOT.parent
+    jobs = []
+    for app in tracker["applications"]:
+        if app["status"] in ("rejected", "archived") or not app.get("folder"):
+            continue
+        folder = repo_root / app["folder"]
+        cover = (folder / "cover.txt")
+        resume_txt = (folder / "resume.txt")
+        jobs.append({
+            "id": app["id"],
+            "company": app["company"],
+            "role": app["role"],
+            "url": app.get("url", ""),
+            "cover": cover.read_text() if cover.exists() else "",
+            "resume_txt": resume_txt.read_text() if resume_txt.exists() else "",
+        })
+
+    data = {
+        "generated": today(),
+        "basics": {k: basics.get(k, "") for k in ("name", "headline", "email", "phone", "location")},
+        "name_parts": name_parts,
+        "links": links,
+        "logistics": logistics,
+        "education": education,
+        "experience": experience,
+        "questions": answers.get("questions") or [],
+        "jobs": jobs,
+    }
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "autofill.json"
+    out.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    print(f"Wrote {out} ({len(jobs)} application(s) included)")
+    if is_template(PROFILE_PATH):
+        print("Note: profile still looks like the unfilled template — run /job-setup.", file=sys.stderr)
+
+
 # -------------------------------------------------------------------- main ---
 
 def main():
@@ -524,6 +611,9 @@ def main():
 
     p = sub.add_parser("sheet", help="print the application-form cheat sheet")
     p.set_defaults(func=cmd_sheet)
+
+    p = sub.add_parser("export", help="write jobsearch/out/autofill.json for the Chrome extension")
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("render", help="render resume YAML to HTML + plain text")
     p.add_argument("--job", help="job folder (name under jobsearch/jobs/ or a path) containing resume.yaml")

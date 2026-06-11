@@ -14,7 +14,8 @@ Two independent parts:
   titles, dates, degrees, or numbers that aren't there. Posting requirements the profile can't
   meet are recorded as gaps in `notes.md`, not written into the resume.
 - Never send anything (emails, applications) on the user's behalf. Gmail integration stops at
-  creating drafts.
+  creating drafts. The Chrome extension (`jobsearch/extension/`) auto-FILLS application forms
+  from `jobsearch.py export` data but must never auto-submit or auto-consent — keep it that way.
 - A profile file containing the line `STATUS: TEMPLATE` is unfilled — direct the user to
   `/job-setup` instead of working from placeholder data.
 - Privacy: this repo is **public** and on 2026-06-11 the user chose **local-only mode**:
