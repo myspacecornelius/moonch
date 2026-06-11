@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Renders of the master resume (regenerable; may contain personal data)
+jobsearch/out/
+
+# Personal job-search data — owner chose local-only mode while the repo is
+# public (2026-06-11). Templates live in jobsearch/profile/*.example.yaml.
+jobsearch/profile/profile.yaml
+jobsearch/profile/answers.yaml
+jobsearch/tracker.json
+jobsearch/jobs/

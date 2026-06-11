@@ -4,3 +4,4 @@ requests>=2.26.0
 webdriver-manager>=3.5.2
 python-dotenv>=0.19.0
 lxml>=4.9.0  # HTML parser for BeautifulSoup
+pyyaml>=6.0  # jobsearch toolkit (profile + resume rendering)

@@ -1,0 +1,46 @@
+# ============================================================================
+# ANSWERS BANK — reusable material for application forms and screens.
+# /job-answers pulls from here first; `jobsearch.py sheet` prints the
+# logistics fields as a copy-paste cheat sheet.
+#
+# STATUS: TEMPLATE — run /job-setup to fill this in.
+#
+# PRIVACY: personal data lives here too — same rules as profile.yaml.
+# ============================================================================
+
+# The fields every single application form asks for.
+logistics:
+  work_authorization: ""        # e.g. "US citizen" / "Green card" / "H-1B, transfer needed"
+  visa_sponsorship_needed: ""   # "No" / "Yes, now" / "Yes, in future"
+  willing_to_relocate: ""
+  remote_preference: ""
+  earliest_start: ""            # e.g. "2 weeks from offer"
+  notice_period: ""
+  salary_expectation: ""        # the number/range you actually say out loud
+  how_heard: ""                 # default answer for "how did you hear about us?"
+
+# Polished, reusable answers to questions that recur across applications.
+# /job-answers adapts these to each company rather than starting from scratch.
+questions:
+  - q: "Why do you want to work here?"
+    a: ""                       # your generic skeleton; tailoring adds company specifics
+  - q: "Tell us about yourself."
+    a: ""
+  - q: "What are you looking for in your next role?"
+    a: ""
+
+# STAR story bank for behavioral questions ("tell me about a time when...").
+# Aim for 4-6 stories covering different themes; /job-answers picks by theme.
+stories:
+  - title: ""                   # short handle, e.g. "Payments migration under deadline"
+    situation: ""
+    task: ""
+    action: ""
+    result: ""                  # quantified if possible
+    themes: []                  # e.g. [leadership, conflict, ambiguity, failure, deadline]
+
+# Never share without asking them first.
+references: []
+# - name: ""
+#   relationship: ""            # e.g. "Manager at Acme, 2020-2023"
+#   contact: ""
