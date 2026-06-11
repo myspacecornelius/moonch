@@ -1,3 +1,14 @@
+# moonch
+
+## Job Search Toolkit
+
+This repo doubles as a personal job-search assistant powered by Claude Code: resume
+tailoring, application-form answers, cover letters, follow-ups, and a pipeline tracker.
+Start with **[jobsearch/README.md](jobsearch/README.md)** — first step is making this repo
+private, then running `/job-setup` in Claude Code.
+
+---
+
 # Web Crawler Project
 
 A versatile web crawler that demonstrates different web scraping techniques using Python. This project includes capabilities for:

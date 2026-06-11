@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Renders of the master resume (regenerable; may contain personal data)
+jobsearch/out/

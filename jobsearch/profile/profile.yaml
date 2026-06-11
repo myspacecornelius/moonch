@@ -1,0 +1,91 @@
+# ============================================================================
+# MASTER PROFILE — the single source of truth for every resume this toolkit
+# produces. Tailored resumes are SUBSETS of this file: bullets may be
+# selected, reordered, and rephrased for emphasis, but never invented.
+#
+# STATUS: TEMPLATE — run /job-setup to fill this in from your real resume.
+# (Setup deletes the STATUS line above; the tools use it to detect an
+# unfilled template.)
+#
+# PRIVACY: this file will contain personal data. Make the repo private
+# before filling it in, or keep it out of git.
+# ============================================================================
+
+basics:
+  name: "Your Name"
+  headline: "Your Title, e.g. Senior Software Engineer"   # optional one-liner under your name
+  email: "you@example.com"
+  phone: "+1 (555) 555-5555"
+  location: "City, ST"
+  links:
+    - label: LinkedIn
+      url: https://www.linkedin.com/in/your-handle
+    - label: GitHub
+      url: https://github.com/your-handle
+
+# 2–3 sentences. Who you are, your strongest proof points, what you're after.
+summary: >
+  Replace with your professional summary.
+
+# Group skills so tailored resumes can reorder groups to match a posting.
+skills:
+  - group: Languages
+    items: [Python, TypeScript]
+  - group: Tools & Platforms
+    items: [AWS, Docker, PostgreSQL]
+
+# Most recent first. Write MORE bullets here than any one resume will use —
+# 6-10 per recent role is ideal. Tailoring picks the best 3-5 per role.
+# Each bullet: action verb + what you did + measurable outcome where possible.
+# `tags` help tailoring match bullets to posting requirements.
+experience:
+  - company: Company Name
+    title: Your Title
+    location: City, ST (or Remote)
+    start: 2022-01          # YYYY-MM
+    end: present            # YYYY-MM or "present"
+    tags: [backend, leadership]
+    bullets:
+      - "Did X using Y, resulting in Z (quantify: %, $, time saved, scale)."
+      - "Another accomplishment from this role."
+
+  - company: Previous Company
+    title: Previous Title
+    location: City, ST
+    start: 2019-06
+    end: 2021-12
+    tags: []
+    bullets:
+      - "Accomplishment."
+
+# Optional sections — delete any you don't need; empty sections are skipped.
+projects:
+  - name: Project Name
+    url: https://github.com/you/project
+    dates: ""               # optional, freeform
+    bullets:
+      - "What it does and why it's impressive."
+
+education:
+  - school: University Name
+    degree: B.S. Computer Science
+    start: 2014
+    end: 2018
+    details: []             # e.g. ["GPA: 3.8", "Dean's List"]
+
+certifications: []
+# - name: AWS Solutions Architect
+#   issuer: Amazon
+#   year: 2023
+
+extras: []                  # awards, volunteering, publications, languages spoken
+
+# Used by /job-find to hunt postings and by /job-tailor to sanity-check fit.
+preferences:
+  target_titles: [Senior Software Engineer, Staff Engineer]
+  locations: [Remote (US), Boston MA]
+  remote: "remote preferred, hybrid OK"
+  salary_floor: ""          # e.g. "$160k base" — used privately, never sent anywhere
+  industries_preferred: []
+  industries_avoid: []
+  dealbreakers: []          # e.g. ["on-call more than 1 week/month"]
