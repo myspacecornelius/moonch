@@ -17,8 +17,12 @@ Two independent parts:
   creating drafts.
 - A profile file containing the line `STATUS: TEMPLATE` is unfilled — direct the user to
   `/job-setup` instead of working from placeholder data.
-- Privacy: as of 2026-06-11 this repo was **public**. Before committing real personal data,
-  verify it has been made private (or that the user explicitly accepted gitignore/local-only mode).
+- Privacy: this repo is **public** and on 2026-06-11 the user chose **local-only mode**:
+  `jobsearch/profile/profile.yaml`, `answers.yaml`, `tracker.json`, and `jobsearch/jobs/` are
+  gitignored — NEVER commit them while the repo is public. Sanitized templates live in
+  `jobsearch/profile/*.example.yaml`. In a fresh session those gitignored files won't exist:
+  ask the user to re-upload their resume and re-run `/job-setup` (or to make the repo private,
+  remove the gitignore entries, and switch to committed mode).
 - The tracker (`jobsearch/tracker.json`) is only modified through
   `python3 jobsearch/tools/jobsearch.py` (add/set/note/list/show/next) — don't hand-edit it.
 - Cloud sessions are ephemeral: after changing profile, tracker, or job folders, commit and push.

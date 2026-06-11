@@ -5,7 +5,10 @@ argument-hint: [path to resume file, or leave empty to paste/import]
 
 Set up the job-search toolkit's data files from the user's real resume. Files to fill:
 `jobsearch/profile/profile.yaml` (master resume data) and `jobsearch/profile/answers.yaml`
-(application answers bank). The schema is documented by comments inside each file — read both first.
+(application answers bank). If either file doesn't exist (fresh clone in local-only mode),
+bootstrap it from the matching `jobsearch/profile/*.example.yaml`. The schema is documented
+by comments inside each file — read them first. Check CLAUDE.md for a previously made
+privacy-mode decision before re-asking.
 
 ## Step 0 — Privacy gate (do not skip)
 

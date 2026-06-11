@@ -7,10 +7,17 @@ Code itself is the engine.
 
 ## ⚠️ Privacy first
 
-This toolkit stores your personal data (resume, salary expectations, application history)
-inside the repo so it persists across sessions. **Make this repo private before running
-`/job-setup`.** If it must stay public, setup will offer a gitignore mode instead (data
-won't persist across Claude Code cloud sessions, which clone fresh each time).
+This toolkit stores personal data (resume, salary expectations, application history).
+Two modes, chosen during `/job-setup`:
+
+- **Private repo (recommended):** real data is committed, so it persists across Claude Code
+  cloud sessions.
+- **Local-only (current mode, chosen 2026-06-11):** the repo stays public and
+  `profile/profile.yaml`, `profile/answers.yaml`, `tracker.json`, and `jobs/` are gitignored.
+  Sanitized templates live in `profile/*.example.yaml`. Cloud sessions clone fresh, so the
+  real data must be re-created each session (re-upload the resume to `/job-setup`). To
+  upgrade later: make the repo private, delete the personal-data entries from `.gitignore`,
+  and commit.
 
 ## Quick start
 
