@@ -1,0 +1,484 @@
+{
+  "format": "finance-studio-filebase-manifest-v1",
+  "version": "2.1.0",
+  "files": [
+    {
+      "file": ".gitignore",
+      "bytes": 654,
+      "sha256": "53ab125b5dcc1f7f52d6cb3bb24d0c8738f4f29c132c2f2bb6506f26e06c4e31"
+    },
+    {
+      "file": "Finance_Task_Studio.html",
+      "bytes": 303327,
+      "sha256": "c194cc7148fd357cb0e625cd6242b303bd5988a5aa4b3982fb1d7a269030178d"
+    },
+    {
+      "file": "README.md",
+      "bytes": 9648,
+      "sha256": "c3e07de07799d27a6940a6ac461a34a3e05a143df38f9ebf8eb0f760cdb9c320"
+    },
+    {
+      "file": "Start Finance Task Studio.command",
+      "bytes": 521,
+      "sha256": "1aa47aa6f16d1c619ff723f2f861abfc777c8d20c2fec19a0b5acd8a613e918e"
+    },
+    {
+      "file": "VERIFICATION.md",
+      "bytes": 5394,
+      "sha256": "54f904623ed7ca85b4c9fe2d041435bb8c4c1286e3e280f0f86fa79b8a33bf78"
+    },
+    {
+      "file": "app.js",
+      "bytes": 56048,
+      "sha256": "8c3fc31eb51f14af0606600b6074dd9ee52e57d372f3f2dbd16762ca6bcf950c"
+    },
+    {
+      "file": "backend/harness.cjs",
+      "bytes": 14075,
+      "sha256": "78ad9c6990db9ad7b87f12d737d6ec60745238b3eb0131f5409051daee113b7c"
+    },
+    {
+      "file": "backend/server.cjs",
+      "bytes": 3956,
+      "sha256": "de4083f27187a7d6211eefc5058577fa8eb033fa6a472828fcf9a7b84cdfdb60"
+    },
+    {
+      "file": "candidate-engine.js",
+      "bytes": 30640,
+      "sha256": "b0cafa3cb4baf46fef07600f4165fa718291d17f3460b3288c6e2d6dbee6efb7"
+    },
+    {
+      "file": "catalog.js",
+      "bytes": 40312,
+      "sha256": "9aaf74ceabf312eb3600329fa39957170bd06061d25180b0da3b6a1f47f1a085"
+    },
+    {
+      "file": "core.js",
+      "bytes": 44095,
+      "sha256": "afab781d9ee7d120dd53dc10dfd5e77c5922addf052418316b792c3dc063b9a3"
+    },
+    {
+      "file": "dashboard.js",
+      "bytes": 47253,
+      "sha256": "a9c8956b13f75312c54fd1b74d0b727d59f26ab72e54f6cb61cbbe777b4317a6"
+    },
+    {
+      "file": "examples.js",
+      "bytes": 25432,
+      "sha256": "f4f708d29976cb1c8c16600d59433a0dc1d9fdd58867315094a5c3225eee7834"
+    },
+    {
+      "file": "index.html",
+      "bytes": 2389,
+      "sha256": "8bfad380ac6804ccfc4d9f8260bf1aaaed5c4b2e01ca746b8a79988c12226782"
+    },
+    {
+      "file": "package-engine.js",
+      "bytes": 22825,
+      "sha256": "2bc35c2ef858be5c3180c268054a88bad3ab19f08255cc7574dbe6b3c4db1139"
+    },
+    {
+      "file": "package.json",
+      "bytes": 725,
+      "sha256": "1e00797b64d6fb9f07f800ee01a5eeea3ef7b066657d53462f560e63d15574cf"
+    },
+    {
+      "file": "playbook.js",
+      "bytes": 3340,
+      "sha256": "84f2efe5ea24917d2e2836a8df4e32fffc8a4d2cff6514075f21051229355357"
+    },
+    {
+      "file": "qa/candidates/browser-report.json",
+      "bytes": 2203,
+      "sha256": "0c3ff2f1a68607afd8527ada1f58ec38c282d69e8f2abe9220b82458bbf299ba"
+    },
+    {
+      "file": "qa/candidates/desktop-new-cash-candidates.png",
+      "bytes": 476940,
+      "sha256": "e77d161b0ad982a3ae0603c7f323ca411ca8ce17e279dca213d3b02bf33be776"
+    },
+    {
+      "file": "qa/candidates/mobile-new-cash-candidates.png",
+      "bytes": 453757,
+      "sha256": "21ca90b15d01b20f07639e95c18a343aba0cb65bb1c45b6281387f9474bf3254"
+    },
+    {
+      "file": "qa/candidates/mobile-new-dividend-candidates.png",
+      "bytes": 449799,
+      "sha256": "b7e7037fffe0e8fe75497eb1f168741f127ef4cac6b45366844994363f6f9978"
+    },
+    {
+      "file": "qa/dashboard/browser-report.json",
+      "bytes": 2216,
+      "sha256": "2f8e13a20cc4b08dbf34876c99db41924ea221e70d6bf5ada15a5f344b33bd4d"
+    },
+    {
+      "file": "qa/dashboard/desktop-files.png",
+      "bytes": 188163,
+      "sha256": "c388cf9e30486c2f5ebdba1f0e25fcf30613d4303de85987fb1e5fad99cf76c2"
+    },
+    {
+      "file": "qa/dashboard/desktop-overview.png",
+      "bytes": 203886,
+      "sha256": "56f0add743c41b0e037738d1366e69de0025181ef8759c336aca8a536a14fc16"
+    },
+    {
+      "file": "qa/dashboard/desktop-results.png",
+      "bytes": 230224,
+      "sha256": "169232da36f3a5583f9d312068e49a90e969c69e1713fa9dd3baf768e9032cbd"
+    },
+    {
+      "file": "qa/dashboard/mobile-files.png",
+      "bytes": 181423,
+      "sha256": "4d35410f9d94eca29e5dc716265f7e50129cb437e783bede05613ac3b5cb7a3f"
+    },
+    {
+      "file": "qa/dashboard/mobile-history.png",
+      "bytes": 69187,
+      "sha256": "9665d17c088e0044b59b2df666de16ad9ccb355663dfb4e8947046241117d714"
+    },
+    {
+      "file": "qa/dashboard/mobile-overview.png",
+      "bytes": 177058,
+      "sha256": "84644b24eaa5156e5b82e8166c371a5cb80d74acbd3f1acca3ac2bca7b38ff2e"
+    },
+    {
+      "file": "qa/legacy/browser-report.json",
+      "bytes": 3440,
+      "sha256": "b3a17d255dc43282d6bfabb5a9684070c344464b30c1badc75d588e35d94e977"
+    },
+    {
+      "file": "qa/legacy/desktop-economics.png",
+      "bytes": 399643,
+      "sha256": "2535d24c946cee36793a2ec8d1d688f5a893de2b6a5a81c03d1b079435534bf4"
+    },
+    {
+      "file": "qa/legacy/desktop-failure-modes.png",
+      "bytes": 610931,
+      "sha256": "ca4310df51e4a3c08bac5200249b057741a09a45adb66db318f68ce82a679a4c"
+    },
+    {
+      "file": "qa/legacy/desktop-playbook.png",
+      "bytes": 883414,
+      "sha256": "00e3b24b2b5af05c2fc4d46c0a68ceaa93d93629d8f76a2a093f1beff9bca7a8"
+    },
+    {
+      "file": "qa/legacy/desktop-research.png",
+      "bytes": 1444035,
+      "sha256": "978fe8700b6903db1eeda9549b444b2616b64778b1e590ba8e99fc674965f748"
+    },
+    {
+      "file": "qa/legacy/desktop-root.png",
+      "bytes": 419286,
+      "sha256": "374d7606a04ed834ec1259ee6817bf5876885d94b601099fcb54b638deb33f52"
+    },
+    {
+      "file": "qa/legacy/desktop-workspace.png",
+      "bytes": 283217,
+      "sha256": "592f7f1ebc01850fc7c5da7c2d411bbdd63a44db05e97ca00f0aff5745c9779f"
+    },
+    {
+      "file": "qa/legacy/library-fixture.json",
+      "bytes": 4775,
+      "sha256": "5116331fc6f1a0d9de0e7ecd4e1a89efff2e00a365d056c8ceec38b3ed1a3091"
+    },
+    {
+      "file": "qa/legacy/mobile-blank-workspace.png",
+      "bytes": 231971,
+      "sha256": "b7042c46ff64386ef9f2aec32c95cceb994fc2d4cb922189e8ff4583d318838e"
+    },
+    {
+      "file": "qa/legacy/mobile-economics.png",
+      "bytes": 163794,
+      "sha256": "bb3c69fe15285140b706de12dab44758a17f113c287bd91a03a42a81bca2ac6d"
+    },
+    {
+      "file": "qa/legacy/mobile-experiments.png",
+      "bytes": 199139,
+      "sha256": "8abf43e0e1987929ad40769b7a96f5d558a0ef84cbfb351c4c7a63e7212139fd"
+    },
+    {
+      "file": "qa/legacy/mobile-failure-modes.png",
+      "bytes": 545194,
+      "sha256": "71ec9054402a970bba61846f0ac32f5a56f727b02aab71fa454e6ee681883511"
+    },
+    {
+      "file": "qa/legacy/mobile-modes.png",
+      "bytes": 463040,
+      "sha256": "407b72f39c15a49ba0a3232aa666c153c5ae1cf9aab243277c05da9faeafda2a"
+    },
+    {
+      "file": "qa/legacy/mobile-playbook.png",
+      "bytes": 880580,
+      "sha256": "0d6dc08e0707977062ee71234766f10a051251be0fafcc393289ed59630a7c9e"
+    },
+    {
+      "file": "qa/legacy/mobile-research.png",
+      "bytes": 1413342,
+      "sha256": "22d3f9d7586b3a2ca9a7d30b1b77d0e2b6b0debc83169cb2babe9e0eaf44f77d"
+    },
+    {
+      "file": "qa/legacy/mobile-review.png",
+      "bytes": 436909,
+      "sha256": "01b3e7771901184e894104d29f233c3e810d6f449c28ec15505980fc7a447305"
+    },
+    {
+      "file": "qa/legacy/mobile-roots.png",
+      "bytes": 283234,
+      "sha256": "f617b69113339ab8545d7a9f9cc6e2353ef6859f08800480c10c1d308e0df4b7"
+    },
+    {
+      "file": "qa/legacy/mobile-sources.png",
+      "bytes": 76337,
+      "sha256": "06f84d3854cd03be649628863a1c205d7602785ecd71c0f6ce54a9ac4bdb038a"
+    },
+    {
+      "file": "qa/legacy/mobile-workspace.png",
+      "bytes": 242137,
+      "sha256": "c0cff8665e1fbaaa366b5d4a67cab0dd52c97812033f18108095822b8442fa70"
+    },
+    {
+      "file": "qa/standalone-dashboard/browser-report.json",
+      "bytes": 1867,
+      "sha256": "837e56bc21b1782a4b62386307a6219d0e779c7f5f7241acc54ecf6e85b75d1c"
+    },
+    {
+      "file": "qa/standalone-dashboard/desktop-files.png",
+      "bytes": 188163,
+      "sha256": "c388cf9e30486c2f5ebdba1f0e25fcf30613d4303de85987fb1e5fad99cf76c2"
+    },
+    {
+      "file": "qa/standalone-dashboard/desktop-overview.png",
+      "bytes": 203886,
+      "sha256": "56f0add743c41b0e037738d1366e69de0025181ef8759c336aca8a536a14fc16"
+    },
+    {
+      "file": "qa/standalone-dashboard/desktop-results.png",
+      "bytes": 230413,
+      "sha256": "69230fabc74a4220dd7fbcac52859c611983a103863cb95e6c82fabe37640cd4"
+    },
+    {
+      "file": "qa/standalone-dashboard/mobile-files.png",
+      "bytes": 181423,
+      "sha256": "4d35410f9d94eca29e5dc716265f7e50129cb437e783bede05613ac3b5cb7a3f"
+    },
+    {
+      "file": "qa/standalone-dashboard/mobile-history.png",
+      "bytes": 69171,
+      "sha256": "8b745bd7b2b09946b09575c821bf1a51bb45a296fc624e3f4bb49c47524943ce"
+    },
+    {
+      "file": "qa/standalone-dashboard/mobile-overview.png",
+      "bytes": 177058,
+      "sha256": "84644b24eaa5156e5b82e8166c371a5cb80d74acbd3f1acca3ac2bca7b38ff2e"
+    },
+    {
+      "file": "qa/standalone-legacy/browser-report.json",
+      "bytes": 3091,
+      "sha256": "b94bf50e4b5aa5327faaadebc6929282df4e18d0e81c5a0d4eff233a0105cd09"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-economics.png",
+      "bytes": 399643,
+      "sha256": "2535d24c946cee36793a2ec8d1d688f5a893de2b6a5a81c03d1b079435534bf4"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-failure-modes.png",
+      "bytes": 610931,
+      "sha256": "ca4310df51e4a3c08bac5200249b057741a09a45adb66db318f68ce82a679a4c"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-playbook.png",
+      "bytes": 897547,
+      "sha256": "d639e4a2405b0a2e39ce1edc546e6ae609236e5623371dda1f1ad3d62606f921"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-research.png",
+      "bytes": 1453840,
+      "sha256": "51606809f8a0f551ed416d101ee5b60a52b1dce106c7055e338b57b216fcad52"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-root.png",
+      "bytes": 419286,
+      "sha256": "374d7606a04ed834ec1259ee6817bf5876885d94b601099fcb54b638deb33f52"
+    },
+    {
+      "file": "qa/standalone-legacy/desktop-workspace.png",
+      "bytes": 283217,
+      "sha256": "592f7f1ebc01850fc7c5da7c2d411bbdd63a44db05e97ca00f0aff5745c9779f"
+    },
+    {
+      "file": "qa/standalone-legacy/library-fixture.json",
+      "bytes": 4775,
+      "sha256": "5116331fc6f1a0d9de0e7ecd4e1a89efff2e00a365d056c8ceec38b3ed1a3091"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-blank-workspace.png",
+      "bytes": 231971,
+      "sha256": "b7042c46ff64386ef9f2aec32c95cceb994fc2d4cb922189e8ff4583d318838e"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-economics.png",
+      "bytes": 163794,
+      "sha256": "bb3c69fe15285140b706de12dab44758a17f113c287bd91a03a42a81bca2ac6d"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-experiments.png",
+      "bytes": 199214,
+      "sha256": "b491269707f5b14da09128d958b6e44af8291bc7333ce0cc36ace130129f61ed"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-failure-modes.png",
+      "bytes": 545194,
+      "sha256": "71ec9054402a970bba61846f0ac32f5a56f727b02aab71fa454e6ee681883511"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-modes.png",
+      "bytes": 463040,
+      "sha256": "407b72f39c15a49ba0a3232aa666c153c5ae1cf9aab243277c05da9faeafda2a"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-playbook.png",
+      "bytes": 880936,
+      "sha256": "004089caa3f68bf10d1dbdcda25131236c2055c850eec9fd8855e27cdecbecf2"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-research.png",
+      "bytes": 1421452,
+      "sha256": "935f1263a8c29e2df56ee44349cdcb4413c013494792a6c59a55e3feb9508d97"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-review.png",
+      "bytes": 436909,
+      "sha256": "01b3e7771901184e894104d29f233c3e810d6f449c28ec15505980fc7a447305"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-roots.png",
+      "bytes": 283618,
+      "sha256": "73cf28f0c00a041dbc595e65708f34200c576d01e2daa39114732465f2a6bfd5"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-sources.png",
+      "bytes": 76337,
+      "sha256": "06f84d3854cd03be649628863a1c205d7602785ecd71c0f6ce54a9ac4bdb038a"
+    },
+    {
+      "file": "qa/standalone-legacy/mobile-workspace.png",
+      "bytes": 242137,
+      "sha256": "c0cff8665e1fbaaa366b5d4a67cab0dd52c97812033f18108095822b8442fa70"
+    },
+    {
+      "file": "qa/unit-tests.txt",
+      "bytes": 17241,
+      "sha256": "48b42ffbaea6bbd2608833e8bc6d43a306e3f3042f0d542dbce2de4c3a6c951e"
+    },
+    {
+      "file": "research/PROVENANCE.md",
+      "bytes": 1311,
+      "sha256": "71f13250b067fb8a5c09b5167a353a7c6b4fd3a1a62dab89552695be6f217fe1"
+    },
+    {
+      "file": "research/design_checklist.json",
+      "bytes": 8923,
+      "sha256": "7a887b1d775b1750bd799e8527b074b32262b64394e8dea947174a27aa6e446a"
+    },
+    {
+      "file": "research/mechanisms.json",
+      "bytes": 21552,
+      "sha256": "53b9ab341b70f0c9b0fc42966fefa58b0db814665199ac45c848730cd293c7a2"
+    },
+    {
+      "file": "research/source_catalog.json",
+      "bytes": 27959,
+      "sha256": "6487de10edc5d18582442f4a3d6cb353ee6c0c478410b0bfe08ae65e41e0f110"
+    },
+    {
+      "file": "research-catalog.json",
+      "bytes": 40218,
+      "sha256": "4217812760e7bd853431820fa60694658e8cf44c5303881715d7a407bae5602b"
+    },
+    {
+      "file": "research-gates.js",
+      "bytes": 9023,
+      "sha256": "f3f0ad8e1b14d8416df0964456f2dc674ca8875a4faafdbd8cd94e3704c8646c"
+    },
+    {
+      "file": "scripts/build-catalog.cjs",
+      "bytes": 2447,
+      "sha256": "e8b7612d7e0c1f4e32bb01883e0a46baed8a974f413139a09d55b40ababd51b3"
+    },
+    {
+      "file": "scripts/build-standalone.cjs",
+      "bytes": 2098,
+      "sha256": "9c73a90a68393c41c63d37a44122abccb63a35b37c85c46e5190b414b10c7fcc"
+    },
+    {
+      "file": "scripts/package-filebase.py",
+      "bytes": 3463,
+      "sha256": "1dbd8932c2d301e5027547499bd99389695e1726f570cf93fd2d214acde49e0c"
+    },
+    {
+      "file": "styles.css",
+      "bytes": 21420,
+      "sha256": "b63787f1f2e293ccdf0fcd84a4053ecf97942ddd484d943e0782c8366213fc5f"
+    },
+    {
+      "file": "tests/browser.cjs",
+      "bytes": 14167,
+      "sha256": "799cb13a73766f9f77eee7592f81466647fcb0a6e48430ecbfa9c962c7534f79"
+    },
+    {
+      "file": "tests/bundle.test.cjs",
+      "bytes": 1255,
+      "sha256": "af27f6603a8bcab3331f981a3971d16d3049c9fb3dd9a326b1dc3354e71b8614"
+    },
+    {
+      "file": "tests/candidates-browser.cjs",
+      "bytes": 11787,
+      "sha256": "e01c078799c915233de8bf4ff3876d9d5fb51250f70fce591b1bcf9a443ed729"
+    },
+    {
+      "file": "tests/candidates.test.cjs",
+      "bytes": 9521,
+      "sha256": "fec6a65a9e8faf080c7392670962ce896fa49ef3bea0202b12d340acd14951d8"
+    },
+    {
+      "file": "tests/core.test.cjs",
+      "bytes": 23599,
+      "sha256": "14140bc51f5bdc442a1c26068a115e9185ed9d8f88a1da8271f474f082a0ad84"
+    },
+    {
+      "file": "tests/dashboard-browser.cjs",
+      "bytes": 12878,
+      "sha256": "de64a262ab6578e7a683a1e0b5eb74e4ed0122c961b7a438a347ec532e6e371a"
+    },
+    {
+      "file": "tests/fixtures/package.zip",
+      "bytes": 1315,
+      "sha256": "b4a9dbe4fc26247c9481a7c02d1fe5cf2d5d0e40344c5a181129d30c51000611"
+    },
+    {
+      "file": "tests/harness.test.cjs",
+      "bytes": 2768,
+      "sha256": "5efea97a88946025b45ad8aedaa6dad0510b25e2b838aa0b852383ae5cc582dd"
+    },
+    {
+      "file": "tests/model-browser.cjs",
+      "bytes": 7012,
+      "sha256": "bf292901bf6ecb340ac71af916a0b78f5de0422170b87523faf641624e08043d"
+    },
+    {
+      "file": "tests/package-engine.test.cjs",
+      "bytes": 4726,
+      "sha256": "ab75619efbe3bfa195b522d08933af8ee33a2949850433f32f4ebd4a07f8ce85"
+    }
+  ],
+  "excluded": [
+    "private/ (locally kept evidence modules and model-run receipts)",
+    "model-runs/ (raw requests, events, SDK storage, stderr)",
+    "qa/**/downloads/",
+    "LOCAL_SERVER.json",
+    "credentials and environment/configuration secrets"
+  ],
+  "private_evidence": "No private task evidence is distributed. A bundled task audit is loaded locally through the app as a private evidence module."
+}

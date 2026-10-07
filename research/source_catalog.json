@@ -1,0 +1,592 @@
+{
+  "schema_version": "1.0",
+  "verified_at_utc": "2026-10-07",
+  "purpose": "Author-facing, source-grounded finance task design; not a jailbreak or a difficulty certification.",
+  "evidence_policy": {
+    "primary_verified": "Directly read primary paper/card/repository; checks publication claims, not independent replication.",
+    "empirical_task_verified": "Requires actual controlled runs on the user's task, versioned inputs, gold and grader. No entries in this catalog satisfy this level.",
+    "inference": "A proposed design based on a documented phenomenon. Must not be presented as measured hardness."
+  },
+  "sources": [
+    {
+      "id": "finverbench",
+      "requested_name": "FinVerBench",
+      "title": "FinVerBench: Benchmark Validity and Calibration in Large Language Model Financial Statement Verification",
+      "url": "https://arxiv.org/html/2605.29586v1",
+      "version": "arXiv 2605.29586v1, 2026-05-28",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Section 3.3; Table 2; Appendix C/Table 13",
+        "Section 6.4/Table 10",
+        "Section 6.5/Table 11",
+        "Section 7.2; Section 8"
+      ],
+      "facts": [
+        "Four categories and twelve defined subtypes; eleven instantiated because CL-D&A is excluded.",
+        "Claude Sonnet 4 recall changes from 100.0% to 79.0% after rounding in the same 105-instance observable sample: 43 clean and 62 injected. Observed FPR stays zero.",
+        "Simplified statements can provoke false positives when omitted items are assumed zero."
+      ],
+      "cautions": [
+        "Single guided-checklist setting; no general model-ranking or Jericho difficulty inference.",
+        "Hidden-field positives were excluded or treated as insufficient information.",
+        "Paper claims code availability but defers its repository URL to a camera-ready version; no repository independently located."
+      ]
+    },
+    {
+      "id": "finrate",
+      "requested_name": "Fin-RATE",
+      "title": "Fin-RATE: A Real-world Financial Analytics and Tracking Evaluation Benchmark for LLMs on SEC Filings",
+      "url": "https://arxiv.org/html/2602.07294v4",
+      "version": "arXiv 2602.07294v4, 2026-06-10",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Section 3.1",
+        "Section 4.2.1",
+        "Section 4.3.1/Table 2",
+        "Appendix I.1-I.4"
+      ],
+      "facts": [
+        "Thirteen core error types in four categories; finer hallucination and query-understanding subtypes are nested, not additional core types.",
+        "Three 2,500-question pathways cover detail reasoning, entity comparison, and longitudinal tracking.",
+        "Error taxonomy explicitly separates missing/ranked/distracting evidence, unsupported generation, numerical/semantic errors, and query/context comprehension."
+      ],
+      "cautions": [
+        "LLM-judge fusion produces error labels; their counts are not independently observed causal mechanisms.",
+        "Entity and year mismatches support candidate designs, not claims about this task family."
+      ]
+    },
+    {
+      "id": "finrate_release",
+      "title": "Fin-RATE official repository and dataset",
+      "url": "https://github.com/jyd777/Fin-RATE",
+      "related_url": "https://huggingface.co/datasets/GGLabYale/Fin-RATE",
+      "version": "live pages read 2026-10-07",
+      "type": "primary_repository_and_card",
+      "status": "identity_verified_only",
+      "locations": [
+        "Repository landing page",
+        "Dataset landing page"
+      ],
+      "facts": [
+        "Both destinations are linked directly by the paper."
+      ],
+      "cautions": [
+        "Release contents and numerical results were not independently executed or fully audited in this pass."
+      ]
+    },
+    {
+      "id": "finsheet",
+      "requested_name": "FinSheet-Bench",
+      "title": "FinSheet-Bench: From Simple Lookups to Complex Reasoning, Where LLMs Break on Financial Spreadsheets",
+      "url": "https://arxiv.org/html/2603.07316v1",
+      "version": "arXiv 2603.07316v1, 2026-03-07",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Sections 4.4-4.5.1",
+        "Section 5.1/Table 4",
+        "Section 5.2/Table 5",
+        "Section 5.6/Table 8",
+        "Sections 6.2 and 7; Appendix A"
+      ],
+      "facts": [
+        "Gemini 3.1 Pro reports 82.4% overall accuracy.",
+        "The 48.6% largest-file figure is an across-model file average, not this model's individual accuracy.",
+        "Experiments use text-serialized synthetic portfolios; serialization drops visual cues and formula references. Twenty-four files vary layout and size."
+      ],
+      "cautions": [
+        "Do not label these results native-Excel agent performance.",
+        "Structural variants also change row counts and available columns, so raw variant gaps do not isolate layout causally.",
+        "FinVerBench's related-work description incorrectly identifies the 82.4% model and conflates aggregation levels."
+      ]
+    },
+    {
+      "id": "failsafeqa",
+      "requested_name": "FailSafeQA",
+      "title": "Expect the Unexpected: FailSafe Long Context QA for Finance",
+      "url": "https://arxiv.org/html/2502.06329v1",
+      "version": "arXiv 2502.06329v1, 2025-02-10",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Sections 2.2-2.4",
+        "Sections 3.1-3.2",
+        "Appendix C.3"
+      ],
+      "facts": [
+        "Six perturbations: misspelled, incomplete, and out-of-domain queries; missing, OCR-degraded, and irrelevant context.",
+        "The 220 base examples distinguish answer-preserving perturbations from cases requiring an insufficiency response."
+      ],
+      "cautions": [
+        "This is robustness and grounding evaluation, not evidence that arbitrary corruption improves financial reasoning tests.",
+        "Missing-source tasks are fair only when identifying insufficiency is an authorized outcome; do not demand an impossible numeric answer."
+      ]
+    },
+    {
+      "id": "hedgebench_paper",
+      "requested_name": "HedgeBench",
+      "title": "Hedge-Bench: Benchmarking Agents on Hard, Realistic Tasks Pertaining to Financial Reasoning",
+      "url": "https://arxiv.org/html/2606.03918v1",
+      "version": "arXiv 2606.03918v1",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Sections 3.1-3.3",
+        "Sections 4.1-4.3",
+        "Section 5.5",
+        "Section 6"
+      ],
+      "facts": [
+        "102 tasks use company/peer source files and open-ended analytical themes.",
+        "Grading uses an LLM judge for factual grounding, conceptual coverage, and opposing-evidence synthesis.",
+        "A fabricated fact invalidates the affected reasoning move; equivalent supported framings can receive credit."
+      ],
+      "cautions": [
+        "The rubric reflects particular analysts; valid off-rubric reasoning may exceed its measurement.",
+        "Section 6 acknowledges possible rubric drift from transcripts. A low perfect-score rate is not a portable difficulty score.",
+        "Do not transplant hidden mandatory themes into a task whose public request does not justify them."
+      ]
+    },
+    {
+      "id": "creditcardqa_paper",
+      "requested_name": "CreditCardQA",
+      "title": "Credit Cards, Confusion, Computation, and Consequences: What Can We Uncover About Language Model Reasoning?",
+      "url": "https://arxiv.org/html/2607.26952v1",
+      "version": "arXiv 2607.26952v1",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Section 2/Table 1",
+        "Section 5/Table 3",
+        "Section 6",
+        "Appendix B, Question Generation Process"
+      ],
+      "facts": [
+        "Paper reports 1,800 questions with 800/1,000 development/test split; naming varies internally among CreditCardQA, CreditQA, and FinLitQA.",
+        "In fifty sampled incorrect GPT-OSS-120B responses, nonexclusive labels include formula/rule substitution 35/50 and missed conditions 27/50.",
+        "Question construction requires all necessary absent inputs/definitions to be supplied and one answer type."
+      ],
+      "cautions": [
+        "The error audit is not all models or all responses; overlapping rates must not be added.",
+        "Agreement-specific branching, caps, and timing motivate candidate mechanisms but do not establish their hardness in Jericho.",
+        "Public dataset release count must be reported separately from paper count."
+      ]
+    },
+    {
+      "id": "mbabench",
+      "requested_name": "GAUGE at arXiv 2605.22664",
+      "title": "MBABench: Evaluating LLM Agents on End-to-End Spreadsheet Tasks in Finance",
+      "url": "https://arxiv.org/html/2605.22664v5",
+      "version": "arXiv 2605.22664v5, 2026-08-19; v1 titled WorkstreamBench",
+      "type": "primary_paper",
+      "status": "verified_identity_correction",
+      "locations": [
+        "Abstract",
+        "Section 3",
+        "Table 2",
+        "Section 8"
+      ],
+      "facts": [
+        "This identifier resolves to MBABench, not GAUGE.",
+        "Three evaluation dimensions cover numerical/task accuracy, formula robustness/auditability, and presentation.",
+        "Synthetic perturbation tests include hardcodes, ranges, signs, and edge cases."
+      ],
+      "cautions": [
+        "Harnesses differ between API and proprietary tools; observed performance differences cannot be attributed solely to models.",
+        "Judge perturbation checks are evidence about the grader, not proof that task mutations are hard."
+      ]
+    },
+    {
+      "id": "gauge",
+      "requested_name": "GAUGE",
+      "title": "One Analyst Is Not Ground Truth: Grading Agent-Built Financial Models Against Observed Professional Practice",
+      "url": "https://arxiv.org/html/2607.24889v2",
+      "version": "arXiv 2607.24889v2, 2026-09-26; v1 GAUGE title",
+      "type": "primary_paper",
+      "status": "verified_primary_report_not_reproduced",
+      "locations": [
+        "Sections 2.1-2.3",
+        "Section 3.3",
+        "Reproducibility Statement",
+        "Appendix H/Table 13",
+        "Appendix X"
+      ],
+      "facts": [
+        "Correct identifier is 2607.24889.",
+        "Separates deterministically verifiable facts/relationships from judgment-bearing forecasts; single-reference audit has 108 directed pairs and median agreement score 0.33.",
+        "Structural validity gates prevent critical defects being washed out by average credit."
+      ],
+      "cautions": [
+        "Observed professional ranges are not truth or blanket permission for any answer.",
+        "Latest paper promises repository/dataset links in a future version despite public-release language; independently downloadable release not verified.",
+        "One provider network, nonindependent directed pairs, and mixed vintages/purposes limit generalization."
+      ]
+    },
+    {
+      "id": "financeqa_card",
+      "title": "FinanceQA",
+      "publisher": "AfterQuery",
+      "url": "https://huggingface.co/datasets/AfterQuery/FinanceQA",
+      "pinned_url": "https://huggingface.co/datasets/AfterQuery/FinanceQA/blob/6eb03b46c2e7f71ad52f7db4d12a9eabd523f575/README.md",
+      "revision": "6eb03b46c2e7f71ad52f7db4d12a9eabd523f575",
+      "kind": "primary dataset card and viewer",
+      "verified_claims": [
+        {
+          "claim": "Public viewer contains 148 test rows.",
+          "location": "Dataset Viewer / Split (1); Number of rows",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Question labels are basic, assumption, conceptual. Tactical questions cover accounting, calculation and incomplete-information assumptions; conceptual questions cover financial relationships and principles.",
+          "location": "Description; Fields, README lines 14–33",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Public, ungated API response.",
+        "declared_license": "Apache-2.0",
+        "location": "README YAML line 2"
+      },
+      "limits": [
+        "Card expresses an aim to be more challenging; it does not establish transferable difficulty for newly authored tasks.",
+        "Reference rationale and answers must be withheld from solver context."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "6eb03b46c2e7f71ad52f7db4d12a9eabd523f575",
+      "type": "primary dataset card and viewer"
+    },
+    {
+      "id": "financebench_card",
+      "title": "FinanceBench public sample",
+      "publisher": "Patronus AI",
+      "url": "https://huggingface.co/datasets/PatronusAI/financebench",
+      "kind": "primary dataset card and viewer",
+      "verified_claims": [
+        {
+          "claim": "150 annotated public examples; 16 historical model configurations and 2,400 manually reviewed answers.",
+          "location": "Card paragraphs after viewer",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Designed as clear-cut, straightforward open-book financial QA and a minimum performance standard. Includes answer/evidence strings and linked PDFs.",
+          "location": "Card description; viewer fields",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Public sample; card directs requests for full-dataset evaluation to publisher.",
+        "declared_license": "CC-BY-NC-4.0",
+        "location": "Dataset header license"
+      },
+      "limits": [
+        "Do not describe the 150 examples as the complete FinanceBench collection.",
+        "Historical results are not current model performance.",
+        "Noncommercial license is a reuse constraint."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "primary dataset card and viewer"
+    },
+    {
+      "id": "hedge_hf",
+      "title": "Trata Hedge Bench",
+      "publisher": "Trata / trytrata",
+      "url": "https://huggingface.co/datasets/trytrata/trata-hedge-bench",
+      "pinned_url": "https://huggingface.co/datasets/trytrata/trata-hedge-bench/blob/125c4a82aa9ca83782fb313e378f329e9fb95ed7/README.md",
+      "revision": "125c4a82aa9ca83782fb313e378f329e9fb95ed7",
+      "kind": "primary dataset card, API manifest",
+      "verified_claims": [
+        {
+          "claim": "102 task rows; separate documents configuration has one row per task/file pair.",
+          "location": "Loading; Configs, README lines 34–78",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Task schema includes analysis_date cutoff, instruction, rubric, LLM-judge prompts and source-file paths. Runnable Harbor environments require Docker and a Gemini grader key.",
+          "location": "Configs; Running the benchmark, README lines 50–89",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "API manifest contains 102 instruction.md environment files.",
+          "location": "API siblings manifest",
+          "status": "independently_counted_release_metadata"
+        }
+      ],
+      "access_license": {
+        "access": "Public, ungated. Standard web extractor failed; public raw README and API fetched successfully.",
+        "declared_license": "CC-BY-NC-4.0",
+        "location": "README YAML line 2"
+      },
+      "limits": [
+        "Task count is not combined task-plus-document row count.",
+        "Public rubrics create evaluation-contamination risk.",
+        "No model run reproduced."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "125c4a82aa9ca83782fb313e378f329e9fb95ed7",
+      "type": "primary dataset card, API manifest"
+    },
+    {
+      "id": "hedge_repo",
+      "title": "Trata Hedge-Bench runnable repository",
+      "publisher": "Trata-Inc",
+      "url": "https://github.com/Trata-Inc/trata-hedge-bench",
+      "kind": "primary repository README",
+      "verified_claims": [
+        {
+          "claim": "Open-ended tasks pair a closed corpus with a reference solution and tests. A typical task is described as three or four themes, each with four or five action moves.",
+          "location": "Task Formulation",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Despite introductory deterministic-grading wording, Task format explicitly says semantic concept matching uses an LLM judge and rubric.",
+          "location": "Introduction versus Task format",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Public repository; prerequisites Harbor, Docker, Gemini API key.",
+        "declared_license": "No separate LICENSE file located in inspected root; associated HF release declares CC-BY-NC-4.0.",
+        "location": "Root file list; Quickstart"
+      },
+      "limits": [
+        "Do not call the implemented grading entirely deterministic or judge-free.",
+        "Expert-congruent analysis need not be a uniquely correct investment conclusion."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "primary repository README"
+    },
+    {
+      "id": "hedge_example",
+      "title": "Apollo capital allocation task",
+      "publisher": "Trata-Inc",
+      "url": "https://github.com/Trata-Inc/trata-hedge-bench/blob/main/environments/apo-2026-03-12-capital-allocation-buybacks-vs-dividends/instruction.md",
+      "kind": "primary task instruction",
+      "verified_claims": [
+        {
+          "claim": "Five named themes; requires a position, file-level evidence, strongest counter-evidence, reconciliation of conflicting data and explicit ambiguity. Ungrounded claims are excluded from grading.",
+          "location": "Cover these themes; Your answer must",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Public instruction fetched from raw GitHub.",
+        "declared_license": "Associated HF release: CC-BY-NC-4.0"
+      },
+      "limits": [
+        "This five-theme example exceeds the README’s stated typical three/four themes, not necessarily a contradiction.",
+        "The theme title presupposes buyback superiority; fair new tasks should allow evidence-supported alternatives."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "primary task instruction"
+    },
+    {
+      "id": "creditqa_card",
+      "title": "CCA Numerical Reasoning / CreditQA release",
+      "publisher": "Georgia Tech Financial Services Innovation Lab (gtfintechlab)",
+      "url": "https://huggingface.co/datasets/gtfintechlab/CreditQA",
+      "pinned_url": "https://huggingface.co/datasets/gtfintechlab/CreditQA/blob/2bb9c66f19805f31396cd6c3e426a7bd7541dfaf/README.md",
+      "revision": "2bb9c66f19805f31396cd6c3e426a7bd7541dfaf",
+      "kind": "primary dataset card and JSON release",
+      "verified_claims": [
+        {
+          "claim": "800 numerical questions from 27 agreements. Schema records answers, units, document/user input provenance, steps, program, first/third-person metadata and agreement identifier.",
+          "location": "README lines 20–84",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Downloaded creditqa.json has 800 rows, 27 distinct agreement identifiers, 607 THIRD and 193 FIRST labels.",
+          "location": "https://huggingface.co/datasets/gtfintechlab/CreditQA/resolve/2bb9c66f19805f31396cd6c3e426a7bd7541dfaf/creditqa.json",
+          "status": "independently_counted_release_data"
+        }
+      ],
+      "access_license": {
+        "access": "Public, ungated; raw fetch succeeded despite web extractor failure.",
+        "declared_license": "CC-BY-NC-SA-4.0",
+        "location": "README YAML line 2"
+      },
+      "limits": [
+        "Card size category says 1K–10K despite 800 released rows.",
+        "Paper reports 1,800 questions; do not equate paper population with this public release."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "2bb9c66f19805f31396cd6c3e426a7bd7541dfaf",
+      "type": "primary dataset card and JSON release"
+    },
+    {
+      "id": "creditqa_repo",
+      "title": "CreditCardQA code repository",
+      "publisher": "gtfintechlab",
+      "url": "https://github.com/gtfintechlab/CreditQA",
+      "kind": "primary README",
+      "verified_claims": [
+        {
+          "claim": "Contains direct-context inference, RAG and evaluation code; questions, agreement texts and two evaluation helper files are kept outside git.",
+          "location": "Contents; Data Layout; Evaluation",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Public code, but README’s local data paths do not themselves supply those files.",
+        "declared_license": "No license visible in inspected root."
+      },
+      "limits": [
+        "Code access is not confirmation of complete reproducibility or all data availability."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "primary README"
+    },
+    {
+      "id": "emb_methodology",
+      "title": "Excel Modeling Benchmark",
+      "publisher": "Vals AI",
+      "url": "https://www.vals.ai/benchmarks/emb",
+      "revision": "Page updated 2026-10-06; retrieved 2026-10-07",
+      "kind": "primary benchmark methodology",
+      "verified_claims": [
+        {
+          "claim": "103 expert-authored, peer-reviewed tasks: 1 public, 51 licensable validation, 51 held-out test. Seven model families.",
+          "location": "Dataset; Task Taxonomy",
+          "status": "primary_reported"
+        },
+        {
+          "claim": "Template mode grades matching cell values; Scratch mode uses an agentic judge for numerical, formula and presentation checks. Excel recalculates submissions; some tasks test multiple scenarios. Categories are equally weighted; time cap is 3.5 hours.",
+          "location": "Methodology",
+          "status": "primary_reported"
+        }
+      ],
+      "access_license": {
+        "access": "Proprietary; full task collection is not openly downloadable.",
+        "declared_license": "No blanket reusable-data license found; validation requires licensing."
+      },
+      "limits": [
+        "Partial-credit scores do not imply client-ready work.",
+        "No score or workbook independently reproduced.",
+        "New tasks cannot inherit published leaderboard difficulty."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "Page updated 2026-10-06; retrieved 2026-10-07",
+      "type": "primary benchmark methodology"
+    },
+    {
+      "id": "ragas_concepts",
+      "title": "Testset Generation for RAG: concepts",
+      "publisher": "Ragas / Vibrant Labs",
+      "url": "https://docs.ragas.io/en/stable/concepts/test_data_generation/rag/",
+      "kind": "official documentation",
+      "verified_claims": [
+        {
+          "claim": "Knowledge graphs support single/multi-hop and specific/abstract queries; finance example chunks by statement section and links company entities. Scenarios combine nodes, style, length and persona; synthesizers produce queries and references.",
+          "location": "Query types; Knowledge Graph Creation; Scenario Generation",
+          "status": "official_documentation"
+        }
+      ],
+      "access_license": {
+        "access": "Public docs.",
+        "declared_license": "Ragas repository Apache-2.0; source corpora need their own permissions.",
+        "license_url": "https://github.com/vibrantlabsai/ragas/blob/main/LICENSE"
+      },
+      "limits": [
+        "Concept page still marks personas “Coming soon”; separate official persona guide provides working API.",
+        "Generation machinery does not certify answer correctness or task difficulty."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "official documentation"
+    },
+    {
+      "id": "ragas_quickstart",
+      "title": "Testset Generation for RAG: quickstart",
+      "publisher": "Ragas / Vibrant Labs",
+      "url": "https://docs.ragas.io/en/stable/getstarted/rag_testset_generation/",
+      "kind": "official documentation",
+      "verified_claims": [
+        {
+          "claim": "Generate from supplied documents, enrich a knowledge graph, configure query-type distribution, export examples and select suitable queries for final use. Example distribution is 0.5 single-hop specific, 0.25 multi-hop abstract and 0.25 multi-hop specific.",
+          "location": "Analyzing the testset; A Deeper Look / Testset Generation",
+          "status": "official_documentation"
+        }
+      ],
+      "access_license": {
+        "access": "Public docs; execution uses configured model and embedding providers."
+      },
+      "limits": [
+        "Example distribution is not a finance-difficulty prescription.",
+        "Inspect generated references before treating them as gold."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "official documentation"
+    },
+    {
+      "id": "ragas_personas",
+      "title": "Persona Generation",
+      "publisher": "Ragas / Vibrant Labs",
+      "url": "https://docs.ragas.io/en/stable/howtos/customizations/testgenerator/_persona_generator/",
+      "kind": "official documentation",
+      "verified_claims": [
+        {
+          "claim": "Persona accepts name and role description; persona_list is passed into TestsetGenerator.",
+          "location": "Persona’s in Testset Generation",
+          "status": "official_documentation"
+        }
+      ],
+      "access_license": {
+        "access": "Public docs."
+      },
+      "limits": [
+        "Persona variation alone is not evidence of increased reasoning difficulty."
+      ],
+      "status": "verified_primary_report_not_reproduced",
+      "version": "live primary page read 2026-10-07",
+      "type": "official documentation"
+    }
+  ],
+  "material_discrepancies": [
+    {
+      "source_ids": [
+        "mbabench",
+        "gauge"
+      ],
+      "finding": "Requested arXiv identifier 2605.22664 is MBABench; GAUGE is 2607.24889.",
+      "handling": "Keep both as distinct versioned sources."
+    },
+    {
+      "source_ids": [
+        "finverbench",
+        "finsheet"
+      ],
+      "finding": "FinVerBench related-work paragraph conflates the FinSheet winning model and the aggregation level of the largest-file result.",
+      "handling": "Use the FinSheet primary tables."
+    },
+    {
+      "source_ids": [
+        "creditqa_card",
+        "creditcardqa_paper"
+      ],
+      "finding": "Public release 800 rows versus paper 1,800; independently checked release. Card size bucket also disagrees with its row count.",
+      "handling": "Report each version separately; cause unresolved."
+    },
+    {
+      "source_ids": [
+        "hedge_hf",
+        "hedge_repo"
+      ],
+      "finding": "Deterministic grading language coexists with explicit LLM semantic-judge implementation.",
+      "handling": "Describe as rubric-based LLM-judged concept matching, not judge-free deterministic checking."
+    },
+    {
+      "source_ids": [
+        "ragas_concepts",
+        "ragas_personas"
+      ],
+      "finding": "Concept page says persona support is coming soon; dedicated guide exposes persona_list.",
+      "handling": "Use version-pinned implementation/docs for engineering; do not repeat obsolete absence claim."
+    }
+  ]
+}

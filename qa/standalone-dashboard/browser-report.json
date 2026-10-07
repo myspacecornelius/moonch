@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "entry": "/tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+  "privateModuleExercised": false,
+  "checks": [
+    "public build opens with nothing loaded: no private evidence, task editor hidden",
+    "desktop-overview fits viewport",
+    "mobile-overview fits viewport",
+    "actual ZIP file input extracts XLSX formulas/caches, DOCX paragraphs, CSV, prompt; PDF visibly unsupported; candidates generated",
+    "run performs deterministic checks with real ID/time/coverage and explicitly heuristic wording cues",
+    "desktop-results fits viewport",
+    "desktop-files fits viewport",
+    "mobile-files fits viewport",
+    "run history lists the local check with provenance",
+    "mobile-history fits viewport",
+    "analysis workspace JSON download/import roundtrip preserves package and actual run",
+    "invalid ZIP is rejected without replacing loaded evidence",
+    "authoring project JSON opens in the task editor",
+    "failure-mode set opens the task editor on the failure-modes page",
+    "standalone HTML works in isolation with zero companion assets",
+    "zero app HTTP requests, runtime errors, and console errors"
+  ],
+  "resources": [
+    "file:///tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html"
+  ],
+  "consoleErrors": [],
+  "appNetworkRequests": [],
+  "browser": "Isolated headless Chromium",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/141.0.7390.37",
+    "revision": "@9f043f63b0e5b728c8d09f3e3ddfc1681a4bd58e",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36",
+    "jsVersion": "14.1.146.11"
+  },
+  "node": "v22.22.0",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "qaData": "Synthetic QA fixture only; no real model runs performed."
+}

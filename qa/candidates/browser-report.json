@@ -1,0 +1,54 @@
+{
+  "passed": true,
+  "entry": "/home/user/moonch/index.html",
+  "privateModuleExercised": false,
+  "checks": [
+    "no candidates or provider panel before files are loaded",
+    "new cash task loads and automatically derives 1200 versus 0 bridge with no manual fields",
+    "desktop-new-cash-candidates fits viewport",
+    "mobile-new-cash-candidates fits viewport",
+    "private review and assistant request contain anchors; solver download stays separated and <=40 words",
+    "rejected same-root candidate cannot be exported as a solver draft",
+    "chosen candidate opens as its own populated project with calculations and source anchors",
+    "candidate added to the failure-mode set as a net-new mode with its anchors and outputs",
+    "new lending task calculates binding share capacity and rejects duplicate/irrelevant roots",
+    "mobile-new-dividend-candidates fits viewport",
+    "unstructured existing-task logs stay unmatched and do not create scores or root failures",
+    "zero app HTTP requests, runtime errors, and console errors"
+  ],
+  "resources": [
+    "file:///home/user/moonch/index.html",
+    "file:///home/user/moonch/styles.css",
+    "file:///home/user/moonch/core.js",
+    "file:///home/user/moonch/catalog.js",
+    "file:///home/user/moonch/examples.js",
+    "file:///home/user/moonch/playbook.js",
+    "file:///home/user/moonch/research-gates.js",
+    "file:///home/user/moonch/package-engine.js",
+    "file:///home/user/moonch/candidate-engine.js",
+    "file:///home/user/moonch/app.js",
+    "file:///home/user/moonch/dashboard.js"
+  ],
+  "consoleErrors": [],
+  "appNetworkRequests": [],
+  "browser": "Isolated headless Chromium",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/141.0.7390.37",
+    "revision": "@9f043f63b0e5b728c8d09f3e3ddfc1681a4bd58e",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36",
+    "jsVersion": "14.1.146.11"
+  },
+  "node": "v22.22.0",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "qaData": "Synthetic QA fixture only; no real model runs performed."
+}

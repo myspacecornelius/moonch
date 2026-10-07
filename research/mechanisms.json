@@ -1,0 +1,490 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Reusable author-side mechanism catalog. Labels are diagnostics, not solver prompt text.",
+  "mechanisms": [
+    {
+      "id": "entity_perimeter",
+      "label": "Entity and ownership perimeter",
+      "root_cause": "A retrieved figure is used for the wrong legal entity or ownership scope.",
+      "required_source_facts": [
+        "Entity identifiers and group relationships",
+        "Scope attached to each cash, debt, cost, or earnings figure",
+        "Any transfer or use restrictions"
+      ],
+      "interpretive_step": "Bind each input to its permitted entity before building the decision ledger.",
+      "plausible_wrong_reading": "Treat group cash as automatically available to every subsidiary.",
+      "decision_impact": "Can reverse a funding or covenant conclusion.",
+      "fairness_checks": [
+        "All relevant entity labels and restrictions must be visible",
+        "Do not require outside corporate-law assumptions"
+      ],
+      "leakage_checks": [
+        "Do not label files as the entity-confusion trap",
+        "Use comparable naming quality across entities"
+      ],
+      "evidence": [
+        {
+          "source_id": "finrate",
+          "location": "Section 4.3.1; Appendix I.4"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "period_alignment",
+      "label": "Period and effective-date alignment",
+      "root_cause": "A date-valid fact is carried into the wrong reporting or operating window.",
+      "required_source_facts": [
+        "As-of date",
+        "Fiscal/calendar period definitions",
+        "Effective dates, expiry dates, and opening/closing balances"
+      ],
+      "interpretive_step": "Determine which facts govern each interval, then align the comparison.",
+      "plausible_wrong_reading": "Use a year-end facility limit for months before it becomes available.",
+      "decision_impact": "Changes peak liquidity need or trend interpretation.",
+      "fairness_checks": [
+        "State inclusion/exclusion conventions for boundary days when material",
+        "Supply any restatement or supersession rule"
+      ],
+      "leakage_checks": [
+        "Avoid filenames that reveal the governing document",
+        "Ensure no post-as-of answer information enters the solver pack"
+      ],
+      "evidence": [
+        {
+          "source_id": "finrate",
+          "location": "Appendix I.3; Section 4.3.1"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "metric_basis",
+      "label": "Metric, unit, and denominator selection",
+      "root_cause": "Correct numbers are combined using incompatible definitions or scaling.",
+      "required_source_facts": [
+        "Units and currencies",
+        "Gross/net and stock/flow definitions",
+        "Relevant denominator and ownership basis"
+      ],
+      "interpretive_step": "Choose comparable measures and convert only as the source permits.",
+      "plausible_wrong_reading": "Compare a percentage-point change with percentage growth, or use gross proceeds as net liquidity.",
+      "decision_impact": "Changes coverage, sizing, or threshold classification.",
+      "fairness_checks": [
+        "Necessary conversions must be derivable",
+        "Grading must recognize algebraically equivalent conventions"
+      ],
+      "leakage_checks": [
+        "Keep units equally legible for decisive and control inputs"
+      ],
+      "evidence": [
+        {
+          "source_id": "finrate",
+          "location": "Appendix I.3-I.4"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "incomplete_schedule",
+      "label": "Completeness-aware reconciliation",
+      "root_cause": "A partial schedule is assumed exhaustive.",
+      "required_source_facts": [
+        "Schedule scope",
+        "Reported total",
+        "Included components",
+        "Any disclosed omitted categories or bridge"
+      ],
+      "interpretive_step": "Separate a proven inconsistency from a reconciliation that lacks sufficient detail.",
+      "plausible_wrong_reading": "Declare fraud or an error because listed components do not equal a broader total.",
+      "decision_impact": "Avoids an unsupported adverse conclusion.",
+      "fairness_checks": [
+        "Permit an insufficiency finding when the pack cannot resolve the gap",
+        "Never hide a gold-critical component and still require its value"
+      ],
+      "leakage_checks": [
+        "Do not mark one schedule as suspicious",
+        "Include coherent clean controls"
+      ],
+      "evidence": [
+        {
+          "source_id": "finverbench",
+          "location": "Section 6.4/Table 10; Section 7.2"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "cross_document_bridge",
+      "label": "Cross-document reconciliation bridge",
+      "root_cause": "Two valid financial measures are equated without their reconciling movements.",
+      "required_source_facts": [
+        "Starting and ending balances",
+        "All material intervening movements",
+        "Basis and sign conventions"
+      ],
+      "interpretive_step": "Identify the valid bridge and reconcile across documents.",
+      "plausible_wrong_reading": "Treat a retained-earnings movement as net income despite a disclosed distribution.",
+      "decision_impact": "Changes earnings quality, available cash, or a modeled residual.",
+      "fairness_checks": [
+        "Verify the bridge is complete",
+        "Do not copy oversimplified accounting identities as universal rules"
+      ],
+      "leakage_checks": [
+        "Hide neither movement nor governing definition",
+        "Do not force a particular worksheet sequence"
+      ],
+      "evidence": [
+        {
+          "source_id": "finverbench",
+          "location": "Section 3.3/Table 2; Section 6.4"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "rounding_calibration",
+      "label": "Rounding and decision tolerance",
+      "root_cause": "Display precision is mistaken for economic inconsistency or suppresses a decisive difference.",
+      "required_source_facts": [
+        "Reporting units and precision",
+        "Underlying values where needed",
+        "Explicit decision threshold"
+      ],
+      "interpretive_step": "Assess whether the displayed discrepancy can arise under legitimate rounding.",
+      "plausible_wrong_reading": "Use an unusual decimal pattern as the evidence of error.",
+      "decision_impact": "Avoids false alarms or wrong threshold calls.",
+      "fairness_checks": [
+        "Choose tolerances from units and decision sensitivity",
+        "Check the answer remains identifiable after rendering"
+      ],
+      "leakage_checks": [
+        "Make mutated and control values share realistic precision",
+        "Inspect PDF/XLSX display and extracted values"
+      ],
+      "evidence": [
+        {
+          "source_id": "finverbench",
+          "location": "Section 6.5/Table 11"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "table_grain",
+      "label": "Row grain and subtotal boundaries",
+      "root_cause": "Headers, totals, or joint holdings are treated as ordinary independent observations.",
+      "required_source_facts": [
+        "Row type and fund/segment membership",
+        "Subtotal labels",
+        "Duplicate or joint-allocation meaning"
+      ],
+      "interpretive_step": "Define the population before counting or aggregating.",
+      "plausible_wrong_reading": "Count a fund total as another investment or count a shared holding twice.",
+      "decision_impact": "Changes exposure, concentration, or allocation.",
+      "fairness_checks": [
+        "Provide legible boundaries in the actual delivered modality",
+        "Allow different correct extraction methods"
+      ],
+      "leakage_checks": [
+        "Do not create difficulty solely by stripping indispensable formatting",
+        "Test a plain-value export for answer completeness"
+      ],
+      "evidence": [
+        {
+          "source_id": "finsheet",
+          "location": "Section 4.5.1; Appendix A.7-A.8"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "ordered_aggregation",
+      "label": "Filter, rank, then aggregate",
+      "root_cause": "Individually correct operations are executed on the wrong subset or in the wrong order.",
+      "required_source_facts": [
+        "Eligible population",
+        "Ranking variable",
+        "Tie rule where relevant",
+        "Aggregation definition"
+      ],
+      "interpretive_step": "Determine the requested set and then compute its statistic.",
+      "plausible_wrong_reading": "Average all holdings before applying the size or eligibility filter.",
+      "decision_impact": "Changes selected investments or reported portfolio performance.",
+      "fairness_checks": [
+        "Resolve meaningful ties visibly",
+        "Supply enough rows to make every selected observation auditable"
+      ],
+      "leakage_checks": [
+        "Do not reveal a required implementation method in the prompt",
+        "Do not add irrelevant row volume purely as a time penalty"
+      ],
+      "evidence": [
+        {
+          "source_id": "finsheet",
+          "location": "Section 5.2/Table 5; Section 6.2"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "contract_conditions",
+      "label": "Rule activation, precedence, and exceptions",
+      "root_cause": "A familiar financial rule is applied while a qualifying condition is ignored.",
+      "required_source_facts": [
+        "Base rule",
+        "Trigger, exception, cap, and floor",
+        "Applicable dates and transaction class",
+        "Any rule precedence"
+      ],
+      "interpretive_step": "Select the operative clause before calculating.",
+      "plausible_wrong_reading": "Charge the usual rate even though a documented exception or threshold changes it.",
+      "decision_impact": "Changes required payment, cost, drawability, or position size.",
+      "fairness_checks": [
+        "Every branch must be specified or legitimately nonapplicable",
+        "Avoid ambiguous clause precedence"
+      ],
+      "leakage_checks": [
+        "Do not announce the exception as a trap",
+        "Retain realistic document hierarchy and discoverability"
+      ],
+      "evidence": [
+        {
+          "source_id": "creditcardqa_paper",
+          "location": "Section 5/Table 3; Appendix B"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "source_sufficiency",
+      "label": "Answerability and source sufficiency",
+      "root_cause": "A plausible answer is supplied despite irrelevant or unavailable evidence.",
+      "required_source_facts": [
+        "Question scope",
+        "Available source inventory",
+        "Visible source identity and coverage"
+      ],
+      "interpretive_step": "Decide which requested claims can actually be supported.",
+      "plausible_wrong_reading": "Fill missing case facts from general knowledge or a similarly named issuer.",
+      "decision_impact": "Prevents unsupported approvals or recommendations.",
+      "fairness_checks": [
+        "Use this only when acknowledging insufficiency is an acceptable deliverable",
+        "Do not grade undisclosed facts as mandatory"
+      ],
+      "leakage_checks": [
+        "Keep reference answers inaccessible",
+        "Validate degraded text still contains facts intended to remain answerable"
+      ],
+      "evidence": [
+        {
+          "source_id": "failsafeqa",
+          "location": "Sections 2.2-2.3; Appendix C.3"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "counterevidence_synthesis",
+      "label": "Reconcile opposing evidence",
+      "root_cause": "A persuasive narrative selects one side while ignoring a load-bearing contrary fact.",
+      "required_source_facts": [
+        "Evidence for the thesis",
+        "Relevant counterevidence",
+        "Shared decision horizon and scope"
+      ],
+      "interpretive_step": "Explain how the evidence jointly supports a qualified decision.",
+      "plausible_wrong_reading": "List pros and cons without resolving the decision-relevant conflict.",
+      "decision_impact": "Changes conviction, recommended action, or conditions.",
+      "fairness_checks": [
+        "Grade support and reasoning, not agreement with one analyst",
+        "Make the requested decision and necessary coverage public"
+      ],
+      "leakage_checks": [
+        "No hidden required themes unrelated to the public request",
+        "Allow valid alternative supported conclusions"
+      ],
+      "evidence": [
+        {
+          "source_id": "hedgebench_paper",
+          "location": "Sections 4.1-4.3; Sections 5.5 and 6"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "citation_entailment",
+      "label": "Claim-to-source attribution",
+      "root_cause": "A citation is present but does not support the associated entity, number, or causal claim.",
+      "required_source_facts": [
+        "Stable source locators",
+        "Relevant supporting passages or cells",
+        "Distinction between facts and analyst inference"
+      ],
+      "interpretive_step": "Verify that each decision-bearing claim follows from the cited evidence.",
+      "plausible_wrong_reading": "Cite a peer's metric to support the subject company's forecast.",
+      "decision_impact": "Exposes an apparently supported but invalid rationale.",
+      "fairness_checks": [
+        "Score unsupported factual claims locally when possible",
+        "Do not require exact phrasing or ornamental citations"
+      ],
+      "leakage_checks": [
+        "References must not expose gold answers",
+        "Check citations resolve in the delivered pack"
+      ],
+      "evidence": [
+        {
+          "source_id": "hedgebench_paper",
+          "location": "Section 4.2"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "dynamic_workbook",
+      "label": "Live calculation and propagation",
+      "root_cause": "A workbook matches the initial answer but is structurally wrong when an input changes.",
+      "required_source_facts": [
+        "Required editable inputs",
+        "Output definitions",
+        "Expected scenario scope",
+        "Calculation assumptions"
+      ],
+      "interpretive_step": "Build linked calculations that preserve the specified relationships.",
+      "plausible_wrong_reading": "Hardcode a correct-looking output or omit a row from a calculation range.",
+      "decision_impact": "Future scenarios produce false funding or valuation results.",
+      "fairness_checks": [
+        "Demand dynamic behavior only where the task requests a reusable model",
+        "Verify formulas and recalculation in an available engine"
+      ],
+      "leakage_checks": [
+        "Test only disclosed input classes",
+        "Keep evaluator-only scenario values separate"
+      ],
+      "evidence": [
+        {
+          "source_id": "mbabench",
+          "location": "Section 3; Table 2"
+        },
+        {
+          "source_id": "gauge",
+          "location": "Appendix H/Table 13"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    },
+    {
+      "id": "judgment_boundaries",
+      "label": "Facts versus defensible judgment",
+      "root_cause": "A grader confuses a different defensible assumption with an error, or accepts any answer under a wide band.",
+      "required_source_facts": [
+        "Fixed historical inputs",
+        "Open assumptions",
+        "Decision constraints",
+        "Required assumption support"
+      ],
+      "interpretive_step": "Check unique facts exactly and assess judgment using explicit support and consistency.",
+      "plausible_wrong_reading": "Match the reference price while using unsupported drivers, or reject a well-supported alternative.",
+      "decision_impact": "Changes grading validity and the investment recommendation's credibility.",
+      "fairness_checks": [
+        "Enumerate admissible interpretations instead of broad permissive grading",
+        "A numeric band alone cannot validate unsupported reasoning"
+      ],
+      "leakage_checks": [
+        "Do not expose reference assumptions unless intended as inputs",
+        "No hidden house view or privately expected recommendation"
+      ],
+      "evidence": [
+        {
+          "source_id": "gauge",
+          "location": "Sections 2.3 and 3.3; Appendix X"
+        }
+      ],
+      "evidence_level": "source_motivated_design_hypothesis",
+      "empirical_task_evidence": {
+        "status": "not_tested",
+        "runs": 0,
+        "hardness_claim_allowed": false
+      },
+      "solver_prompt_policy": "State the business objective, deliverable and material constraints. Keep this mechanism label and diagnostic wrong reading author-side; do not prescribe a method."
+    }
+  ]
+}

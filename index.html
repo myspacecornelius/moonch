@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Finance Task Studio</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="core.js"></script>
+  <script defer src="catalog.js"></script>
+  <script defer src="examples.js"></script>
+  <script defer src="playbook.js"></script>
+  <script defer src="research-gates.js"></script>
+  <script defer src="package-engine.js"></script>
+  <script defer src="candidate-engine.js"></script>
+  <script defer src="app.js"></script>
+  <script defer src="dashboard.js"></script>
+</head>
+<body>
+  <a class="skip" href="#analysis-main">Skip to results</a>
+  <div id="dashboard-app"><main class="startup"><section class="card"><h1>Finance Task Studio</h1><p>Loading the local workspace.</p><p>If this message remains, download and open <strong>Finance_Task_Studio.html</strong> in a browser. A file preview may block interactive scripts.</p><p id="startup-details" class="muted">The source-folder edition requires all files beside index.html.</p></section></main></div>
+  <div id="advanced-shell" hidden><div class="advanced-return"><button type="button" data-dash-action="close-advanced">Return to analysis</button><span>Task authoring editor · failure modes, roots, economics, and exports</span></div><section id="advanced-evidence"></section><div id="app"></div></div>
+  <div id="evidence-modal"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="project-file" accept=".json,application/json" hidden>
+  <input type="file" id="catalog-file" accept=".json,application/json" hidden>
+  <input type="file" id="library-file" accept=".json,application/json" hidden>
+  <input type="file" id="package-files" accept=".zip,.xlsx,.xlsm,.docx,.txt,.md,.csv,.json,.html,.log,.pdf" multiple hidden>
+  <input type="file" id="analysis-session-file" accept=".json" hidden>
+  <input type="file" id="evidence-module-file" accept=".js,.json,application/json,text/javascript" hidden>
+  <noscript>This local tool requires JavaScript. All computation stays in your browser.</noscript>
+</body>
+</html>

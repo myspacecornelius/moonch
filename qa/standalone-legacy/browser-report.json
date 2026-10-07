@@ -1,0 +1,66 @@
+{
+  "passed": true,
+  "entry": "/tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+  "checks": [
+    "file URL opens the task editor with all nine views without a server",
+    "desktop-workspace fits viewport",
+    "mobile-blank-workspace fits viewport",
+    "synthetic worked example loads with five failure modes",
+    "failure-mode page shows the ten-mode shortlist with three selected and the set locked",
+    "desktop-failure-modes fits viewport",
+    "mobile-failure-modes fits viewport",
+    "41-word solver export blocked in interface",
+    "source review status visibly resets after evidence edit",
+    "root review status visibly resets after a record-field edit",
+    "desktop-root fits viewport",
+    "cash bridge calculates and is recorded as a candidate output",
+    "desktop-economics fits viewport",
+    "guidance drafted from the failure modes with no lint blocker",
+    "guidance lint flags scoring language, jargon, and dashes live",
+    "real downloaded exports preserve audience separation and carry the failure-mode set",
+    "saved project imports through file picker with its library and roundtrip state",
+    "invalid import is rejected without replacing work",
+    "library JSON imports through the file picker; selecting a shortlist row creates a historical mode",
+    "mechanism scaffold fills blank record fields as labeled hypotheses",
+    "actual-run entry form validates and persists supplied fixture (QA only)",
+    "mobile-workspace fits viewport",
+    "mobile-modes fits viewport",
+    "mobile-sources fits viewport",
+    "mobile-roots fits viewport",
+    "mobile-economics fits viewport",
+    "mobile-review fits viewport",
+    "mobile-experiments fits viewport",
+    "mobile-playbook fits viewport",
+    "mobile-research fits viewport",
+    "desktop-research fits viewport",
+    "desktop-playbook fits viewport",
+    "standalone HTML works in isolation with zero companion assets",
+    "zero app HTTP requests, runtime errors, and console errors"
+  ],
+  "resources": [
+    "file:///tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNSIgdmlld0JveD0iMCAwIDI0IDI0Ij48cGF0aCBmaWxsPSJXaW5kb3dUZXh0IiBkPSJNMjAgM2gtMVYxaC0ydjJIN1YxSDV2Mkg0Yy0xLjEgMC0yIC45LTIgMnYxNmMwIDEuMS45IDIgMiAyaDE2YzEuMSAwIDItLjkgMi0yVjVjMC0xLjEtLjktMi0yLTJ6bTAgMThINFY4aDE2djEzeiIvPjxwYXRoIGZpbGw9Im5vbmUiIGQ9Ik0wIDBoMjR2MjRIMHoiLz48L3N2Zz4="
+  ],
+  "consoleErrors": [],
+  "appNetworkRequests": [],
+  "browser": "Isolated headless Chromium",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/141.0.7390.37",
+    "revision": "@9f043f63b0e5b728c8d09f3e3ddfc1681a4bd58e",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36",
+    "jsVersion": "14.1.146.11"
+  },
+  "node": "v22.22.0",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "qaData": "Synthetic QA fixtures only; no real model runs performed."
+}

@@ -1,0 +1,496 @@
+TAP version 13
+# Subtest: standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
+ok 1 - standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
+  ---
+  duration_ms: 7.500795
+  type: 'test'
+  ...
+# Subtest: standalone page carries no private evidence module or model receipt
+ok 2 - standalone page carries no private evidence module or model receipt
+  ---
+  duration_ms: 0.562957
+  type: 'test'
+  ...
+# Subtest: cash illustration generates three ranked hypotheses with actual conditional bridge arithmetic
+ok 3 - cash illustration generates three ranked hypotheses with actual conditional bridge arithmetic
+  ---
+  duration_ms: 23.433825
+  type: 'test'
+  ...
+# Subtest: dividend illustration derives 3680 versus 4000 and rejects duplicate entitlement root
+ok 4 - dividend illustration derives 3680 versus 4000 and rejects duplicate entitlement root
+  ---
+  duration_ms: 6.75807
+  type: 'test'
+  ...
+# Subtest: nonbinding headline is rejected, not presented as financial model failure
+ok 5 - nonbinding headline is rejected, not presented as financial model failure
+  ---
+  duration_ms: 11.713111
+  type: 'test'
+  ...
+# Subtest: conflicting source numeric values hold the candidate without choosing the convenient value
+ok 6 - conflicting source numeric values hold the candidate without choosing the convenient value
+  ---
+  duration_ms: 7.269118
+  type: 'test'
+  ...
+# Subtest: missing authority clause is explicit even if conditional arithmetic is possible
+ok 7 - missing authority clause is explicit even if conditional arithmetic is possible
+  ---
+  duration_ms: 6.103353
+  type: 'test'
+  ...
+# Subtest: irrelevant files yield three rejected templates with no invented interpretations as findings
+ok 8 - irrelevant files yield three rejected templates with no invented interpretations as findings
+  ---
+  duration_ms: 4.837686
+  type: 'test'
+  ...
+# Subtest: solver draft excludes private root evidence and evaluator explanations
+ok 9 - solver draft excludes private root evidence and evaluator explanations
+  ---
+  duration_ms: 10.647639
+  type: 'test'
+  ...
+# Subtest: candidate authoring project validates and retains anchors/calculation plan
+ok 10 - candidate authoring project validates and retains anchors/calculation plan
+  ---
+  duration_ms: 8.622979
+  type: 'test'
+  ...
+# Subtest: structured assistant request includes sources and limitations but no inferred scores
+ok 11 - structured assistant request includes sources and limitations but no inferred scores
+  ---
+  duration_ms: 5.468675
+  type: 'test'
+  ...
+# Subtest: run logs require explicit source hash and versions; old evidence stays unmatched
+ok 12 - run logs require explicit source hash and versions; old evidence stays unmatched
+  ---
+  duration_ms: 8.782512
+  type: 'test'
+  ...
+# Subtest: text run logs never synthesize scores, root failures, or current matches
+ok 13 - text run logs never synthesize scores, root failures, or current matches
+  ---
+  duration_ms: 7.080118
+  type: 'test'
+  ...
+# Subtest: imported audit modules map to candidates generically from their own projects
+ok 14 - imported audit modules map to candidates generically from their own projects
+  ---
+  duration_ms: 9.377774
+  type: 'test'
+  ...
+# Subtest: locally kept private evidence module round-trips through the generic importer
+ok 15 - locally kept private evidence module round-trips through the generic importer # SKIP no private evidence module present (expected in the public checkout)
+  ---
+  duration_ms: 0.147188
+  type: 'test'
+  ...
+# Subtest: unsupported precision is held for review instead of crashing generation
+ok 16 - unsupported precision is held for review instead of crashing generation
+  ---
+  duration_ms: 11.682931
+  type: 'test'
+  ...
+# Subtest: blank project import roundtrip
+ok 17 - blank project import roundtrip
+  ---
+  duration_ms: 8.878654
+  type: 'test'
+  ...
+# Subtest: all illustrations roundtrip, are labeled synthetic, and carry no run records
+ok 18 - all illustrations roundtrip, are labeled synthetic, and carry no run records
+  ---
+  duration_ms: 12.735395
+  type: 'test'
+  ...
+# Subtest: worked example locks five modes with no structural blocker and lint-clean guidance
+ok 19 - worked example locks five modes with no structural blocker and lint-clean guidance
+  ---
+  duration_ms: 4.581174
+  type: 'test'
+  ...
+# Subtest: schema 1 projects without failure-mode fields import with defaults
+ok 20 - schema 1 projects without failure-mode fields import with defaults
+  ---
+  duration_ms: 0.691369
+  type: 'test'
+  ...
+# Subtest: invalid JSON and unsupported schema rejected
+ok 21 - invalid JSON and unsupported schema rejected
+  ---
+  duration_ms: 0.85737
+  type: 'test'
+  ...
+# Subtest: bad types, duplicate IDs, dangling anchors, unsupported lanes rejected
+ok 22 - bad types, duplicate IDs, dangling anchors, unsupported lanes rejected
+  ---
+  duration_ms: 6.549808
+  type: 'test'
+  ...
+# Subtest: unsafe JSON keys and oversize imports rejected
+ok 23 - unsafe JSON keys and oversize imports rejected
+  ---
+  duration_ms: 0.477932
+  type: 'test'
+  ...
+# Subtest: project unknown fields are not retained
+ok 24 - project unknown fields are not retained
+  ---
+  duration_ms: 0.361468
+  type: 'test'
+  ...
+# Subtest: prompt generator is deterministic and never truncates
+ok 25 - prompt generator is deterministic and never truncates
+  ---
+  duration_ms: 0.610313
+  type: 'test'
+  ...
+# Subtest: word count handles empty and whitespace
+ok 26 - word count handles empty and whitespace
+  ---
+  duration_ms: 0.4186
+  type: 'test'
+  ...
+# Subtest: solver export is strict allowlist even with malicious evaluator fields
+ok 27 - solver export is strict allowlist even with malicious evaluator fields
+  ---
+  duration_ms: 2.12042
+  type: 'test'
+  ...
+# Subtest: solver manifest omits private-only sources and deduplicates file versions
+ok 28 - solver manifest omits private-only sources and deduplicates file versions
+  ---
+  duration_ms: 0.879851
+  type: 'test'
+  ...
+# Subtest: solver prompt empty and over 40 words block only solver export
+ok 29 - solver prompt empty and over 40 words block only solver export
+  ---
+  duration_ms: 0.560923
+  type: 'test'
+  ...
+# Subtest: evaluator includes the failure-mode set and guidance lint without official fields
+ok 30 - evaluator includes the failure-mode set and guidance lint without official fields
+  ---
+  duration_ms: 1.557525
+  type: 'test'
+  ...
+# Subtest: cash bridge uses funded cash, not facility eligibility or unpaid debt
+ok 31 - cash bridge uses funded cash, not facility eligibility or unpaid debt
+  ---
+  duration_ms: 0.293264
+  type: 'test'
+  ...
+# Subtest: cash bridge rejects invalid calendar and unsupported draw
+ok 32 - cash bridge rejects invalid calendar and unsupported draw
+  ---
+  duration_ms: 0.250824
+  type: 'test'
+  ...
+# Subtest: cash bridge does not silently use empty required inputs
+ok 33 - cash bridge does not silently use empty required inputs
+  ---
+  duration_ms: 0.104344
+  type: 'test'
+  ...
+# Subtest: exact whole-cent maximum satisfies every upper bound
+ok 34 - exact whole-cent maximum satisfies every upper bound
+  ---
+  duration_ms: 0.247703
+  type: 'test'
+  ...
+# Subtest: ceiling rejects negatives, infinity, exponent and excessive precision
+ok 35 - ceiling rejects negatives, infinity, exponent and excessive precision
+  ---
+  duration_ms: 0.235754
+  type: 'test'
+  ...
+# Subtest: dividend helper derives whole-share capacity and actual shortfall
+ok 36 - dividend helper derives whole-share capacity and actual shortfall
+  ---
+  duration_ms: 0.161514
+  type: 'test'
+  ...
+# Subtest: dividend helper rejects zero price and fractional shares
+ok 37 - dividend helper rejects zero price and fractional shares
+  ---
+  duration_ms: 0.159571
+  type: 'test'
+  ...
+# Subtest: affine fixed point residual is near zero with no invented finance equation
+ok 38 - affine fixed point residual is near zero with no invented finance equation
+  ---
+  duration_ms: 0.196314
+  type: 'test'
+  ...
+# Subtest: numeric comparison uses maximum tolerance and both decision directions
+ok 39 - numeric comparison uses maximum tolerance and both decision directions
+  ---
+  duration_ms: 0.126959
+  type: 'test'
+  ...
+# Subtest: blank/nonfinite numeric outputs and negative tolerance are rejected
+ok 40 - blank/nonfinite numeric outputs and negative tolerance are rejected
+  ---
+  duration_ms: 0.257029
+  type: 'test'
+  ...
+# Subtest: audit identifies ambiguity, teaching heuristic, missing inputs and same-root reuse
+ok 41 - audit identifies ambiguity, teaching heuristic, missing inputs and same-root reuse
+  ---
+  duration_ms: 0.748455
+  type: 'test'
+  ...
+# Subtest: audit flags missing solver evidence and no material gap
+ok 42 - audit flags missing solver evidence and no material gap
+  ---
+  duration_ms: 1.126758
+  type: 'test'
+  ...
+# Subtest: failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks
+ok 43 - failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks
+  ---
+  duration_ms: 6.13997
+  type: 'test'
+  ...
+# Subtest: library parsing normalizes the endpoint shape and rejects duplicates or missing ids
+ok 44 - library parsing normalizes the endpoint shape and rejects duplicates or missing ids
+  ---
+  duration_ms: 1.6555
+  type: 'test'
+  ...
+# Subtest: shortlist ranking is deterministic and never padded
+ok 45 - shortlist ranking is deterministic and never padded
+  ---
+  duration_ms: 0.460838
+  type: 'test'
+  ...
+# Subtest: guidance lint flags the send-back patterns and leaves finance wording alone
+ok 46 - guidance lint flags the send-back patterns and leaves finance wording alone
+  ---
+  duration_ms: 1.384124
+  type: 'test'
+  ...
+# Subtest: clean text replaces dashes, curly quotes, zero-width characters and is idempotent
+ok 47 - clean text replaces dashes, curly quotes, zero-width characters and is idempotent
+  ---
+  duration_ms: 0.395698
+  type: 'test'
+  ...
+# Subtest: guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example
+ok 48 - guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example
+  ---
+  duration_ms: 3.779478
+  type: 'test'
+  ...
+# Subtest: failure-mode records follow the record contract and count each causal group once
+ok 49 - failure-mode records follow the record contract and count each causal group once
+  ---
+  duration_ms: 1.504521
+  type: 'test'
+  ...
+# Subtest: working document reports the shortlist, selections, and open loops without inventing anything
+ok 50 - working document reports the shortlist, selections, and open loops without inventing anything
+  ---
+  duration_ms: 2.365874
+  type: 'test'
+  ...
+# Subtest: scaffold fills only blank record fields and the audit flags unedited hypotheses
+ok 51 - scaffold fills only blank record fields and the audit flags unedited hypotheses
+  ---
+  duration_ms: 3.407449
+  type: 'test'
+  ...
+# Subtest: actual run requires real-reference fields and score scale
+ok 52 - actual run requires real-reference fields and score scale
+  ---
+  duration_ms: 0.293657
+  type: 'test'
+  ...
+# Subtest: snapshots change on source, prompt, guidance, output edits, not run ledger edits
+ok 53 - snapshots change on source, prompt, guidance, output edits, not run ledger edits
+  ---
+  duration_ms: 1.242678
+  type: 'test'
+  ...
+# Subtest: catalog stays isolated and rejects unsafe URLs/dangling mechanisms
+ok 54 - catalog stays isolated and rejects unsafe URLs/dangling mechanisms
+  ---
+  duration_ms: 1.798825
+  type: 'test'
+  ...
+# Subtest: stale imported calculator result is not trusted
+ok 55 - stale imported calculator result is not trusted
+  ---
+  duration_ms: 0.198556
+  type: 'test'
+  ...
+# Subtest: playbook gate assessments roundtrip independently of solver draft
+ok 56 - playbook gate assessments roundtrip independently of solver draft
+  ---
+  duration_ms: 1.629415
+  type: 'test'
+  ...
+# Subtest: app has no network, external runtime dependencies, or private module references
+ok 57 - app has no network, external runtime dependencies, or private module references
+  ---
+  duration_ms: 1.292647
+  type: 'test'
+  ...
+# Subtest: research preserves exact catalog counts and material identity corrections
+ok 58 - research preserves exact catalog counts and material identity corrections
+  ---
+  duration_ms: 0.926753
+  type: 'test'
+  ...
+# Subtest: non-binding decision output and older runs do not establish current difficulty
+ok 59 - non-binding decision output and older runs do not establish current difficulty
+  ---
+  duration_ms: 0.777758
+  type: 'test'
+  ...
+# Subtest: unsafe binding IDs and numerical overflow are rejected
+ok 60 - unsafe binding IDs and numerical overflow are rejected
+  ---
+  duration_ms: 0.337636
+  type: 'test'
+  ...
+# Subtest: general business direction is not automatically marked method leakage
+ok 61 - general business direction is not automatically marked method leakage
+  ---
+  duration_ms: 0.711125
+  type: 'test'
+  ...
+# Subtest: calculation-only anchors and open author gates are reviewed
+ok 62 - calculation-only anchors and open author gates are reviewed
+  ---
+  duration_ms: 0.9083
+  type: 'test'
+  ...
+# Subtest: explicit 44-word project exception preserves exact text and stays out of solver metadata
+ok 63 - explicit 44-word project exception preserves exact text and stays out of solver metadata
+  ---
+  duration_ms: 2.19862
+  type: 'test'
+  ...
+# Subtest: word-limit exceptions require a reason and cannot silently broaden default
+ok 64 - word-limit exceptions require a reason and cannot silently broaden default
+  ---
+  duration_ms: 1.421849
+  type: 'test'
+  ...
+# Subtest: completion requires correct stop reason and nonempty actual final text
+ok 65 - completion requires correct stop reason and nonempty actual final text
+  ---
+  duration_ms: 2.266635
+  type: 'test'
+  ...
+# Subtest: account route is explicit and bounded, never key fallback
+ok 66 - account route is explicit and bounded, never key fallback
+  ---
+  duration_ms: 0.314308
+  type: 'test'
+  ...
+# Subtest: patch disables tools, auxiliary models, retries and subagent entry points
+ok 67 - patch disables tools, auxiliary models, retries and subagent entry points
+  ---
+  duration_ms: 1.830995
+  type: 'test'
+  ...
+# Subtest: progress projection omits source message content
+ok 68 - progress projection omits source message content
+  ---
+  duration_ms: 1.66847
+  type: 'test'
+  ...
+# Subtest: one-run authorization file blocks respawn across restarts
+ok 69 - one-run authorization file blocks respawn across restarts
+  ---
+  duration_ms: 2.30891
+  type: 'test'
+  ...
+# Subtest: author review prompt is built from the loaded module and cannot pretend blind pilot
+ok 70 - author review prompt is built from the loaded module and cannot pretend blind pilot
+  ---
+  duration_ms: 0.532573
+  type: 'test'
+  ...
+# Subtest: ZIP checksum validation and supported office containers are indexed
+ok 71 - ZIP checksum validation and supported office containers are indexed
+  ---
+  duration_ms: 22.688302
+  type: 'test'
+  ...
+# Subtest: invalid ZIP, encrypted flag, unsafe paths, CRC corruption rejected
+ok 72 - invalid ZIP, encrypted flag, unsafe paths, CRC corruption rejected
+  ---
+  duration_ms: 2.88201
+  type: 'test'
+  ...
+# Subtest: CSV quotes, embedded newline, invalid quotes
+ok 73 - CSV quotes, embedded newline, invalid quotes
+  ---
+  duration_ms: 1.792525
+  type: 'test'
+  ...
+# Subtest: file ingestion handles text/PDF without pretending PDF extracted
+ok 74 - file ingestion handles text/PDF without pretending PDF extracted
+  ---
+  duration_ms: 14.17781
+  type: 'test'
+  ...
+# Subtest: invalid package rejects duplicate IDs, hashes, roles and record types
+ok 75 - invalid package rejects duplicate IDs, hashes, roles and record types
+  ---
+  duration_ms: 0.692588
+  type: 'test'
+  ...
+# Subtest: project roundtrip and deterministic findings have no invented scores
+ok 76 - project roundtrip and deterministic findings have no invented scores
+  ---
+  duration_ms: 0.927934
+  type: 'test'
+  ...
+# Subtest: saved errors, missing caches and unsupported files produce evidence-limited findings
+ok 77 - saved errors, missing caches and unsupported files produce evidence-limited findings
+  ---
+  duration_ms: 0.716822
+  type: 'test'
+  ...
+# Subtest: teaching language is only heuristic, historical differences are not generic contradictions
+ok 78 - teaching language is only heuristic, historical differences are not generic contradictions
+  ---
+  duration_ms: 0.734504
+  type: 'test'
+  ...
+# Subtest: private evaluator records do not enter detected source facts
+ok 79 - private evaluator records do not enter detected source facts
+  ---
+  duration_ms: 0.336846
+  type: 'test'
+  ...
+# Subtest: unconnected adapter cannot imply a model run
+ok 80 - unconnected adapter cannot imply a model run
+  ---
+  duration_ms: 0.500664
+  type: 'test'
+  ...
+# Subtest: malformed run histories cannot crash imported dashboard views
+ok 81 - malformed run histories cannot crash imported dashboard views
+  ---
+  duration_ms: 0.568518
+  type: 'test'
+  ...
+1..81
+# tests 81
+# suites 0
+# pass 80
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 318.677986

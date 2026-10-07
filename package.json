@@ -1,0 +1,14 @@
+{
+  "name": "finance-task-studio",
+  "version": "2.1.0",
+  "private": true,
+  "description": "An offline workspace for locking the five failure modes of a derivative finance task, anchoring each to source evidence and recomputed economics, and drafting lint-checked grader guidance. No model calls; private evidence stays local.",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "test:browser": "node tests/browser.cjs",
+    "test:dashboard": "node tests/dashboard-browser.cjs",
+    "test:candidates": "node tests/candidates-browser.cjs",
+    "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs && python3 scripts/package-filebase.py --manifest-only"
+  },
+  "license": "UNLICENSED"
+}

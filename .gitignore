@@ -1,0 +1,23 @@
+# Private task evidence, module builders, and model-run receipts stay local. Load modules through the app's file picker.
+/private/
+/*-audit.js
+/evidence-module.js
+/model-run.js
+/model-runs/
+/LOCAL_SERVER.json
+
+# Headless QA working output. Reports and the retained screenshots are committed explicitly.
+qa/**/downloads/
+qa/**/invalid-project.json
+qa/**/library-fixture.json
+qa/**/*.png
+!qa/legacy/desktop-failure-modes.png
+!qa/legacy/mobile-failure-modes.png
+!qa/dashboard/desktop-overview.png
+!qa/dashboard/mobile-overview.png
+!qa/candidates/desktop-new-cash-candidates.png
+!qa/candidates/mobile-new-dividend-candidates.png
+
+__pycache__/
+.DS_Store
+.env

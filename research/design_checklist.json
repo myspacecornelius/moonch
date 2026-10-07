@@ -1,0 +1,192 @@
+{
+  "schema_version": "1.0",
+  "title": "Finance task-design acceptance checklist",
+  "scope": "Authoring and evaluating realistic financial interpretation tasks. No instructions to evade model safeguards, deceive participants, or manipulate external financial decisions.",
+  "evidence_boundary": "A research match identifies a plausible mechanism. Only controlled task-specific results can establish whether a variant is harder. No task-specific success rates are supplied.",
+  "gates": [
+    {
+      "id": "business_decision",
+      "question": "Is there a concrete professional decision or deliverable whose answer changes under the targeted interpretation?",
+      "required_evidence": "Decision statement and numerical or qualitative consequence."
+    },
+    {
+      "id": "visible_facts",
+      "question": "Can every required answer fact be found or derived from the actual solver-visible package?",
+      "required_evidence": "Fact ledger with file, section/cell, entity, date, units, and role in the answer."
+    },
+    {
+      "id": "answerability",
+      "question": "Can an independent qualified reviewer solve the case without evaluator-only facts?",
+      "required_evidence": "Blind solution and source audit; treat genuinely missing information as an admissible outcome."
+    },
+    {
+      "id": "realistic_constraint",
+      "question": "Does the mechanism arise from plausible financial terms, reporting structure, or analysis rather than arbitrary obscurity?",
+      "required_evidence": "Source-grounded rationale or explicitly labeled synthetic adaptation."
+    },
+    {
+      "id": "material_interpretation",
+      "question": "Is the difficult step interpreting and combining facts rather than spotting a cosmetic anomaly?",
+      "required_evidence": "Correct-versus-plausible-wrong calculation or decision comparison."
+    },
+    {
+      "id": "public_request",
+      "question": "Does the prompt specify the objective, deliverables, and material output constraints without dictating the solution method or naming the trap?",
+      "required_evidence": "Prompt audit; keep mechanism diagnostics evaluator-side."
+    },
+    {
+      "id": "bounded_ambiguity",
+      "question": "Are all decision-relevant ambiguities resolved by sources or covered by specific accepted alternatives?",
+      "required_evidence": "Enumerated interpretations, conditions for credit, and independently checked outcomes."
+    },
+    {
+      "id": "grading_alignment",
+      "question": "Does every must-pass grading criterion trace to the public request or an inferable source requirement?",
+      "required_evidence": "Criterion-to-requirement mapping; no hidden house view, mandatory invented workflow, or irrelevant formatting preference."
+    },
+    {
+      "id": "tolerance",
+      "question": "Are numeric tolerances tied to reporting precision and decision sensitivity?",
+      "required_evidence": "Rounding tests and boundary cases; exact treatment for categorical thresholds."
+    },
+    {
+      "id": "critical_failures",
+      "question": "Can a critical wrong decision or broken relationship pass through averaged partial credit?",
+      "required_evidence": "Explicit task-specific failure conditions rather than generic broad permissive grading."
+    },
+    {
+      "id": "equivalent_solutions",
+      "question": "Will substantively correct alternative formulas, layouts, and supported judgments receive appropriate credit?",
+      "required_evidence": "At least one independently constructed valid alternative, where alternatives exist."
+    },
+    {
+      "id": "leakage",
+      "question": "Are gold answers, wrong-reading diagnostics, task labels, metadata, comments, hidden sheets, and post-cutoff facts excluded from solver access?",
+      "required_evidence": "Package inventory and content/metadata inspection."
+    },
+    {
+      "id": "artifact_fidelity",
+      "question": "Do rendered files, extracted values, formulas, and cached values preserve all needed facts?",
+      "required_evidence": "Actual modality inspection; recalculation and error scan when workbook behavior is graded."
+    },
+    {
+      "id": "clean_controls",
+      "question": "Does the grader accept an unperturbed correct control and reject the targeted wrong reading for the intended reason?",
+      "required_evidence": "Correct, wrong, and boundary control results with adjudication."
+    },
+    {
+      "id": "paired_evidence",
+      "question": "Is any harder/easier claim backed by a controlled comparison on this task family?",
+      "required_evidence": "Versioned baseline and variant, constant harness/prompt/allowed tools, actual attempts and grades, uncertainty and reviewer notes."
+    },
+    {
+      "id": "rights",
+      "question": "Are reused data and artifacts allowed for the intended audience and use?",
+      "required_evidence": "Verified license/access provenance; do not copy noncommercial/gated data into commercial or public packages without permission."
+    }
+  ],
+  "stop_conditions": [
+    "A gold-critical fact is missing from solver-visible materials.",
+    "A decisive clause is ambiguous and accepted alternatives cannot be bounded.",
+    "An unsupported assumption is required for a pass.",
+    "A cosmetic clue reveals the answer.",
+    "The intended wrong reading does not alter the decision or a meaningful intermediate result.",
+    "The grader rewards the reference author's preferred method over equivalent correctness.",
+    "An empirical hardness claim has no paired task-specific evidence."
+  ],
+  "task_record_template": {
+    "task_id": "",
+    "version": "",
+    "business_objective": "",
+    "deliverables": [],
+    "as_of_date": null,
+    "mechanism_ids": [],
+    "research_source_ids": [],
+    "research_match": {
+      "status": "hypothesis",
+      "rationale": ""
+    },
+    "source_fact_ledger": [
+      {
+        "fact_id": "",
+        "source_file": "",
+        "locator": "",
+        "fact": "",
+        "entity": "",
+        "period": "",
+        "units": "",
+        "source_scope": "",
+        "visibility": "solver",
+        "answer_role": ""
+      }
+    ],
+    "required_interpretation": "",
+    "correct_path": {
+      "assumptions": [],
+      "calculations": [],
+      "decision": "",
+      "evidence_fact_ids": []
+    },
+    "plausible_wrong_reading": {
+      "reading": "",
+      "changed_calculation": "",
+      "changed_decision": "",
+      "why_plausible": ""
+    },
+    "accepted_alternatives": [
+      {
+        "interpretation": "",
+        "conditions": [],
+        "expected_result": ""
+      }
+    ],
+    "grader_contract": {
+      "fixed_checks": [],
+      "judgment_checks": [],
+      "critical_failures": [],
+      "tolerances": [],
+      "allowed_equivalent_methods": [],
+      "criterion_source_map": []
+    },
+    "leakage_audit": {
+      "status": "unverified",
+      "findings": []
+    },
+    "fairness_audit": {
+      "status": "unverified",
+      "reviewer_findings": []
+    },
+    "empirical_task_evidence": {
+      "status": "not_run",
+      "baseline_version": null,
+      "variant_version": null,
+      "model_and_harness": null,
+      "attempts": [],
+      "paired_result": null,
+      "uncertainty": null,
+      "harder_claim": false
+    }
+  },
+  "validation_workflow": [
+    "Freeze the objective and solver-visible requirements before writing gold or grader.",
+    "Construct the source fact ledger and an independent correct calculation.",
+    "Write the smallest realistic variation that isolates the mechanism; preserve a clean baseline.",
+    "Compute the tempting wrong reading and confirm its concrete decision impact.",
+    "Have a qualified reviewer solve the visible case and identify defensible alternatives.",
+    "Test the grader against correct, alternative-correct, wrong-reading, and boundary artifacts.",
+    "Audit every supplied file and render for completeness, leakage, and numeric precision.",
+    "Pilot baseline and variant under the same model, harness, tool access, budget, and grading version. Record failures, refusals, runtime errors, and unsupported claims separately.",
+    "Adjudicate grading disagreements and report the measured paired effect with uncertainty. A changed failure rate alone does not prove the proposed root cause.",
+    "Retain only variants with valid financial semantics and a defensible grading contract, regardless of whether they lower model performance."
+  ],
+  "generator_guidance": {
+    "ragas_role": "Optional candidate-generation scaffold for evidence relationships and phrasing variants. Generated references are provisional until checked.",
+    "do_not_infer": [
+      "A multi-hop label proves genuine dependency",
+      "A persona or typo variant is substantively harder",
+      "A low benchmark headline transfers to Jericho",
+      "More documents or tokens automatically improve evaluation",
+      "An in-range valuation is automatically justified"
+    ]
+  }
+}
