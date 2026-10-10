@@ -55,12 +55,12 @@ claude -p <prompt-text>
 ```
 
 - `cwd` is the pilot folder. `stdin` is closed. Timeout 50 minutes (`timeout` semantics: SIGTERM, then SIGKILL after 5 s).
-- Environment: the parent environment plus `TMPDIR=<folder>/.tmp` and `CLAUDE_CODE_TMPDIR=<folder>/.tmp`, so the agent's scratch space and temporary files are inside the folder. Nothing else is added or removed. No API key is read, logged or forwarded explicitly. The pilot's own configuration directory is the user's normal one (needed for sign-in); the strict audit still treats any agent access to it as a violation.
+- Environment: the parent environment plus `TMPDIR=<folder>/.tmp` and `CLAUDE_CODE_TMPDIR=<folder>/.tmp`, so the agent's scratch space and temporary files are inside the folder. Nothing else is added or removed. No API key is read, logged or forwarded explicitly. The pilot's own configuration directory is the user's normal one (needed for sign-in); the strict audit still treats any agent access to it as a violation. The child environment is otherwise not scrubbed; the audit is given the same environment so inherited path variables are resolved.
 - Prompt text for a pilot: `The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message.\n\n` followed by the writer's prompt.
 - Allowlists: models `claude-opus-5-5` (default), `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`; efforts `low`, `medium` (default), `high`, `xhigh`, `max`.
 - Other agent kinds use the same runner with `tools: []` (`--tools ""`), no folder content, and a prompt built by the server:
   - `grader-sim`: a **simulated** grader. Input is the guideline text and one answer. It returns JSON with `verdict`, `reason`. Always labelled "simulated grader, not Studio grading".
-  - `author-review`: one analysis of the loaded package (replaces the archived DeepSeek run, which stays in the tree, unlinked and unchanged).
+  - `author-review`: one tool-less analysis of the package text the page extracts (replaces the archived DeepSeek run, which stays in the tree, unlinked and unchanged). It returns text for the author to read, is never stored or classified, and never enters an export. Labelled "author review of the loaded package, not a blind pilot and not a score".
 
 ### 3.3 Stream parsing
 
@@ -116,9 +116,11 @@ All routes require `Host == 127.0.0.1:<port>`. All non-GET routes also require `
 | `POST /api/agents/rounds/:id/runs/:n/classify` `{verdict, fingerprintIds, note}` | Human classification. Allowed only if audit is `CLEAN`. |
 | `POST /api/agents/rounds/:id/cancel` | SIGTERM all runs; state `cancelled`. |
 | `POST /api/agents/rounds/:id/export` | Returns run-evidence JSON (section 8). |
+| `POST /api/agents/rounds/:id/refreeze` `{gold, fingerprints}` | After launch only. Stores a post-hoc freeze version beside the original, which is never overwritten. |
 | `POST /api/agents/grader-sim` `{guidelineText, answerText, model}` | One tool-less simulated grader run. Counts toward a separate cap of 5 per call batch. |
+| `POST /api/agents/author-review` `{promptText, packageText, model}` | One tool-less author review. `packageText` is at most 100,000 characters. One at a time. |
 
-Errors: `{error: "<message>"}` with 400, 403, 404, 409, 413 or 500. A launch refusal for a changed packet is 409 with `PACKET HASH MISMATCH`.
+Errors: `{error: "<message>"}` with 400, 403, 404, 405, 409, 413, 415 or 500. A launch refusal for a changed packet is 409 with `PACKET HASH MISMATCH`. A wrong `Content-Type` is 415. An error the server did not expect is a generic 500 and the cause goes only to the terminal log; server folder paths are redacted from every message.
 
 ## 6. Audit (port of the field-tested checker)
 
@@ -130,6 +132,8 @@ Errors: `{error: "<message>"}` with 400, 403, 404, 409, 413 or 500. A launch ref
 - `home`: `~`, `$HOME`, `${HOME}`, `$OLDPWD`.
 - `harness-spill`: an absolute path under the user's Claude configuration directory (`claudeConfigDir`, default `~/.claude`), for example the large-output files the runtime may point an agent at. It is a violation like any other path outside the folder; the kind only explains the cause so the writer can read the report.
 - `bare-cd`: `cd` with no argument.
+
+**Implementation notes (as built).** The audit tokenises shell commands (quotes, substitutions, here-documents, subshells, redirects, `bash -c`, `eval`), splits on unquoted `$IFS`, expands brace words such as `{cat,/etc/x}`, and tracks `cd`, `cd -`, `pushd`/`popd` and `$PWD`. A word is a URL only when it has a real host and nothing left to expand; `x://../..` is a relative path. It accepts `env` (the environment the pilot actually received, so `$VAR/path` is checked for inherited variables), `budgetMs` and `clock`. Work is bounded and **fails closed**: a call that cannot be analysed is a violation, not a pass. Notes that never discard a run: `unverifiable-command`, `unverifiable-code`, `unverifiable-input`, `cwd-unresolved` (relative paths after an unresolvable `cd` are not checked). The audit remains a heuristic: paths built at run time, shell functions and aliases, and encoded text passed to a shell can evade it. The UI and README say so.
 
 Must **not** be flagged: `sed -n '/a/,/b/p'` style address ranges, division such as `a / b`, `x/y` inside Python, URLs, `/dev/null`.
 
@@ -160,8 +164,8 @@ Fixtures for the tests use these patterns: `cd ../../other` from a folder two le
 A new top-level view `agents` in `dashboard.js`, implemented in `agents.js`.
 
 1. **Runtime.** Found / not found, version, path. Offline edition: "Local agents need the companion. Run `npm start`."
-2. **Packet.** Folder path input, **Inspect**, a table of files with include boxes (defaults exclude evaluator, answer, rubric, golden, `private`), prompt box (word count against the project limit), `gaf/` toggle with the sentence "Matches production only if the production solver sees this file."
-3. **Freeze.** Gold decision phrase, figures with tolerance, fingerprints (id, label, tokens). **Freeze** button shows the hash and timestamp. Launch stays disabled until frozen.
+2. **Packet.** Folder path input, **Inspect**, a table of files with include boxes (defaults exclude evaluator, answer, rubric, golden, `private`), prompt box (word count against the project limit), `gaf/` toggle (**on by default**: the production solver is assumed to see it; the choice is part of the round, the approval summary and every exported record) with the sentence "Matches production only if the production solver sees this file."
+3. **Freeze.** Gold decision phrase (alternatives separated by semicolons), figures with tolerance, fingerprints (id, label, tokens). **Freeze** button shows the hash and timestamp. Launch stays disabled until frozen.
 4. **Round.** Model, effort, pilots (1 to 5, stepper cannot exceed the cap). The isolation statement and the shell-access statement are printed here, not hidden in a tooltip.
 5. **Approve and launch.** A modal repeats the summary, shows the exact command line with the prompt elided, requires three checkboxes (shell access as me, network use by the agent runtime, isolation by audit only), then calls approve and launch.
 6. **Runs.** One row per pilot: state, turns, tool calls, resolved model, audit badge, elapsed. Click opens the detail drawer (final answer, outputs, violations with the offending call and the plain cause for `harness-spill`).
@@ -229,3 +233,18 @@ Not changed: the scoring-language blockers, the cell-reference check, the dash a
 ## 15. Scrub: no platform names in public lint rules or research text
 
 The public tree must not name the evaluation platform or the contractor. Remove those names from `core.js` (jargon list), `catalog.js`, `research-catalog.json`, `research/*.json`, `research-gates.js`, `README.md`, `VERIFICATION.md` and regenerated outputs. Where a sentence only exists to mirror Studio's own guidance for that platform, move the original text to `private/research-originals/` (a copy of the file as it was) and replace the public wording with a neutral phrase ("the target platform", "the evaluation"). Facts about the cited papers stay. Git history already contains the old text; rewriting history is a separate decision for the repository owner and is not done by this change.
+
+## 16. As built: response shapes and behaviour the contract left open
+
+These are the shapes the page and the tests rely on. A change to any of them needs a change to `agents.js` and `tests/agents-server.test.cjs`.
+
+- **Lists and rounds.** `GET /api/agents/rounds` returns `{rounds: [row]}`, newest first, where a row has `id, createdAt, label, status, config, packetSha256, freezeSha256, gafVisible, runCount, counts`. A round view (every round route) has the section 4 fields plus `postHocFreezes`, `counts` and `directional`. Its `runs` are rows: `audit` is `{status, violationCount, inputsModified, notes}`, `final` is `{chars}`, and `classification` is `{suggestedVerdict, humanVerdict}`. The full record (final text, violations, outputs, `classification: {suggested, human}`) comes only from `GET .../runs/:n`.
+- **Approval.** While a round is `frozen` or `approved`, its view also carries `summarySha256` and `approvalSummary` (`text, summarySha256, commandLine, workingFolder, model, effort, count, tools, packetSha256, freezeSha256, gafVisible, overrides`). The page approves by sending that hash back, so the server checks it against a hash of the summary it computes again. The command line is built by the server and has the prompt elided.
+- **Suggestion.** `classification.suggested` is `{verdict, matches: [{label, value, found, where}], fingerprints: [{id, label, hit, tokensFound, figuresFound}], decision, label: "heuristic", freezeVersion, freezeSha256}`. Only fingerprints with `hit: true` are candidates.
+- **Export.** `POST .../export` returns `{schema: "finance-agent-round-export", roundId, records, discarded, excluded, notes, freeze, directional, gafVisible}`. The page stamps each record with the project snapshot before it validates it with `core.validateExperiment`.
+- **Client keys.** Keys such as `bin`, `args`, `folder` and `env` in any body are ignored. A tool list that differs from the fixed one is refused with 400.
+- **Extra HTTP rules.** A GET with a foreign `Origin` header is 403. Every response carries `X-Frame-Options: DENY`. While the server shuts down, new requests get 503.
+- **Shutdown.** On SIGINT or SIGTERM the server cancels the archived adapter and every running round, waits for the processes to stop, then exits. Pilots run in their own process group, so Ctrl-C reaches them only through this handler. A SIGKILL of the server leaves running pilots running.
+- **Launch.** A launch with no `claude` found is refused with 409 and the round stays `approved`. Only one round runs at a time. A round that was running when the server stopped is marked interrupted on the next start.
+- **Test isolation.** The browser test copies the files it needs to a temporary folder and runs the companion from there, so round state is written under that copy and the project's own `private/` folder is neither read nor written.
+- **Archived adapter.** `--run-approved-once` still starts the archived one-run analysis, and nothing else does. `LOCAL_SERVER.json` records `modelCallsOnLaunch: 0` unless that flag was given.

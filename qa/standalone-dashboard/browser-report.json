@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "entry": "/tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+  "entry": "/tmp/finance-standalone-fkJXiQ/Finance_Task_Studio.html",
   "privateModuleExercised": false,
   "checks": [
     "public build opens with nothing loaded: no private evidence, task editor hidden",
@@ -21,7 +21,7 @@
     "zero app HTTP requests, runtime errors, and console errors"
   ],
   "resources": [
-    "file:///tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html"
+    "file:///tmp/finance-standalone-fkJXiQ/Finance_Task_Studio.html"
   ],
   "consoleErrors": [],
   "appNetworkRequests": [],

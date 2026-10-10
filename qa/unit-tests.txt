@@ -1,496 +1,2510 @@
+
+> finance-task-studio@3.0.0 test
+> node --test tests/*.test.cjs
+
 TAP version 13
-# Subtest: standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
-ok 1 - standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
+# Subtest: cwdKeyFor replaces slashes and underscores with dashes
+ok 1 - cwdKeyFor replaces slashes and underscores with dashes
   ---
-  duration_ms: 7.500795
+  duration_ms: 1.288292
+  type: 'test'
+  ...
+# Subtest: extractToolCalls returns assistant tool_use blocks in order and ignores everything else
+ok 2 - extractToolCalls returns assistant tool_use blocks in order and ignores everything else
+  ---
+  duration_ms: 1.572059
+  type: 'test'
+  ...
+# Subtest: toolResultTexts reads string and block content and links each result to its call
+ok 3 - toolResultTexts reads string and block content and links each result to its call
+  ---
+  duration_ms: 0.426563
+  type: 'test'
+  ...
+# Subtest: every violation kind is reported with tool, kind, path and the offending call
+ok 4 - every violation kind is reported with tool, kind, path and the offending call
+  ---
+  duration_ms: 15.566176
+  type: 'test'
+  ...
+# Subtest: must-flag cases from the contract
+ok 5 - must-flag cases from the contract
+  ---
+  duration_ms: 4.922796
+  type: 'test'
+  ...
+# Subtest: must-not-flag cases from the contract
+ok 6 - must-not-flag cases from the contract
+  ---
+  duration_ms: 7.330872
+  type: 'test'
+  ...
+# Subtest: allowlisted devices and binaries only
+ok 7 - allowlisted devices and binaries only
+  ---
+  duration_ms: 3.523742
+  type: 'test'
+  ...
+# Subtest: the binary directories are for running programs, not for writing into
+ok 8 - the binary directories are for running programs, not for writing into
+  ---
+  duration_ms: 4.590809
+  type: 'test'
+  ...
+# Subtest: bare cd names its cause
+ok 9 - bare cd names its cause
+  ---
+  duration_ms: 11.903857
+  type: 'test'
+  ...
+# Subtest: bare slash forms are bare-root, not plain abs
+ok 10 - bare slash forms are bare-root, not plain abs
+  ---
+  duration_ms: 5.727803
+  type: 'test'
+  ...
+# Subtest: tracked working directory starts at the folder and follows cd across calls
+ok 11 - tracked working directory starts at the folder and follows cd across calls
+  ---
+  duration_ms: 6.084177
+  type: 'test'
+  ...
+# Subtest: cd follows absolute targets, cd - and pushd/popd
+ok 12 - cd follows absolute targets, cd - and pushd/popd
+  ---
+  duration_ms: 5.19718
+  type: 'test'
+  ...
+# Subtest: a cd that leaves the folder is one violation, later plain names are not piled on
+ok 13 - a cd that leaves the folder is one violation, later plain names are not piled on
+  ---
+  duration_ms: 2.913711
+  type: 'test'
+  ...
+# Subtest: subshell parentheses scope cd, command substitution runs in a subshell
+ok 14 - subshell parentheses scope cd, command substitution runs in a subshell
+  ---
+  duration_ms: 5.089387
+  type: 'test'
+  ...
+# Subtest: variables, $PWD, $(pwd) and unknown cd targets
+ok 15 - variables, $PWD, $(pwd) and unknown cd targets
+  ---
+  duration_ms: 5.572426
+  type: 'test'
+  ...
+# Subtest: home references: ~, ~user, $HOME, ${HOME}, $OLDPWD, in any quoting
+ok 16 - home references: ~, ~user, $HOME, ${HOME}, $OLDPWD, in any quoting
+  ---
+  duration_ms: 6.567213
+  type: 'test'
+  ...
+# Subtest: symlinks inside the folder that point outside are violations when they exist
+ok 17 - symlinks inside the folder that point outside are violations when they exist
+  ---
+  duration_ms: 6.046546
+  type: 'test'
+  ...
+# Subtest: the folder reached through an alias is the same folder
+ok 18 - the folder reached through an alias is the same folder
+  ---
+  duration_ms: 5.382026
+  type: 'test'
+  ...
+# Subtest: the folder .tmp is clean, including through TMPDIR
+ok 19 - the folder .tmp is clean, including through TMPDIR
+  ---
+  duration_ms: 9.831373
+  type: 'test'
+  ...
+# Subtest: harness-spill is a violation like any other and the run is discarded
+ok 20 - harness-spill is a violation like any other and the run is discarded
+  ---
+  duration_ms: 5.037276
+  type: 'test'
+  ...
+# Subtest: claudeConfigDir defaults to CLAUDE_CONFIG_DIR, then ~/.claude
+ok 21 - claudeConfigDir defaults to CLAUDE_CONFIG_DIR, then ~/.claude
+  ---
+  duration_ms: 7.108301
+  type: 'test'
+  ...
+# Subtest: there is no allowance: extra options change nothing and the audit is always strict
+ok 22 - there is no allowance: extra options change nothing and the audit is always strict
+  ---
+  duration_ms: 7.135588
+  type: 'test'
+  ...
+# Subtest: auditToolCalls needs a real folder and tolerates odd event lists
+ok 23 - auditToolCalls needs a real folder and tolerates odd event lists
+  ---
+  duration_ms: 4.497107
+  type: 'test'
+  ...
+# Subtest: file tools: path fields are checked as paths and resolve against the folder
+ok 24 - file tools: path fields are checked as paths and resolve against the folder
+  ---
+  duration_ms: 5.601832
+  type: 'test'
+  ...
+# Subtest: file tools: contents and patterns are scanned as text, not as paths
+ok 25 - file tools: contents and patterns are scanned as text, not as paths
+  ---
+  duration_ms: 4.614464
+  type: 'test'
+  ...
+# Subtest: an unexpected tool is noted and its path fields are still checked
+ok 26 - an unexpected tool is noted and its path fields are still checked
+  ---
+  duration_ms: 4.22361
+  type: 'test'
+  ...
+# Subtest: shell structure: quoting, comments, continuations, wrappers and compound commands
+ok 27 - shell structure: quoting, comments, continuations, wrappers and compound commands
+  ---
+  duration_ms: 6.619376
+  type: 'test'
+  ...
+# Subtest: nested shells and eval are audited
+ok 28 - nested shells and eval are audited
+  ---
+  duration_ms: 4.20706
+  type: 'test'
+  ...
+# Subtest: commands whose arguments are patterns or scripts do not produce false positives
+ok 29 - commands whose arguments are patterns or scripts do not produce false positives
+  ---
+  duration_ms: 10.786509
+  type: 'test'
+  ...
+# Subtest: inline interpreter code is scanned like text
+ok 30 - inline interpreter code is scanned like text
+  ---
+  duration_ms: 5.734392
+  type: 'test'
+  ...
+# Subtest: here strings and here documents written to files are scanned
+ok 31 - here strings and here documents written to files are scanned
+  ---
+  duration_ms: 7.50521
+  type: 'test'
+  ...
+# Subtest: each violation carries the offending call, truncated, and is reported once per call
+ok 32 - each violation carries the offending call, truncated, and is reported once per call
+  ---
+  duration_ms: 5.585756
+  type: 'test'
+  ...
+# Subtest: one violation anywhere discards the whole run
+ok 33 - one violation anywhere discards the whole run
+  ---
+  duration_ms: 4.646013
+  type: 'test'
+  ...
+# Subtest: leak-in-results is a note, never a violation
+ok 34 - leak-in-results is a note, never a violation
+  ---
+  duration_ms: 5.5083
+  type: 'test'
+  ...
+# Subtest: a call that cannot be analysed fails closed instead of being trusted
+ok 35 - a call that cannot be analysed fails closed instead of being trusted
+  ---
+  duration_ms: 5.798244
+  type: 'test'
+  ...
+# Subtest: ordinary solver commands are clean
+ok 36 - ordinary solver commands are clean
+  ---
+  duration_ms: 10.509917
+  type: 'test'
+  ...
+# Subtest: ordinary ways out of the folder are caught
+ok 37 - ordinary ways out of the folder are caught
+  ---
+  duration_ms: 5.582438
+  type: 'test'
+  ...
+# Subtest: brace words cannot make the audit slow
+ok 38 - brace words cannot make the audit slow
+  ---
+  duration_ms: 131.683534
+  type: 'test'
+  ...
+# Subtest: hostile or malformed commands never throw and stay fast
+ok 39 - hostile or malformed commands never throw and stay fast
+  ---
+  duration_ms: 571.802422
+  type: 'test'
+  ...
+# Subtest: a URL hides nothing: substitutions inside it are audited and a host-less x:// is a path
+ok 40 - a URL hides nothing: substitutions inside it are audited and a host-less x:// is a path
+  ---
+  duration_ms: 13.54032
+  type: 'test'
+  ...
+# Subtest: ${IFS}, $IFS and brace words split into the words the shell would run
+ok 41 - ${IFS}, $IFS and brace words split into the words the shell would run
+  ---
+  duration_ms: 37.211456
+  type: 'test'
+  ...
+# Subtest: notes name the shapes the audit cannot read from the text
+ok 42 - notes name the shapes the audit cannot read from the text
+  ---
+  duration_ms: 11.5902
+  type: 'test'
+  ...
+# Subtest: text mode sees a path glued to < or > and still ignores closing tags
+ok 43 - text mode sees a path glued to < or > and still ignores closing tags
+  ---
+  duration_ms: 6.528693
+  type: 'test'
+  ...
+# Subtest: the tracked working directory is restored exactly: each construct has a clean case and an escaping case
+ok 44 - the tracked working directory is restored exactly: each construct has a clean case and an escaping case
+  ---
+  duration_ms: 5.293573
+  type: 'test'
+  ...
+# Subtest: cd - is only trusted after a cd in the same command; a first cd - jumps to an unknown OLDPWD
+ok 45 - cd - is only trusted after a cd in the same command; a first cd - jumps to an unknown OLDPWD
+  ---
+  duration_ms: 6.574516
+  type: 'test'
+  ...
+# Subtest: a cd that cannot be resolved says so plainly in its note
+ok 46 - a cd that cannot be resolved says so plainly in its note
+  ---
+  duration_ms: 4.902121
+  type: 'test'
+  ...
+# Subtest: variables the pilot inherited are looked up when the environment is given
+ok 47 - variables the pilot inherited are looked up when the environment is given
+  ---
+  duration_ms: 9.677728
+  type: 'test'
+  ...
+# Subtest: repeated cd, long paths and large commands are bounded, and a cap fails closed
+ok 48 - repeated cd, long paths and large commands are bounded, and a cap fails closed
+  ---
+  duration_ms: 1395.809086
+  type: 'test'
+  ...
+# Subtest: the audit has a time budget, and a call that runs out of it fails closed
+ok 49 - the audit has a time budget, and a call that runs out of it fails closed
+  ---
+  duration_ms: 8.154913
+  type: 'test'
+  ...
+# Subtest: running a program from outside the folder is an access, with or without a wrapper
+ok 50 - running a program from outside the folder is an access, with or without a wrapper
+  ---
+  duration_ms: 14.263071
+  type: 'test'
+  ...
+# Subtest: harness spill is found through a relative path, and ~/ inside code or file content is a home access
+ok 51 - harness spill is found through a relative path, and ~/ inside code or file content is a home access
+  ---
+  duration_ms: 22.414874
+  type: 'test'
+  ...
+# Subtest: leak-in-results ignores the physical names macOS gives its system folders
+ok 52 - leak-in-results ignores the physical names macOS gives its system folders
+  ---
+  duration_ms: 11.357088
+  type: 'test'
+  ...
+# Subtest: the result is labelled heuristic and has the documented shape
+ok 53 - the result is labelled heuristic and has the documented shape
+  ---
+  duration_ms: 4.106531
+  type: 'test'
+  ...
+# Subtest: figures match within the absolute tolerance, inclusive
+ok 54 - figures match within the absolute tolerance, inclusive
+  ---
+  duration_ms: 0.729945
+  type: 'test'
+  ...
+# Subtest: thousands separators, currency signs, percent and x are ignored when matching
+ok 55 - thousands separators, currency signs, percent and x are ignored when matching
+  ---
+  duration_ms: 0.600784
+  type: 'test'
+  ...
+# Subtest: typographic characters do not defeat matching
+ok 56 - typographic characters do not defeat matching
+  ---
+  duration_ms: 0.245631
+  type: 'test'
+  ...
+# Subtest: signs matter, accounting brackets are read both ways
+ok 57 - signs matter, accounting brackets are read both ways
+  ---
+  duration_ms: 0.426905
+  type: 'test'
+  ...
+# Subtest: figures given as text are parsed the same way
+ok 58 - figures given as text are parsed the same way
+  ---
+  duration_ms: 1.452244
+  type: 'test'
+  ...
+# Subtest: an unusable gold figure can never be found
+ok 59 - an unusable gold figure can never be found
+  ---
+  duration_ms: 0.544866
+  type: 'test'
+  ...
+# Subtest: matches-frozen-gold needs every gold figure
+ok 60 - matches-frozen-gold needs every gold figure
+  ---
+  duration_ms: 0.686453
+  type: 'test'
+  ...
+# Subtest: decision keywords come from gold.decision split on semicolons; one is enough; boundaries and case are respected
+ok 61 - decision keywords come from gold.decision split on semicolons; one is enough; boundaries and case are respected
+  ---
+  duration_ms: 1.322269
+  type: 'test'
+  ...
+# Subtest: a gold with nothing to check is never a match
+ok 62 - a gold with nothing to check is never a match
+  ---
+  duration_ms: 0.721164
+  type: 'test'
+  ...
+# Subtest: a fingerprint hits only when all of its tokens appear, case insensitively
+ok 63 - a fingerprint hits only when all of its tokens appear, case insensitively
+  ---
+  duration_ms: 0.840899
+  type: 'test'
+  ...
+# Subtest: a fingerprint with figures hits only when all of its figures match
+ok 64 - a fingerprint with figures hits only when all of its figures match
+  ---
+  duration_ms: 0.254401
+  type: 'test'
+  ...
+# Subtest: tokens or figures: either route is enough, and an empty fingerprint never hits
+ok 65 - tokens or figures: either route is enough, and an empty fingerprint never hits
+  ---
+  duration_ms: 0.167315
+  type: 'test'
+  ...
+# Subtest: verdict rules: fingerprint, gold, both, neither
+ok 66 - verdict rules: fingerprint, gold, both, neither
+  ---
+  duration_ms: 0.190244
+  type: 'test'
+  ...
+# Subtest: the outputs text is searched too and the result says where a figure was found
+ok 67 - the outputs text is searched too and the result says where a figure was found
+  ---
+  duration_ms: 0.305741
+  type: 'test'
+  ...
+# Subtest: odd inputs are tolerated, a missing freeze is not
+ok 68 - odd inputs are tolerated, a missing freeze is not
+  ---
+  duration_ms: 84.509534
+  type: 'test'
+  ...
+# Subtest: the suggestion is never final: it does not touch the freeze and changes nothing stored
+ok 69 - the suggestion is never final: it does not touch the freeze and changes nothing stored
+  ---
+  duration_ms: 0.749814
+  type: 'test'
+  ...
+# Subtest: hashFreeze is sha256 of canonical JSON with sorted keys
+ok 70 - hashFreeze is sha256 of canonical JSON with sorted keys
+  ---
+  duration_ms: 1.168225
+  type: 'test'
+  ...
+# Subtest: hashFreeze ignores key order and whitespace sources, but not content or array order
+ok 71 - hashFreeze ignores key order and whitespace sources, but not content or array order
+  ---
+  duration_ms: 0.781442
+  type: 'test'
+  ...
+# Subtest: hashFreeze drops undefined like JSON does, ignores a stored top level sha256, and accepts the real record
+ok 72 - hashFreeze drops undefined like JSON does, ignores a stored top level sha256, and accepts the real record
+  ---
+  duration_ms: 0.840708
+  type: 'test'
+  ...
+# Subtest: hashFreeze rejects things that are not records
+ok 73 - hashFreeze rejects things that are not records
+  ---
+  duration_ms: 0.681887
+  type: 'test'
+  ...
+# Subtest: phrases written with capitals, digits or accents match the answer in any case
+ok 74 - phrases written with capitals, digits or accents match the answer in any case
+  ---
+  duration_ms: 1.264627
+  type: 'test'
+  ...
+# Subtest: curly quotes and dashes in a phrase match their plain forms, and a mixed-case token is not found inside a longer word
+ok 75 - curly quotes and dashes in a phrase match their plain forms, and a mixed-case token is not found inside a longer word
+  ---
+  duration_ms: 0.531786
+  type: 'test'
+  ...
+# Subtest: hashFile streams a file and matches sha256
+ok 76 - hashFile streams a file and matches sha256
+  ---
+  duration_ms: 17.205765
+  type: 'test'
+  ...
+# Subtest: hashFile never follows a link and refuses non regular files
+ok 77 - hashFile never follows a link and refuses non regular files
+  ---
+  duration_ms: 6.873323
+  type: 'test'
+  ...
+# Subtest: inspectSource lists regular files with role, hash, size and default inclusion
+ok 78 - inspectSource lists regular files with role, hash, size and default inclusion
+  ---
+  duration_ms: 12.27334
+  type: 'test'
+  ...
+# Subtest: role inference is the one package-engine uses
+ok 79 - role inference is the one package-engine uses
+  ---
+  duration_ms: 0.326152
+  type: 'test'
+  ...
+# Subtest: inspectSource skips junk and dot folders, flags hidden files, and never follows links
+ok 80 - inspectSource skips junk and dot folders, flags hidden files, and never follows links
+  ---
+  duration_ms: 6.899306
+  type: 'test'
+  ...
+# Subtest: inspectSource accepts a source folder reached through a link
+ok 81 - inspectSource accepts a source folder reached through a link
+  ---
+  duration_ms: 2.805311
+  type: 'test'
+  ...
+# Subtest: inspectSource refuses bad source paths
+ok 82 - inspectSource refuses bad source paths
+  ---
+  duration_ms: 2.3824
+  type: 'test'
+  ...
+# Subtest: inspectSource refuses the project root, anything inside it, private/, and folders that contain it
+ok 83 - inspectSource refuses the project root, anything inside it, private/, and folders that contain it
+  ---
+  duration_ms: 2.723479
+  type: 'test'
+  ...
+# Subtest: inspectSource uses the real project as its default root
+ok 84 - inspectSource uses the real project as its default root
+  ---
+  duration_ms: 0.585862
+  type: 'test'
+  ...
+# Subtest: inspectSource enforces depth, file count and size limits
+ok 85 - inspectSource enforces depth, file count and size limits
+  ---
+  duration_ms: 141.502831
+  type: 'test'
+  ...
+# Subtest: buildPilotFolder copies byte for byte into folder/filesystem and creates outputs and .tmp
+ok 86 - buildPilotFolder copies byte for byte into folder/filesystem and creates outputs and .tmp
+  ---
+  duration_ms: 7.803506
+  type: 'test'
+  ...
+# Subtest: the prompt text is never written into the folder
+ok 87 - the prompt text is never written into the folder
+  ---
+  duration_ms: 3.851958
+  type: 'test'
+  ...
+# Subtest: files under a gaf segment are omitted when gafVisible is false and copied when true
+ok 88 - files under a gaf segment are omitted when gafVisible is false and copied when true
+  ---
+  duration_ms: 19.864103
+  type: 'test'
+  ...
+# Subtest: gafVisible must be an explicit boolean
+ok 89 - gafVisible must be an explicit boolean
+  ---
+  duration_ms: 2.776261
+  type: 'test'
+  ...
+# Subtest: evaluator names and private segments are refused unless that exact file is overridden
+ok 90 - evaluator names and private segments are refused unless that exact file is overridden
+  ---
+  duration_ms: 7.601981
+  type: 'test'
+  ...
+# Subtest: a source folder inside the project is refused even with an override
+ok 91 - a source folder inside the project is refused even with an override
+  ---
+  duration_ms: 1.735148
+  type: 'test'
+  ...
+# Subtest: path traversal, absolute paths and odd names in the selection are refused
+ok 92 - path traversal, absolute paths and odd names in the selection are refused
+  ---
+  duration_ms: 4.547557
+  type: 'test'
+  ...
+# Subtest: symlinks, links in parent folders and non files are refused
+ok 93 - symlinks, links in parent folders and non files are refused
+  ---
+  duration_ms: 4.522889
+  type: 'test'
+  ...
+# Subtest: a file that changed after approval is refused with PACKET HASH MISMATCH (409) and the half built folder is removed
+ok 94 - a file that changed after approval is refused with PACKET HASH MISMATCH (409) and the half built folder is removed
+  ---
+  duration_ms: 8.256642
+  type: 'test'
+  ...
+# Subtest: hashes must be real sha256 values and the selection must name real files
+ok 95 - hashes must be real sha256 values and the selection must name real files
+  ---
+  duration_ms: 3.807594
+  type: 'test'
+  ...
+# Subtest: run ids, destination and existing folders
+ok 96 - run ids, destination and existing folders
+  ---
+  duration_ms: 4.730489
+  type: 'test'
+  ...
+# Subtest: limits are enforced when building too
+ok 97 - limits are enforced when building too
+  ---
+  duration_ms: 20.036021
+  type: 'test'
+  ...
+# Subtest: an unreadable or vanished source file removes the folder
+ok 98 - an unreadable or vanished source file removes the folder
+  ---
+  duration_ms: 2.213043
+  type: 'test'
+  ...
+# Subtest: verifyFolder detects modified, missing and replaced inputs
+ok 99 - verifyFolder detects modified, missing and replaced inputs
+  ---
+  duration_ms: 5.970459
+  type: 'test'
+  ...
+# Subtest: verifyFolder ignores extra files the agent added
+ok 100 - verifyFolder ignores extra files the agent added
+  ---
+  duration_ms: 4.158956
+  type: 'test'
+  ...
+# Subtest: snapshotOutputs lists regular files with size and hash, sorted, ignoring links
+ok 101 - snapshotOutputs lists regular files with size and hash, sorted, ignoring links
+  ---
+  duration_ms: 4.843647
+  type: 'test'
+  ...
+# Subtest: snapshotOutputs is bounded
+ok 102 - snapshotOutputs is bounded
+  ---
+  duration_ms: 520.489163
+  type: 'test'
+  ...
+# Subtest: refusals are PacketError with an HTTP style status
+ok 103 - refusals are PacketError with an HTTP style status
+  ---
+  duration_ms: 1.859329
+  type: 'test'
+  ...
+# Subtest: constants carry the documented limits and allowlists and cannot be changed at run time
+ok 104 - constants carry the documented limits and allowlists and cannot be changed at run time
+  ---
+  duration_ms: 0.420128
+  type: 'test'
+  ...
+# Subtest: the evaluator pattern is case insensitive and the id pattern is strict
+ok 105 - the evaluator pattern is case insensitive and the id pattern is strict
+  ---
+  duration_ms: 0.3386
+  type: 'test'
+  ...
+# Subtest: each rule of the selection check refuses with its own message, for files that really exist
+ok 106 - each rule of the selection check refuses with its own message, for files that really exist
+  ---
+  duration_ms: 3.618905
+  type: 'test'
+  ...
+# Subtest: a relative source folder is refused even when it exists, and hashFile names the reason for a folder
+ok 107 - a relative source folder is refused even when it exists, and hashFile names the reason for a folder
+  ---
+  duration_ms: 2.305987
+  type: 'test'
+  ...
+# Subtest: a file whose name holds a control character is listed as unusable, with a printable name
+ok 108 - a file whose name holds a control character is listed as unusable, with a printable name
+  ---
+  duration_ms: 2.24544
+  type: 'test'
+  ...
+# Subtest: the pilots root is created private, reused when it is private, tightened when it is open, and refused when it is a link
+ok 109 - the pilots root is created private, reused when it is private, tightened when it is open, and refused when it is a link
+  ---
+  duration_ms: 15.0772
+  type: 'test'
+  ...
+# Subtest: a pilots root that belongs to another account is refused
+ok 110 - a pilots root that belongs to another account is refused
+  ---
+  duration_ms: 2.812578
+  type: 'test'
+  ...
+# Subtest: the audit runs against each pilot own folder: a sibling pilot output is off limits, the own folder is not
+ok 111 - the audit runs against each pilot own folder: a sibling pilot output is off limits, the own folder is not
+  ---
+  duration_ms: 236.483625
+  type: 'test'
+  ...
+# Subtest: every field of the approval summary is bound: a valid edit of the stored round after approval is refused at launch
+ok 112 - every field of the approval summary is bound: a valid edit of the stored round after approval is refused at launch
+  ---
+  duration_ms: 453.399477
+  type: 'test'
+  ...
+# Subtest: a name with a control character can neither be selected nor forge a line of the approval summary
+ok 113 - a name with a control character can neither be selected nor forge a line of the approval summary
+  ---
+  duration_ms: 8.750863
+  type: 'test'
+  ...
+# Subtest: cancel stops a child the pilot shell started, not only the process itself
+ok 114 - cancel stops a child the pilot shell started, not only the process itself
+  ---
+  duration_ms: 48.420977
+  type: 'test'
+  ...
+# Subtest: a timeout stops the whole process group
+ok 115 - a timeout stops the whole process group
+  ---
+  duration_ms: 408.775948
+  type: 'test'
+  ...
+# Subtest: a child that ignores SIGTERM is killed when the run ends, even though the parent already exited
+ok 116 - a child that ignores SIGTERM is killed when the run ends, even though the parent already exited
+  ---
+  duration_ms: 219.641268
+  type: 'test'
+  ...
+# Subtest: a background process left behind by a run that ends normally is stopped and noted
+ok 117 - a background process left behind by a run that ends normally is stopped and noted
+  ---
+  duration_ms: 136.922857
+  type: 'test'
+  ...
+# Subtest: a pilot that leaves a background process running has it stopped, and the run says so
+ok 118 - a pilot that leaves a background process running has it stopped, and the run says so
+  ---
+  duration_ms: 128.970108
+  type: 'test'
+  ...
+# Subtest: a human verdict is on disk the moment it is given
+ok 119 - a human verdict is on disk the moment it is given
+  ---
+  duration_ms: 105.723967
+  type: 'test'
+  ...
+# Subtest: a human verdict, a post-hoc freeze and the export survive a restart; a second post-hoc freeze keeps the verdict
+ok 120 - a human verdict, a post-hoc freeze and the export survive a restart; a second post-hoc freeze keeps the verdict
+  ---
+  duration_ms: 107.310606
+  type: 'test'
+  ...
+# Subtest: a finished, failed or cancelled round cannot be launched again, and its runs are left as they were
+ok 121 - a finished, failed or cancelled round cannot be launched again, and its runs are left as they were
+  ---
+  duration_ms: 229.784317
+  type: 'test'
+  ...
+# Subtest: counts, the directional line and the export agree: discarded, failed and unclassified runs are not counted as results
+ok 122 - counts, the directional line and the export agree: discarded, failed and unclassified runs are not counted as results
+  ---
+  duration_ms: 206.600286
+  type: 'test'
+  ...
+# Subtest: the export names the model the runtime reported, and falls back to labelled hashes when no versions were given
+ok 123 - the export names the model the runtime reported, and falls back to labelled hashes when no versions were given
+  ---
+  duration_ms: 99.968711
+  type: 'test'
+  ...
+# Subtest: an evaluator-role file the writer overrode into the packet does not enter the source fingerprint
+ok 124 - an evaluator-role file the writer overrode into the packet does not enter the source fingerprint
+  ---
+  duration_ms: 90.227463
+  type: 'test'
+  ...
+# Subtest: the approval summary lists what is delivered and what is withheld, for gaf visible and hidden
+ok 125 - the approval summary lists what is delivered and what is withheld, for gaf visible and hidden
+  ---
+  duration_ms: 9.154701
+  type: 'test'
+  ...
+# Subtest: an approval hash that is only a prefix of the right one is refused
+ok 126 - an approval hash that is only a prefix of the right one is refused
+  ---
+  duration_ms: 5.024546
+  type: 'test'
+  ...
+# Subtest: limits can be lowered but never raised: a huge override gives the contract values
+ok 127 - limits can be lowered but never raised: a huge override gives the contract values
+  ---
+  duration_ms: 0.407445
+  type: 'test'
+  ...
+# Subtest: a tool-less run (grader or author review) is capped at ten minutes, whatever the pilot limit is
+ok 128 - a tool-less run (grader or author review) is capped at ten minutes, whatever the pilot limit is
+  ---
+  duration_ms: 78.616359
+  type: 'test'
+  ...
+# Subtest: a source folder that disappeared after approval refuses the launch with PACKET HASH MISMATCH
+ok 129 - a source folder that disappeared after approval refuses the launch with PACKET HASH MISMATCH
+  ---
+  duration_ms: 45.367727
+  type: 'test'
+  ...
+# Subtest: a run that cannot be finished is DISCARDED, never CLEAN
+ok 130 - a run that cannot be finished is DISCARDED, never CLEAN
+  ---
+  duration_ms: 613.888091
+  type: 'test'
+  ...
+# Subtest: a solver file that disappeared and junk output lines are noted exactly
+ok 131 - a solver file that disappeared and junk output lines are noted exactly
+  ---
+  duration_ms: 101.832002
+  type: 'test'
+  ...
+# Subtest: an answer kept in a text-like output file is found for every text extension, and not for other files
+ok 132 - an answer kept in a text-like output file is found for every text extension, and not for other files
+  ---
+  duration_ms: 567.406736
+  type: 'test'
+  ...
+# Subtest: the data markers around grader and review inputs are exact, and the service sends them
+ok 133 - the data markers around grader and review inputs are exact, and the service sends them
+  ---
+  duration_ms: 159.401785
+  type: 'test'
+  ...
+# Subtest: keys a client adds to the config are not stored and never reach the command line
+ok 134 - keys a client adds to the config are not stored and never reach the command line
+  ---
+  duration_ms: 102.828684
+  type: 'test'
+  ...
+# Subtest: the folder that holds the pilot folders must be a real directory this account owns
+ok 135 - the folder that holds the pilot folders must be a real directory this account owns
+  ---
+  duration_ms: 233.737581
+  type: 'test'
+  ...
+# Subtest: a pilots root owned by another account is refused
+ok 136 - a pilots root owned by another account is refused
+  ---
+  duration_ms: 55.497876
+  type: 'test'
+  ...
+# Subtest: a runtime that was missing is looked for again at once, and a found one is still cached
+ok 137 - a runtime that was missing is looked for again at once, and a found one is still cached
+  ---
+  duration_ms: 6.179077
+  type: 'test'
+  ...
+# Subtest: a launch refused after the approval keeps the dialog usable: the round is shown as approved and the next click launches it
+ok 138 - a launch refused after the approval keeps the dialog usable: the round is shown as approved and the next click launches it
+  ---
+  duration_ms: 1556.580713
+  type: 'test'
+  ...
+# Subtest: the launch gate says when Claude Code is missing, and Check again opens it once it is installed
+ok 139 - the launch gate says when Claude Code is missing, and Check again opens it once it is installed
+  ---
+  duration_ms: 923.043197
+  type: 'test'
+  ...
+# Subtest: the approval dialog repeats the prompt, its hash, the files delivered and the files withheld by the gaf setting
+ok 140 - the approval dialog repeats the prompt, its hash, the files delivered and the files withheld by the gaf setting
+  ---
+  duration_ms: 242.386613
+  type: 'test'
+  ...
+# Subtest: with gaf hidden, the page itself leaves out a gaf-named file, so the packet table and the companion agree
+ok 141 - with gaf hidden, the page itself leaves out a gaf-named file, so the packet table and the companion agree
+  ---
+  duration_ms: 975.640638
+  type: 'test'
+  ...
+# Subtest: the page and the companion use one rule for which files are gaf files
+ok 142 - the page and the companion use one rule for which files are gaf files
+  ---
+  duration_ms: 0.388543
+  type: 'test'
+  ...
+# Subtest: a fingerprint added by a post-hoc freeze can be chosen when classifying, and every freeze version is listed
+ok 143 - a fingerprint added by a post-hoc freeze can be chosen when classifying, and every freeze version is listed
+  ---
+  duration_ms: 447.785455
+  type: 'test'
+  ...
+# Subtest: a failed run explains itself: the reason in words, the runtime message, and the command with the prompt elided
+ok 144 - a failed run explains itself: the reason in words, the runtime message, and the command with the prompt elided
+  ---
+  duration_ms: 460.430231
+  type: 'test'
+  ...
+# Subtest: a timeout is explained in words
+ok 145 - a timeout is explained in words
+  ---
+  duration_ms: 665.929736
+  type: 'test'
+  ...
+# Subtest: a run interrupted by a companion restart is shown as not audited, with the round note
+ok 146 - a run interrupted by a companion restart is shown as not audited, with the round note
+  ---
+  duration_ms: 310.530562
+  type: 'test'
+  ...
+# Subtest: the audit section states what the audit cannot see, and says what a note is
+ok 147 - the audit section states what the audit cannot see, and says what a note is
+  ---
+  duration_ms: 296.398158
+  type: 'test'
+  ...
+# Subtest: the packet card says where files land and warns about a nested filesystem folder
+ok 148 - the packet card says where files land and warns about a nested filesystem folder
+  ---
+  duration_ms: 608.464557
+  type: 'test'
+  ...
+# Subtest: the simulated grader button says what it needs, and the footer text of the runs card is not a dead end
+ok 149 - the simulated grader button says what it needs, and the footer text of the runs card is not a dead end
+  ---
+  duration_ms: 133.290592
+  type: 'test'
+  ...
+# Subtest: copy about models and accounts depends on the edition: offline from disk, approval-gated when served by the companion
+ok 150 - copy about models and accounts depends on the edition: offline from disk, approval-gated when served by the companion
+  ---
+  duration_ms: 20.121852
+  type: 'test'
+  ...
+# Subtest: buildArgs is exactly the fixed argument list of section 3.2
+ok 151 - buildArgs is exactly the fixed argument list of section 3.2
+  ---
+  duration_ms: 3.062881
+  type: 'test'
+  ...
+# Subtest: buildArgs for a tool-less agent passes an empty tool list and no allowed tools
+ok 152 - buildArgs for a tool-less agent passes an empty tool list and no allowed tools
+  ---
+  duration_ms: 0.429841
+  type: 'test'
+  ...
+# Subtest: buildArgs refuses anything outside the allowlists
+ok 153 - buildArgs refuses anything outside the allowlists
+  ---
+  duration_ms: 2.938294
+  type: 'test'
+  ...
+# Subtest: detectClaude order: CLAUDE_BIN, then PATH, then the known locations
+ok 154 - detectClaude order: CLAUDE_BIN, then PATH, then the known locations
+  ---
+  duration_ms: 1.453958
+  type: 'test'
+  ...
+# Subtest: detectClaude ignores a relative CLAUDE_BIN and reports a binary that cannot print a version
+ok 155 - detectClaude ignores a relative CLAUDE_BIN and reports a binary that cannot print a version
+  ---
+  duration_ms: 1.151065
+  type: 'test'
+  ...
+# Subtest: detectClaude runs the real --version of the stub and never a prompt
+ok 156 - detectClaude runs the real --version of the stub and never a prompt
+  ---
+  duration_ms: 39.145402
+  type: 'test'
+  ...
+# Subtest: a completed run: stream parsed, init and result recorded, transcript kept line by line
+ok 157 - a completed run: stream parsed, init and result recorded, transcript kept line by line
+  ---
+  duration_ms: 39.744894
+  type: 'test'
+  ...
+# Subtest: stream parsing tolerates junk lines, blank lines and lines split across writes
+ok 158 - stream parsing tolerates junk lines, blank lines and lines split across writes
+  ---
+  duration_ms: 67.08857
+  type: 'test'
+  ...
+# Subtest: stream parsing with a fake child: partial lines, split multibyte characters, a last line without a newline
+ok 159 - stream parsing with a fake child: partial lines, split multibyte characters, a last line without a newline
+  ---
+  duration_ms: 21.403337
+  type: 'test'
+  ...
+# Subtest: tool_result bodies in the summary are cut to 2000 characters; the transcript keeps them whole
+ok 160 - tool_result bodies in the summary are cut to 2000 characters; the transcript keeps them whole
+  ---
+  duration_ms: 35.090278
+  type: 'test'
+  ...
+# Subtest: a run is failed on a non-zero exit even when a result exists
+ok 161 - a run is failed on a non-zero exit even when a result exists
+  ---
+  duration_ms: 50.746009
+  type: 'test'
+  ...
+# Subtest: a run is failed when the result text is empty, missing, or flagged as an error
+ok 162 - a run is failed when the result text is empty, missing, or flagged as an error
+  ---
+  duration_ms: 158.412038
+  type: 'test'
+  ...
+# Subtest: the stderr tail is the last 4 KB
+ok 163 - the stderr tail is the last 4 KB
+  ---
+  duration_ms: 41.108678
+  type: 'test'
+  ...
+# Subtest: cancel() stops a running process and the state is cancelled
+ok 164 - cancel() stops a running process and the state is cancelled
+  ---
+  duration_ms: 35.504026
+  type: 'test'
+  ...
+# Subtest: cancel() before start() never spawns anything
+ok 165 - cancel() before start() never spawns anything
+  ---
+  duration_ms: 1.078102
+  type: 'test'
+  ...
+# Subtest: the timeout sends SIGTERM and the run is failed
+ok 166 - the timeout sends SIGTERM and the run is failed
+  ---
+  duration_ms: 257.295554
+  type: 'test'
+  ...
+# Subtest: a process that ignores SIGTERM is killed with SIGKILL after the grace period
+ok 167 - a process that ignores SIGTERM is killed with SIGKILL after the grace period
+  ---
+  duration_ms: 511.487564
+  type: 'test'
+  ...
+# Subtest: timeout and kill signals on a fake child: SIGTERM, then SIGKILL after the grace period
+ok 168 - timeout and kill signals on a fake child: SIGTERM, then SIGKILL after the grace period
+  ---
+  duration_ms: 140.613346
+  type: 'test'
+  ...
+# Subtest: a process that cannot be started is a failed run with the real error in the stderr tail
+ok 169 - a process that cannot be started is a failed run with the real error in the stderr tail
+  ---
+  duration_ms: 3.800188
+  type: 'test'
+  ...
+# Subtest: status() has the documented shape and finds the stub
+ok 170 - status() has the documented shape and finds the stub
+  ---
+  duration_ms: 47.34043
+  type: 'test'
+  ...
+# Subtest: status() reports a missing runtime, and launch then refuses without starting anything
+ok 171 - status() reports a missing runtime, and launch then refuses without starting anything
+  ---
+  duration_ms: 17.688894
+  type: 'test'
+  ...
+# Subtest: status() asks the binary for its version once and caches the answer
+ok 172 - status() asks the binary for its version once and caches the answer
+  ---
+  duration_ms: 43.647439
+  type: 'test'
+  ...
+# Subtest: ClaudeRun defaults are the contract limits: 50 minutes, then SIGKILL after 5 seconds
+ok 173 - ClaudeRun defaults are the contract limits: 50 minutes, then SIGKILL after 5 seconds
+  ---
+  duration_ms: 0.709529
+  type: 'test'
+  ...
+# Subtest: the cap of five pilots and the allowlists are enforced on the server
+ok 174 - the cap of five pilots and the allowlists are enforced on the server
+  ---
+  duration_ms: 14.829755
+  type: 'test'
+  ...
+# Subtest: the browser cannot supply a binary, an argument list or a folder
+ok 175 - the browser cannot supply a binary, an argument list or a folder
+  ---
+  duration_ms: 106.43433
+  type: 'test'
+  ...
+# Subtest: files that look like grading material are refused unless overridden by name; the override is recorded
+ok 176 - files that look like grading material are refused unless overridden by name; the override is recorded
+  ---
+  duration_ms: 19.365912
+  type: 'test'
+  ...
+# Subtest: inspectPacket lists files and refuses folders inside the project
+ok 177 - inspectPacket lists files and refuses folders inside the project
+  ---
+  duration_ms: 5.208727
+  type: 'test'
+  ...
+# Subtest: round and run ids from a client are validated and never used to build paths
+ok 178 - round and run ids from a client are validated and never used to build paths
+  ---
+  duration_ms: 9.63116
+  type: 'test'
+  ...
+# Subtest: freeze is validated and required before approval
+ok 179 - freeze is validated and required before approval
+  ---
+  duration_ms: 8.893773
+  type: 'test'
+  ...
+# Subtest: approval summary states everything the writer approves, and the approval hash must match
+ok 180 - approval summary states everything the writer approves, and the approval hash must match
+  ---
+  duration_ms: 9.192005
+  type: 'test'
+  ...
+# Subtest: the summary differs between rounds that differ in what will run
+ok 181 - the summary differs between rounds that differ in what will run
+  ---
+  duration_ms: 36.841049
+  type: 'test'
+  ...
+# Subtest: a launch without approval starts nothing; the same for a cancelled round
+ok 182 - a launch without approval starts nothing; the same for a cancelled round
+  ---
+  duration_ms: 6.852636
+  type: 'test'
+  ...
+# Subtest: a packet file that changed after approval refuses the launch with 409 and starts nothing
+ok 183 - a packet file that changed after approval refuses the launch with 409 and starts nothing
+  ---
+  duration_ms: 83.947035
+  type: 'test'
+  ...
+# Subtest: a round edited on disk after approval is refused at launch
+ok 184 - a round edited on disk after approval is refused at launch
+  ---
+  duration_ms: 78.708758
+  type: 'test'
+  ...
+# Subtest: a launched round runs the stub with exact arguments and the pilot environment, then records everything
+ok 185 - a launched round runs the stub with exact arguments and the pilot environment, then records everything
+  ---
+  duration_ms: 105.708953
+  type: 'test'
+  ...
+# Subtest: the child environment is the parent environment plus TMPDIR and CLAUDE_CODE_TMPDIR, nothing else
+ok 186 - the child environment is the parent environment plus TMPDIR and CLAUDE_CODE_TMPDIR, nothing else
+  ---
+  duration_ms: 101.524715
+  type: 'test'
+  ...
+# Subtest: persisted layout under private/agent-rounds/<id>
+ok 187 - persisted layout under private/agent-rounds/<id>
+  ---
+  duration_ms: 113.526102
+  type: 'test'
+  ...
+# Subtest: state survives a restart; a round that was running when the companion stopped is marked interrupted
+ok 188 - state survives a restart; a round that was running when the companion stopped is marked interrupted
+  ---
+  duration_ms: 96.944288
+  type: 'test'
+  ...
+# Subtest: gafVisible false leaves the gaf files out of the pilot folder; true delivers them
+ok 189 - gafVisible false leaves the gaf files out of the pilot folder; true delivers them
+  ---
+  duration_ms: 210.842769
+  type: 'test'
+  ...
+# Subtest: a tool call outside the pilot folder DISCARDS the run; it cannot be classified and is exported separately
+ok 190 - a tool call outside the pilot folder DISCARDS the run; it cannot be classified and is exported separately
+  ---
+  duration_ms: 109.814486
+  type: 'test'
+  ...
+# Subtest: a read under the Claude configuration folder is a harness-spill violation and discards the run
+ok 191 - a read under the Claude configuration folder is a harness-spill violation and discards the run
+  ---
+  duration_ms: 100.753283
+  type: 'test'
+  ...
+# Subtest: calls inside the folder, including the scratch folder, are clean
+ok 192 - calls inside the folder, including the scratch folder, are clean
+  ---
+  duration_ms: 102.057331
+  type: 'test'
+  ...
+# Subtest: a solver file changed by the pilot is an inputs-modified note, not a discard
+ok 193 - a solver file changed by the pilot is an inputs-modified note, not a discard
+  ---
+  duration_ms: 104.663442
+  type: 'test'
+  ...
+# Subtest: a model mismatch is a note and is never corrected; dated and context-suffixed ids are the same model
+ok 194 - a model mismatch is a note and is never corrected; dated and context-suffixed ids are the same model
+  ---
+  duration_ms: 539.984846
+  type: 'test'
+  ...
+# Subtest: a tool result that mentions the project root or private/ is a leak-in-results note
+ok 195 - a tool result that mentions the project root or private/ is a leak-in-results note
+  ---
+  duration_ms: 305.00813
+  type: 'test'
+  ...
+# Subtest: a failed run keeps the real stderr tail; a round where every run failed is failed; classify is refused
+ok 196 - a failed run keeps the real stderr tail; a round where every run failed is failed; classify is refused
+  ---
+  duration_ms: 106.149531
+  type: 'test'
+  ...
+# Subtest: a run that cannot be built (hash mismatch while copying) is failed and the other runs continue
+ok 197 - a run that cannot be built (hash mismatch while copying) is failed and the other runs continue
+  ---
+  duration_ms: 218.045287
+  type: 'test'
+  ...
+# Subtest: the per-run timeout fails the run and the round
+ok 198 - the per-run timeout fails the run and the round
+  ---
+  duration_ms: 362.284359
+  type: 'test'
+  ...
+# Subtest: limits can be lowered for tests but never raised above the contract
+ok 199 - limits can be lowered for tests but never raised above the contract
+  ---
+  duration_ms: 412.587076
+  type: 'test'
+  ...
+# Subtest: at most three pilots run at a time and a round of five completes
+ok 200 - at most three pilots run at a time and a round of five completes
+  ---
+  duration_ms: 988.689139
+  type: 'test'
+  ...
+# Subtest: a lowered concurrency limit runs the pilots one after another
+ok 201 - a lowered concurrency limit runs the pilots one after another
+  ---
+  duration_ms: 655.722981
+  type: 'test'
+  ...
+# Subtest: only one round can run at a time
+ok 202 - only one round can run at a time
+  ---
+  duration_ms: 153.528078
+  type: 'test'
+  ...
+# Subtest: cancelling a running round stops the pilots and marks the round and its runs cancelled
+ok 203 - cancelling a running round stops the pilots and marks the round and its runs cancelled
+  ---
+  duration_ms: 147.643954
+  type: 'test'
+  ...
+# Subtest: human classification, export records and discarded runs; records validate through core.validateExperiment
+ok 204 - human classification, export records and discarded runs; records validate through core.validateExperiment
+  ---
+  duration_ms: 203.98879
+  type: 'test'
+  ...
+# Subtest: sourceFingerprint is computed exactly as candidate-engine does, from the delivered solver files plus the prompt
+ok 205 - sourceFingerprint is computed exactly as candidate-engine does, from the delivered solver files plus the prompt
+  ---
+  duration_ms: 328.631958
+  type: 'test'
+  ...
+# Subtest: explicit version labels given at creation are exported
+ok 206 - explicit version labels given at creation are exported
+  ---
+  duration_ms: 88.852559
+  type: 'test'
+  ...
+# Subtest: an export of a round with no runs is refused
+ok 207 - an export of a round with no runs is refused
+  ---
+  duration_ms: 8.991462
+  type: 'test'
+  ...
+# Subtest: a post-hoc freeze keeps the original, adds a labelled version, and refreshes suggestions
+ok 208 - a post-hoc freeze keeps the original, adds a labelled version, and refreshes suggestions
+  ---
+  duration_ms: 101.495024
+  type: 'test'
+  ...
+# Subtest: graderSim runs once without tools and without folder content, parses the JSON verdict, and is labelled simulated
+ok 209 - graderSim runs once without tools and without folder content, parses the JSON verdict, and is labelled simulated
+  ---
+  duration_ms: 70.818986
+  type: 'test'
+  ...
+# Subtest: graderSim: invalid JSON is unclear, tool use is discarded, a failed run is reported, batches are capped at five
+ok 210 - graderSim: invalid JSON is unclear, tool use is discarded, a failed run is reported, batches are capped at five
+  ---
+  duration_ms: 485.523712
+  type: 'test'
+  ...
+# Subtest: the grader prompt keeps the guidance and the answer inside data markers
+ok 211 - the grader prompt keeps the guidance and the answer inside data markers
+  ---
+  duration_ms: 0.247596
+  type: 'test'
+  ...
+# Subtest: authorReview runs once without tools, in an empty folder, and returns text for the author to read
+ok 212 - authorReview runs once without tools, in an empty folder, and returns text for the author to read
+  ---
+  duration_ms: 137.972579
+  type: 'test'
+  ...
+# Subtest: authorReview refuses bad input before anything starts, discards a tool using reviewer, and reports a failed run
+ok 213 - authorReview refuses bad input before anything starts, discards a tool using reviewer, and reports a failed run
+  ---
+  duration_ms: 146.384633
+  type: 'test'
+  ...
+# Subtest: authorReview allows one review at a time and stops it at shutdown
+ok 214 - authorReview allows one review at a time and stops it at shutdown
+  ---
+  duration_ms: 138.764281
+  type: 'test'
+  ...
+# Subtest: the review prompt keeps the prompt and the package inside data markers and asks for no score
+ok 215 - the review prompt keeps the prompt and the package inside data markers and asks for no score
+  ---
+  duration_ms: 0.391777
+  type: 'test'
+  ...
+# Subtest: AgentError carries a status and the service exports it
+ok 216 - AgentError carries a status and the service exports it
+  ---
+  duration_ms: 0.121327
+  type: 'test'
+  ...
+# Subtest: every service method named in the contract exists and is async
+ok 217 - every service method named in the contract exists and is async
+  ---
+  duration_ms: 38.056908
+  type: 'test'
+  ...
+# Subtest: the service hands out copies, so a caller cannot change stored state
+ok 218 - the service hands out copies, so a caller cannot change stored state
+  ---
+  duration_ms: 9.481236
+  type: 'test'
+  ...
+# Subtest: GET /api/status keeps its fields and adds the agents block
+ok 219 - GET /api/status keeps its fields and adds the agents block
+  ---
+  duration_ms: 69.922032
+  type: 'test'
+  ...
+# Subtest: the nonce differs from one server to the next
+ok 220 - the nonce differs from one server to the next
+  ---
+  duration_ms: 21.831388
+  type: 'test'
+  ...
+# Subtest: a status block that cannot be read still answers, from the fixed limits
+ok 221 - a status block that cannot be read still answers, from the fixed limits
+  ---
+  duration_ms: 11.416061
+  type: 'test'
+  ...
+# Subtest: starting the companion starts no model, writes no server record, and reading the status only asks for the version
+ok 222 - starting the companion starts no model, writes no server record, and reading the status only asks for the version
+  ---
+  duration_ms: 53.542578
+  type: 'test'
+  ...
+# Subtest: LOCAL_SERVER.json records zero model calls unless the one-time run was requested
+ok 223 - LOCAL_SERVER.json records zero model calls unless the one-time run was requested
+  ---
+  duration_ms: 0.463583
+  type: 'test'
+  ...
+# Subtest: createServer refuses a missing service and a bad port, and binds to the loopback address only
+ok 224 - createServer refuses a missing service and a bad port, and binds to the loopback address only
+  ---
+  duration_ms: 10.309859
+  type: 'test'
+  ...
+# Subtest: the Host header must be exactly 127.0.0.1:<port> on every kind of request
+ok 225 - the Host header must be exactly 127.0.0.1:<port> on every kind of request
+  ---
+  duration_ms: 32.481984
+  type: 'test'
+  ...
+# Subtest: a change needs Origin http://<host>
+ok 226 - a change needs Origin http://<host>
+  ---
+  duration_ms: 33.421136
+  type: 'test'
+  ...
+# Subtest: a change needs the nonce from the status route
+ok 227 - a change needs the nonce from the status route
+  ---
+  duration_ms: 24.252168
+  type: 'test'
+  ...
+# Subtest: a change needs Content-Type application/json
+ok 228 - a change needs Content-Type application/json
+  ---
+  duration_ms: 24.694977
+  type: 'test'
+  ...
+# Subtest: Origin, nonce and content type are checked before the body is read or any id is looked at
+ok 229 - Origin, nonce and content type are checked before the body is read or any id is looked at
+  ---
+  duration_ms: 18.774348
+  type: 'test'
+  ...
+# Subtest: a page on another origin cannot read the API, and responses carry no CORS permission
+ok 230 - a page on another origin cannot read the API, and responses carry no CORS permission
+  ---
+  duration_ms: 58.356533
+  type: 'test'
+  ...
+# Subtest: the body cap is 1 MB, and 256 KB on the packet routes
+ok 231 - the body cap is 1 MB, and 256 KB on the packet routes
+  ---
+  duration_ms: 88.947049
+  type: 'test'
+  ...
+# Subtest: a client that hangs up in the middle of a body does not disturb the server
+ok 232 - a client that hangs up in the middle of a body does not disturb the server
+  ---
+  duration_ms: 154.53433
+  type: 'test'
+  ...
+# Subtest: invalid JSON, a body that is not an object, and bad UTF-8 are 400; an empty body is an empty object
+ok 233 - invalid JSON, a body that is not an object, and bad UTF-8 are 400; an empty body is an empty object
+  ---
+  duration_ms: 38.340553
+  type: 'test'
+  ...
+# Subtest: ids must match ^[a-z0-9-]{4,64}$ on every route that takes one
+ok 234 - ids must match ^[a-z0-9-]{4,64}$ on every route that takes one
+  ---
+  duration_ms: 120.319618
+  type: 'test'
+  ...
+# Subtest: the server rejects a bad id or run number itself, before the service is called
+ok 235 - the server rejects a bad id or run number itself, before the service is called
+  ---
+  duration_ms: 72.153688
+  type: 'test'
+  ...
+# Subtest: run numbers are checked on the run routes, and an unknown run is a 404
+ok 236 - run numbers are checked on the run routes, and an unknown run is a 404
+  ---
+  duration_ms: 38.308556
+  type: 'test'
+  ...
+# Subtest: unknown routes: non-GET is 405, GET is 404, a known address with the wrong method is 405 with Allow
+ok 237 - unknown routes: non-GET is 405, GET is 404, a known address with the wrong method is 405 with Allow
+  ---
+  duration_ms: 49.994177
+  type: 'test'
+  ...
+# Subtest: static files: the allowlist, agents.js, the connect-src rewrite, and nothing else
+ok 238 - static files: the allowlist, agents.js, the connect-src rewrite, and nothing else
+  ---
+  duration_ms: 53.485465
+  type: 'test'
+  ...
+# Subtest: a missing asset file is a 404, not an error
+ok 239 - a missing asset file is a 404, not an error
+  ---
+  duration_ms: 11.45546
+  type: 'test'
+  ...
+# Subtest: the archived cancel route keeps its checks: Origin and nonce, no content type, no model
+ok 240 - the archived cancel route keeps its checks: Origin and nonce, no content type, no model
+  ---
+  duration_ms: 13.644872
+  type: 'test'
+  ...
+# Subtest: errors: AgentError statuses pass through, everything else is a generic 500 with nothing from the server in it
+ok 241 - errors: AgentError statuses pass through, everything else is a generic 500 with nothing from the server in it
+  ---
+  duration_ms: 59.005527
+  type: 'test'
+  ...
+# Subtest: a client error message that names a server folder has it replaced
+ok 242 - a client error message that names a server folder has it replaced
+  ---
+  duration_ms: 10.056265
+  type: 'test'
+  ...
+# Subtest: the list of rounds is wrapped in an object
+ok 243 - the list of rounds is wrapped in an object
+  ---
+  duration_ms: 14.820149
+  type: 'test'
+  ...
+# Subtest: the author review route answers 404 when the service does not offer it, then passes the body through
+ok 244 - the author review route answers 404 when the service does not offer it, then passes the body through
+  ---
+  duration_ms: 23.517521
+  type: 'test'
+  ...
+# Subtest: the author review route runs one tool-less review through the real service
+ok 245 - the author review route runs one tool-less review through the real service
+  ---
+  duration_ms: 108.331288
+  type: 'test'
+  ...
+# Subtest: full flow: inspect, create, freeze, approval summary, approve, launch, poll, classify, export
+ok 246 - full flow: inspect, create, freeze, approval summary, approve, launch, poll, classify, export
+  ---
+  duration_ms: 222.022521
+  type: 'test'
+  ...
+# Subtest: a file that looks like grading material needs an override by name, and the override is recorded
+ok 247 - a file that looks like grading material needs an override by name, and the override is recorded
+  ---
+  duration_ms: 17.343708
+  type: 'test'
+  ...
+# Subtest: round creation refuses a pilot count above the cap and every other value that is not 1 to 5
+ok 248 - round creation refuses a pilot count above the cap and every other value that is not 1 to 5
+  ---
+  duration_ms: 51.454887
+  type: 'test'
+  ...
+# Subtest: round creation refuses models, efforts and tool lists outside the allowlists, and missing fields
+ok 249 - round creation refuses models, efforts and tool lists outside the allowlists, and missing fields
+  ---
+  duration_ms: 44.700748
+  type: 'test'
+  ...
+# Subtest: a source folder inside the project, holding the project, or not usable is refused
+ok 250 - a source folder inside the project, holding the project, or not usable is refused
+  ---
+  duration_ms: 60.033622
+  type: 'test'
+  ...
+# Subtest: earlier pilot folders can never become a packet source
+ok 251 - earlier pilot folders can never become a packet source
+  ---
+  duration_ms: 127.922942
+  type: 'test'
+  ...
+# Subtest: freeze bodies are validated, and nothing can launch without a freeze and an approval
+ok 252 - freeze bodies are validated, and nothing can launch without a freeze and an approval
+  ---
+  duration_ms: 28.048696
+  type: 'test'
+  ...
+# Subtest: a changed packet file stops the launch with PACKET HASH MISMATCH and nothing starts
+ok 253 - a changed packet file stops the launch with PACKET HASH MISMATCH and nothing starts
+  ---
+  duration_ms: 54.477327
+  type: 'test'
+  ...
+# Subtest: a DISCARDED run cannot be classified and is exported only in the separate list
+ok 254 - a DISCARDED run cannot be classified and is exported only in the separate list
+  ---
+  duration_ms: 128.265596
+  type: 'test'
+  ...
+# Subtest: cancel stops a running round, a second round cannot start meanwhile, and a second cancel is refused
+ok 255 - cancel stops a running round, a second round cannot start meanwhile, and a second cancel is refused
+  ---
+  duration_ms: 176.209393
+  type: 'test'
+  ...
+# Subtest: shutdown cancels a running round before the server closes, and then nothing answers
+ok 256 - shutdown cancels a running round before the server closes, and then nothing answers
+  ---
+  duration_ms: 82.540834
+  type: 'test'
+  ...
+# Subtest: GET /runs/:n returns that run, not the first one
+ok 257 - GET /runs/:n returns that run, not the first one
+  ---
+  duration_ms: 133.138888
+  type: 'test'
+  ...
+# Subtest: shutdown stops a launch that was still being answered when it began, with a second pass
+ok 258 - shutdown stops a launch that was still being answered when it began, with a second pass
+  ---
+  duration_ms: 169.060051
+  type: 'test'
+  ...
+# Subtest: shutdown cancels the archived adapter once
+ok 259 - shutdown cancels the archived adapter once
+  ---
+  duration_ms: 8.131571
+  type: 'test'
+  ...
+# Subtest: the approval dialog data comes from the service, and a text that forges a Command line cannot replace the real one
+ok 260 - the approval dialog data comes from the service, and a text that forges a Command line cannot replace the real one
+  ---
+  duration_ms: 16.747381
+  type: 'test'
+  ...
+# Subtest: shutdown lets a request that is being answered finish, after cancelling the simulated grader it was waiting on
+ok 261 - shutdown lets a request that is being answered finish, after cancelling the simulated grader it was waiting on
+  ---
+  duration_ms: 73.318622
+  type: 'test'
+  ...
+# Subtest: while the server shuts down, a request on a connection that is still open is refused with 503
+ok 262 - while the server shuts down, a request on a connection that is still open is refused with 503
+  ---
+  duration_ms: 31.534624
+  type: 'test'
+  ...
+# Subtest: SIGINT and SIGTERM run the shutdown once, then exit; a second signal exits at once; a stuck shutdown is cut off
+ok 263 - SIGINT and SIGTERM run the shutdown once, then exit; a second signal exits at once; a stuck shutdown is cut off
+  ---
+  duration_ms: 142.341806
+  type: 'test'
+  ...
+# Subtest: grader-sim over HTTP: one tool-less run, labelled as a simulation, five at most per call
+ok 264 - grader-sim over HTTP: one tool-less run, labelled as a simulation, five at most per call
+  ---
+  duration_ms: 90.72301
+  type: 'test'
+  ...
+# Subtest: usableClaudeBin pins CLAUDE_BIN only when it names an executable file
+ok 265 - usableClaudeBin pins CLAUDE_BIN only when it names an executable file
+  ---
+  duration_ms: 1.703069
+  type: 'test'
+  ...
+# Subtest: run as a script it serves, records zero model calls, and SIGTERM cancels the running round before it exits
+ok 266 - run as a script it serves, records zero model calls, and SIGTERM cancels the running round before it exits
+  ---
+  duration_ms: 262.038288
+  type: 'test'
+  ...
+# Subtest: run as a script with SIGINT the same way, and with the one-time run flag but no evidence module nothing starts
+ok 267 - run as a script with SIGINT the same way, and with the one-time run flag but no evidence module nothing starts
+  ---
+  duration_ms: 156.335107
+  type: 'test'
+  ...
+# Subtest: run as a script it exits with a message on a bad or busy port, and ignores an unusable CLAUDE_BIN
+ok 268 - run as a script it exits with a message on a bad or busy port, and ignores an unusable CLAUDE_BIN
+  ---
+  duration_ms: 243.831465
+  type: 'test'
+  ...
+# Subtest: standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
+ok 269 - standalone embeds every exact script byte, including literal dollars, with matching CSP hashes
+  ---
+  duration_ms: 6.50186
   type: 'test'
   ...
 # Subtest: standalone page carries no private evidence module or model receipt
-ok 2 - standalone page carries no private evidence module or model receipt
+ok 270 - standalone page carries no private evidence module or model receipt
   ---
-  duration_ms: 0.562957
+  duration_ms: 0.698778
+  type: 'test'
+  ...
+# Subtest: agents page script ships in both editions, talks only to relative /api/ paths, and has no dynamic code or inline styles
+ok 271 - agents page script ships in both editions, talks only to relative /api/ paths, and has no dynamic code or inline styles
+  ---
+  duration_ms: 1.295163
   type: 'test'
   ...
 # Subtest: cash illustration generates three ranked hypotheses with actual conditional bridge arithmetic
-ok 3 - cash illustration generates three ranked hypotheses with actual conditional bridge arithmetic
+ok 272 - cash illustration generates three ranked hypotheses with actual conditional bridge arithmetic
   ---
-  duration_ms: 23.433825
+  duration_ms: 19.875509
   type: 'test'
   ...
 # Subtest: dividend illustration derives 3680 versus 4000 and rejects duplicate entitlement root
-ok 4 - dividend illustration derives 3680 versus 4000 and rejects duplicate entitlement root
+ok 273 - dividend illustration derives 3680 versus 4000 and rejects duplicate entitlement root
   ---
-  duration_ms: 6.75807
+  duration_ms: 6.889682
   type: 'test'
   ...
 # Subtest: nonbinding headline is rejected, not presented as financial model failure
-ok 5 - nonbinding headline is rejected, not presented as financial model failure
+ok 274 - nonbinding headline is rejected, not presented as financial model failure
   ---
-  duration_ms: 11.713111
+  duration_ms: 6.99883
   type: 'test'
   ...
 # Subtest: conflicting source numeric values hold the candidate without choosing the convenient value
-ok 6 - conflicting source numeric values hold the candidate without choosing the convenient value
+ok 275 - conflicting source numeric values hold the candidate without choosing the convenient value
   ---
-  duration_ms: 7.269118
+  duration_ms: 6.299075
   type: 'test'
   ...
 # Subtest: missing authority clause is explicit even if conditional arithmetic is possible
-ok 7 - missing authority clause is explicit even if conditional arithmetic is possible
+ok 276 - missing authority clause is explicit even if conditional arithmetic is possible
   ---
-  duration_ms: 6.103353
+  duration_ms: 5.899497
   type: 'test'
   ...
 # Subtest: irrelevant files yield three rejected templates with no invented interpretations as findings
-ok 8 - irrelevant files yield three rejected templates with no invented interpretations as findings
+ok 277 - irrelevant files yield three rejected templates with no invented interpretations as findings
   ---
-  duration_ms: 4.837686
+  duration_ms: 3.75177
   type: 'test'
   ...
 # Subtest: solver draft excludes private root evidence and evaluator explanations
-ok 9 - solver draft excludes private root evidence and evaluator explanations
+ok 278 - solver draft excludes private root evidence and evaluator explanations
   ---
-  duration_ms: 10.647639
+  duration_ms: 9.160393
   type: 'test'
   ...
 # Subtest: candidate authoring project validates and retains anchors/calculation plan
-ok 10 - candidate authoring project validates and retains anchors/calculation plan
+ok 279 - candidate authoring project validates and retains anchors/calculation plan
   ---
-  duration_ms: 8.622979
+  duration_ms: 7.93985
   type: 'test'
   ...
 # Subtest: structured assistant request includes sources and limitations but no inferred scores
-ok 11 - structured assistant request includes sources and limitations but no inferred scores
+ok 280 - structured assistant request includes sources and limitations but no inferred scores
   ---
-  duration_ms: 5.468675
+  duration_ms: 5.834097
   type: 'test'
   ...
 # Subtest: run logs require explicit source hash and versions; old evidence stays unmatched
-ok 12 - run logs require explicit source hash and versions; old evidence stays unmatched
+ok 281 - run logs require explicit source hash and versions; old evidence stays unmatched
   ---
-  duration_ms: 8.782512
+  duration_ms: 7.278664
   type: 'test'
   ...
 # Subtest: text run logs never synthesize scores, root failures, or current matches
-ok 13 - text run logs never synthesize scores, root failures, or current matches
+ok 282 - text run logs never synthesize scores, root failures, or current matches
   ---
-  duration_ms: 7.080118
+  duration_ms: 7.672142
   type: 'test'
   ...
 # Subtest: imported audit modules map to candidates generically from their own projects
-ok 14 - imported audit modules map to candidates generically from their own projects
+ok 283 - imported audit modules map to candidates generically from their own projects
   ---
-  duration_ms: 9.377774
+  duration_ms: 6.731696
   type: 'test'
   ...
 # Subtest: locally kept private evidence module round-trips through the generic importer
-ok 15 - locally kept private evidence module round-trips through the generic importer # SKIP no private evidence module present (expected in the public checkout)
+ok 284 - locally kept private evidence module round-trips through the generic importer # SKIP no private evidence module present (expected in the public checkout)
   ---
-  duration_ms: 0.147188
+  duration_ms: 0.159075
   type: 'test'
   ...
 # Subtest: unsupported precision is held for review instead of crashing generation
-ok 16 - unsupported precision is held for review instead of crashing generation
+ok 285 - unsupported precision is held for review instead of crashing generation
   ---
-  duration_ms: 11.682931
+  duration_ms: 6.244192
   type: 'test'
   ...
 # Subtest: blank project import roundtrip
-ok 17 - blank project import roundtrip
+ok 286 - blank project import roundtrip
   ---
-  duration_ms: 8.878654
+  duration_ms: 7.57364
   type: 'test'
   ...
 # Subtest: all illustrations roundtrip, are labeled synthetic, and carry no run records
-ok 18 - all illustrations roundtrip, are labeled synthetic, and carry no run records
+ok 287 - all illustrations roundtrip, are labeled synthetic, and carry no run records
   ---
-  duration_ms: 12.735395
+  duration_ms: 7.775603
   type: 'test'
   ...
 # Subtest: worked example locks five modes with no structural blocker and lint-clean guidance
-ok 19 - worked example locks five modes with no structural blocker and lint-clean guidance
+ok 288 - worked example locks five modes with no structural blocker and lint-clean guidance
   ---
-  duration_ms: 4.581174
+  duration_ms: 3.260083
   type: 'test'
   ...
 # Subtest: schema 1 projects without failure-mode fields import with defaults
-ok 20 - schema 1 projects without failure-mode fields import with defaults
+ok 289 - schema 1 projects without failure-mode fields import with defaults
   ---
-  duration_ms: 0.691369
+  duration_ms: 0.45015
   type: 'test'
   ...
 # Subtest: invalid JSON and unsupported schema rejected
-ok 21 - invalid JSON and unsupported schema rejected
+ok 290 - invalid JSON and unsupported schema rejected
   ---
-  duration_ms: 0.85737
+  duration_ms: 0.529347
   type: 'test'
   ...
 # Subtest: bad types, duplicate IDs, dangling anchors, unsupported lanes rejected
-ok 22 - bad types, duplicate IDs, dangling anchors, unsupported lanes rejected
+ok 291 - bad types, duplicate IDs, dangling anchors, unsupported lanes rejected
   ---
-  duration_ms: 6.549808
+  duration_ms: 2.501115
   type: 'test'
   ...
 # Subtest: unsafe JSON keys and oversize imports rejected
-ok 23 - unsafe JSON keys and oversize imports rejected
+ok 292 - unsafe JSON keys and oversize imports rejected
   ---
-  duration_ms: 0.477932
+  duration_ms: 0.394948
   type: 'test'
   ...
 # Subtest: project unknown fields are not retained
-ok 24 - project unknown fields are not retained
+ok 293 - project unknown fields are not retained
   ---
-  duration_ms: 0.361468
+  duration_ms: 0.224402
   type: 'test'
   ...
 # Subtest: prompt generator is deterministic and never truncates
-ok 25 - prompt generator is deterministic and never truncates
+ok 294 - prompt generator is deterministic and never truncates
   ---
-  duration_ms: 0.610313
+  duration_ms: 0.55823
   type: 'test'
   ...
 # Subtest: word count handles empty and whitespace
-ok 26 - word count handles empty and whitespace
+ok 295 - word count handles empty and whitespace
   ---
-  duration_ms: 0.4186
+  duration_ms: 0.460024
   type: 'test'
   ...
 # Subtest: solver export is strict allowlist even with malicious evaluator fields
-ok 27 - solver export is strict allowlist even with malicious evaluator fields
+ok 296 - solver export is strict allowlist even with malicious evaluator fields
   ---
-  duration_ms: 2.12042
+  duration_ms: 1.575279
   type: 'test'
   ...
 # Subtest: solver manifest omits private-only sources and deduplicates file versions
-ok 28 - solver manifest omits private-only sources and deduplicates file versions
+ok 297 - solver manifest omits private-only sources and deduplicates file versions
   ---
-  duration_ms: 0.879851
+  duration_ms: 0.655827
   type: 'test'
   ...
-# Subtest: solver prompt empty and over 40 words block only solver export
-ok 29 - solver prompt empty and over 40 words block only solver export
+# Subtest: solver prompt empty and over 60 words block only solver export
+ok 298 - solver prompt empty and over 60 words block only solver export
   ---
-  duration_ms: 0.560923
+  duration_ms: 0.454241
   type: 'test'
   ...
 # Subtest: evaluator includes the failure-mode set and guidance lint without official fields
-ok 30 - evaluator includes the failure-mode set and guidance lint without official fields
+ok 299 - evaluator includes the failure-mode set and guidance lint without official fields
   ---
-  duration_ms: 1.557525
+  duration_ms: 1.239998
   type: 'test'
   ...
 # Subtest: cash bridge uses funded cash, not facility eligibility or unpaid debt
-ok 31 - cash bridge uses funded cash, not facility eligibility or unpaid debt
+ok 300 - cash bridge uses funded cash, not facility eligibility or unpaid debt
   ---
-  duration_ms: 0.293264
+  duration_ms: 0.169106
   type: 'test'
   ...
 # Subtest: cash bridge rejects invalid calendar and unsupported draw
-ok 32 - cash bridge rejects invalid calendar and unsupported draw
+ok 301 - cash bridge rejects invalid calendar and unsupported draw
   ---
-  duration_ms: 0.250824
+  duration_ms: 0.235964
   type: 'test'
   ...
 # Subtest: cash bridge does not silently use empty required inputs
-ok 33 - cash bridge does not silently use empty required inputs
+ok 302 - cash bridge does not silently use empty required inputs
   ---
-  duration_ms: 0.104344
+  duration_ms: 0.100247
   type: 'test'
   ...
 # Subtest: exact whole-cent maximum satisfies every upper bound
-ok 34 - exact whole-cent maximum satisfies every upper bound
+ok 303 - exact whole-cent maximum satisfies every upper bound
   ---
-  duration_ms: 0.247703
+  duration_ms: 0.202019
   type: 'test'
   ...
 # Subtest: ceiling rejects negatives, infinity, exponent and excessive precision
-ok 35 - ceiling rejects negatives, infinity, exponent and excessive precision
+ok 304 - ceiling rejects negatives, infinity, exponent and excessive precision
   ---
-  duration_ms: 0.235754
+  duration_ms: 0.119257
   type: 'test'
   ...
 # Subtest: dividend helper derives whole-share capacity and actual shortfall
-ok 36 - dividend helper derives whole-share capacity and actual shortfall
+ok 305 - dividend helper derives whole-share capacity and actual shortfall
   ---
-  duration_ms: 0.161514
+  duration_ms: 0.085369
   type: 'test'
   ...
 # Subtest: dividend helper rejects zero price and fractional shares
-ok 37 - dividend helper rejects zero price and fractional shares
+ok 306 - dividend helper rejects zero price and fractional shares
   ---
-  duration_ms: 0.159571
+  duration_ms: 0.077104
   type: 'test'
   ...
 # Subtest: affine fixed point residual is near zero with no invented finance equation
-ok 38 - affine fixed point residual is near zero with no invented finance equation
+ok 307 - affine fixed point residual is near zero with no invented finance equation
   ---
-  duration_ms: 0.196314
+  duration_ms: 0.133403
   type: 'test'
   ...
 # Subtest: numeric comparison uses maximum tolerance and both decision directions
-ok 39 - numeric comparison uses maximum tolerance and both decision directions
+ok 308 - numeric comparison uses maximum tolerance and both decision directions
   ---
-  duration_ms: 0.126959
+  duration_ms: 0.125595
   type: 'test'
   ...
 # Subtest: blank/nonfinite numeric outputs and negative tolerance are rejected
-ok 40 - blank/nonfinite numeric outputs and negative tolerance are rejected
+ok 309 - blank/nonfinite numeric outputs and negative tolerance are rejected
   ---
-  duration_ms: 0.257029
+  duration_ms: 0.137091
   type: 'test'
   ...
 # Subtest: audit identifies ambiguity, teaching heuristic, missing inputs and same-root reuse
-ok 41 - audit identifies ambiguity, teaching heuristic, missing inputs and same-root reuse
+ok 310 - audit identifies ambiguity, teaching heuristic, missing inputs and same-root reuse
   ---
-  duration_ms: 0.748455
+  duration_ms: 0.549105
   type: 'test'
   ...
 # Subtest: audit flags missing solver evidence and no material gap
-ok 42 - audit flags missing solver evidence and no material gap
+ok 311 - audit flags missing solver evidence and no material gap
   ---
-  duration_ms: 1.126758
+  duration_ms: 1.018018
   type: 'test'
   ...
 # Subtest: failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks
-ok 43 - failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks
+ok 312 - failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks
   ---
-  duration_ms: 6.13997
+  duration_ms: 4.819526
   type: 'test'
   ...
 # Subtest: library parsing normalizes the endpoint shape and rejects duplicates or missing ids
-ok 44 - library parsing normalizes the endpoint shape and rejects duplicates or missing ids
+ok 313 - library parsing normalizes the endpoint shape and rejects duplicates or missing ids
   ---
-  duration_ms: 1.6555
+  duration_ms: 1.346243
   type: 'test'
   ...
 # Subtest: shortlist ranking is deterministic and never padded
-ok 45 - shortlist ranking is deterministic and never padded
+ok 314 - shortlist ranking is deterministic and never padded
   ---
-  duration_ms: 0.460838
+  duration_ms: 0.675886
   type: 'test'
   ...
 # Subtest: guidance lint flags the send-back patterns and leaves finance wording alone
-ok 46 - guidance lint flags the send-back patterns and leaves finance wording alone
+ok 315 - guidance lint flags the send-back patterns and leaves finance wording alone
   ---
-  duration_ms: 1.384124
+  duration_ms: 2.09073
   type: 'test'
   ...
 # Subtest: clean text replaces dashes, curly quotes, zero-width characters and is idempotent
-ok 47 - clean text replaces dashes, curly quotes, zero-width characters and is idempotent
+ok 316 - clean text replaces dashes, curly quotes, zero-width characters and is idempotent
   ---
-  duration_ms: 0.395698
+  duration_ms: 0.483286
   type: 'test'
   ...
 # Subtest: guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example
-ok 48 - guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example
+ok 317 - guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example
   ---
-  duration_ms: 3.779478
+  duration_ms: 4.716568
   type: 'test'
   ...
 # Subtest: failure-mode records follow the record contract and count each causal group once
-ok 49 - failure-mode records follow the record contract and count each causal group once
+ok 318 - failure-mode records follow the record contract and count each causal group once
   ---
-  duration_ms: 1.504521
+  duration_ms: 1.819531
   type: 'test'
   ...
 # Subtest: working document reports the shortlist, selections, and open loops without inventing anything
-ok 50 - working document reports the shortlist, selections, and open loops without inventing anything
+ok 319 - working document reports the shortlist, selections, and open loops without inventing anything
   ---
-  duration_ms: 2.365874
+  duration_ms: 3.425768
   type: 'test'
   ...
 # Subtest: scaffold fills only blank record fields and the audit flags unedited hypotheses
-ok 51 - scaffold fills only blank record fields and the audit flags unedited hypotheses
+ok 320 - scaffold fills only blank record fields and the audit flags unedited hypotheses
   ---
-  duration_ms: 3.407449
+  duration_ms: 5.449443
   type: 'test'
   ...
 # Subtest: actual run requires real-reference fields and score scale
-ok 52 - actual run requires real-reference fields and score scale
+ok 321 - actual run requires real-reference fields and score scale
   ---
-  duration_ms: 0.293657
+  duration_ms: 0.312655
   type: 'test'
   ...
 # Subtest: snapshots change on source, prompt, guidance, output edits, not run ledger edits
-ok 53 - snapshots change on source, prompt, guidance, output edits, not run ledger edits
+ok 322 - snapshots change on source, prompt, guidance, output edits, not run ledger edits
   ---
-  duration_ms: 1.242678
+  duration_ms: 1.617118
   type: 'test'
   ...
 # Subtest: catalog stays isolated and rejects unsafe URLs/dangling mechanisms
-ok 54 - catalog stays isolated and rejects unsafe URLs/dangling mechanisms
+ok 323 - catalog stays isolated and rejects unsafe URLs/dangling mechanisms
   ---
-  duration_ms: 1.798825
+  duration_ms: 2.198982
   type: 'test'
   ...
 # Subtest: stale imported calculator result is not trusted
-ok 55 - stale imported calculator result is not trusted
+ok 324 - stale imported calculator result is not trusted
   ---
-  duration_ms: 0.198556
+  duration_ms: 0.30223
   type: 'test'
   ...
 # Subtest: playbook gate assessments roundtrip independently of solver draft
-ok 56 - playbook gate assessments roundtrip independently of solver draft
+ok 325 - playbook gate assessments roundtrip independently of solver draft
   ---
-  duration_ms: 1.629415
+  duration_ms: 2.574214
   type: 'test'
   ...
 # Subtest: app has no network, external runtime dependencies, or private module references
-ok 57 - app has no network, external runtime dependencies, or private module references
+ok 326 - app has no network, external runtime dependencies, or private module references
   ---
-  duration_ms: 1.292647
+  duration_ms: 1.550183
   type: 'test'
   ...
 # Subtest: research preserves exact catalog counts and material identity corrections
-ok 58 - research preserves exact catalog counts and material identity corrections
+ok 327 - research preserves exact catalog counts and material identity corrections
   ---
-  duration_ms: 0.926753
+  duration_ms: 1.225725
   type: 'test'
   ...
 # Subtest: non-binding decision output and older runs do not establish current difficulty
-ok 59 - non-binding decision output and older runs do not establish current difficulty
+ok 328 - non-binding decision output and older runs do not establish current difficulty
   ---
-  duration_ms: 0.777758
+  duration_ms: 0.742438
   type: 'test'
   ...
 # Subtest: unsafe binding IDs and numerical overflow are rejected
-ok 60 - unsafe binding IDs and numerical overflow are rejected
+ok 329 - unsafe binding IDs and numerical overflow are rejected
   ---
-  duration_ms: 0.337636
+  duration_ms: 0.450312
   type: 'test'
   ...
 # Subtest: general business direction is not automatically marked method leakage
-ok 61 - general business direction is not automatically marked method leakage
+ok 330 - general business direction is not automatically marked method leakage
   ---
-  duration_ms: 0.711125
+  duration_ms: 0.716509
   type: 'test'
   ...
 # Subtest: calculation-only anchors and open author gates are reviewed
-ok 62 - calculation-only anchors and open author gates are reviewed
+ok 331 - calculation-only anchors and open author gates are reviewed
   ---
-  duration_ms: 0.9083
+  duration_ms: 5.46964
   type: 'test'
   ...
-# Subtest: explicit 44-word project exception preserves exact text and stays out of solver metadata
-ok 63 - explicit 44-word project exception preserves exact text and stays out of solver metadata
+# Subtest: explicit 44-word project exception stays importable, preserves exact text, and never lowers the 60-word default
+ok 332 - explicit 44-word project exception stays importable, preserves exact text, and never lowers the 60-word default
   ---
-  duration_ms: 2.19862
+  duration_ms: 2.579772
   type: 'test'
   ...
 # Subtest: word-limit exceptions require a reason and cannot silently broaden default
-ok 64 - word-limit exceptions require a reason and cannot silently broaden default
+ok 333 - word-limit exceptions require a reason and cannot silently broaden default
   ---
-  duration_ms: 1.421849
+  duration_ms: 1.219194
+  type: 'test'
+  ...
+# Subtest: prompt limit defaults to 60 words and the 44-word exception can never lower it
+ok 334 - prompt limit defaults to 60 words and the 44-word exception can never lower it
+  ---
+  duration_ms: 2.05731
+  type: 'test'
+  ...
+# Subtest: the prompt generator still stops at 40 words even though the limit is 60
+ok 335 - the prompt generator still stops at 40 words even though the limit is 60
+  ---
+  duration_ms: 0.220075
+  type: 'test'
+  ...
+# Subtest: guidance-long starts above 650 words and the blocker stays at 800
+ok 336 - guidance-long starts above 650 words and the blocker stays at 800
+  ---
+  duration_ms: 1.57808
+  type: 'test'
+  ...
+# Subtest: a guideline in the five-block shipped layout is lint clean
+ok 337 - a guideline in the five-block shipped layout is lint clean
+  ---
+  duration_ms: 1.259117
+  type: 'test'
+  ...
+# Subtest: each block heading is accepted alone, with or without its number and period
+ok 338 - each block heading is accepted alone, with or without its number and period
+  ---
+  duration_ms: 0.371498
+  type: 'test'
+  ...
+# Subtest: other titles, markdown headings and bold titles are still flagged, including inside the shipped layout
+ok 339 - other titles, markdown headings and bold titles are still flagged, including inside the shipped layout
+  ---
+  duration_ms: 1.558791
+  type: 'test'
+  ...
+# Subtest: You are grading is allowed while other scoring words keep their review finding
+ok 340 - You are grading is allowed while other scoring words keep their review finding
+  ---
+  duration_ms: 0.326006
+  type: 'test'
+  ...
+# Subtest: the built-in jargon check is exactly the generic list, with extra terms only through options
+ok 341 - the built-in jargon check is exactly the generic list, with extra terms only through options
+  ---
+  duration_ms: 3.263902
+  type: 'test'
+  ...
+# Subtest: extraJargon adds literal, case-insensitive, whole-term checks
+ok 342 - extraJargon adds literal, case-insensitive, whole-term checks
+  ---
+  duration_ms: 9.248674
+  type: 'test'
+  ...
+# Subtest: malformed extraJargon is ignored instead of throwing
+ok 343 - malformed extraJargon is ignored instead of throwing
+  ---
+  duration_ms: 0.320799
+  type: 'test'
+  ...
+# Subtest: extra jargon terms reach the audit, the evaluator draft, the guidance draft and the working document
+ok 344 - extra jargon terms reach the audit, the evaluator draft, the guidance draft and the working document
+  ---
+  duration_ms: 3.723195
+  type: 'test'
+  ...
+# Subtest: the public tree matches none of the terms in the list named by FINANCE_PRIVACY_TERMS
+ok 345 - the public tree matches none of the terms in the list named by FINANCE_PRIVACY_TERMS # SKIP set FINANCE_PRIVACY_TERMS to a term list to scan the whole tree
+  ---
+  duration_ms: 0.074946
+  type: 'test'
+  ...
+# Subtest: every lint-bearing call in the authoring page passes the private lint terms
+ok 346 - every lint-bearing call in the authoring page passes the private lint terms
+  ---
+  duration_ms: 0.96456
   type: 'test'
   ...
 # Subtest: completion requires correct stop reason and nonempty actual final text
-ok 65 - completion requires correct stop reason and nonempty actual final text
+ok 347 - completion requires correct stop reason and nonempty actual final text
   ---
-  duration_ms: 2.266635
+  duration_ms: 1.850852
   type: 'test'
   ...
 # Subtest: account route is explicit and bounded, never key fallback
-ok 66 - account route is explicit and bounded, never key fallback
+ok 348 - account route is explicit and bounded, never key fallback
   ---
-  duration_ms: 0.314308
+  duration_ms: 0.198579
   type: 'test'
   ...
 # Subtest: patch disables tools, auxiliary models, retries and subagent entry points
-ok 67 - patch disables tools, auxiliary models, retries and subagent entry points
+ok 349 - patch disables tools, auxiliary models, retries and subagent entry points
   ---
-  duration_ms: 1.830995
+  duration_ms: 2.790074
   type: 'test'
   ...
 # Subtest: progress projection omits source message content
-ok 68 - progress projection omits source message content
+ok 350 - progress projection omits source message content
   ---
-  duration_ms: 1.66847
+  duration_ms: 1.240066
   type: 'test'
   ...
 # Subtest: one-run authorization file blocks respawn across restarts
-ok 69 - one-run authorization file blocks respawn across restarts
+ok 351 - one-run authorization file blocks respawn across restarts
   ---
-  duration_ms: 2.30891
+  duration_ms: 3.725422
   type: 'test'
   ...
 # Subtest: author review prompt is built from the loaded module and cannot pretend blind pilot
-ok 70 - author review prompt is built from the loaded module and cannot pretend blind pilot
+ok 352 - author review prompt is built from the loaded module and cannot pretend blind pilot
   ---
-  duration_ms: 0.532573
+  duration_ms: 0.408124
   type: 'test'
   ...
 # Subtest: ZIP checksum validation and supported office containers are indexed
-ok 71 - ZIP checksum validation and supported office containers are indexed
+ok 353 - ZIP checksum validation and supported office containers are indexed
   ---
-  duration_ms: 22.688302
+  duration_ms: 19.275516
   type: 'test'
   ...
 # Subtest: invalid ZIP, encrypted flag, unsafe paths, CRC corruption rejected
-ok 72 - invalid ZIP, encrypted flag, unsafe paths, CRC corruption rejected
+ok 354 - invalid ZIP, encrypted flag, unsafe paths, CRC corruption rejected
   ---
-  duration_ms: 2.88201
+  duration_ms: 2.783904
   type: 'test'
   ...
 # Subtest: CSV quotes, embedded newline, invalid quotes
-ok 73 - CSV quotes, embedded newline, invalid quotes
+ok 355 - CSV quotes, embedded newline, invalid quotes
   ---
-  duration_ms: 1.792525
+  duration_ms: 1.397801
   type: 'test'
   ...
 # Subtest: file ingestion handles text/PDF without pretending PDF extracted
-ok 74 - file ingestion handles text/PDF without pretending PDF extracted
+ok 356 - file ingestion handles text/PDF without pretending PDF extracted
   ---
-  duration_ms: 14.17781
+  duration_ms: 10.050741
   type: 'test'
   ...
 # Subtest: invalid package rejects duplicate IDs, hashes, roles and record types
-ok 75 - invalid package rejects duplicate IDs, hashes, roles and record types
+ok 357 - invalid package rejects duplicate IDs, hashes, roles and record types
   ---
-  duration_ms: 0.692588
+  duration_ms: 0.578558
   type: 'test'
   ...
 # Subtest: project roundtrip and deterministic findings have no invented scores
-ok 76 - project roundtrip and deterministic findings have no invented scores
+ok 358 - project roundtrip and deterministic findings have no invented scores
   ---
-  duration_ms: 0.927934
+  duration_ms: 0.895945
   type: 'test'
   ...
 # Subtest: saved errors, missing caches and unsupported files produce evidence-limited findings
-ok 77 - saved errors, missing caches and unsupported files produce evidence-limited findings
+ok 359 - saved errors, missing caches and unsupported files produce evidence-limited findings
   ---
-  duration_ms: 0.716822
+  duration_ms: 0.614107
   type: 'test'
   ...
 # Subtest: teaching language is only heuristic, historical differences are not generic contradictions
-ok 78 - teaching language is only heuristic, historical differences are not generic contradictions
+ok 360 - teaching language is only heuristic, historical differences are not generic contradictions
   ---
-  duration_ms: 0.734504
+  duration_ms: 0.731428
   type: 'test'
   ...
 # Subtest: private evaluator records do not enter detected source facts
-ok 79 - private evaluator records do not enter detected source facts
+ok 361 - private evaluator records do not enter detected source facts
   ---
-  duration_ms: 0.336846
+  duration_ms: 0.310164
   type: 'test'
   ...
 # Subtest: unconnected adapter cannot imply a model run
-ok 80 - unconnected adapter cannot imply a model run
+ok 362 - unconnected adapter cannot imply a model run
   ---
-  duration_ms: 0.500664
+  duration_ms: 0.561079
   type: 'test'
   ...
 # Subtest: malformed run histories cannot crash imported dashboard views
-ok 81 - malformed run histories cannot crash imported dashboard views
+ok 363 - malformed run histories cannot crash imported dashboard views
   ---
-  duration_ms: 0.568518
+  duration_ms: 0.537417
   type: 'test'
   ...
-1..81
-# tests 81
+# Subtest: parseRefLines reads the four fields of each line and ignores everything else
+ok 364 - parseRefLines reads the four fields of each line and ignores everything else
+  ---
+  duration_ms: 1.566177
+  type: 'test'
+  ...
+# Subtest: planRanges: an existing branch scans remote..local, a deletion nothing, a new branch the unpushed commits only
+ok 365 - planRanges: an existing branch scans remote..local, a deletion nothing, a new branch the unpushed commits only
+  ---
+  duration_ms: 0.739141
+  type: 'test'
+  ...
+# Subtest: main blocks when the scan fails, passes when it does not, and blocks outside a work tree
+ok 366 - main blocks when the scan fails, passes when it does not, and blocks outside a work tree
+  ---
+  duration_ms: 0.425639
+  type: 'test'
+  ...
+# Subtest: a term added in one commit and removed in the next is blocked, although the work tree is clean
+ok 367 - a term added in one commit and removed in the next is blocked, although the work tree is clean
+  ---
+  duration_ms: 376.261175
+  type: 'test'
+  ...
+# Subtest: a new branch is scanned from its first unpushed commit, and history that is already on the remote does not block it
+ok 368 - a new branch is scanned from its first unpushed commit, and history that is already on the remote does not block it
+  ---
+  duration_ms: 444.344762
+  type: 'test'
+  ...
+# Subtest: a deletion passes, a missing term list blocks (the scan fails closed), and the hook is quiet about clean pushes
+ok 369 - a deletion passes, a missing term list blocks (the scan fails closed), and the hook is quiet about clean pushes
+  ---
+  duration_ms: 566.974325
+  type: 'test'
+  ...
+# Subtest: a clean repository passes with exit 0 and a one line summary
+ok 370 - a clean repository passes with exit 0 and a one line summary
+  ---
+  duration_ms: 112.0821
+  type: 'test'
+  ...
+# Subtest: a tracked file containing a term fails with exit 1, file:line and the term index
+ok 371 - a tracked file containing a term fails with exit 1, file:line and the term index
+  ---
+  duration_ms: 134.144075
+  type: 'test'
+  ...
+# Subtest: an untracked file that git does not ignore is scanned and fails
+ok 372 - an untracked file that git does not ignore is scanned and fails
+  ---
+  duration_ms: 122.445986
+  type: 'test'
+  ...
+# Subtest: an ignored untracked file containing a term passes
+ok 373 - an ignored untracked file containing a term passes
+  ---
+  duration_ms: 108.71424
+  type: 'test'
+  ...
+# Subtest: the default term file is <root>/private/privacy-terms.txt and private/ stays out of the scan
+ok 374 - the default term file is <root>/private/privacy-terms.txt and private/ stays out of the scan
+  ---
+  duration_ms: 120.545516
+  type: 'test'
+  ...
+# Subtest: literals are case insensitive and regexes honour their own flags
+ok 375 - literals are case insensitive and regexes honour their own flags
+  ---
+  duration_ms: 166.70202
+  type: 'test'
+  ...
+# Subtest: regex metacharacters in a literal term are matched literally
+ok 376 - regex metacharacters in a literal term are matched literally
+  ---
+  duration_ms: 140.406545
+  type: 'test'
+  ...
+# Subtest: a path-like literal such as /usr/lib is not mistaken for a regular expression
+ok 377 - a path-like literal such as /usr/lib is not mistaken for a regular expression
+  ---
+  duration_ms: 131.533195
+  type: 'test'
+  ...
+# Subtest: the term index is the line number in the term file, counting comments and blanks
+ok 378 - the term index is the line number in the term file, counting comments and blanks
+  ---
+  duration_ms: 134.212048
+  type: 'test'
+  ...
+# Subtest: a term file with a byte order mark and CRLF line endings works
+ok 379 - a term file with a byte order mark and CRLF line endings works
+  ---
+  duration_ms: 124.401447
+  type: 'test'
+  ...
+# Subtest: one line matching two terms reports both indexes
+ok 380 - one line matching two terms reports both indexes
+  ---
+  duration_ms: 116.555857
+  type: 'test'
+  ...
+# Subtest: an invalid regular expression is an error (exit 2), never skipped, and is not echoed
+ok 381 - an invalid regular expression is an error (exit 2), never skipped, and is not echoed
+  ---
+  duration_ms: 105.958478
+  type: 'test'
+  ...
+# Subtest: invalid regex flags and a term that matches the empty string are errors
+ok 382 - invalid regex flags and a term that matches the empty string are errors
+  ---
+  duration_ms: 111.088409
+  type: 'test'
+  ...
+# Subtest: a missing, empty or comment-only term file exits 2 with the refusal message
+ok 383 - a missing, empty or comment-only term file exits 2 with the refusal message
+  ---
+  duration_ms: 153.940481
+  type: 'test'
+  ...
+# Subtest: with no --terms and no private/privacy-terms.txt the scan refuses to pass
+ok 384 - with no --terms and no private/privacy-terms.txt the scan refuses to pass
+  ---
+  duration_ms: 81.40353
+  type: 'test'
+  ...
+# Subtest: a term file that is not UTF-8 text (for example UTF-16) is an error, not a silent no-op
+ok 385 - a term file that is not UTF-8 text (for example UTF-16) is an error, not a silent no-op
+  ---
+  duration_ms: 101.964314
+  type: 'test'
+  ...
+# Subtest: usage errors exit 2 and --help exits 0
+ok 386 - usage errors exit 2 and --help exits 0
+  ---
+  duration_ms: 393.647086
+  type: 'test'
+  ...
+# Subtest: the --flag=value form is accepted
+ok 387 - the --flag=value form is accepted
+  ---
+  duration_ms: 144.906789
+  type: 'test'
+  ...
+# Subtest: a root that is not the top level of a git work tree is an error
+ok 388 - a root that is not the top level of a git work tree is an error
+  ---
+  duration_ms: 135.967896
+  type: 'test'
+  ...
+# Subtest: tracked files under private/ are an error
+ok 389 - tracked files under private/ are an error
+  ---
+  duration_ms: 116.39771
+  type: 'test'
+  ...
+# Subtest: GIT_DIR and GIT_WORK_TREE from the environment do not redirect the scan
+ok 390 - GIT_DIR and GIT_WORK_TREE from the environment do not redirect the scan
+  ---
+  duration_ms: 129.18792
+  type: 'test'
+  ...
+# Subtest: a binary file is skipped, its path is listed, and its content is not scanned
+ok 391 - a binary file is skipped, its path is listed, and its content is not scanned
+  ---
+  duration_ms: 91.146496
+  type: 'test'
+  ...
+# Subtest: only the first 8 KB decide whether a file is binary
+ok 392 - only the first 8 KB decide whether a file is binary
+  ---
+  duration_ms: 93.544513
+  type: 'test'
+  ...
+# Subtest: UTF-16 text with a byte order mark is scanned as text, not skipped as binary
+ok 393 - UTF-16 text with a byte order mark is scanned as text, not skipped as binary
+  ---
+  duration_ms: 95.954626
+  type: 'test'
+  ...
+# Subtest: files over 5 MB are skipped and reported, and a file of exactly 5 MB is scanned
+ok 394 - files over 5 MB are skipped and reported, and a file of exactly 5 MB is scanned
+  ---
+  duration_ms: 208.788967
+  type: 'test'
+  ...
+# Subtest: symlinks are never followed; a link is scanned as its own target text only
+ok 395 - symlinks are never followed; a link is scanned as its own target text only
+  ---
+  duration_ms: 148.042522
+  type: 'test'
+  ...
+# Subtest: a tracked directory swapped for a symlink out of the repository is not read through
+ok 396 - a tracked directory swapped for a symlink out of the repository is not read through
+  ---
+  duration_ms: 129.175478
+  type: 'test'
+  ...
+# Subtest: a reader that closes the pipe early does not change the exit code or print a stack trace
+ok 397 - a reader that closes the pipe early does not change the exit code or print a stack trace
+  ---
+  duration_ms: 95.80135
+  type: 'test'
+  ...
+# Subtest: a term inside a file name is a hit on the path and the printed path is redacted
+ok 398 - a term inside a file name is a hit on the path and the printed path is redacted
+  ---
+  duration_ms: 102.863856
+  type: 'test'
+  ...
+# Subtest: output never contains the matched text or the term, in any scenario
+ok 399 - output never contains the matched text or the term, in any scenario
+  ---
+  duration_ms: 218.238997
+  type: 'test'
+  ...
+# Subtest: a hostile file name cannot forge extra output lines
+ok 400 - a hostile file name cannot forge extra output lines
+  ---
+  duration_ms: 86.02322
+  type: 'test'
+  ...
+# Subtest: a term removed and then added again inside the range fails as an added line
+ok 401 - a term removed and then added again inside the range fails as an added line
+  ---
+  duration_ms: 128.697918
+  type: 'test'
+  ...
+# Subtest: a term added and removed again inside the range still fails, because history is what gets pushed
+ok 402 - a term added and removed again inside the range still fails, because history is what gets pushed
+  ---
+  duration_ms: 181.716281
+  type: 'test'
+  ...
+# Subtest: lines removed by the range are not hits, only added lines are
+ok 403 - lines removed by the range are not hits, only added lines are
+  ---
+  duration_ms: 109.278708
+  type: 'test'
+  ...
+# Subtest: an added line that itself starts with "++" is scanned and is not taken for a diff header
+ok 404 - an added line that itself starts with "++" is scanned and is not taken for a diff header
+  ---
+  duration_ms: 115.376607
+  type: 'test'
+  ...
+# Subtest: range hits name the file, the new-file line number, the range and the commit
+ok 405 - range hits name the file, the new-file line number, the range and the commit
+  ---
+  duration_ms: 128.204985
+  type: 'test'
+  ...
+# Subtest: a term introduced only on a merged branch is found through the merge
+ok 406 - a term introduced only on a merged branch is found through the merge
+  ---
+  duration_ms: 217.294439
+  type: 'test'
+  ...
+# Subtest: a term in a path name added within the range is found even if the file is later deleted
+ok 407 - a term in a path name added within the range is found even if the file is later deleted
+  ---
+  duration_ms: 139.469462
+  type: 'test'
+  ...
+# Subtest: paths with spaces and quotes are read correctly from the diff
+ok 408 - paths with spaces and quotes are read correctly from the diff
+  ---
+  duration_ms: 145.6799
+  type: 'test'
+  ...
+# Subtest: binary changes inside the range are counted but cannot be scanned
+ok 409 - binary changes inside the range are counted but cannot be scanned
+  ---
+  duration_ms: 102.306078
+  type: 'test'
+  ...
+# Subtest: private/ paths added by commits in the range are an error
+ok 410 - private/ paths added by commits in the range are an error
+  ---
+  duration_ms: 120.922924
+  type: 'test'
+  ...
+# Subtest: an unknown revision in --range is an error (exit 2), not a pass
+ok 411 - an unknown revision in --range is an error (exit 2), not a pass
+  ---
+  duration_ms: 79.98655
+  type: 'test'
+  ...
+# Subtest: an empty range scans no added lines and passes
+ok 412 - an empty range scans no added lines and passes
+  ---
+  duration_ms: 92.94555
+  type: 'test'
+  ...
+# Subtest: parseTerms and validateRange behave as documented
+ok 413 - parseTerms and validateRange behave as documented
+  ---
+  duration_ms: 2.589218
+  type: 'test'
+  ...
+# Subtest: decodeText treats NUL bytes in the first 8 KB as binary and honours byte order marks
+ok 414 - decodeText treats NUL bytes in the first 8 KB as binary and honours byte order marks
+  ---
+  duration_ms: 0.389444
+  type: 'test'
+  ...
+# Subtest: files the app downloads with private material are ignored wherever they land
+ok 415 - files the app downloads with private material are ignored wherever they land
+  ---
+  duration_ms: 54.78536
+  type: 'test'
+  ...
+# Subtest: no tracked file carries the private download suffix
+ok 416 - no tracked file carries the private download suffix
+  ---
+  duration_ms: 7.149846
+  type: 'test'
+  ...
+1..416
+# tests 416
 # suites 0
-# pass 80
+# pass 414
 # fail 0
 # cancelled 0
-# skipped 1
+# skipped 2
 # todo 0
-# duration_ms 318.677986
+# duration_ms 14497.312034

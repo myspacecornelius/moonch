@@ -184,7 +184,7 @@
     "do_not_infer": [
       "A multi-hop label proves genuine dependency",
       "A persona or typo variant is substantively harder",
-      "A low benchmark headline transfers to Jericho",
+      "A low benchmark headline transfers to the target platform",
       "More documents or tokens automatically improve evaluation",
       "An in-range valuation is automatically justified"
     ]

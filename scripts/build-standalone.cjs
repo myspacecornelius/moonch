@@ -7,7 +7,7 @@ const read = name => fs.readFileSync(path.join(root, name), 'utf8');
 const hash = text => "'sha256-" + crypto.createHash('sha256').update(text).digest('base64') + "'";
 let html = read('index.html');
 const names = [...html.matchAll(/<script defer src="([^"]+)"><\/script>/g)].map(match => match[1]);
-if (names.length !== 9) throw new Error('Unexpected source script count.');
+if (names.length !== 10) throw new Error('Unexpected source script count: expected 10 scripts.');
 if (names.some(name => /-audit|evidence-module|model-run/.test(name))) throw new Error('Private modules must not be bundled.');
 const bootstrap = "window.addEventListener('error',function(event){var note=document.getElementById('startup-details');if(note)note.textContent='Startup error: '+(event.message||'A script could not load')+'. Please open this downloaded file in a current browser.';});";
 const scripts = [bootstrap, ...names.map(name => read(name).replace(/<\/script/gi, '<\\/script'))];

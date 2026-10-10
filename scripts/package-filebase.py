@@ -8,13 +8,13 @@ included. Usage:
 from pathlib import Path
 import hashlib, json, sys, zipfile, stat
 
-VERSION = '2.1.0'
+VERSION = '3.0.0'
 root = Path(__file__).resolve().parent.parent
-explicit = ['Finance_Task_Studio.html', 'index.html', 'styles.css', 'core.js', 'app.js', 'dashboard.js', 'package-engine.js',
+explicit = ['Finance_Task_Studio.html', 'index.html', 'styles.css', 'core.js', 'app.js', 'agents.js', 'dashboard.js', 'package-engine.js',
             'candidate-engine.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'research-catalog.json',
             'README.md', 'VERIFICATION.md', 'package.json', '.gitignore', 'Start Finance Task Studio.command']
 files = [root / f for f in explicit]
-for directory in ['backend', 'scripts', 'tests', 'research']:
+for directory in ['backend', 'scripts', 'tests', 'research', 'docs']:
     files += [f for f in (root / directory).rglob('*') if f.is_file() and '__pycache__' not in f.parts and '.DS_Store' not in f.parts]
 files += [f for f in (root / 'qa').rglob('*') if f.is_file() and 'downloads' not in f.parts and f.name != 'invalid-project.json']
 forbidden = ['private', 'model-runs', 'downloads', 'evidence-module.js', 'model-run.js', 'LOCAL_SERVER.json']

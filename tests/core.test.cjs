@@ -19,7 +19,7 @@ test('prompt generator is deterministic and never truncates',()=>{const b={objec
 test('word count handles empty and whitespace',()=>{assert.equal(C.words(''),0);assert.equal(C.words('One\n two\tthree'),3);});
 test('solver export is strict allowlist even with malicious evaluator fields',()=>{const p=complete();p.notes='SECRET_NOTE';p.sources[0].excerpt='SECRET_EXCERPT';p.sources[0].cell='SECRET_CELL';p.roots[0].correctInterpretation='SECRET_CORRECT';p.roots[0].wrongInterpretation='SECRET_WRONG';p.roots[0].detectionMethod='SECRET_DETECTION';p.roots[3].duplicateCheck='SECRET_DUP';p.thesis='SECRET_THESIS';p.guidance='SECRET_GUIDANCE';p.task.industry='SECRET_TASK';p.library.modes[0].name='SECRET_LIBRARY';p.gates.private={status:'pending',notes:'SECRET_GATE'};p.experiments=[{notes:'SECRET_RUN'}];const s=JSON.stringify(C.solverDraft(p));for(const x of ['SECRET','rootRecords','sourceAnchors','experiments','oracle','title','library','guidance','thesis','modeId'])assert.ok(!s.includes(x),x);assert.ok(s.includes('Treasury_Procedure.txt'));assert.equal(C.solverDraft(p).wordCount,C.words(p.business.prompt));});
 test('solver manifest omits private-only sources and deduplicates file versions',()=>{const p=complete();p.sources.push({...p.sources[0],id:C.uid()},{...C.source(),file:'private.pdf'});assert.equal(C.solverDraft(p).suppliedFileManifest.length,4);});
-test('solver prompt empty and over 40 words block only solver export',()=>{const p=C.blank();assert.throws(()=>C.solverDraft(p));p.business.prompt='word '.repeat(41);assert.throws(()=>C.solverDraft(p));assert.equal(C.evaluatorDraft(p).kind,'evaluator-draft');});
+test('solver prompt empty and over 60 words block only solver export',()=>{const p=C.blank();assert.throws(()=>C.solverDraft(p));p.business.prompt='word '.repeat(61);assert.throws(()=>C.solverDraft(p),/at most 60 words/);p.business.prompt='word '.repeat(60);assert.equal(C.solverDraft(p).wordCount,60);assert.equal(C.evaluatorDraft(p).kind,'evaluator-draft');});
 test('evaluator includes the failure-mode set and guidance lint without official fields',()=>{const p=complete(),e=C.evaluatorDraft(p);assert.equal(e.rootRecords.length,5);assert.equal(e.failureModeSet.locked,true);assert.deepEqual(e.failureModeSet.historical.map(x=>x.modeId),['SYN-FM-02','SYN-FM-01','SYN-FM-05']);assert.equal(e.failureModeSet.library.shortlist.length,10);assert.equal(e.graderGuidance.wordCount,C.words(p.guidance));assert.deepEqual(e.task,p.task);assert.equal(e.FailureAnalysis,undefined);assert.equal(e.GraderAnalysis,undefined);assert.equal(e.humanAttestation,undefined);});
 test('cash bridge uses funded cash, not facility eligibility or unpaid debt',()=>{const i={facility:'3000',fraction:'0.6',asOf:'2026-09-30',clearDate:'2026-09-30',releaseDate:'2026-10-01',opening:'100',fundedDraw:'500',otherInflows:'50',outflows:'2000'};const x=C.calculate('cash',i);assert.equal(x.details.eligibleFacility,1800);assert.equal(x.details.fundedCash,650);assert.equal(x.value,1350);assert.equal(C.calculate('cash',{...i,asOf:'2026-10-01'}).details.eligibleFacility,3000);assert.equal(C.calculate('cash',{...i,fundedDraw:'0'}).value,1850);});
 test('cash bridge rejects invalid calendar and unsupported draw',()=>{const i={facility:'3000',fraction:'0.6',asOf:'2026-09-30',clearDate:'2026-09-30',releaseDate:'2026-10-01',opening:'0',fundedDraw:'1801',otherInflows:'0',outflows:'2000'};assert.throws(()=>C.calculate('cash',i),/exceeds/);assert.throws(()=>C.calculate('cash',{...i,fundedDraw:'0',asOf:'2026-02-30'}),/date/);assert.throws(()=>C.calculate('cash',{...i,releaseDate:i.clearDate}),/after clearance/);});
@@ -36,7 +36,7 @@ test('audit flags missing solver evidence and no material gap',()=>{const p=comp
 test('failure-mode set audit enforces three shortlisted historical modes plus two net-new with duplicate checks',()=>{const p=complete();p.roots[0].modeId='SYN-FM-99';assert.ok(C.audit(p).some(x=>x.code==='mode-id-unlisted'));p.roots[0].modeId='';assert.ok(C.audit(p).some(x=>x.code==='mode-id-empty'));const q=complete();q.roots.pop();assert.ok(C.audit(q).some(x=>x.code==='set-size'));const r=complete();r.roots[4].lane='historical';r.roots[4].modeId='SYN-FM-04';const a=C.audit(r);assert.ok(a.some(x=>x.code==='historical-count'));assert.ok(a.some(x=>x.code==='net-new-count'));const s=complete();s.roots[3].duplicateCheck='';assert.ok(C.audit(s).some(x=>x.code==='duplicate-check'));const t=complete();t.library=null;assert.ok(C.audit(t).some(x=>x.code==='mode-id-unverified'));const u=complete();u.task.activity='Another activity';assert.ok(C.audit(u).some(x=>x.code==='library-activity'));const v=complete();v.roots[0].expectedBehavior='';v.roots[0].classification='';const codes=C.audit(v).map(x=>x.code);assert.ok(codes.includes('missing-expectedBehavior')&&codes.includes('missing-classification'));});
 test('library parsing normalizes the endpoint shape and rejects duplicates or missing ids',()=>{const lib=C.parseLibrary(JSON.stringify(seed.library()));assert.equal(lib.kind,'finance-failure-mode-library');assert.equal(lib.modes.length,12);assert.equal(lib.modes[0].modeId,'SYN-FM-01');assert.equal(lib.modes[1].overused,true);assert.equal(lib.modes[1].avgTaskScore,0.38);assert.equal(lib.modes[10].status,'draft');assert.deepEqual(C.parseLibrary(lib).modes.map(m=>m.modeId),lib.modes.map(m=>m.modeId));assert.deepEqual(C.parseLibrary(lib).modes[0].record,lib.modes[0].record);const dup=seed.library();dup.modes.push({...dup.modes[0]});assert.throws(()=>C.parseLibrary(dup),/unique/);assert.throws(()=>C.parseLibrary('{"modes":[{"name":"no id"}]}'),/mode_id/);assert.throws(()=>C.parseLibrary('{"modes":"x"}'));assert.throws(()=>C.parseLibrary('{"modes":[],"__proto__":{}}'),/Unsafe/);assert.throws(()=>C.parseLibrary('nope'),/valid JSON/);});
 test('shortlist ranking is deterministic and never padded',()=>{const lib=C.parseLibrary(seed.library()),rank=C.rankLibrary(lib.modes);assert.equal(rank.eligible.length,10);assert.equal(rank.complete,true);assert.deepEqual(rank.shortlist.slice(0,3).map(m=>m.modeId),['SYN-FM-02','SYN-FM-01','SYN-FM-05']);assert.ok(!rank.shortlist.some(m=>['SYN-FM-11','SYN-FM-12'].includes(m.modeId)));const tie=C.parseLibrary({modes:[{mode_id:'B',status:'approved',uses:5,avg_task_score:0.5,usage_share:0.1,overused:false},{mode_id:'A',status:'approved',uses:5,avg_task_score:0.5,usage_share:0.1,overused:true},{mode_id:'C',status:'approved',uses:9,avg_task_score:0.5,usage_share:0.2,overused:false},{mode_id:'D',status:'Approved',uses:'2',avg_task_score:'0.5',usage_share:null,overused:'false'},{mode_id:'E',status:'approved',uses:0,avg_task_score:0.1},{mode_id:'F',status:'approved',uses:4,avg_task_score:'n/a'}]});const r2=C.rankLibrary(tie.modes);assert.deepEqual(r2.shortlist.map(m=>m.modeId),['C','B','A','D']);assert.equal(r2.complete,false);});
-test('guidance lint flags the send-back patterns and leaves finance wording alone',()=>{const bad='Penalize any answer that misses the SAF figure. Valuation 50% of the grade. Check cell B2:B10 and A1.\nPriority Checks\nThe model should — as the prompt says — deduct points.';const l=C.lintGuidance(bad),codes=l.map(x=>x.code);for(const code of ['guidance-scoring','guidance-jargon','guidance-cell-reference','guidance-titled-section','guidance-unicode','guidance-ai-mention','guidance-rubric'])assert.ok(codes.includes(code),code);assert.equal(l.find(x=>x.code==='guidance-cell-reference').heuristic,true);assert.equal(l.find(x=>x.code==='guidance-jargon').heuristic,false);const fine='In Q3 FY25 the coverage ratio fell 40 basis points. The weighted average cost of capital is 9%. Use the H1 figures and the IFRS16 lease schedule.';assert.deepEqual(C.lintGuidance(fine).filter(x=>x.level==='blocker'),[]);assert.ok(!C.lintGuidance(fine).some(x=>x.code==='guidance-cell-reference'));assert.ok(C.lintGuidance('').some(x=>x.code==='guidance-empty'));assert.ok(C.lintGuidance('word '.repeat(800)).some(x=>x.code==='guidance-length'));assert.ok(C.lintGuidance('word '.repeat(600)).some(x=>x.code==='guidance-long'));assert.ok(C.lintGuidance('The calculations are wrong in places.').some(x=>x.code==='guidance-vague'));});
+test('guidance lint flags the send-back patterns and leaves finance wording alone',()=>{const bad='Penalize any answer that misses the SAF figure. Valuation 50% of the grade. Check cell B2:B10 and A1.\nPriority Checks\nThe model should — as the prompt says — deduct points.';const l=C.lintGuidance(bad),codes=l.map(x=>x.code);for(const code of ['guidance-scoring','guidance-jargon','guidance-cell-reference','guidance-titled-section','guidance-unicode','guidance-ai-mention','guidance-rubric'])assert.ok(codes.includes(code),code);assert.equal(l.find(x=>x.code==='guidance-cell-reference').heuristic,true);assert.equal(l.find(x=>x.code==='guidance-jargon').heuristic,false);const fine='In Q3 FY25 the coverage ratio fell 40 basis points. The weighted average cost of capital is 9%. Use the H1 figures and the IFRS16 lease schedule.';assert.deepEqual(C.lintGuidance(fine).filter(x=>x.level==='blocker'),[]);assert.ok(!C.lintGuidance(fine).some(x=>x.code==='guidance-cell-reference'));assert.ok(C.lintGuidance('').some(x=>x.code==='guidance-empty'));assert.ok(C.lintGuidance('word '.repeat(800)).some(x=>x.code==='guidance-length'));assert.ok(!C.lintGuidance('word '.repeat(600)).some(x=>x.code==='guidance-long'));assert.ok(C.lintGuidance('word '.repeat(651)).some(x=>x.code==='guidance-long'));assert.ok(C.lintGuidance('The calculations are wrong in places.').some(x=>x.code==='guidance-vague'));});
 test('clean text replaces dashes, curly quotes, zero-width characters and is idempotent',()=>{const c=C.cleanText('A — b – c “q” ‘s’ x​y  z');assert.equal(c.text,'A, b - c "q" \'s\' xy z');assert.equal(c.replacements,8);assert.equal(C.cleanText(c.text).replacements,0);});
 test('guidance draft is deterministic, dash-free, jargon-free, and lint-clean for the worked example',()=>{const g=C.generateGuidance(complete());assert.match(g.text,/A tempting mistake is to add the 1,800 available facility/);assert.match(g.text,/Work from Treasury_Procedure\.txt/);assert.ok(!/[—–]/.test(g.text));assert.deepEqual(g.lint.filter(x=>x.level==='blocker'),[],JSON.stringify(g.lint));assert.equal(C.generateGuidance(complete()).text,g.text);assert.equal(g.wordCount,C.words(g.text));assert.throws(()=>C.generateGuidance(C.blank()),/objective/);const p=complete();p.roots.forEach(r=>r.wrongInterpretation='');assert.throws(()=>C.generateGuidance(p),/wrong approach/);});
 test('failure-mode records follow the record contract and count each causal group once',()=>{const t=C.failureModeRecords(complete());for(const h of ['Deliverable context:','Failure or judgment point:','Triggering condition:','Plausible wrong approach:','Consequence:','Detection method:','Corrective action:','Expected model behavior:','Classification:','Duplicate check against the historical shortlist:'])assert.ok(t.includes(h),h);assert.match(t,/Final failure-mode set: 5 of 5 \(3 historical, 2 net-new\)/);assert.match(t,/Historical Mode IDs: SYN-FM-02, SYN-FM-01, SYN-FM-05/);assert.equal((t.match(/\(count every consequence of this root once\)/g)||[]).length,5);assert.match(t,/Cash bridge: wrong 0 versus correct 1200 currency units \(difference -1200, decision changes\)/);assert.ok(!/[—–]/.test(t));assert.match(C.failureModeRecords(C.blank()),/\(pending\)/);});
@@ -53,5 +53,148 @@ test('non-binding decision output and older runs do not establish current diffic
 test('unsafe binding IDs and numerical overflow are rejected',()=>{const p=C.blank();p.roots[0].id='x.y';assert.throws(()=>C.parseProject(p),/IDs/);assert.throws(()=>C.calculate('ceiling',{constraints:'9999999999999999'}),/range/);assert.throws(()=>C.calculate('dividend',{budget:'9999999999999999',price:'0.0001',loanShares:'0',dividend:'0'}),/range/);assert.throws(()=>C.calculate('fixed',{a:'1000000000000000',b:'0.9999999'}),/range/);});
 test('general business direction is not automatically marked method leakage',()=>{const p=complete();p.business.prompt='Update the workbook using the supplied documents and recommend whether the payment can proceed.';assert.ok(!C.audit(p).some(x=>x.code==='teaching-language'));});
 test('calculation-only anchors and open author gates are reviewed',()=>{const p=complete(),s=C.source();s.title='Unreviewed calculation input';p.sources.push(s);p.roots[0].outputs[0].sourceIds.push(s.id);p.gates.example={status:'needs-work',notes:'Resolve support'};assert.ok(C.audit(p).some(x=>x.code==='source-unavailable'&&x.message.includes(s.title)));assert.ok(C.audit(p).some(x=>x.code==='gate-open'));});
-test('explicit 44-word project exception preserves exact text and stays out of solver metadata',()=>{const p=complete();p.business.prompt=Array.from({length:44},(_,i)=>'word'+i).join(' ');assert.throws(()=>C.solverDraft(p));p.exportPolicy={businessPromptMaxWords:44,reason:'Author authorized preserving an original 44-word prompt.'};const parsed=C.parseProject(p);assert.deepEqual(parsed.exportPolicy,p.exportPolicy);assert.equal(C.solverDraft(parsed).businessPrompt,p.business.prompt);assert.equal(C.solverDraft(parsed).wordCount,44);assert.equal(C.solverDraft(parsed).exportPolicy,undefined);assert.deepEqual(C.evaluatorDraft(parsed).exportPolicy,p.exportPolicy);assert.ok(!C.audit(parsed).some(f=>f.code==='prompt-length'));parsed.business.prompt+=' extra';assert.throws(()=>C.solverDraft(parsed),/44 words/);});
+test('explicit 44-word project exception stays importable, preserves exact text, and never lowers the 60-word default',()=>{const p=complete();p.business.prompt=Array.from({length:44},(_,i)=>'word'+i).join(' ');assert.equal(C.solverDraft(p).wordCount,44);p.exportPolicy={businessPromptMaxWords:44,reason:'Author authorized preserving an original 44-word prompt.'};const parsed=C.parseProject(p);assert.deepEqual(parsed.exportPolicy,p.exportPolicy);assert.equal(C.promptLimit(parsed),60);assert.equal(C.solverDraft(parsed).businessPrompt,p.business.prompt);assert.equal(C.solverDraft(parsed).wordCount,44);assert.equal(C.solverDraft(parsed).exportPolicy,undefined);assert.deepEqual(C.evaluatorDraft(parsed).exportPolicy,p.exportPolicy);assert.ok(!C.audit(parsed).some(f=>f.code==='prompt-length'));assert.ok(C.audit(parsed).some(f=>f.code==='prompt-exception'));parsed.business.prompt+=' '+Array.from({length:17},(_,i)=>'extra'+i).join(' ');assert.equal(C.words(parsed.business.prompt),61);assert.throws(()=>C.solverDraft(parsed),/60 words/);assert.ok(C.audit(parsed).some(f=>f.code==='prompt-length'&&/over 60 words/.test(f.message)));});
 test('word-limit exceptions require a reason and cannot silently broaden default',()=>{const p=complete();for(const policy of [{businessPromptMaxWords:999,reason:'x'},{businessPromptMaxWords:44,reason:''}]){p.exportPolicy=policy;assert.throws(()=>C.parseProject(p));}});
+
+/* Lint alignment with the shipped format (docs/local-agents.md section 13) and the public scrub (section 15). */
+// The built-in jargon list is pinned to this generic set. A platform or company name has no place in it: those terms stay in the writer's private
+// evidence module (lintTerms), and the privacy scan (scripts/privacy-scan.cjs, with the writer's private term list) is what guards the rest of the tree.
+const GENERIC_JARGON='SAF|GAF|golden (?:answer|file|score)s?|ground truth|attempt agent|grader agent|MGP|difftest';
+const BLOCK_HEADINGS=['Context','Golden Response','1. Must-haves','2. Common Failures','3. Acceptable Variation'];
+const reviewSentence=topic=>'The reviewer checks that '+topic+' follows the supplied treasury procedure and the dated facility letter.';
+const guidanceBlock=(heading,topic,sentences)=>heading+'\n'+Array.from({length:sentences},()=>reviewSentence(topic)).join(' ');
+// A synthetic guideline in the five-block shipped layout, about 600 words.
+function shippedGuideline(headings=BLOCK_HEADINGS){
+  const opening='You are grading a response to a synthetic treasury task about a cash bridge.\n';
+  const bodies=[[headings[0],'the funded cash figure',5],[headings[1],'the final bridge amount',6],[headings[2],'each stated input',8],[headings[3],'the facility limit',8],[headings[4],'a rounded result',6]];
+  return bodies.map(([h,topic,n],i)=>(i===0?h+'\n'+opening+Array.from({length:n},()=>reviewSentence(topic)).join(' '):guidanceBlock(h,topic,n))).join('\n\n');
+}
+const codesOf=(text,opts)=>C.lintGuidance(text,opts).map(x=>x.code);
+
+test('prompt limit defaults to 60 words and the 44-word exception can never lower it',()=>{
+  assert.equal(C.promptLimit(C.blank()),60);
+  assert.equal(C.promptLimit({exportPolicy:{businessPromptMaxWords:44,reason:'Authorized by the author.'}}),60);
+  assert.throws(()=>C.promptLimit({exportPolicy:{businessPromptMaxWords:61,reason:'x'}}),/44-word limit/);
+  assert.throws(()=>C.promptLimit({exportPolicy:{businessPromptMaxWords:44,reason:'  '}}),/authorization reason/);
+  const p=complete();
+  p.business.prompt=Array.from({length:60},(_,i)=>'w'+i).join(' ');
+  assert.ok(!C.audit(p).some(x=>x.code==='prompt-length'));
+  p.business.prompt+=' w60';
+  const finding=C.audit(p).find(x=>x.code==='prompt-length');
+  assert.equal(finding.level,'blocker');
+  assert.match(finding.message,/over 60 words/);
+});
+test('the prompt generator still stops at 40 words even though the limit is 60',()=>{
+  const b=n=>({objective:Array.from({length:n},(_,i)=>'w'+i).join(' '),deliverable:'the cash bridge',decision:'whether to proceed'});
+  assert.equal(C.words(C.generatePrompt(b(26))),40);
+  assert.throws(()=>C.generatePrompt(b(27)),/exceeds 40/);
+});
+test('guidance-long starts above 650 words and the blocker stays at 800',()=>{
+  const words=n=>Array.from({length:n},(_,i)=>'plain'+i).join(' ');
+  assert.ok(!codesOf(words(650)).includes('guidance-long'));
+  const long=C.lintGuidance(words(651)).find(x=>x.code==='guidance-long');
+  assert.equal(long.level,'review');
+  assert.match(long.message,/651 words/);
+  assert.ok(codesOf(words(799)).includes('guidance-long')&&!codesOf(words(799)).includes('guidance-length'));
+  const blocked=C.lintGuidance(words(800));
+  assert.equal(blocked.find(x=>x.code==='guidance-length').level,'blocker');
+  assert.ok(!blocked.some(x=>x.code==='guidance-long'));
+});
+test('a guideline in the five-block shipped layout is lint clean',()=>{
+  const text=shippedGuideline();
+  assert.ok(C.words(text)>=570&&C.words(text)<=620,String(C.words(text)));
+  assert.deepEqual(C.lintGuidance(text),[]);
+  assert.deepEqual(C.lintGuidance(shippedGuideline(['Context','Golden Response','Must-haves','Common Failures','Acceptable Variation'])),[]);
+});
+test('each block heading is accepted alone, with or without its number and period',()=>{
+  for(const heading of ['Context','Golden Response','Must-haves','1. Must-haves','Common Failures','2. Common Failures','Acceptable Variation','3. Acceptable Variation'])
+    assert.ok(!codesOf(heading+'\n'+reviewSentence('the funded cash figure')).includes('guidance-titled-section'),heading);
+});
+test('other titles, markdown headings and bold titles are still flagged, including inside the shipped layout',()=>{
+  for(const title of ['Priority Checks','Background','## Context','**Golden Response**','# Notes']){
+    const alone=C.lintGuidance(title+'\n'+reviewSentence('the funded cash figure')).find(x=>x.code==='guidance-titled-section');
+    assert.ok(alone,title);
+    assert.ok(alone.message.includes(title),title);
+    const inside=C.lintGuidance(shippedGuideline().replace('3. Acceptable Variation','3. Acceptable Variation\n'+title)).find(x=>x.code==='guidance-titled-section');
+    assert.ok(inside&&inside.message.includes(title),'inside: '+title);
+  }
+  const text=shippedGuideline().replace('2. Common Failures','Priority Checks\n'+reviewSentence('the facility limit')+'\n\n2. Common Failures');
+  assert.ok(C.lintGuidance(text).find(x=>x.code==='guidance-titled-section').message.includes('Priority Checks'));
+});
+test('You are grading is allowed while other scoring words keep their review finding',()=>{
+  for(const ok of ['You are grading a response about a cash bridge.','You are grading. The bridge amount comes from the treasury procedure.'])
+    assert.ok(!codesOf(ok).includes('guidance-scoring-word'),ok);
+  for(const bad of ['The grading is strict.','Grading rules apply. You are grading a response.','Report the score.','Scoring follows the procedure.','Award 5 points.','You are grading a response and counting points.']){
+    const found=C.lintGuidance(bad).find(x=>x.code==='guidance-scoring-word');
+    assert.ok(found,bad);
+    assert.equal(found.level,'review');
+  }
+  assert.match(C.lintGuidance('Grading rules apply. You are grading a response.').find(x=>x.code==='guidance-scoring-word').message,/Found: "Grading"/);
+  for(const phrase of ['partial credit','penalise the miss','a rubric'])
+    assert.equal(C.lintGuidance('You are grading a response. Allow '+phrase+'.').filter(x=>x.level==='blocker').length>0,true,phrase);
+});
+test('the built-in jargon check is exactly the generic list, with extra terms only through options',()=>{
+  const source=fs.readFileSync(require.resolve('../core.js'),'utf8');
+  const match=/const jargon=\/\\b\(([^/]+)\)\\b\/i/.exec(source);
+  assert.ok(match,'core.js defines the built-in jargon pattern');
+  assert.equal(match[1],GENERIC_JARGON,'the built-in list holds only these generic terms; extra terms come from lintTerms');
+  assert.ok(!codesOf('Follow the Northwind format for this task.').includes('guidance-jargon'),'an unlisted name is not jargon');
+  assert.ok(C.lintGuidance('Follow the Northwind format for this task.',{extraJargon:['northwind']}).some(x=>x.code==='guidance-jargon'),'but a writer can add it locally');
+  for(const term of ['SAF','GAF','ground truth','golden answer','attempt agent','grader agent','MGP','difftest']){
+    const found=C.lintGuidance('The '+term+' is used here.').find(x=>x.code==='guidance-jargon');
+    assert.ok(found&&found.level==='blocker'&&found.heuristic===false,term);
+  }
+});
+test('extraJargon adds literal, case-insensitive, whole-term checks',()=>{
+  const found=C.lintGuidance('The Acme Grader checks it.',{extraJargon:['acme grader']}).find(x=>x.code==='guidance-jargon');
+  assert.equal(found.level,'blocker');
+  assert.equal(found.heuristic,false);
+  assert.match(found.message,/Found: "Acme Grader"/);
+  assert.ok(!codesOf('The Acme Grader checks it.').includes('guidance-jargon'));
+  assert.ok(!codesOf('Acmeish figures apply.',{extraJargon:['Acme']}).includes('guidance-jargon'));
+  assert.ok(codesOf('ACME figures apply.',{extraJargon:['Acme']}).includes('guidance-jargon'));
+  assert.ok(codesOf('Apply the C++ (v2) rule.',{extraJargon:['C++ (v2)']}).includes('guidance-jargon'));
+  assert.ok(!codesOf('Apply the axb rule.',{extraJargon:['a.b']}).includes('guidance-jargon'));
+  assert.ok(codesOf('Apply the a.b rule.',{extraJargon:['a.b']}).includes('guidance-jargon'));
+  assert.ok(codesOf('The Acme\n  grader checks it.',{extraJargon:['acme grader']}).includes('guidance-jargon'));
+  assert.ok(codesOf('Apply the rule(v2) here.',{extraJargon:['(v2)']}).includes('guidance-jargon'));
+  assert.ok(!codesOf('Apply the rulev2 here.',{extraJargon:['v2']}).includes('guidance-jargon'));
+  assert.equal(C.lintGuidance('The ground truth and the Acme rule.',{extraJargon:['Acme']}).filter(x=>x.code==='guidance-jargon').length,1);
+});
+test('malformed extraJargon is ignored instead of throwing',()=>{
+  const text='The Acme rule applies to the funded cash figure.';
+  for(const opts of [undefined,null,0,'acme',[],{},{extraJargon:null},{extraJargon:'Acme'},{extraJargon:[]},{extraJargon:[1,null,'','   ',{},['Acme']]}])
+    assert.ok(!codesOf(text,opts).includes('guidance-jargon'),JSON.stringify(opts));
+  assert.ok(codesOf(text,{extraJargon:[1,'  Acme  ']}).includes('guidance-jargon'));
+});
+test('extra jargon terms reach the audit, the evaluator draft, the guidance draft and the working document',()=>{
+  const opts={extraJargon:['Acme']};
+  const p=complete();p.guidance='The Acme procedure sets the rule for the funded cash figure.';
+  const jargon=list=>list.filter(x=>x.code==='guidance-jargon');
+  assert.equal(jargon(C.audit(p)).length,0);
+  assert.equal(jargon(C.audit(p,opts)).length,1);
+  assert.equal(jargon(C.evaluatorDraft(p).graderGuidance.lint).length,0);
+  const draft=C.evaluatorDraft(p,opts);
+  assert.equal(jargon(draft.graderGuidance.lint).length,1);
+  assert.equal(jargon(draft.checks).length,1);
+  assert.match(C.workingDocument(p),/\d+ words; 0 lint blockers/);
+  assert.match(C.workingDocument(p,opts),/\d+ words; 1 lint blockers/);
+  const generated=C.generateGuidance(complete(),{extraJargon:['Treasury_Procedure.txt']});
+  assert.equal(jargon(generated.lint).length,1);
+  assert.equal(jargon(C.generateGuidance(complete()).lint).length,0);
+});
+// The whole public tree (every tracked file and every untracked file git does not ignore: code, tests, docs, README, research text) against the writer's own term list.
+// The list is never in the repository and this test never reads private/; the writer points FINANCE_PRIVACY_TERMS at it (for example private/privacy-terms.txt).
+test('the public tree matches none of the terms in the list named by FINANCE_PRIVACY_TERMS',{skip:process.env.FINANCE_PRIVACY_TERMS?false:'set FINANCE_PRIVACY_TERMS to a term list to scan the whole tree'},()=>{
+  const result=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'..','scripts','privacy-scan.cjs'),'--terms',process.env.FINANCE_PRIVACY_TERMS,'--root',path.join(__dirname,'..')],{encoding:'utf8'});
+  assert.equal(result.status,0,'privacy scan output:\n'+result.stdout+result.stderr);
+});
+test('every lint-bearing call in the authoring page passes the private lint terms',()=>{
+  const source=fs.readFileSync(require.resolve('../app.js'),'utf8');
+  assert.ok(/getLintTerms\?\.\(\)/.test(source),'app.js must read the terms through the dashboard accessor, never copy the whole module');
+  const bare=source.match(/C\.(?:lintGuidance|audit|evaluatorDraft|generateGuidance|workingDocument)\(p(?:\.guidance)?\)/g);
+  assert.equal(bare,null,'calls without lint options: '+bare);
+  assert.ok(!/getEvidenceModule/.test(source),'getEvidenceModule deep-copies the module and must not run on every render');
+  const dashboard=fs.readFileSync(require.resolve('../dashboard.js'),'utf8');
+  assert.ok(/getLintTerms:\(\)=>D&&Array\.isArray\(D\.lintTerms\)/.test(dashboard),'dashboard.js must provide getLintTerms from the loaded module\'s lintTerms array only');
+});

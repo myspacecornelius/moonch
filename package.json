@@ -1,13 +1,16 @@
 {
   "name": "finance-task-studio",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "An offline workspace for locking the five failure modes of a derivative finance task, anchoring each to source evidence and recomputed economics, and drafting lint-checked grader guidance. No model calls; private evidence stays local.",
+  "description": "A workspace for locking the five failure modes of a derivative finance task, anchoring each to source evidence and recomputed economics, and drafting lint-checked grader guidance. Offline by default with no model calls. Served by its local companion (npm start) it can also run local Claude Code agents as audited blind pilots, after an explicit approval for each round. Private evidence stays local.",
   "scripts": {
+    "start": "node backend/server.cjs --open",
+    "privacy": "node scripts/privacy-scan.cjs",
     "test": "node --test tests/*.test.cjs",
     "test:browser": "node tests/browser.cjs",
     "test:dashboard": "node tests/dashboard-browser.cjs",
     "test:candidates": "node tests/candidates-browser.cjs",
+    "test:agents": "node tests/agents-browser.cjs",
     "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs && python3 scripts/package-filebase.py --manifest-only"
   },
   "license": "UNLICENSED"

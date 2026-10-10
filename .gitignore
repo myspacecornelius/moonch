@@ -5,6 +5,9 @@
 /model-run.js
 /model-runs/
 /LOCAL_SERVER.json
+# The app's own downloads of private material (Finance_Agent_Round_<id>_PRIVATE.json holds the frozen gold and the prompt; the analysis
+# workspace and its results use the same suffix). Keep them outside the repository; if one lands inside it, git must not offer it.
+*_PRIVATE.*
 
 # Headless QA working output. Reports and the retained screenshots are committed explicitly.
 qa/**/downloads/
@@ -17,6 +20,8 @@ qa/**/*.png
 !qa/dashboard/mobile-overview.png
 !qa/candidates/desktop-new-cash-candidates.png
 !qa/candidates/mobile-new-dividend-candidates.png
+!qa/agents/desktop-agents.png
+!qa/agents/mobile-agents.png
 
 __pycache__/
 .DS_Store

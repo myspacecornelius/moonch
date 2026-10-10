@@ -9,7 +9,7 @@
     "failure-mode page shows the ten-mode shortlist with three selected and the set locked",
     "desktop-failure-modes fits viewport",
     "mobile-failure-modes fits viewport",
-    "41-word solver export blocked in interface",
+    "61-word solver export blocked in interface",
     "source review status visibly resets after evidence edit",
     "root review status visibly resets after a record-field edit",
     "desktop-root fits viewport",
@@ -47,6 +47,7 @@
     "file:///home/user/moonch/package-engine.js",
     "file:///home/user/moonch/candidate-engine.js",
     "file:///home/user/moonch/app.js",
+    "file:///home/user/moonch/agents.js",
     "file:///home/user/moonch/dashboard.js",
     "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNSIgdmlld0JveD0iMCAwIDI0IDI0Ij48cGF0aCBmaWxsPSJXaW5kb3dUZXh0IiBkPSJNMjAgM2gtMVYxaC0ydjJIN1YxSDV2Mkg0Yy0xLjEgMC0yIC45LTIgMnYxNmMwIDEuMS45IDIgMiAyaDE2YzEuMSAwIDItLjkgMi0yVjVjMC0xLjEtLjktMi0yLTJ6bTAgMThINFY4aDE2djEzeiIvPjxwYXRoIGZpbGw9Im5vbmUiIGQ9Ik0wIDBoMjR2MjRIMHoiLz48L3N2Zz4="
   ],

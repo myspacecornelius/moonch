@@ -1,0 +1,54 @@
+{
+  "passed": true,
+  "checks": [
+    "file edition shows only the offline message, with no controls and no HTTP request",
+    "runtime panel reports the stub as found, with version and path",
+    "the companion-served page says models run only after approval, not that none run",
+    "hostile file name renders as text, no element created, no dialog",
+    "packet panel: defaults exclude evaluator-looking files, gaf toggle with the production sentence, override is labelled, word count against the project limit",
+    "launch disabled until frozen; pilots stepper capped at the status maximum; isolation and shell statements printed in the round card",
+    "freeze shows hash and time; a changed prompt marks the freeze stale and disables launch; restoring it re-enables",
+    "desktop-approval fits viewport",
+    "approval dialog needs three checkboxes, shows the command line with the prompt elided and the override list, then launches 2 pilots",
+    "both pilots finish; the banner reads directional only, n = 2; no percentage or pass rate is shown",
+    "desktop-drawer fits viewport",
+    "detail drawer shows final answer, outputs and audit; the heuristic suggestion (gold figures, fingerprint ids) copies into the controls; verdict and fingerprint chips save and the table lists them; Escape closes and returns focus",
+    "simulated grader and author review each run behind their own approval, end to end through the stub, and the grader is labelled as a simulation",
+    "export adds two experiment records to the project after confirmation",
+    "round JSON downloads",
+    "desktop-agents fits viewport",
+    "mobile-agents fits viewport",
+    "mobile-drawer fits viewport",
+    "desktop-discarded fits viewport",
+    "a DISCARDED pilot is kept and explained, cannot be classified, and is left out of the export",
+    "every request went to 127.0.0.1; zero console errors and zero dialogs"
+  ],
+  "requestCount": 72,
+  "apiRequestCount": 48,
+  "hosts": [
+    "127.0.0.1"
+  ],
+  "consoleErrors": [],
+  "dialogs": [],
+  "browser": "Isolated headless Chromium",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/141.0.7390.37",
+    "revision": "@9f043f63b0e5b728c8d09f3e3ddfc1681a4bd58e",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36",
+    "jsVersion": "14.1.146.11"
+  },
+  "node": "v22.22.0",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "server": "backend/server.cjs with the stub agent runtime; no model was started",
+  "qaData": "Synthetic packet only."
+}

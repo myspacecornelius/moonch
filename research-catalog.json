@@ -16,7 +16,7 @@
         "Simplified statements can provoke false positives when omitted items are assumed zero.",
         "Source anchors: Section 3.3; Table 2; Appendix C/Table 13; Section 6.4/Table 10; Section 6.5/Table 11; Section 7.2; Section 8"
       ],
-      "limits": "Single guided-checklist setting; no general model-ranking or Jericho difficulty inference. Hidden-field positives were excluded or treated as insufficient information. Paper claims code availability but defers its repository URL to a camera-ready version; no repository independently located."
+      "limits": "Single guided-checklist setting; no general model-ranking or target-platform difficulty inference. Hidden-field positives were excluded or treated as insufficient information. Paper claims code availability but defers its repository URL to a camera-ready version; no repository independently located."
     },
     {
       "id": "finrate",
@@ -103,7 +103,7 @@
         "Question construction requires all necessary absent inputs/definitions to be supplied and one answer type.",
         "Source anchors: Section 2/Table 1; Section 5/Table 3; Section 6; Appendix B, Question Generation Process"
       ],
-      "limits": "The error audit is not all models or all responses; overlapping rates must not be added. Agreement-specific branching, caps, and timing motivate candidate mechanisms but do not establish their hardness in Jericho. Public dataset release count must be reported separately from paper count."
+      "limits": "The error audit is not all models or all responses; overlapping rates must not be added. Agreement-specific branching, caps, and timing motivate candidate mechanisms but do not establish their hardness on the target platform. Public dataset release count must be reported separately from paper count."
     },
     {
       "id": "mbabench",

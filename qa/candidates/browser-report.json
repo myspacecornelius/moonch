@@ -27,6 +27,7 @@
     "file:///home/user/moonch/package-engine.js",
     "file:///home/user/moonch/candidate-engine.js",
     "file:///home/user/moonch/app.js",
+    "file:///home/user/moonch/agents.js",
     "file:///home/user/moonch/dashboard.js"
   ],
   "consoleErrors": [],

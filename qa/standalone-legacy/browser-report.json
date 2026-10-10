@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "entry": "/tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+  "entry": "/tmp/finance-standalone-fkJXiQ/Finance_Task_Studio.html",
   "checks": [
     "file URL opens the task editor with all nine views without a server",
     "desktop-workspace fits viewport",
@@ -9,7 +9,7 @@
     "failure-mode page shows the ten-mode shortlist with three selected and the set locked",
     "desktop-failure-modes fits viewport",
     "mobile-failure-modes fits viewport",
-    "41-word solver export blocked in interface",
+    "61-word solver export blocked in interface",
     "source review status visibly resets after evidence edit",
     "root review status visibly resets after a record-field edit",
     "desktop-root fits viewport",
@@ -38,7 +38,7 @@
     "zero app HTTP requests, runtime errors, and console errors"
   ],
   "resources": [
-    "file:///tmp/tmp.xEDkZIBMBE/Finance_Task_Studio.html",
+    "file:///tmp/finance-standalone-fkJXiQ/Finance_Task_Studio.html",
     "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNSIgdmlld0JveD0iMCAwIDI0IDI0Ij48cGF0aCBmaWxsPSJXaW5kb3dUZXh0IiBkPSJNMjAgM2gtMVYxaC0ydjJIN1YxSDV2Mkg0Yy0xLjEgMC0yIC45LTIgMnYxNmMwIDEuMS45IDIgMiAyaDE2YzEuMSAwIDItLjkgMi0yVjVjMC0xLjEtLjktMi0yLTJ6bTAgMThINFY4aDE2djEzeiIvPjxwYXRoIGZpbGw9Im5vbmUiIGQ9Ik0wIDBoMjR2MjRIMHoiLz48L3N2Zz4="
   ],
   "consoleErrors": [],
