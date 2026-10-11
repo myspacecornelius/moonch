@@ -535,7 +535,7 @@ test('live-smoke: the command line shows the token as <redacted>; S3 has a promp
   assert.deepEqual(smoke.parseOptions(['--stage', 'all']).stages, ['S0', 'S1', 'S2', 'S3']);
 });
 
-function runSmokeS0(t, extraEnv) {
+function runSmoke(t, args, extraEnv) {
   const dir = tempDir(t, 'finance-pilot-token-smoke-');
   const original = path.join(dir, 'writer-config');
   const scratchRoot = path.join(dir, 'tmp');
@@ -543,13 +543,49 @@ function runSmokeS0(t, extraEnv) {
   fs.mkdirSync(scratchRoot);
   const argvLog = path.join(dir, 'argv.log');
   const envLog = path.join(dir, 'env.log');
-  const result = childProcess.spawnSync(process.execPath, [SMOKE], {
+  const result = childProcess.spawnSync(process.execPath, [SMOKE, ...args], {
     env: cleanEnv({ CLAUDE_BIN: STUB, CLAUDE_CONFIG_DIR: original, TMPDIR: scratchRoot, FINANCE_STUB_ARGV_LOG: argvLog, FINANCE_STUB_AUTH_LOG: envLog, FINANCE_STUB_SCENARIO: '', ...extraEnv }),
     encoding: 'utf8',
-    timeout: 60000,
+    timeout: 120000,
   });
-  return { ...result, argv: readJsonLines(argvLog), auth: readJsonLines(envLog) };
+  return { ...result, argv: readJsonLines(argvLog), auth: readJsonLines(envLog), leftovers: fs.readdirSync(scratchRoot) };
 }
+
+const runSmokeS0 = (t, extraEnv) => runSmoke(t, [], extraEnv);
+
+test('live-smoke S3 against the stub: a runtime that leaks the token and one that hides it both pass; no token or no approval refuses', t => {
+  const token = { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN };
+  /* a runtime that passes the token to the pilot's shell (the stub's echoToken): blanked out everywhere, kind secret */
+  const leaking = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ echoToken: true, resultText: 'done' }) });
+  assert.equal(leaking.status, 0, leaking.stdout + leaking.stderr);
+  assert.match(leaking.stdout, /the audit is DISCARDED for reading the environment\s+PASS\s+DISCARDED; kinds: environ, secret/);
+  assert.match(leaking.stdout, /what the pilot's shell saw\s+INFO\s+the token reached the runtime's output and was blanked out/);
+  assert.match(leaking.stdout, /the token is in no file the round kept\s+PASS/);
+  assert.match(leaking.stdout, /the token is nowhere in the pilot folder\s+PASS/);
+  assert.match(leaking.stdout, /the final answer shows the marker where the token was\s+PASS\s+"done The token is \[pilot-token redacted\]\./);
+  assert.ok(!(leaking.stdout + leaking.stderr).includes(TOKEN), 'the token is never printed');
+  assert.match(leaking.stdout, /CLAUDE_CODE_OAUTH_TOKEN=<redacted>/, 'the command line shows the token redacted');
+  assert.deepEqual(leaking.leftovers, [], 'the scratch folders are removed');
+  /* a runtime that keeps the token from the shell, as Claude Code 2.1.287 does: environ only, nothing to blank out */
+  const hiding = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ toolUses: [{ name: 'Bash', input: { command: 'printenv CLAUDE_CODE_OAUTH_TOKEN' }, result: '' }], resultText: 'The variable is not set.' }) });
+  assert.equal(hiding.status, 0, hiding.stdout + hiding.stderr);
+  assert.match(hiding.stdout, /the audit is DISCARDED for reading the environment\s+PASS\s+DISCARDED; kinds: environ\s*\n/);
+  assert.match(hiding.stdout, /what the pilot's shell saw\s+INFO\s+the runtime kept the token from the pilot's shell/);
+  assert.match(hiding.stdout, /the final answer shows the marker where the token was\s+INFO\s+"The variable is not set\."/);
+  /* a runtime that lets a pilot read the environment without a discard would be a FAIL */
+  const silent = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ resultText: 'I did nothing.' }) });
+  assert.equal(silent.status, 1);
+  assert.match(silent.stdout, /the audit is DISCARDED for reading the environment\s+FAIL\s+CLEAN; kinds: none/);
+  /* refusals: no approval flag, no token */
+  const unapproved = runSmoke(t, ['--stage', 'S3'], token);
+  assert.equal(unapproved.status, 2);
+  assert.match(unapproved.stdout, /Refusing S3: it calls a model/);
+  assert.equal(unapproved.argv.some(args => args.includes('-p')), false, 'nothing ran');
+  const tokenless = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { FINANCE_STUB_SCENARIO: JSON.stringify({ echoToken: true }) });
+  assert.equal(tokenless.status, 2);
+  assert.match(tokenless.stdout, /Refusing S3: it needs a pilot token/);
+  assert.equal(tokenless.argv.some(args => args.includes('-p')), false, 'nothing ran');
+});
 
 test('live-smoke S0 against the stub: with a token the rows say so and the token is never printed; a gateway without one is a FAIL row', t => {
   const withToken = runSmokeS0(t, { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN, ANTHROPIC_BASE_URL: 'https://gw.example.test' });
