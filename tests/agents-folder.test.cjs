@@ -5,8 +5,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, PacketError } = require('../backend/agents/pilot-folder.cjs');
-const { inferRole } = require('../package-engine.js');
+const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, isGafPath, PacketError } = require('../backend/agents/pilot-folder.cjs');
+const { inferRole, classifyPath, WITHHELD_ROLES } = require('../package-engine.js');
 const constants = require('../backend/agents/constants.cjs');
 
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
@@ -103,6 +103,121 @@ test('inspectSource lists regular files with role, hash, size and default inclus
 test('role inference is the one package-engine uses', () => {
   assert.equal(typeof inferRole, 'function');
   for (const [name, role] of [['gaf/x.xlsx', 'template'], ['a/template_v2.xlsx', 'template'], ['answers.csv', 'evaluator'], ['Task_Prompt.txt', 'prompt'], ['batch_2.csv', 'run-evidence'], ['review.docx', 'audit'], ['sector.csv', 'source']]) assert.equal(inferRole(name), role, name);
+});
+
+/* ------------------------------------------------------------------ packet contents from names: one table, both directions */
+
+/* [path, role, included by default, reason for a withheld file]. Synthetic names: folder conventions first, then whole words
+   (punctuation, spaces, camel case and digits split words). Grading words fail closed; ordinary finance words stay sources. */
+const PACKET_TABLE = [
+  /* the review evidence: substring matching got all five wrong */
+  ['Reference_Memo.docx', 'evaluator', false, /the word "reference"/],
+  ['guideline.md', 'evaluator', false, /the word "guideline"/],
+  ['Solution.xlsx', 'evaluator', false, /the word "solution"/],
+  ['Cash_Runway_Model.xlsx', 'source', true],
+  ['Credit_Analysis.docx', 'source', true],
+  /* ordinary finance words, camel case and spaces */
+  ['CashRunwayModel.xlsx', 'source', true],
+  ['runRateBridge.xlsx', 'source', true],
+  ['Run-Rate Revenue.xlsx', 'source', true],
+  ['rerun_schedule.csv', 'source', true],
+  ['Audit Committee Minutes.pdf', 'source', true],
+  ['credit analysis/Borrower Financials.xlsx', 'source', true],
+  ['Goldman_Comps.xlsx', 'source', true],
+  ['Information_Memorandum.pdf', 'source', true],
+  ['referral_fees.csv', 'source', true],
+  ['Earnings_Call_Transcript.pdf', 'source', true],
+  ['Cash_Receipts.csv', 'source', true],
+  ['Payment_Batch.csv', 'source', true],
+  ['Bank_Run_Scenario.xlsx', 'source', true],
+  ['Annual_Review_2025.pdf', 'source', true],
+  ['data/q1/sales.csv', 'source', true],
+  ['Task_Prompt.txt', 'prompt', true],
+  ['templates/Output_Template.xlsx', 'template', true],
+  ['Extra_gaf_notes.txt', 'template', true],
+  /* a gaf/ folder is the solver-visible parent reference: its own names do not withhold it */
+  ['gaf/Reference Memo.docx', 'template', true],
+  ['gaf/Solution Layout.xlsx', 'template', true],
+  /* grading words fail closed, however the name is written */
+  ['ReferenceMemo.docx', 'evaluator', false, /the word "reference"/],
+  ['AnswerKey.xlsx', 'evaluator', false, /the word "answer"/],
+  ['ANSWERKEY.pdf', 'evaluator', false, /the word "answer"/],
+  ['Grading Guidelines.pdf', 'evaluator', false, /the word "grading"/],
+  ['Expected Output.xlsx', 'evaluator', false, /the word "expected"/],
+  ['rubricV2.docx', 'evaluator', false, /the word "rubric"/],
+  ['Golden Response.md', 'evaluator', false, /the word "golden"/],
+  ['notes/Investment Memo.docx', 'evaluator', false, /the word "memo"/],
+  /* withheld folders, and they win over gaf/ */
+  ['grader/notes.txt', 'evaluator', false, /under grader\//],
+  ['deal/answers/q1.csv', 'evaluator', false, /under answers\//],
+  ['Reference/rates.csv', 'evaluator', false, /under reference\//],
+  ['evaluator/scoring.xlsx', 'evaluator', false, /under evaluator\//],
+  ['gaf/answers/key.xlsx', 'evaluator', false, /under answers\//],
+  ['gaf/private/notes.txt', 'evaluator', false, /under private\//],
+  /* run evidence and audit notes need a word in context */
+  ['run_1.log', 'run-evidence', false, /"run 1" looks like evidence from an earlier run/],
+  ['old-run.log', 'run-evidence', false, /"run log"/],
+  ['Run3.json', 'run-evidence', false, /"run 3"/],
+  ['agent_transcript.json', 'run-evidence', false, /"agent transcript"/],
+  ['trajectory.json', 'run-evidence', false, /"trajectory"/],
+  ['batch_2.csv', 'run-evidence', false, /"batch 2"/],
+  ['review.md', 'audit', false, /"review" looks like a review or audit/],
+  ['Audit_Notes.docx', 'audit', false, /"audit"/],
+  ['candidate_audit.txt', 'audit', false, /"candidate"/],
+];
+
+test('the packet table: inspection includes or withholds each name, and every withheld row says why', t => {
+  assert.ok(PACKET_TABLE.length >= 30);
+  assert.ok(PACKET_TABLE.some(row => row[2]) && PACKET_TABLE.some(row => !row[2]), 'both directions');
+  const w = world(t);
+  for (const [rel] of PACKET_TABLE) w.put(rel);
+  const listing = inspectSource(w.source, { projectRoot: w.projectRoot });
+  const byPath = new Map(listing.files.map(file => [file.path, file]));
+  assert.equal(byPath.size, PACKET_TABLE.length);
+  for (const [rel, role, included, reason] of PACKET_TABLE) {
+    const file = byPath.get(rel);
+    assert.ok(file, 'listed: ' + rel);
+    assert.equal(file.inferredRole, role, 'role: ' + rel);
+    assert.equal(file.defaultInclude, included, 'default inclusion: ' + rel);
+    assert.equal(inferRole(rel), role, 'the same rule as package-engine.js: ' + rel);
+    assert.equal(constants.EVALUATOR_PATTERN.test(rel), role === 'evaluator', 'refused without an override exactly when it is grading material: ' + rel);
+    if (included) {
+      assert.equal(file.reason, '', 'an included file has no reason: ' + rel);
+    } else {
+      assert.match(file.reason, /^Withheld by default: /, 'a withheld file says so: ' + rel);
+      assert.match(file.reason, reason, 'and says why: ' + rel);
+      assert.equal(file.reason, classifyPath(rel).reason);
+    }
+  }
+});
+
+test('the packet table builds: default files need no override, grading material needs one, gaf files follow the toggle', t => {
+  const w = world(t);
+  for (const [rel] of PACKET_TABLE) w.put(rel);
+  const listing = inspectSource(w.source, { projectRoot: w.projectRoot });
+  const entry = rel => ({ path: rel, sha256: listing.files.find(file => file.path === rel).sha256 });
+  const defaults = listing.files.filter(file => file.defaultInclude).map(file => file.path);
+  const visible = build(w, defaults.map(entry), { runId: 'rnd-table-visible-1' });
+  assert.deepEqual(visible.manifest.map(m => m.path), [...defaults].sort());
+  assert.deepEqual(visible.overrides, []);
+  const hidden = build(w, defaults.map(entry), { runId: 'rnd-table-hidden-1', gafVisible: false });
+  assert.deepEqual(hidden.omitted, ['Extra_gaf_notes.txt', 'gaf/Reference Memo.docx', 'gaf/Solution Layout.xlsx'], 'a gaf file whose name has a grading word is still under the toggle');
+  const grading = PACKET_TABLE.filter(row => row[1] === 'evaluator').map(row => row[0]);
+  for (const rel of grading) assert.throws(() => build(w, [entry(rel)], { runId: 'rnd-table-refused-1' }), /grading material/, rel);
+  const overridden = build(w, grading.map(rel => ({ ...entry(rel), override: true })), { runId: 'rnd-table-override-1' });
+  assert.deepEqual(overridden.overrides, [...grading].sort(), 'each override is recorded by name');
+});
+
+test('a file the gaf folder rule keeps is always one the gaf toggle hides', () => {
+  const kept = ['gaf/Answer Key.xlsx', 'GAF/rubric.docx', ' gaf /Solution.xlsx', 'deal/gaf/Reference Memo.docx', 'gaf/sub/guidance.md'];
+  for (const rel of kept) {
+    assert.equal(classifyPath(rel).role, 'template', rel);
+    assert.ok(isGafPath(rel), 'hidden when the gaf folder is hidden: ' + rel);
+  }
+  /* a folder that only looks like gaf/ after Unicode trimming, or a gaf.zip, is not the gaf folder: its words count */
+  for (const rel of [' gaf/answer.xlsx', 'gaf.zip / answer.xlsx', 'gafs/answer.xlsx', 'my gaf files/answer.xlsx']) {
+    assert.equal(classifyPath(rel).role, 'evaluator', JSON.stringify(rel));
+  }
 });
 
 test('inspectSource skips junk and dot folders, flags hidden files, and never follows links', t => {
@@ -483,20 +598,31 @@ test('constants carry the documented limits and allowlists and cannot be changed
   assert.equal(constants.DEFAULT_EFFORT, 'medium');
   assert.ok(constants.EFFORTS.includes(constants.DEFAULT_EFFORT));
   assert.deepEqual([...constants.TOOLS], ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']);
-  assert.deepEqual({ ...constants.LIMITS }, { files: 150, bytes: 104857600, depth: 4, timeoutMs: 3000000, killGraceMs: 5000, concurrency: 3, bodyBytes: 1048576, packetBodyBytes: 262144, graderBatch: 5 });
+  assert.equal(constants.LIMITS.concurrency, constants.MAX_PILOTS_PER_ROUND, 'a full round runs in one wave');
+  assert.deepEqual({ ...constants.BUDGET_USD }, { pilotDefault: 3, toolLessDefault: 0.5, minUsd: 0.05, maxUsd: 20 });
+  assert.deepEqual({ ...constants.LIMITS }, { files: 150, bytes: 104857600, depth: 4, timeoutMs: 3000000, killGraceMs: 5000, concurrency: 5, bodyBytes: 1048576, packetBodyBytes: 262144, graderBatch: 5 });
   assert.throws(() => constants.MODELS.push('claude-other'), TypeError);
   assert.throws(() => { constants.LIMITS.files = 1000; }, TypeError);
+  assert.throws(() => { constants.BUDGET_USD.maxUsd = 1000; }, TypeError);
   assert.throws(() => { constants.MAX_PILOTS_PER_ROUND = 50; }, TypeError);
 });
 
-test('the evaluator pattern is case insensitive and the id pattern is strict', () => {
+test('the evaluator pattern is case insensitive, word bounded, the shared evaluator rule, and the id pattern is strict', () => {
   const { EVALUATOR_PATTERN, ID_RE } = constants;
-  assert.equal(EVALUATOR_PATTERN.flags.includes('g'), false, 'no sticky state between calls');
-  for (const name of ['Answer Key.pdf', 'GOLDEN.txt', 'gold_standard.csv', 'Grader notes', 'evaluator.md', 'RUBRIC.docx', 'reference solution.xlsx', 'reference_solution.xlsx', 'reference-solution.xlsx', 'fingerprints.json', 'Attestation.pdf', 'private/x.csv']) {
+  assert.ok(!(EVALUATOR_PATTERN instanceof RegExp), 'a rule object, not a substring pattern');
+  assert.ok(Object.isFrozen(EVALUATOR_PATTERN));
+  assert.throws(() => { EVALUATOR_PATTERN.test = () => false; }, TypeError);
+  for (const name of ['Answer Key.pdf', 'GOLDEN.txt', 'gold_standard.csv', 'Grader notes', 'evaluator.md', 'RUBRIC.docx', 'reference solution.xlsx', 'reference_solution.xlsx', 'reference-solution.xlsx', 'fingerprints.json', 'Attestation.pdf', 'private/x.csv', 'Reference_Memo.docx', 'guideline.md', 'Solution.xlsx']) {
     assert.ok(EVALUATOR_PATTERN.test(name), name);
     assert.ok(EVALUATOR_PATTERN.test(name), name + ' (second call gives the same answer)');
+    assert.equal(classifyPath(name).role, 'evaluator', name);
   }
-  for (const name of ['model.xlsx', 'sales_q1.csv', 'prompt.txt', 'notes/readme.md', 'referral.txt']) assert.equal(EVALUATOR_PATTERN.test(name), false, name);
+  for (const name of ['model.xlsx', 'sales_q1.csv', 'prompt.txt', 'notes/readme.md', 'referral.txt', 'Goldman_Comps.xlsx', 'Information_Memorandum.pdf', 'gaf/Reference_Memo.docx', 'run_1.log', 'review.md']) {
+    assert.equal(EVALUATOR_PATTERN.test(name), false, name);
+    assert.notEqual(classifyPath(name).role, 'evaluator', name);
+  }
+  assert.deepEqual([...constants.WITHHELD_ROLES], ['evaluator', 'run-evidence', 'audit']);
+  assert.equal(constants.WITHHELD_ROLES, WITHHELD_ROLES, 'the one list package-engine.js uses');
   for (const good of ['rnd-0123456789ab', 'abcd', 'a-b-c-1', 'x'.repeat(64)]) assert.ok(ID_RE.test(good), good);
   for (const bad of ['abc', 'x'.repeat(65), 'UPPER-case', 'has space', 'a/b/c/d', '../escape-1', 'under_score', 'abcd\n', '']) assert.equal(ID_RE.test(bad), false, JSON.stringify(bad));
 });

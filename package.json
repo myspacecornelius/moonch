@@ -11,6 +11,7 @@
     "test:dashboard": "node tests/dashboard-browser.cjs",
     "test:candidates": "node tests/candidates-browser.cjs",
     "test:agents": "node tests/agents-browser.cjs",
+    "smoke": "node scripts/live-smoke.cjs",
     "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs && python3 scripts/package-filebase.py --manifest-only"
   },
   "license": "UNLICENSED"

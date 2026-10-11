@@ -99,7 +99,20 @@ function makeElement(id) {
   };
 }
 
-function makePage(t, world, { location } = {}) {
+/* A Map-backed stand-in for window.localStorage. broken: every call throws, as blocked storage does. */
+function makeStorage({ broken = false } = {}) {
+  const map = new Map();
+  const guard = () => { if (broken) throw new Error('synthetic: storage is blocked'); };
+  return {
+    map,
+    getItem: key => { guard(); return map.has(key) ? map.get(key) : null; },
+    setItem: (key, value) => { guard(); map.set(key, String(value)); },
+    removeItem: key => { guard(); map.delete(key); },
+  };
+}
+const DRAFT_KEY = 'finance-studio.agents.draft.v1';
+
+function makePage(t, world, { location, storage, pkg, engine } = {}) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, makeElement(id));
@@ -117,7 +130,7 @@ function makePage(t, world, { location } = {}) {
     }
   };
   const document = {
-    activeElement: null, hidden: false, body: element('body'),
+    activeElement: null, hidden: false, body: element('body'), title: 'Finance Task Studio',
     querySelector: selector => {
       const match = /^#([\w-]+)$/.exec(selector);
       return match ? element(match[1]) : null;
@@ -127,22 +140,32 @@ function makePage(t, world, { location } = {}) {
   const context = vm.createContext({
     document, fetch: pageFetch, setTimeout, clearTimeout, console, URL, Blob,
     location: location || { protocol: 'http:', hostname: '127.0.0.1' }, CSS: { escape: value => String(value) },
+    ...(storage ? { localStorage: storage } : {}),
   });
   context.window = context;
+  /* engine: the page as index.html loads it, with package-engine.js (window.FinancePackageEngine) before agents.js. */
+  if (engine) {
+    Object.assign(context, { TextDecoder, TextEncoder });
+    vm.runInContext(fs.readFileSync(path.join(REPO, 'package-engine.js'), 'utf8'), context, { filename: 'package-engine.js' });
+  }
   vm.runInContext(AGENTS_SOURCE, context, { filename: 'agents.js' });
   const agents = context.FinanceAgents;
   assert.ok(agents && typeof agents.handleEvent === 'function', 'agents.js exports its handler');
   t.after(() => agents.afterRender(false));
 
-  const all = () => ['ag-runtime', 'ag-packet', 'ag-freeze', 'ag-round', 'ag-runs', 'ag-gate', 'ag-freeze-state', 'agents-modal'].map(id => element(id).innerHTML).join('\n');
+  const all = () => ['ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs', 'ag-gate', 'ag-freeze-state', 'agents-modal'].map(id => element(id).innerHTML).join('\n');
+  /* Controls are looked up in the innermost painted copy first: the fake elements do not nest, so the gate and the freeze
+     state are newer than the copies inside the cards that hold them. */
+  const newestFirst = () => ['agents-modal', 'ag-gate', 'ag-freeze-state', 'ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs'].map(id => element(id).innerHTML).join('\n');
   const tagOf = (action, dataset = {}) => {
     const wanted = Object.entries(dataset).map(([key, value]) => `data-${key}="${value}"`);
-    const found = [...all().matchAll(/<(?:button|tr)\b[^>]*>/g)].map(match => match[0]).find(tag => tag.includes(`data-ag="${action}"`) && wanted.every(attribute => tag.includes(attribute)));
+    const found = [...newestFirst().matchAll(/<(?:button|tr)\b[^>]*>/g)].map(match => match[0]).find(tag => tag.includes(`data-ag="${action}"`) && wanted.every(attribute => tag.includes(attribute)));
     return found || null;
   };
   const page = {
     elements,
     agents,
+    document,
     html: all,
     section: name => element('ag-' + name).innerHTML,
     modal: () => element('agents-modal').innerHTML,
@@ -179,7 +202,7 @@ function makePage(t, world, { location } = {}) {
       await page.settle();
     },
     async boot() {
-      agents.render({ package: null, notify() {}, download() {} });
+      agents.render({ package: pkg || null, notify() {}, download() {} });
       agents.afterRender(true);
       await waitFor(() => element('ag-runtime').innerHTML, { label: 'the page to load' });
       await page.settle();
@@ -304,6 +327,33 @@ test('with gaf hidden, the page itself leaves out a gaf-named file, so the packe
   assert.match(page.modal(), /Withheld because the gaf folder is hidden: none/);
 });
 
+test('a gaf/ file whose name has a grading word is included, and the packet table marks it for a second look', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  w.put('gaf/Golden_Response.docx', 'synthetic');
+  w.put('gaf/Template_Layout.txt', 'synthetic template');
+  w.put('Golden_Response.docx', 'synthetic');
+  const page = makePage(t, w, { engine: true });
+  await page.boot();
+  await page.type('dir', { value: w.source });
+  await page.click('inspect');
+  const packet = page.section('packet');
+  const row = name => packet.slice(packet.indexOf(`<code class="ag-path">${name}</code>`), packet.indexOf('</tr>', packet.indexOf(`<code class="ag-path">${name}</code>`)));
+  assert.match(row('gaf/Golden_Response.docx'), /Check: grading word in a gaf\/ file/);
+  assert.match(row('gaf/Golden_Response.docx'), /Its name has a grading word, which withholds a file anywhere else: make sure pilots should see it\./);
+  assert.match(row('gaf/Golden_Response.docx'), /data-label="Role">template</);
+  assert.doesNotMatch(row('gaf/Template_Layout.txt'), /Check: grading word/);
+  assert.doesNotMatch(row('Golden_Response.docx'), /Check: grading word/, 'outside gaf/ the file is withheld instead');
+  assert.match(row('Golden_Response.docx'), /Withheld by default: the name contains the word &quot;golden&quot;/);
+  assert.equal((packet.match(/Check: grading word/g) || []).length, 1);
+
+  /* Without the engine (an older page build) nothing is marked and nothing breaks. */
+  const bare = makePage(t, w);
+  await bare.boot();
+  await bare.type('dir', { value: w.source });
+  await bare.click('inspect');
+  assert.doesNotMatch(bare.section('packet'), /Check: grading word/);
+});
+
 test('the page and the companion use one rule for which files are gaf files', () => {
   const match = /const isGaf=path=>\/(.+)\/([a-z]*)\.test\(String\(path\)\);/.exec(AGENTS_SOURCE);
   assert.ok(match, 'agents.js defines isGaf with a regular expression literal');
@@ -365,6 +415,7 @@ test('a failed run explains itself: the reason in words, the runtime message, an
   assert.match(drawer, /&lt;prompt elided&gt;/, 'the prompt is elided');
   assert.doesNotMatch(drawer, /claude --version/);
   assert.match(drawer, /--model claude-opus-5-5 --effort medium/);
+  assert.match(drawer, /--no-session-persistence --max-budget-usd 3\.00/, 'the documented command carries the spending cap');
   assert.match(drawer, /Runtime message \(the run failed\)/);
   assert.doesNotMatch(drawer, /<h3>Final answer<\/h3>/);
   assert.ok(!drawer.includes(PROMPT), 'the prompt text itself is not in the command');
@@ -386,6 +437,21 @@ test('a timeout is explained in words', async t => {
   await page.boot();
   await page.click('open-run', { n: 1 });
   assert.match(page.modal(), /The pilot ran out of time \(50 minutes\) and was stopped\./);
+});
+
+test('a pilot stopped by its spending cap is explained in words, with the round cap', async t => {
+  const w = await makeWorld(t, { budgetExhausted: true, exitCode: 1 });
+  const id = await finishedRoundViaService(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 1, maxBudgetUsd: 0.75 } });
+  const run = await w.service.getRun(id, 1);
+  assert.equal(run.state, 'failed');
+  assert.equal(run.failureReason, 'budget');
+  assert.equal(run.terminalReason, 'budget_exhausted');
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /The pilot reached its spending cap of USD 0\.75 \(--max-budget-usd 0\.75\) and the runtime stopped it before it finished\./);
+  assert.doesNotMatch(drawer, /The program exited with code 1\./, 'the cap, not the exit code, is the reason given');
 });
 
 test('a run interrupted by a companion restart is shown as not audited, with the round note', async t => {
@@ -425,6 +491,23 @@ test('the audit section states what the audit cannot see, and says what a note i
   assert.match(drawer, /does not run anything, so a path assembled while a command runs/);
   assert.match(drawer, /cwd-unresolved/);
   assert.match(drawer, /A note never discards a run/);
+});
+
+test('a pilot that starts the agent runtime again is discarded, and the page says why and what the spending cap covers', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, toolUses: [{ name: 'Bash', input: { command: 'claude -p "solve the task in ./filesystem" > outputs/inner.txt' } }] });
+  const before = makePage(t, w);
+  await before.boot();
+  assert.match(before.section('settings'), /The cap applies to each pilot process the Studio starts\. It is not a ceiling on everything a pilot can start/);
+  await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  assert.match(page.section('runs'), /DISCARDED/);
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /<td data-label="Kind">runtime<\/td>/);
+  assert.match(drawer, /<strong>runtime:<\/strong> A tool call started the agent runtime \(the claude program\) again/);
+  assert.match(drawer, /no spending cap, and its own tool calls are not audited/);
+  assert.match(drawer, /started the agent runtime again \(the causes are listed below\)/);
 });
 
 /* ====================================================================== smaller wording and layout items */
@@ -500,4 +583,291 @@ test('copy about models and accounts depends on the edition: offline from disk, 
   assert.match(served.dashboard, /Sources stay on this computer\. A model run you approve sends only the files and text approved for that run to Anthropic\./);
   assert.match(served.editor, /Local by design/);
   assert.match(served.editor, /Agent runs are on the Agents page, after your approval\./);
+});
+
+/* ====================================================================== round speed: settings, one wave, carry forward */
+
+const runningCount = round => round.runs.filter(run => run.state === 'running').length;
+
+test('model, effort, pilots and the spending cap sit above the freeze; five pilots by default; the freeze fixes them', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  const root = page.elements.get('ag-root').innerHTML;
+  assert.ok(root.indexOf('id="ag-settings"') > 0 && root.indexOf('id="ag-settings"') < root.indexOf('id="ag-freeze"'), 'the settings card comes before the freeze card');
+  const settings = page.section('settings');
+  for (const control of ['data-ag-in="model"', 'data-ag-in="effort"', 'id="ag-count"', 'id="ag-atonce"', 'id="ag-budget"']) assert.ok(settings.includes(control), control);
+  assert.doesNotMatch(page.section('round'), /data-ag-in="model"|id="ag-count"/, 'the round card no longer holds the settings');
+  assert.match(settings, /id="ag-count"[^>]*value="5"/, 'five pilots by default');
+  assert.match(settings, /All 5 at once/);
+  assert.match(page.text(), /Round maximum spend USD 15\.00 \(5 × USD 3\.00\)/);
+  await page.type('count', { value: '9', event: 'change' });
+  assert.match(page.section('settings'), /id="ag-count"[^>]*value="5"/, 'capped at the companion maximum');
+
+  /* a cap the companion would refuse stops the freeze in the page, and nothing is created */
+  await page.type('budget', { value: '0.01' });
+  assert.match(page.elements.get('ag-budget-error').textContent, /must be a number of US dollars from 0\.05 to 20\.00/);
+  assert.match(page.elements.get('ag-roundmax').textContent, /Not set/);
+  await page.fillAndFreeze();
+  assert.match(page.html(), /Set the spending cap per pilot/);
+  assert.deepEqual(await w.service.listRounds(), []);
+
+  await page.type('budget', { value: '1.25' });
+  await page.type('atonce', { value: '2' });
+  assert.match(page.text(), /Round maximum spend USD 6\.25 \(5 × USD 1\.25\)/);
+  await page.click('freeze');
+  const [row] = await w.service.listRounds();
+  assert.deepEqual({ count: row.config.count, concurrency: row.config.concurrency, maxBudgetUsd: row.config.maxBudgetUsd }, { count: 5, concurrency: 2, maxBudgetUsd: 1.25 });
+  assert.match(page.section('round'), /2 at a time, 3 waves/);
+  assert.match(page.section('round'), /USD 1\.25 \(--max-budget-usd 1\.25\)/);
+  assert.match(page.section('round'), /Round maximum spend<\/dt><dd>USD 6\.25/);
+  assert.equal(page.enabled('open-approve'), true);
+  await page.type('budget', { value: '1.50' });
+  assert.equal(page.enabled('open-approve'), false, 'a changed cap makes the freeze stale');
+  assert.match(page.html(), /changed after the freeze/);
+});
+
+test('approval shows the cap per pilot, the round maximum and one wave; five pilots then run at once; the strip and the title count them', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, delayMs: 1200 });
+  const page = makePage(t, w);
+  await page.boot();
+  assert.equal(page.document.title, 'Finance Task Studio');
+  assert.match(page.section('strip'), /No round selected/);
+  await page.fillAndFreeze();
+  await page.click('open-approve');
+  const dialog = page.text();
+  assert.match(dialog, /Claude Code is ready\./, 'the pre-flight ran before the dialog opened');
+  assert.match(dialog, /Spending cap per pilot USD 3\.00 \(--max-budget-usd 3\.00\)/);
+  assert.match(dialog, /Round maximum spend USD 15\.00 \(5 × USD 3\.00\) The cap applies to each pilot process the Studio starts\. It is not a ceiling on everything a pilot can start/);
+  assert.match(dialog, /all 5 at once, one wave/);
+  assert.match(page.modal(), /--max-budget-usd 3\.00/, 'the command line carries the cap');
+  assert.match(page.modal(), /Pilots times cap: USD 15\.00 for the pilot processes the Studio starts/, 'and so does the text the approval covers');
+  assert.match(page.modal(), /not a ceiling on everything a pilot can start/, 'which says what the cap does not cover');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  assert.equal(page.modal().trim(), '');
+  const id = (await w.service.listRounds())[0].id;
+  let most = 0;
+  await waitFor(async () => {
+    const round = await w.service.getRound(id);
+    most = Math.max(most, runningCount(round));
+    return round.status !== 'running';
+  }, { label: 'the round to end', interval: 20 });
+  assert.equal(most, 5, 'all five pilots ran together');
+  assert.match(page.status(), /all 5 at once, one wave/);
+  assert.match(page.document.title, /^\(\d\/5\) Agents · Finance Task Studio$/, 'the title counts the pilots');
+  await waitFor(() => page.document.title === '(5/5) Agents · Finance Task Studio', { label: 'the title to count all five', timeout: 10000 });
+  assert.match(page.section('strip'), new RegExp(`Round ${id}`));
+  assert.match(page.section('strip'), /Pilots 5: done 5 · running 0 · failed 0/);
+  assert.match(page.section('strip'), /Elapsed \d+m \d\ds/);
+  page.agents.afterRender(false);
+  assert.equal(page.document.title, 'Finance Task Studio', 'leaving the page restores the title');
+});
+
+test('a pre-flight problem is named in the approval dialog before anything is approved, and Check again clears it', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER }, { env: { FINANCE_STUB_AUTH: 'logged-out' } });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  await page.click('open-approve');
+  assert.match(page.modal(), /Fix this before you approve\./);
+  assert.match(page.modal(), /not signed in/);
+  await page.acknowledgeAll();
+  assert.equal(page.enabled('approve-launch'), false, 'approval waits for a passing check');
+  assert.match(page.section('gate'), /Claude Code is not ready for this round\./);
+  const round = (await w.service.listRounds())[0];
+  assert.equal(round.status, 'frozen', 'nothing was approved');
+  w.env.FINANCE_STUB_AUTH = 'ok';
+  await page.click('recheck-preflight');
+  assert.match(page.modal(), /Claude Code is ready\./);
+  assert.equal(page.enabled('approve-launch'), true);
+  assert.doesNotMatch(page.section('gate'), /not ready/);
+
+  const older = await makeWorld(t, { resultText: GOLD_ANSWER }, { env: { FINANCE_STUB_HELP_DROP: '--max-budget-usd' } });
+  const olderPage = makePage(t, older);
+  await olderPage.boot();
+  await olderPage.fillAndFreeze();
+  await olderPage.click('open-approve');
+  assert.match(olderPage.modal(), /does not list --max-budget-usd/);
+  await olderPage.acknowledgeAll();
+  assert.equal(olderPage.enabled('approve-launch'), false);
+});
+
+test('the simulated grader and the author review are disabled while any round runs, with the reason, and come back after it', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const pkg = { documents: [{ name: 'Facility_Terms.txt', role: 'source', sha256: 'a'.repeat(64), records: [{ locator: 'line 1', text: 'synthetic' }] }] };
+  const page = makePage(t, w, { pkg });
+  await page.boot();
+  await page.type('count', { value: '2', event: 'change' });
+  await page.fillAndFreeze();
+  await page.click('open-approve');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  const id = (await w.service.listRounds())[0].id;
+  await waitFor(async () => (await w.service.getRound(id)).runs[0].state === 'completed', { label: 'pilot 1 to complete' });
+  await waitFor(() => /<td data-label="State"><span class="pill green">completed<\/span>/.test(page.section('runs')), { label: 'the page to show pilot 1 completed', timeout: 10000 });
+  assert.match(page.section('runs'), /<td data-label="Audit"><span class="pill green">CLEAN<\/span>/, 'a clean, completed run that a grader could use');
+  assert.equal(page.enabled('open-grader'), false, 'the grader waits although a clean run exists');
+  assert.equal(page.enabled('open-review'), false, 'the review waits although a package is loaded');
+  assert.match(page.section('runs'), /their text would be on a command line that a running pilot can read/);
+  assert.equal(page.enabled('next-round'), false);
+  assert.match(page.section('runs'), /Start the next round when it has ended/);
+
+  await w.service.cancelRound(id);
+  await w.service.whenSettled(id);
+  await waitFor(() => page.enabled('open-grader') && page.enabled('open-review'), { label: 'the buttons to come back', timeout: 10000 });
+  assert.doesNotMatch(page.section('runs'), /their text would be on a command line/);
+});
+
+test('while another round runs, a finished run keeps its answer hidden and cannot be classified; it comes back when that round ends', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const finished = await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  const running = await approvedRoundViaService(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  await w.service.launchRound(running);
+  await waitFor(async () => (await w.service.getRound(running)).runs[1].state === 'running', { label: 'pilot 2 to run' });
+  await page.type('select-round', { value: finished, event: 'change' });
+  await page.click('open-run', { n: 1 });
+  assert.match(page.modal(), /Hidden while a round is running/);
+  assert.ok(!page.modal().includes(GOLD_ANSWER), 'the answer is not shown');
+  assert.equal(page.enabled('save-class'), false);
+  assert.match(page.modal(), /Classification waits until no round is running/);
+  await w.service.cancelRound(running);
+  await w.service.whenSettled(running);
+  await waitFor(() => page.modal().includes(GOLD_ANSWER), { label: 'the drawer to read the run again', timeout: 10000 });
+  assert.doesNotMatch(page.modal(), /Hidden while a round is running/);
+});
+
+test('start next round from this round: a new draft with carriedFrom fills the form; freezing it confirms the same content hash; it still needs its own approval', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('count', { value: '1', event: 'change' });
+  await page.type('budget', { value: '0.75' });
+  await page.fillAndFreeze();
+  await page.click('open-approve');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  const first = (await w.service.listRounds())[0].id;
+  await w.service.whenSettled(first);
+  await waitFor(() => page.enabled('next-round'), { label: 'the next-round button', timeout: 10000 });
+  const firstRound = await w.service.getRound(first);
+
+  /* the page is cleared, so everything that comes back comes from the companion */
+  await page.click('clear-draft');
+  assert.ok(!page.section('packet').includes(PROMPT));
+  await page.click('next-round');
+  const rows = await w.service.listRounds();
+  assert.equal(rows.length, 2);
+  const next = rows.find(row => row.id !== first);
+  assert.equal(next.status, 'draft');
+  assert.equal(next.carriedFrom, first);
+  assert.match(page.status(), new RegExp(`Round ${next.id} starts from round ${first}`));
+  assert.ok(page.section('packet').includes(PROMPT), 'the prompt is back in the form');
+  assert.match(page.section('packet'), /2 of 2 files included/);
+  assert.match(page.section('settings'), /id="ag-budget"[^>]*value="0\.75"/);
+  assert.match(page.section('settings'), /id="ag-count"[^>]*value="1"/);
+  assert.match(page.section('freeze'), /data-ag-in="decision"[^>]*value="hold"/);
+  assert.match(page.section('freeze'), /value="fp-alpha"/);
+  assert.match(page.section('freeze-state'), new RegExp(`Carried forward from round ${first}`));
+  assert.ok(page.section('freeze-state').includes(firstRound.freeze.contentSha256), 'the earlier content hash');
+  assert.match(page.section('freeze-state'), /Not frozen yet/);
+  assert.equal(page.enabled('open-approve'), false, 'nothing is approved by carrying forward');
+
+  await page.click('freeze');
+  assert.equal((await w.service.listRounds()).length, 2, 'the carried draft itself was frozen');
+  const frozen = await w.service.getRound(next.id);
+  assert.equal(frozen.status, 'frozen');
+  assert.equal(frozen.freeze.contentSha256, firstRound.freeze.contentSha256);
+  assert.notEqual(frozen.freeze.sha256, firstRound.freeze.sha256);
+  const state = page.section('freeze-state');
+  assert.ok(state.includes(frozen.freeze.contentSha256) && state.includes(frozen.freeze.sha256) && state.includes(firstRound.freeze.sha256), 'both hashes of both freezes');
+  assert.match(state, /Gold and fingerprints<\/dt><dd>unchanged/);
+  assert.match(page.status(), /the gold and fingerprints are unchanged/);
+  assert.match(page.section('gate'), /frozen and ready for your approval/);
+
+  /* an edit after that freezes a new round that still names where it came from */
+  await page.type('decision', { value: 'hold; defer' });
+  await page.click('freeze');
+  const third = (await w.service.listRounds()).find(row => ![first, next.id].includes(row.id));
+  assert.equal(third.carriedFrom, first);
+  assert.match(page.section('freeze-state'), /Gold and fingerprints<\/dt><dd>changed/);
+  await page.click('open-approve');
+  assert.match(page.text(), new RegExp(`Carried forward from Round ${first}\\. Gold and fingerprints changed`));
+  assert.match(page.modal(), new RegExp(`Gold and fingerprints compared with round ${first}: changed`));
+});
+
+test('the form is kept in this browser while you work, restored after a reload, removed by Clear draft and by a launch, and never written while a round runs', async t => {
+  const w = await makeWorld(t, { hang: true }, { limits: { killGraceMs: 200 } });
+  const storage = makeStorage();
+  const page = makePage(t, w, { storage });
+  await page.boot();
+  await page.type('dir', { value: w.source });
+  await page.click('inspect');
+  await page.type('include', { checked: false, dataset: { i: 0 } });
+  await page.type('prompt', { value: PROMPT });
+  await page.type('decision', { value: 'hold' });
+  await page.type('fig', { value: '1,250', dataset: { kind: 'gfig', i: 0, j: 0, f: 'value' } });
+  await page.type('budget', { value: '2.50' });
+  await waitFor(() => storage.map.has(DRAFT_KEY), { label: 'the draft to be saved' });
+  await sleep(500);
+  const saved = JSON.parse(storage.map.get(DRAFT_KEY));
+  assert.equal(saved.dir, w.source);
+  assert.equal(saved.prompt, PROMPT);
+  assert.equal(saved.fz.decision, 'hold');
+  assert.equal(saved.fz.figures[0].value, '1,250');
+  assert.equal(saved.config.budget, '2.50');
+  assert.equal(saved.include.paths.length, 1, 'the include boxes too');
+  assert.match(page.section('draft'), /saved in this browser/);
+
+  /* a reload: a new page on the same storage gets the form back, and the include boxes once the folder is listed */
+  const again = makePage(t, w, { storage });
+  await again.boot();
+  assert.match(again.status(), /Restored the form you were working on/);
+  assert.ok(again.section('packet').includes(PROMPT));
+  assert.match(again.section('freeze'), /data-ag-in="decision"[^>]*value="hold"/);
+  assert.match(again.section('settings'), /id="ag-budget"[^>]*value="2\.50"/);
+  await again.click('inspect');
+  assert.match(again.section('packet'), /1 of 2 files included/);
+
+  /* Clear draft empties the form and the storage */
+  await again.click('clear-draft');
+  assert.equal(storage.map.has(DRAFT_KEY), false);
+  assert.ok(!again.section('packet').includes(PROMPT));
+  assert.match(again.status(), /Draft cleared/);
+
+  /* a launch removes the draft, and nothing is written while the round runs */
+  await again.type('count', { value: '1', event: 'change' });
+  await again.fillAndFreeze();
+  await waitFor(() => storage.map.has(DRAFT_KEY), { label: 'the draft to be saved again' });
+  await again.click('open-approve');
+  await again.acknowledgeAll();
+  await again.click('approve-launch');
+  assert.equal(storage.map.has(DRAFT_KEY), false, 'the launch removed the draft');
+  assert.match(again.status(), /draft saved in this browser was removed/);
+  await again.type('prompt', { value: PROMPT + ' Typed while the round runs.' });
+  await sleep(700);
+  assert.equal(storage.map.has(DRAFT_KEY), false, 'nothing is stored while a round runs');
+  assert.match(again.section('draft'), /not saved in this browser until it has ended/);
+});
+
+test('blocked or damaged storage never breaks the page', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w, { storage: makeStorage({ broken: true }) });
+  await page.boot();
+  await page.fillAndFreeze();
+  assert.match(page.status(), /Gold frozen/);
+  await sleep(500);
+  const damaged = makeStorage();
+  damaged.map.set(DRAFT_KEY, '{"v":1,"prompt":42,"fz":{"figures":"x","fingerprints":[null,{"id":7}]},"config":{"count":"9","budget":3},"include":{"dir":5}}');
+  const second = makePage(t, w, { storage: damaged });
+  await second.boot();
+  assert.match(second.section('settings'), /id="ag-count"[^>]*value="5"/);
+  assert.match(second.section('settings'), /id="ag-budget"[^>]*value="3\.00"/);
+  const notJson = makeStorage();
+  notJson.map.set(DRAFT_KEY, '{not json');
+  const third = makePage(t, w, { storage: notJson });
+  await third.boot();
+  assert.doesNotMatch(third.status(), /Restored/);
 });

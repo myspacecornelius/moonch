@@ -13,7 +13,8 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
-const { detectClaude, buildArgs, ClaudeRun, summarizeEvents } = require('../backend/agents/claude-runner.cjs');
+const { detectClaude, buildArgs, ClaudeRun, summarizeEvents, REQUIRED_FLAGS, parseHelpFlags } = require('../backend/agents/claude-runner.cjs');
+const { cwdKeyFor } = require('../backend/agents/path-audit.cjs');
 const { createAgentService, AgentError } = require('../backend/agents/index.cjs');
 const { buildGraderPrompt, parseGraderOutput, buildReviewPrompt } = require('../backend/agents/rounds.cjs');
 const C = require('../backend/agents/constants.cjs');
@@ -133,7 +134,7 @@ const expectedArgs = (promptText, model = 'claude-opus-5-5', effort = 'medium') 
   '--tools', TOOL_LIST, '--allowedTools', TOOL_LIST,
   '--permission-mode', 'acceptEdits',
   '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '',
-  '--no-session-persistence',
+  '--no-session-persistence', '--max-budget-usd', '3.00',
 ];
 
 async function rejects(promise, status, pattern) {
@@ -168,7 +169,8 @@ test('buildArgs is exactly the fixed argument list of section 3.2', () => {
     buildArgs({ prompt: 'Hello there', model: 'claude-opus-5-5', effort: 'medium', tools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'] }),
     ['-p', 'Hello there', '--model', 'claude-opus-5-5', '--effort', 'medium', '--output-format', 'stream-json', '--verbose',
       '--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
-      '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence'],
+      '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+      '--max-budget-usd', '3.00'],
   );
   /* The tool order does not depend on the order the caller used. */
   assert.deepEqual(
@@ -181,7 +183,8 @@ test('buildArgs for a tool-less agent passes an empty tool list and no allowed t
   assert.deepEqual(
     buildArgs({ prompt: 'Grade this', model: 'claude-sonnet-5-5', effort: 'low', tools: [] }),
     ['-p', 'Grade this', '--model', 'claude-sonnet-5-5', '--effort', 'low', '--output-format', 'stream-json', '--verbose',
-      '--tools', '', '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence'],
+      '--tools', '', '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+      '--max-budget-usd', '0.50'],
   );
 });
 
@@ -199,6 +202,10 @@ test('buildArgs refuses anything outside the allowlists', () => {
   assert.throws(() => buildArgs({ ...ok, prompt: '--help' }), /dash/);
   assert.throws(() => buildArgs({ ...ok, prompt: 'a\0b' }), /prompt/);
   assert.throws(() => buildArgs({ ...ok, prompt: 'x'.repeat(200 * 1024) }), /too large/);
+  for (const maxBudgetUsd of [0, 0.04, 20.01, 100, -1, 1.005, NaN, Infinity, '3', null]) {
+    assert.throws(() => buildArgs({ ...ok, maxBudgetUsd }), /spending cap/, String(maxBudgetUsd));
+  }
+  assert.throws(() => buildArgs({ ...ok, promptVia: 'file' }), /argument or on stdin/);
 });
 
 /* ====================================================================== detection */
@@ -275,7 +282,7 @@ test('a completed run: stream parsed, init and result recorded, transcript kept 
   assert.equal(summary.failureReason, null);
   assert.deepEqual(summary.init, { model: 'claude-opus-5-5', tools: C.TOOLS, skills: [], mcp_servers: [] });
   assert.deepEqual(summary.result, {
-    present: true, text: 'The answer is 42.', num_turns: 3, total_cost_usd: 0.5, terminal_reason: 'completed', is_error: false, modelUsage: ['claude-opus-5-5'],
+    present: true, text: 'The answer is 42.', num_turns: 3, total_cost_usd: 0.5, terminal_reason: 'completed', subtype: 'success', is_error: false, modelUsage: ['claude-opus-5-5'],
   });
   assert.equal(summary.events.length, 6); /* init, 2 x (assistant + user), result */
   assert.deepEqual(summary.events.map(event => event.type), ['system', 'assistant', 'user', 'assistant', 'user', 'result']);
@@ -369,6 +376,28 @@ test('a run is failed when the result text is empty, missing, or flagged as an e
   const flagged = await stubRun(t, { isError: true, resultText: 'API Error: credit balance too low' }).run.start();
   assert.equal(flagged.state, 'failed');
   assert.equal(flagged.failureReason, 'error-result');
+  assert.equal(flagged.result.subtype, 'error_during_execution');
+});
+
+test('a run that reached its spending cap is failed with the reason budget, whatever its exit code', async t => {
+  for (const exitCode of [1, 0]) {
+    const summary = await stubRun(t, { budgetExhausted: true, exitCode }).run.start();
+    assert.equal(summary.state, 'failed', `exit ${exitCode}`);
+    assert.equal(summary.failureReason, 'budget', `exit ${exitCode}`);
+    assert.equal(summary.result.subtype, 'error_max_budget_usd');
+    assert.equal(summary.result.terminal_reason, 'budget_exhausted');
+    assert.equal(summary.result.is_error, true);
+    assert.equal(summary.result.total_cost_usd, C.BUDGET_USD.pilotDefault, 'the stub reports the cap it was given');
+  }
+  /* only that subtype: other error results keep their reasons, and a missing or odd subtype is null */
+  const base = { type: 'result', is_error: true, result: '' };
+  assert.equal(summarizeEvents([{ ...base, subtype: 'error_max_turns' }]).result.subtype, 'error_max_turns');
+  assert.equal(summarizeEvents([{ ...base, subtype: 42 }]).result.subtype, null);
+  assert.equal(summarizeEvents([base]).result.subtype, null);
+  assert.equal(summarizeEvents([]).result.subtype, null);
+  assert.equal(summarizeEvents([{ ...base, subtype: 'x'.repeat(500) }]).result.subtype.length, 64);
+  const other = await stubRun(t, { isError: true, exitCode: 1, resultText: 'API Error' }).run.start();
+  assert.equal(other.failureReason, 'exit-code');
 });
 
 test('the stderr tail is the last 4 KB', async t => {
@@ -512,10 +541,21 @@ test('the cap of five pilots and the allowlists are enforced on the server', asy
   await rejects(newRound(w, { gafVisible: undefined }), 400, /gafVisible/);
   await rejects(newRound(w, { promptText: '   ' }), 400, /promptText/);
   await rejects(newRound(w, { config: undefined }), 400);
-  /* defaults apply only to model and effort */
+  /* the spending cap per pilot is a number of US dollars in whole cents inside the allowlisted range */
+  for (const maxBudgetUsd of [0, 0.04, 20.01, 1000, -3, 2.555, '3.00', null, NaN, true]) {
+    await rejects(newRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 1, maxBudgetUsd } }), 400, /spending cap/);
+  }
+  for (const [maxBudgetUsd, stored] of [[0.05, 0.05], [0.1, 0.1], [12.5, 12.5], [20, 20], [0.1 + 0.2, 0.3]]) {
+    const round = await newRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 1, maxBudgetUsd } });
+    assert.equal(round.config.maxBudgetUsd, stored);
+  }
+  /* defaults apply only to model, effort and the spending cap */
   const defaults = await newRound(w, { config: { count: 2 } });
   assert.equal(defaults.config.model, 'claude-opus-5-5');
   assert.equal(defaults.config.effort, 'medium');
+  assert.equal(defaults.config.maxBudgetUsd, C.BUDGET_USD.pilotDefault);
+  assert.equal(C.BUDGET_USD.pilotDefault, 3);
+  assert.equal(C.BUDGET_USD.toolLessDefault, 0.5);
   assert.deepEqual(defaults.config.tools, C.TOOLS);
   assert.equal(promptRuns(w.argvLog).length, 0, 'creating rounds never starts a pilot');
 });
@@ -636,8 +676,12 @@ test('approval summary states everything the writer approves, and the approval h
   for (const needle of [
     'claude-sonnet-5-5', 'high', 'Pilots: 3', 'at most 5', TOOL_LIST.split(',').join(', '), round.packet.packetSha256, round.packet.promptSha256,
     round.freeze.sha256, 'GAF folder visible to pilots: no', 'not by an operating system sandbox', 'Shell access', 'Network', 'finance-studio-pilots/<run id>',
-    '--output-format stream-json', '--permission-mode acceptEdits', '<prompt elided>',
+    '--output-format stream-json', '--permission-mode acceptEdits', '<prompt elided>', '--max-budget-usd 3.00',
+    'Spending cap per pilot: USD 3.00', 'on each pilot process the Studio starts', 'Pilots times cap: USD 9.00 for the pilot processes the Studio starts',
+    'not a ceiling on everything a pilot can start', 'a claude process that a pilot starts from its own shell runs under your sign-in with no cap',
   ]) assert.ok(summary.includes(needle), 'summary mentions: ' + needle);
+  assert.equal(round.config.maxBudgetUsd, 3, 'the default cap is recorded in the round config');
+  assert.ok(!/at most USD [\d.]+ for the round/.test(summary), 'the cap is not stated as a ceiling on everything a round can spend');
   assert.ok(!summary.includes(PROMPT), 'the prompt text itself is elided');
   assert.ok(!summary.includes(w.tmpRoot), 'no absolute path is echoed');
 
@@ -676,6 +720,7 @@ test('the summary differs between rounds that differ in what will run', async t 
     summaryOf({ config: { model: 'claude-opus-5-5', effort: 'low', count: 1 } }),
     summaryOf({ config: { model: 'claude-haiku-5-5', effort: 'medium', count: 1 } }),
     summaryOf({ config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } }),
+    summaryOf({ config: { model: 'claude-opus-5-5', effort: 'medium', count: 1, maxBudgetUsd: 1.5 } }),
     summaryOf({ promptText: PROMPT + ' Also state the caveat.' }),
     summaryOf({ include: ['Facility_Terms.txt'] }),
   ]);
@@ -765,6 +810,10 @@ test('a launched round runs the stub with exact arguments and the pilot environm
   assert.equal(env.cwd, folder);
   assert.equal(env.TMPDIR, path.join(folder, '.tmp'));
   assert.equal(env.CLAUDE_CODE_TMPDIR, path.join(folder, '.tmp'));
+  assert.equal(env.CLAUDE_CONFIG_DIR, path.join(folder, '.tmp', 'claude-config'), 'the runtime keeps its own files inside the folder');
+  assert.equal(env.CLAUDE_SECURESTORAGE_CONFIG_DIR, expectedSecureStorage(w.env), 'the sign-in is read where the writer keeps it');
+  assert.equal(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+  assert.equal(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
   assert.deepEqual(fs.readdirSync(folder).sort(), ['.tmp', 'filesystem', 'outputs']);
   assert.deepEqual(fs.readdirSync(path.join(folder, 'filesystem')).sort(), ['Cash_Facts.csv', 'Facility_Terms.txt']);
   assert.equal(fs.readFileSync(path.join(folder, 'filesystem', 'Cash_Facts.csv'), 'utf8'), fs.readFileSync(path.join(w.source, 'Cash_Facts.csv'), 'utf8'));
@@ -801,7 +850,10 @@ test('a launched round runs the stub with exact arguments and the pilot environm
   assert.deepEqual(fs.readdirSync(path.join(w.projectRoot, 'private')), ['agent-rounds']);
 });
 
-test('the child environment is the parent environment plus TMPDIR and CLAUDE_CODE_TMPDIR, nothing else', async t => {
+/* What a pilot's CLAUDE_SECURESTORAGE_CONFIG_DIR must be for a parent environment (see claude-runner.cjs). */
+const expectedSecureStorage = env => (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined ? env.CLAUDE_SECURESTORAGE_CONFIG_DIR : env.CLAUDE_CONFIG_DIR || '');
+
+test('the child environment is the parent environment plus the scratch, configuration and sign-in variables, nothing else', async t => {
   const seen = [];
   const spawnFn = (bin, args, options) => { seen.push({ bin, args, options }); return childProcess.spawn(bin, args, options); };
   const w = makeWorld(t, { resultText: GOLD_ANSWER }, { spawnFn, env: { SYNTHETIC_MARKER: 'kept' } });
@@ -809,8 +861,17 @@ test('the child environment is the parent environment plus TMPDIR and CLAUDE_COD
   assert.equal(seen.length, 1);
   const { options } = seen[0];
   const scratch = path.join(w.pilots, `${id}-1`, '.tmp');
-  const expected = { ...w.env, TMPDIR: scratch, CLAUDE_CODE_TMPDIR: scratch };
+  const expected = {
+    ...w.env,
+    TMPDIR: scratch,
+    CLAUDE_CODE_TMPDIR: scratch,
+    CLAUDE_CONFIG_DIR: path.join(scratch, 'claude-config'),
+    CLAUDE_SECURESTORAGE_CONFIG_DIR: expectedSecureStorage(w.env),
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
+  };
   assert.deepEqual(options.env, expected);
+  assert.ok(fs.statSync(path.join(scratch, 'claude-config')).isDirectory(), 'the configuration folder exists before the runtime starts');
   assert.equal(options.cwd, path.join(w.pilots, `${id}-1`));
   assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
   assert.equal(seen[0].bin, STUB);
@@ -1060,21 +1121,21 @@ test('limits can be lowered for tests but never raised above the contract', asyn
   await waitFor(async () => {
     const round = await w.service.getRound(id);
     max = Math.max(max, round.runs.filter(run => run.state === 'running').length);
-    return max >= 3 || round.status !== 'running';
-  }, { label: 'three running pilots' });
+    return max >= C.MAX_PILOTS_PER_ROUND || round.status !== 'running';
+  }, { label: 'five running pilots' });
   await sleep(300);
   const round = await w.service.getRound(id);
   max = Math.max(max, round.runs.filter(run => run.state === 'running').length);
-  assert.equal(max, 3);
+  assert.equal(max, C.MAX_PILOTS_PER_ROUND, 'a concurrency of 99 is held to the round cap');
   await w.service.cancelRound(id);
   await w.service.whenSettled(id);
 });
 
 /* ====================================================================== concurrency, one round, cancel */
 
-test('at most three pilots run at a time and a round of five completes', async t => {
+test('a round that asks for three at a time runs at most three at a time, and a round of five completes', async t => {
   const w = makeWorld(t, { resultText: GOLD_ANSWER, delayMs: 400 });
-  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5 } });
+  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5, concurrency: 3 } });
   await w.service.launchRound(id);
   let max = 0;
   let sawQueued = false;
@@ -1083,7 +1144,7 @@ test('at most three pilots run at a time and a round of five completes', async t
     const running = round.runs.filter(run => run.state === 'running').length;
     max = Math.max(max, running);
     if (round.runs.some(run => run.state === 'queued') && running === 3) sawQueued = true;
-    assert.ok(running <= C.LIMITS.concurrency, 'never more than three running');
+    assert.ok(running <= 3, 'never more than three running');
     if (round.status !== 'running') break;
     await sleep(10);
   }
@@ -1129,7 +1190,7 @@ test('only one round can run at a time', async t => {
 
 test('cancelling a running round stops the pilots and marks the round and its runs cancelled', async t => {
   const w = makeWorld(t, { hang: true });
-  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5 } });
+  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5, concurrency: 3 } });
   await w.service.launchRound(id);
   await waitFor(async () => (await w.service.getRound(id)).runs.filter(run => run.resolvedModel).length === 3, { label: 'three live pilots' });
   const cancelling = await w.service.cancelRound(id);
@@ -1343,12 +1404,15 @@ test('graderSim runs once without tools and without folder content, parses the J
   assert.deepEqual(args.slice(2), [
     '--model', 'claude-sonnet-5-5', '--effort', 'medium', '--output-format', 'stream-json', '--verbose', '--tools', '',
     '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+    '--max-budget-usd', '0.50',
   ]);
   assert.ok(!args.includes('--allowedTools'));
   const [env] = readJsonLines(w.envLog);
   assert.equal(path.dirname(env.cwd), w.pilots);
   assert.match(path.basename(env.cwd), /^gsim-[0-9a-f]{12}-1$/);
   assert.equal(env.TMPDIR, path.join(env.cwd, '.tmp'));
+  assert.equal(env.CLAUDE_CONFIG_DIR, path.join(env.cwd, '.tmp', 'claude-config'), 'a tool-less run keeps the runtime files in its folder too');
+  assert.equal(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
   assert.equal(fs.existsSync(env.cwd), false, 'the empty folder is removed afterwards');
   assert.deepEqual(fs.readdirSync(path.join(w.projectRoot, 'private')), [], 'nothing is persisted');
 });
@@ -1417,11 +1481,14 @@ test('authorReview runs once without tools, in an empty folder, and returns text
   assert.deepEqual(args.slice(2), [
     '--model', 'claude-haiku-5-5', '--effort', 'low', '--output-format', 'stream-json', '--verbose', '--tools', '',
     '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+    '--max-budget-usd', '0.50',
   ]);
   const [env] = readJsonLines(w.envLog);
   assert.equal(path.dirname(env.cwd), w.pilots);
   assert.match(path.basename(env.cwd), /^rev-[0-9a-f]{12}$/);
   assert.equal(env.TMPDIR, path.join(env.cwd, '.tmp'));
+  assert.equal(env.CLAUDE_CONFIG_DIR, path.join(env.cwd, '.tmp', 'claude-config'));
+  assert.equal(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
   assert.equal(fs.existsSync(env.cwd), false, 'the empty folder is removed afterwards');
   assert.deepEqual(fs.readdirSync(path.join(w.projectRoot, 'private')), [], 'nothing is persisted');
 });
@@ -1506,4 +1573,433 @@ test('the service hands out copies, so a caller cannot change stored state', asy
   assert.equal(again.status, 'frozen');
   assert.equal(again.freeze.gold.figures[0].value, '1,250');
   assert.equal(again.config.count, 1);
+});
+
+/* ====================================================================== the runtime's own files stay in the pilot folder */
+
+/* A synthetic stand-in for the writer's own runtime configuration folder (never the real one). */
+function writerConfig(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-runner-writer-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, '.credentials.json'), '{"synthetic": "not a real sign-in"}\n');
+  return dir;
+}
+
+function filesNamed(dir, name) {
+  const found = [];
+  const walk = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name === name) found.push(full);
+    }
+  };
+  walk(dir);
+  return found;
+}
+
+const SPILL = { spill: { bytes: 300 * 1024 }, resultText: GOLD_ANSWER };
+
+test('a large output the runtime saves and the pilot then reads stays inside the pilot folder, so the run is CLEAN', async t => {
+  const original = writerConfig(t);
+  const w = makeWorld(t, SPILL, { env: { CLAUDE_CONFIG_DIR: original } });
+  const id = await finishedRound(w);
+  const run = await w.service.getRun(id, 1);
+  const folder = path.join(w.pilots, `${id}-1`);
+  assert.equal(run.state, 'completed');
+  assert.equal(run.audit.status, 'CLEAN', JSON.stringify(run.audit.violations));
+  assert.deepEqual(run.toolCalls, { total: 2, bash: 1, file: 1 });
+  const spill = path.join(folder, '.tmp', 'claude-config', 'projects', cwdKeyFor(folder), 'stub-session', 'tool-results', 'toolu_stub_1.txt');
+  assert.equal(fs.statSync(spill).size, 300 * 1024, 'the runtime wrote the large output under the moved configuration folder');
+  const transcript = readJsonLines(path.join(w.projectRoot, 'private', 'agent-rounds', id, 'runs', '1', 'transcript.jsonl'));
+  const read = transcript.filter(event => event.type === 'assistant').flatMap(event => event.message.content).find(block => block.type === 'tool_use' && block.name === 'Read');
+  assert.equal(read.input.file_path, spill, 'the pilot read the saved file');
+  assert.deepEqual(fs.readdirSync(original), ['.credentials.json'], 'nothing was written into the writer\'s folder');
+  assert.deepEqual(filesNamed(folder, '.credentials.json'), [], 'the sign-in is never copied into the pilot folder');
+  const [env] = readJsonLines(w.envLog);
+  assert.equal(env.CLAUDE_CONFIG_DIR, path.join(folder, '.tmp', 'claude-config'));
+  assert.equal(env.CLAUDE_SECURESTORAGE_CONFIG_DIR, w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined ? w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR : original, 'the sign-in is read from the writer\'s folder');
+});
+
+test('the same large output with the configuration folder not moved lands in the writer\'s folder and DISCARDS the run', async t => {
+  const original = writerConfig(t);
+  /* The behaviour before the move: the runtime is handed the writer's own CLAUDE_CONFIG_DIR. */
+  const spawnFn = (bin, args, options) => childProcess.spawn(bin, args, { ...options, env: { ...options.env, CLAUDE_CONFIG_DIR: original } });
+  const w = makeWorld(t, SPILL, { env: { CLAUDE_CONFIG_DIR: original }, spawnFn });
+  const id = await finishedRound(w);
+  const run = await w.service.getRun(id, 1);
+  const folder = path.join(w.pilots, `${id}-1`);
+  assert.equal(run.state, 'completed');
+  assert.equal(run.audit.status, 'DISCARDED');
+  assert.deepEqual([...new Set(run.audit.violations.map(violation => violation.kind))], ['harness-spill']);
+  const spill = path.join(original, 'projects', cwdKeyFor(folder), 'stub-session', 'tool-results', 'toolu_stub_1.txt');
+  assert.equal(run.audit.violations[0].path, spill);
+  assert.ok(fs.existsSync(spill));
+  assert.equal(fs.existsSync(path.join(folder, '.tmp', 'claude-config', 'projects')), false);
+  await rejects(w.service.classifyRun(id, 1, { verdict: 'matches-frozen-gold' }), 409, /DISCARDED/);
+});
+
+test('the audit keeps the writer\'s folder as harness-spill and resolves the pilot variables as the pilot saw them', async t => {
+  const original = writerConfig(t);
+  const audited = async (command, extraEnv = {}) => {
+    const w = makeWorld(t, { toolUses: [{ name: 'Bash', input: { command } }], resultText: GOLD_ANSWER }, { env: { CLAUDE_CONFIG_DIR: original, ...extraEnv } });
+    const id = await finishedRound(w);
+    return (await w.service.getRun(id, 1)).audit;
+  };
+  assert.equal((await audited('ls $CLAUDE_CONFIG_DIR/projects')).status, 'CLEAN', 'the pilot\'s own configuration folder is inside the folder');
+  assert.equal((await audited('ls "$TMPDIR/claude-config"')).status, 'CLEAN');
+  const signIn = await audited('cat $CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json', { CLAUDE_SECURESTORAGE_CONFIG_DIR: original });
+  assert.equal(signIn.status, 'DISCARDED');
+  assert.deepEqual(signIn.violations.map(violation => violation.kind), ['harness-spill']);
+  const direct = await audited(`cat ${path.join(original, 'projects', 'x', 'tool-results', 'y.txt')}`);
+  assert.deepEqual(direct.violations.map(violation => violation.kind), ['harness-spill']);
+  /* with no CLAUDE_CONFIG_DIR the writer's folder is <HOME>/.claude of the environment the pilot inherits */
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-runner-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const fromHome = await audited(`cat ${path.join(home, '.claude', 'projects', 'x', 'tool-results', 'y.txt')}`, { CLAUDE_CONFIG_DIR: '', HOME: home });
+  assert.deepEqual(fromHome.violations.map(violation => violation.kind), ['harness-spill']);
+});
+
+/* ====================================================================== prompt delivery and the strict stub */
+
+function runStub(args, extraEnv = {}, input) {
+  const result = childProcess.spawnSync(process.execPath, [STUB, ...args], { env: { ...process.env, FINANCE_STUB_SCENARIO: '', ...extraEnv }, input: input === undefined ? '' : input, encoding: 'utf8', timeout: 15000 });
+  return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+test('promptVia stdin: the prompt leaves the argument list, --input-format text is added, and ClaudeRun writes it to stdin', async t => {
+  const prompt = 'Synthetic prompt delivered on stdin.';
+  const stdinArgs = buildArgs({ prompt, model: 'claude-haiku-5-5', effort: 'low', tools: [], promptVia: 'stdin' });
+  assert.deepEqual(stdinArgs, ['-p', '--model', 'claude-haiku-5-5', '--effort', 'low', '--output-format', 'stream-json', '--verbose', '--tools', '',
+    '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+    '--max-budget-usd', '0.50', '--input-format', 'text']);
+  assert.ok(!stdinArgs.includes(prompt));
+  assert.deepEqual(buildArgs({ prompt, model: 'claude-haiku-5-5', effort: 'low', tools: [] }), buildArgs({ prompt, model: 'claude-haiku-5-5', effort: 'low', tools: [], promptVia: 'argv' }), 'argv is the default');
+
+  const dir = tempDir(t);
+  const promptLog = path.join(dir, 'prompt.log');
+  const env = { ...process.env, FINANCE_STUB_SCENARIO: JSON.stringify({ echoPrompt: true }), FINANCE_STUB_PROMPT_LOG: promptLog };
+  const viaStdin = await new ClaudeRun({ bin: STUB, args: stdinArgs, cwd: dir, env, promptVia: 'stdin', prompt }).start();
+  assert.equal(viaStdin.state, 'completed', viaStdin.stderrTail);
+  assert.equal(viaStdin.result.text, prompt);
+  const viaArgv = await new ClaudeRun({ bin: STUB, args: buildArgs({ prompt, model: 'claude-haiku-5-5', effort: 'low', tools: [] }), cwd: dir, env }).start();
+  assert.equal(viaArgv.state, 'completed', viaArgv.stderrTail);
+  assert.equal(viaArgv.result.text, prompt);
+  assert.deepEqual(readJsonLines(promptLog), [{ via: 'stdin', prompt }, { via: 'argv', prompt }]);
+
+  /* the stdin argument list without the prompt on stdin is refused by the runtime, as the real CLI does */
+  const missing = await new ClaudeRun({ bin: STUB, args: stdinArgs, cwd: dir, env }).start();
+  assert.equal(missing.state, 'failed');
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderrTail, /Input must be provided either through stdin or as a prompt argument/);
+  assert.throws(() => new ClaudeRun({ bin: STUB, args: stdinArgs, cwd: dir, env, promptVia: 'stdin' }), /prompt is required on stdin/);
+  assert.throws(() => new ClaudeRun({ bin: STUB, args: stdinArgs, cwd: dir, env, promptVia: 'pipe', prompt }), /stdin/);
+});
+
+test('promptVia stdin on a fake child: stdin is a pipe that receives the prompt and is closed; argv keeps stdin closed', async () => {
+  const fake = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.pid = 4545;
+    child.kill = () => true;
+    child.written = '';
+    child.ended = false;
+    child.stdin.on('data', chunk => { child.written += chunk; });
+    child.stdin.on('end', () => { child.ended = true; });
+    return child;
+  };
+  for (const [promptVia, stdio0] of [['stdin', 'pipe'], ['argv', 'ignore']]) {
+    const child = fake();
+    let options = null;
+    const run = new ClaudeRun({ bin: '/fake/claude', args: ['-p'], cwd: '/fake', env: {}, promptVia, prompt: 'the prompt', spawnFn: (bin, args, spawnOptions) => { options = spawnOptions; return child; } });
+    const done = run.start();
+    child.stdout.write('{"type":"result","result":"ok"}\n');
+    await sleep(20);
+    child.emit('close', 0, null);
+    await done;
+    assert.equal(options.stdio[0], stdio0, promptVia);
+    assert.equal(child.written, promptVia === 'stdin' ? 'the prompt' : '', promptVia);
+    assert.equal(child.ended, promptVia === 'stdin', promptVia);
+  }
+});
+
+test('the stub refuses options it does not know, like the real CLI, and knows exactly the flags buildArgs uses', () => {
+  const unknown = runStub(['-p', 'x', '--dangerously-skip-permissions']);
+  assert.equal(unknown.code, 1);
+  assert.equal(unknown.stderr, "error: unknown option '--dangerously-skip-permissions'\n");
+  assert.equal(unknown.stdout, '');
+  assert.equal(runStub(['-p', 'x', '--model']).stderr, "error: option '--model <model>' argument missing\n");
+  assert.equal(runStub(['-p', 'x', '--output-format', 'yaml']).stderr, "error: option '--output-format <format>' argument 'yaml' is invalid. Allowed choices are text, json, stream-json.\n");
+  assert.match(runStub(['-p', 'x', '--max-budget-usd', '0']).stderr, /--max-budget-usd must be a positive number/);
+  assert.equal(runStub(['-p', 'x', '--max-budget-usd', '0']).code, 1);
+  assert.equal(runStub(['--version']).stdout, '0.0.0-stub\n');
+
+  /* --help lists the flags buildArgs uses (with the real aliases) and nothing else */
+  const help = runStub(['--help']);
+  assert.equal(help.code, 0);
+  assert.deepEqual([...parseHelpFlags(help.stdout)].sort(), [...REQUIRED_FLAGS, '--print', '--allowed-tools', '-h', '--help', '-v', '--version'].sort());
+
+  /* every list buildArgs makes runs against it */
+  const lists = [
+    buildArgs({ prompt: 'p', model: 'claude-opus-5-5', effort: 'medium', tools: C.TOOLS }),
+    buildArgs({ prompt: 'p', model: 'claude-opus-5-5', effort: 'max', tools: [], maxBudgetUsd: 20 }),
+    buildArgs({ prompt: 'p', model: 'claude-haiku-5-5', effort: 'low', tools: ['Read'], promptVia: 'stdin' }),
+  ];
+  for (const args of lists) {
+    const ran = runStub(args, { FINANCE_STUB_SCENARIO: JSON.stringify({ resultText: 'fine' }) }, 'p');
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.match(ran.stdout, /"result":"fine"/);
+  }
+
+  /* an "older CLI" without a flag leaves it out of --help and refuses it */
+  const older = { FINANCE_STUB_HELP_DROP: '--max-budget-usd' };
+  assert.equal(parseHelpFlags(runStub(['--help'], older).stdout).has('--max-budget-usd'), false);
+  assert.equal(runStub(lists[0], older).stderr, "error: unknown option '--max-budget-usd'\n");
+});
+
+/* ====================================================================== round speed: one wave, carry forward, pre-flight */
+
+const { freezeContentSha256 } = require('../backend/agents/rounds.cjs');
+
+test('by default every pilot of a round starts at once: a round of five is one wave', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER, delayMs: 600 });
+  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5 } });
+  assert.equal((await w.service.getRound(id)).config.concurrency, 5, 'the default is the number of pilots');
+  const { summary } = await w.service.approvalSummary(id);
+  assert.ok(summary.includes('Pilots: 5 (at most 5 per round; all 5 at once)'), summary);
+  assert.ok(summary.includes('Waves: 1 (every pilot starts at once, so the round ends within about 50 minutes)'), summary);
+  await w.service.launchRound(id);
+  let max = 0;
+  let waited = false;
+  for (;;) {
+    const round = await w.service.getRound(id);
+    max = Math.max(max, round.runs.filter(run => run.state === 'running').length);
+    if (round.runs.some(run => run.state === 'queued') && round.runs.some(run => run.state === 'completed')) waited = true;
+    if (round.status !== 'running') break;
+    await sleep(10);
+  }
+  assert.equal(max, 5, 'all five ran together');
+  assert.equal(waited, false, 'no pilot waited for another to finish');
+  const round = await w.service.getRound(id);
+  const firstEnd = Math.min(...round.runs.map(run => Date.parse(run.endedAt)));
+  assert.ok(round.runs.every(run => Date.parse(run.startedAt) <= firstEnd), 'every pilot started before the first one ended');
+  assert.deepEqual(round.runs.map(run => run.state), ['completed', 'completed', 'completed', 'completed', 'completed']);
+  assert.equal(promptRuns(w.argvLog).length, 5);
+});
+
+test('a round can ask for fewer pilots at a time, never more than it has; the store limit lowers it further; the approval says which', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER, delayMs: 300 });
+  const config = extra => ({ config: { model: 'claude-opus-5-5', effort: 'medium', count: 3, ...extra } });
+  for (const concurrency of [0, 4, 1.5, '2', null, -1, true]) await rejects(newRound(w, config({ concurrency })), 400, /at a time/);
+  const id = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 4, concurrency: 2 } });
+  const { summary } = await w.service.approvalSummary(id);
+  assert.ok(summary.includes('Pilots: 4 (at most 5 per round; at most 2 at a time)'), summary);
+  assert.ok(summary.includes('Waves: 2 (2 at a time, so the round can take up to about 100 minutes)'), summary);
+  await w.service.launchRound(id);
+  let max = 0;
+  for (;;) {
+    const round = await w.service.getRound(id);
+    max = Math.max(max, round.runs.filter(run => run.state === 'running').length);
+    if (round.status !== 'running') break;
+    await sleep(10);
+  }
+  assert.equal(max, 2);
+  assert.equal((await w.service.getRound(id)).status, 'finished');
+
+  /* a store whose limit is lower than the round's wish runs at that limit, and its summary says so */
+  const limited = w.make({ limits: { concurrency: 2 } });
+  const round = await limited.createRound(roundBody(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5 } }));
+  await limited.freezeRound(round.id, GOLD);
+  assert.ok((await limited.approvalSummary(round.id)).summary.includes('Pilots: 5 (at most 5 per round; at most 2 at a time)'));
+  assert.ok((await limited.approvalSummary(round.id)).summary.includes('Waves: 3 (2 at a time, so the round can take up to about 150 minutes)'));
+});
+
+test('a freeze carries a content hash without its time stamp: the same gold frozen at two times has one contentSha256', async t => {
+  const w = makeWorld(t);
+  const january = w.make({ clock: () => new Date('2026-01-01T00:00:00.000Z') });
+  const february = w.make({ clock: () => new Date('2026-02-01T00:00:00.000Z') });
+  const a = await january.createRound(roundBody(w));
+  const b = await february.createRound(roundBody(w));
+  const first = (await january.freezeRound(a.id, GOLD)).freeze;
+  const second = (await february.freezeRound(b.id, GOLD)).freeze;
+  assert.notEqual(first.sha256, second.sha256, 'the freeze hash covers the time stamp');
+  assert.match(first.contentSha256, /^[0-9a-f]{64}$/);
+  assert.equal(first.contentSha256, second.contentSha256, 'the content hash does not');
+  assert.equal(first.contentSha256, freezeContentSha256({ gold: first.gold, fingerprints: first.fingerprints }));
+  const changed = (await february.freezeRound(b.id, { ...GOLD, gold: { ...GOLD.gold, notes: 'Synthetic gold, edited' } })).freeze;
+  assert.notEqual(changed.contentSha256, first.contentSha256);
+  assert.ok((await january.approvalSummary(a.id)).summary.includes(`Freeze content sha256 (gold and fingerprints, without the time stamp): ${first.contentSha256}`));
+  const stored = JSON.parse(fs.readFileSync(path.join(w.projectRoot, 'private', 'agent-rounds', a.id, 'freeze.json'), 'utf8'));
+  assert.equal(stored.contentSha256, first.contentSha256, 'the stored freeze carries it, under its sha256');
+});
+
+test('the next round from a finished one is a new draft carrying packet selection, prompt, gaf setting, settings, gold and fingerprints; it still needs its own freeze and approval', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  w.put('gaf/Template_Layout.txt', 'synthetic template');
+  w.put('Answer_Key.txt', 'synthetic, overridden on purpose');
+  const first = await finishedRound(w, {
+    label: 'first round',
+    gafVisible: false,
+    include: ['Cash_Facts.csv', 'Facility_Terms.txt', 'Answer_Key.txt', 'gaf/Template_Layout.txt'],
+    overrides: ['Answer_Key.txt'],
+    config: { model: 'claude-sonnet-5-5', effort: 'high', count: 2, maxBudgetUsd: 1.25, concurrency: 1 },
+    versions: { prompt: 'p-1', workbook: 'w-1', evaluator: 'e-1' },
+  });
+  const posthoc = { gold: { ...GOLD.gold, notes: 'Synthetic post-hoc notes' }, fingerprints: GOLD.fingerprints };
+  await w.service.refreezeRound(first, posthoc);
+  const previous = await w.service.getRound(first);
+  const latest = previous.postHocFreezes[0];
+  const started = promptRuns(w.argvLog).length;
+
+  const next = await w.service.nextRound(first);
+  assert.notEqual(next.id, first);
+  assert.equal(next.status, 'draft');
+  assert.equal(next.carriedFrom, first);
+  assert.equal(next.freeze, null, 'nothing is frozen by carrying forward');
+  assert.equal(next.approval, null, 'nothing is approved by carrying forward');
+  assert.deepEqual(next.runs, []);
+  assert.equal(next.label, 'first round');
+  assert.equal(next.packet.sourceDir, previous.packet.sourceDir);
+  assert.equal(next.packet.promptText, PROMPT);
+  assert.equal(next.packet.gafVisible, false);
+  const selection = round => round.packet.files.filter(file => file.include).map(file => [file.path, file.overridden]);
+  assert.deepEqual(selection(next), selection(previous));
+  assert.equal(next.packet.packetSha256, previous.packet.packetSha256);
+  assert.deepEqual(next.config, previous.config);
+  assert.deepEqual(next.versions, previous.versions);
+  assert.deepEqual(next.carried, {
+    roundId: first, status: 'finished', freezeVersion: 2, postHoc: true, freezeSha256: latest.sha256, contentSha256: latest.contentSha256,
+    packetSha256: previous.packet.packetSha256, promptSha256: previous.packet.promptSha256, gafVisible: false, config: previous.config,
+    content: { gold: latest.gold, fingerprints: latest.fingerprints },
+  }, 'the latest freeze version is carried, with both of its hashes');
+  assert.deepEqual(next.carryChanges, { packet: false, prompt: false, gafVisible: false, settings: false, freezeContent: null });
+  assert.equal((await w.service.listRounds()).find(row => row.id === next.id).carriedFrom, first);
+
+  /* carrying forward never skips a step */
+  await rejects(w.service.approvalSummary(next.id), 409, /Freeze/);
+  await rejects(w.service.approveRound(next.id, { summarySha256: 'x', acknowledgements: ACK }), 409, /Freeze/);
+  await rejects(w.service.launchRound(next.id), 409, /Approve/);
+  const frozen = await w.service.freezeRound(next.id, next.carried.content);
+  assert.equal(frozen.status, 'frozen');
+  assert.notEqual(frozen.freeze.sha256, latest.sha256, 'its own freeze, with its own time stamp');
+  assert.equal(frozen.freeze.contentSha256, latest.contentSha256, 'the same content');
+  assert.equal(frozen.carryChanges.freezeContent, false);
+  const { summary } = await w.service.approvalSummary(next.id);
+  assert.ok(summary.includes(`Carried forward from round ${first} (its freeze version 2, post-hoc: sha256 ${latest.sha256}, content sha256 ${latest.contentSha256})`), summary);
+  assert.ok(summary.includes(`Gold and fingerprints compared with round ${first}: unchanged`));
+  assert.ok(summary.includes(`Other changes from round ${first}: none`));
+  await rejects(w.service.launchRound(next.id), 409, /Approve/);
+  assert.equal(promptRuns(w.argvLog).length, started, 'nothing was started');
+  assert.deepEqual(await w.service.getRound(first), previous, 'the earlier round is unchanged');
+  assert.equal((await w.make().getRound(next.id)).carriedFrom, first, 'the lineage is stored');
+});
+
+test('a carried-forward round reports what changed, and carrying forward refuses what it cannot carry', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const first = await finishedRound(w);
+  fs.appendFileSync(path.join(w.source, 'Cash_Facts.csv'), 'Late synthetic row,1\n');
+  const next = await w.service.nextRound(first);
+  assert.equal(next.carryChanges.packet, true, 'the packet is read again, so a changed file shows');
+  const frozen = await w.service.freezeRound(next.id, { ...GOLD, gold: { ...GOLD.gold, decision: 'hold; defer' } });
+  assert.notEqual(frozen.freeze.contentSha256, next.carried.contentSha256);
+  assert.equal(frozen.carryChanges.freezeContent, true);
+  const { summary } = await w.service.approvalSummary(next.id);
+  assert.ok(summary.includes(`Gold and fingerprints compared with round ${first}: changed`));
+  assert.ok(summary.includes(`Other changes from round ${first}: packet files`));
+
+  /* a round made from the form after edits names the round it was carried from */
+  const edited = await w.service.createRound(roundBody(w, { promptText: PROMPT + ' Also state the caveat.', config: { model: 'claude-opus-5-5', effort: 'low', count: 1 }, carriedFrom: first }));
+  assert.equal(edited.carriedFrom, first);
+  assert.deepEqual(edited.carryChanges, { packet: true, prompt: true, gafVisible: false, settings: true, freezeContent: null });
+  const plain = await newRound(w);
+  assert.equal(plain.carriedFrom, null);
+  assert.equal(plain.carried, null);
+  assert.equal(plain.carryChanges, null);
+
+  await rejects(w.service.createRound(roundBody(w, { carriedFrom: 'not-a-round' })), 400, /carriedFrom/);
+  await rejects(w.service.createRound(roundBody(w, { carriedFrom: ['rnd-000000000000'] })), 400, /carriedFrom/);
+  await rejects(w.service.createRound(roundBody(w, { carriedFrom: 'rnd-000000000000' })), 404);
+  await rejects(w.service.createRound(roundBody(w, { carriedFrom: plain.id })), 409, /no freeze/);
+  await rejects(w.service.nextRound(plain.id), 409, /no freeze/);
+  await rejects(w.service.nextRound('rnd-000000000000'), 404);
+  await rejects(w.service.nextRound('../x'), 400);
+  const before = (await w.service.listRounds()).length;
+  fs.rmSync(path.join(w.source, 'Facility_Terms.txt'));
+  await rejects(w.service.nextRound(first), 409, /cannot be carried forward as it was/);
+  assert.equal((await w.service.listRounds()).length, before, 'nothing was created');
+});
+
+test('the pre-flight can be asked for before approval: it names a missing option or a missing sign-in and starts no model', async t => {
+  const ok = makeWorld(t, { resultText: GOLD_ANSWER });
+  const id = await frozenRound(ok);
+  const result = await ok.service.preflightRound(id);
+  assert.equal(result.ok, true);
+  assert.equal(result.roundId, id);
+  assert.equal(typeof result.version, 'string');
+  assert.equal(result.checks.length, 2);
+  const invocations = readJsonLines(ok.argvLog);
+  assert.ok(invocations.some(args => args.includes('--help')), 'claude --help was read');
+  assert.ok(invocations.some(args => args[0] === 'auth' && args[1] === 'status'), 'claude auth status was asked');
+  assert.equal(promptRuns(ok.argvLog).length, 0, 'no model was started');
+  assert.equal((await ok.service.getRound(id)).status, 'frozen', 'the check changes nothing');
+  assert.equal(fs.readdirSync(ok.tmpRoot).filter(name => name.startsWith('finance-studio-preflight-')).length, 0, 'its folder is removed');
+
+  const loggedOut = makeWorld(t, {}, { env: { FINANCE_STUB_AUTH: 'logged-out' } });
+  await rejects(loggedOut.service.preflightRound(await frozenRound(loggedOut)), 409, /not signed in/);
+  const older = makeWorld(t, {}, { env: { FINANCE_STUB_HELP_DROP: '--max-budget-usd' } });
+  await rejects(older.service.preflightRound(await frozenRound(older)), 409, /does not list --max-budget-usd/);
+  const missing = ok.make({ claudeBin: path.join(ok.base, 'no-such-claude') });
+  await rejects(missing.preflightRound(id), 409, /was not found/);
+  await rejects(ok.service.preflightRound('rnd-000000000000'), 404);
+  assert.equal(promptRuns(loggedOut.argvLog).length + promptRuns(older.argvLog).length, 0);
+});
+
+test('the companion port reaches the audit: a pilot that calls it, on any host name, is DISCARDED once the port is known', async t => {
+  const port = 43219;
+  const scenario = { toolUses: [{ name: 'Bash', input: { command: `curl -s http://studio.invalid:${port}/api/status` } }], resultText: GOLD_ANSWER };
+  const unknown = makeWorld(t, scenario);
+  const before = await finishedRound(unknown);
+  assert.equal((await unknown.service.getRun(before, 1)).audit.status, 'CLEAN', 'without the port a remote address is not loopback');
+
+  const told = makeWorld(t, scenario);
+  await told.service.setCompanionPort(port);
+  const after = await finishedRound(told);
+  const run = await told.service.getRun(after, 1);
+  assert.equal(run.audit.status, 'DISCARDED');
+  assert.deepEqual(run.audit.violations.map(violation => violation.kind), ['loopback']);
+  for (const value of [0, 65536, 1.5, '43219', null, undefined]) await rejects(told.service.setCompanionPort(value), 400, /companion port/);
+
+  /* the same through the constructor option */
+  const viaOption = unknown.make({ companionPort: port });
+  const round = await viaOption.createRound(roundBody(unknown));
+  await viaOption.freezeRound(round.id, GOLD);
+  await viaOption.approveRound(round.id, { summarySha256: (await viaOption.approvalSummary(round.id)).summarySha256, acknowledgements: ACK });
+  await viaOption.launchRound(round.id);
+  await viaOption.whenSettled(round.id);
+  assert.equal((await viaOption.getRun(round.id, 1)).audit.status, 'DISCARDED');
+});
+
+test('the service keeps its own copy of the overlap rule: no grader or review while a round runs, no launch while one of them runs', { timeout: 30000 }, async t => {
+  const w = makeWorld(t, { hang: true }, { limits: { killGraceMs: 200 } });
+  const running = await approvedRound(w);
+  await w.service.launchRound(running);
+  await waitFor(() => promptRuns(w.argvLog).length === 1, { label: 'the pilot to start' });
+  await rejects(w.service.graderSim({ guidelineText: 'g', answerText: 'a' }), 409, /round of pilots is running/);
+  await rejects(w.service.authorReview({ packageText: 'x' }), 409, /round of pilots is running/);
+  assert.equal(promptRuns(w.argvLog).length, 1, 'nothing else was started');
+  await w.service.cancelRound(running);
+  await w.service.whenSettled(running);
+
+  const waiting = await approvedRound(w);
+  const grading = w.service.graderSim({ guidelineText: 'You are grading an answer.', answerText: 'An answer.' });
+  await waitFor(() => promptRuns(w.argvLog).length === 2, { label: 'the simulated grader to start' });
+  await rejects(w.service.launchRound(waiting), 409, /simulated grader or an author review is still running/);
+  assert.equal((await w.service.getRound(waiting)).status, 'approved');
+  await w.service.shutdown();
+  assert.equal((await grading).results[0].state, 'cancelled');
+  await w.service.launchRound(waiting);
+  await w.service.cancelRound(waiting);
+  await w.service.whenSettled(waiting);
 });

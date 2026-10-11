@@ -19,8 +19,13 @@
 /* Agents page. Classes are ag-*; no inline styles anywhere (the page CSP forbids them). */
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .ag-root{min-width:0}.ag-root .card h3{margin-top:22px}.ag-root .card-title h2{margin-bottom:0}
-.ag-status{position:sticky;top:0;z-index:5;margin:0 0 18px;padding:11px 16px;border-left:3px solid #7f9c71;background:#edf3ec;border-radius:0 8px 8px 0;font-size:.86rem;line-height:1.5;overflow-wrap:anywhere}
+.ag-top{position:sticky;top:0;z-index:5;margin:0 0 18px;background:var(--paper);padding-top:4px}
+.ag-strip{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:9px 16px;border:1px solid var(--line);border-radius:10px;background:var(--white);font-size:.84rem;line-height:1.5;min-width:0}
+.ag-strip-item{min-width:0;overflow-wrap:anywhere}.ag-strip-item .pill{margin-left:4px}.ag-strip-other{color:var(--amber);font-weight:650}
+.ag-status{margin:8px 0 0;padding:11px 16px;border-left:3px solid #7f9c71;background:#edf3ec;border-radius:0 8px 8px 0;font-size:.86rem;line-height:1.5;overflow-wrap:anywhere}
 .ag-status.error{border-color:#b35b48;background:#fcecea;color:var(--red)}.ag-status:empty{display:none}
+.ag-draft{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;margin:0 0 18px}.ag-draft p{margin:0;font-size:.82rem;min-width:0;flex:1 1 260px}
+.ag-spend{display:block;margin-top:9px;font-size:1rem}.ag-why:empty{display:none}
 .ag-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px}.ag-row .field{margin-bottom:0}.ag-grow{flex:1 1 280px;min-width:0}
 .ag-count{font-size:.8rem;color:var(--muted);margin:0}.ag-count.over{color:var(--amber);font-weight:650}
 .ag-path{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.78rem;overflow-wrap:anywhere;word-break:break-all}
@@ -44,7 +49,7 @@
 .ag-chip[aria-pressed="true"]{background:var(--green);color:#fff;border-color:var(--green)}.ag-chip[aria-pressed="true"] small{color:#dfecc5}
 .ag-offline{max-width:640px}
 @media(max-width:700px){
-  .ag-status{margin-bottom:14px}
+  .ag-top{margin-bottom:14px}.ag-strip{padding:8px 12px;gap:4px 12px}
   .ag-figrow{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.ag-figrow .field:first-child{grid-column:1/-1}.ag-figrow button{grid-column:1/-1;justify-self:start}
   .ag-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
   .ag-table,.ag-table tbody,.ag-table tr,.ag-table td{display:block;width:100%}

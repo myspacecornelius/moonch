@@ -2,9 +2,12 @@
    to an existing browser. It starts backend/server.cjs as a child process on a free port with CLAUDE_BIN pointing at the test double
    backend/agents/stub-claude.cjs, so no model is ever started. Everything it types is synthetic.
 
-   Flow: offline edition message, inspect a synthetic packet folder (with a hostile file name), freeze, stepper cap, stale freeze,
-   approve and launch 2 pilots, classify both, export. Then the server is restarted with the stub's violation scenario and a second
-   round produces a DISCARDED run, which must not be classifiable or exported.
+   Flow: offline edition message, inspect a synthetic packet folder (with a hostile file name), settings above the freeze (five pilots
+   by default, the spending cap and the round maximum), freeze, stepper cap, stale freeze, the pre-flight before approval, approve and
+   launch 5 pilots that run in one wave, the status strip and the tab title counting them, classify two, export, then "Start next
+   round from this round" (a new draft with carriedFrom, frozen with the same content hash). Then the server is restarted with the
+   stub's violation scenario: a reload restores the form kept in the browser, and a second round produces a DISCARDED run, which
+   must not be classifiable or exported.
 
    The companion runs from a private copy of the files it serves, made in the system temporary folder, so round state is written
    there and the project's own private/ folder is never read or written.
@@ -21,8 +24,8 @@ const stub=path.join(root,'backend','agents','stub-claude.cjs');
    simulated grader and the author review run in folders that pick scenario 1. The second server run makes a call outside the folder. */
 const SCENARIO_ENV='FINANCE_STUB_SCENARIO';
 const SCENARIO_CLEAN=JSON.stringify([
-  {resultText:'Decision: approve. Units owed: 2,480. {"verdict":"meets-guidance","reason":"The answer states the guided figure."}',writeFiles:[{path:'outputs/answer.txt',content:'approve 2,480\n'}]},
-  {resultText:'Hold the transfer. Units owed: 2,915. {"verdict":"does-not-meet-guidance","reason":"The figure differs."}',writeFiles:[{path:'outputs/answer.txt',content:'hold 2,915\n'}]}
+  {resultText:'Decision: approve. Units owed: 2,480. {"verdict":"meets-guidance","reason":"The answer states the guided figure."}',writeFiles:[{path:'outputs/answer.txt',content:'approve 2,480\n'}],delayMs:4000},
+  {resultText:'Hold the transfer. Units owed: 2,915. {"verdict":"does-not-meet-guidance","reason":"The figure differs."}',writeFiles:[{path:'outputs/answer.txt',content:'hold 2,915\n'}],delayMs:4000}
 ]);
 const SCENARIO_DISCARD=JSON.stringify({toolUses:[{name:'Read',input:{file_path:'/etc/hosts'},result:'synthetic'}],resultText:'Decision: approve. Units owed: 2,480.'});
 const HOSTILE_NAME='<img src=x onerror=alert(1)>.txt';
@@ -114,9 +117,15 @@ async function fillPacketAndFreeze(options){
   for(const phrase of ['No account or model needed','Sources stay in this browser'])assert.ok(!pageText.includes(phrase),'the companion-served page must not say "'+phrase+'"');
   assert.match(pageText,/No model runs until you approve a round or a review/);assert.match(pageText,/Sources stay on this computer/);
   checks.push('the companion-served page says models run only after approval, not that none run');
+  assert.equal(await evaluate('Boolean(document.querySelector("#ag-settings").compareDocumentPosition(document.querySelector("#ag-freeze"))&Node.DOCUMENT_POSITION_FOLLOWING)'),true,'the settings card comes before the freeze card');
+  assert.equal(await evaluate('document.querySelector("#ag-count").value'),'5','five pilots by default');
+  assert.match(await text('#ag-roundmax'),/USD 15\.00 \(5 × USD 3\.00\)/);
+  assert.match(await text('#ag-settings'),/All 5 at once/);
+  assert.match(await text('#ag-strip'),/No round selected/);
+  checks.push('model, effort, pilots (five by default), pilots at a time and the spending cap sit above the freeze, with the round maximum spend');
 
   /* 3. Packet: inspect, hostile name renders as text, defaults, overrides and the gaf toggle. */
-  await fillPacketAndFreeze({pilots:2});
+  await fillPacketAndFreeze({pilots:5});
   const names=await evaluate('[...document.querySelectorAll("#ag-packet .ag-path")].map(el=>el.textContent)');
   assert.ok(names.includes(HOSTILE_NAME),'hostile file name must render as literal text');
   assert.equal(await evaluate('document.querySelectorAll("#ag-root img").length'),0,'hostile name must not create an element');
@@ -141,7 +150,7 @@ async function fillPacketAndFreeze(options){
   assert.equal(await evaluate('document.querySelector("#ag-count").value'),String(await evaluate('Number(document.querySelector("#ag-count").max)')),'stepper stops at the cap');
   assert.equal(await evaluate('document.querySelector("[data-ag=count-inc]").disabled'),true);
   await setValue('#ag-count','99');assert.equal(await evaluate('Number(document.querySelector("#ag-count").value)'),await evaluate('Number(document.querySelector("#ag-count").max)'),'typed values are clamped to the cap');
-  await setValue('#ag-count','2');
+  await setValue('#ag-count','5');
   assert.match(await text("#ag-round"),/not by an operating system sandbox/);assert.match(await text('#ag-round'),/shell commands as your user account/);
   checks.push('launch disabled until frozen; pilots stepper capped at the status maximum; isolation and shell statements printed in the round card');
 
@@ -162,6 +171,7 @@ async function fillPacketAndFreeze(options){
   await click('[data-ag="open-approve"]');
   await waitFor('!!document.querySelector("#agents-modal [role=dialog]")','approval dialog');
   const dialog=await text('#agents-modal');assert.match(dialog,/Approve and launch this round/);assert.match(dialog,/claude-sonnet-5-5/);assert.match(dialog,/Overridden files/);assert.match(dialog,/evaluator-notes\.txt/);
+  assert.match(dialog,/Claude Code is ready\./,'the pre-flight ran before the dialog opened');assert.match(dialog,/Round maximum spend\s*USD 15\.00/);assert.match(dialog,/all 5 at once, one wave/);assert.match(dialog,/USD 3\.00 \(--max-budget-usd 3\.00\)/);
   const command=await text('#agents-modal .ag-command');assert.match(command,/claude/i);assert.match(command,/--model/);assert.ok(!command.includes('Atlas'),'the command summary elides the prompt');
   assert.equal(await evaluate('document.querySelectorAll("#agents-modal input[type=checkbox]").length'),3);
   assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=approve-launch]").disabled'),true);
@@ -170,15 +180,23 @@ async function fillPacketAndFreeze(options){
   await screenshot('desktop-approval',1440,1000);
   await click('#agents-modal [data-ag="approve-launch"]');
   await waitFor('!document.querySelector("#agents-modal [role=dialog]")','dialog closed after launch');
-  await waitFor('document.querySelectorAll("#ag-runs tbody tr").length===2','two pilot rows');
-  checks.push('approval dialog needs three checkboxes, shows the command line with the prompt elided and the override list, then launches 2 pilots');
+  await waitFor('document.querySelectorAll("#ag-runs tbody tr").length===5','five pilot rows');
+  checks.push('approval dialog checks Claude Code first (no model), shows the cap per pilot, the round maximum and one wave, needs three checkboxes, shows the command line with the prompt elided and the override list, then launches 5 pilots');
+  await waitFor('[...document.querySelectorAll("#ag-runs tbody tr")].filter(tr=>tr.children[1].textContent.trim()==="running").length===5','all five pilots running at the same time',20000);
+  assert.match(await text('#ag-strip'),/Pilots 5: done 0 · running 5 · failed 0/);
+  assert.equal(await evaluate('document.title'),'(0/5) Agents · Finance Task Studio','the tab title counts the pilots');
+  await screenshot('desktop-one-wave',1440,1000);
+  checks.push('all five pilots run at once (one wave): the status strip shows 5 running and the tab title reads (0/5) Agents');
 
   /* 7. Runs table, banner, drawer, classification. */
   await waitFor('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>/completed|failed|cancelled/.test(tr.children[1].textContent))','pilots to finish',120000);
-  const runsText=await text('#ag-runs');assert.match(runsText,/Directional only, n = 2\. No rate or difficulty is computed\./);assert.ok(!runsText.includes('%'),'no percentage anywhere in the runs card');assert.ok(!/pass rate|success rate|failure rate/i.test(runsText),'no rate wording');
+  await waitFor('document.title==="(5/5) Agents · Finance Task Studio"','the title to count five of five');
+  assert.match(await text('#ag-strip'),/Pilots 5: done 5 · running 0 · failed 0/);assert.match(await text('#ag-strip'),/Elapsed \d+m \d\ds/);
+  checks.push('the status strip and the tab title update as the pilots end: (5/5) Agents, done 5, elapsed time');
+  const runsText=await text('#ag-runs');assert.match(runsText,/Directional only, n = 5\. No rate or difficulty is computed\./);assert.ok(!runsText.includes('%'),'no percentage anywhere in the runs card');assert.ok(!/pass rate|success rate|failure rate/i.test(runsText),'no rate wording');
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[1].textContent.trim()==="completed")'),true,'both pilots completed');
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[5].textContent.trim()==="CLEAN")'),true,'both pilots audited CLEAN');
-  checks.push('both pilots finish; the banner reads directional only, n = 2; no percentage or pass rate is shown');
+  checks.push('all five pilots finish; the banner reads directional only, n = 5; no percentage or pass rate is shown');
   await focusClick('#ag-runs [data-ag-key="run-1"]');
   await waitFor('!!document.querySelector("#agents-modal .ag-drawer")&&!!document.querySelector("#agents-modal .ag-final")','drawer with final answer');
   assert.ok((await text('#agents-modal .ag-final')).trim().length>0,'final answer is shown');
@@ -200,8 +218,8 @@ async function fillPacketAndFreeze(options){
   assert.equal(await evaluate('document.querySelector("#agents-modal .ag-chip[data-id=fp-beta]").getAttribute("aria-pressed")'),'false');
   await click('#agents-modal [data-ag="save-class"]');await waitFor('/Lands on a frozen fingerprint/.test(document.querySelector("#ag-runs").textContent)','verdicts in table');
   await click('#agents-modal [data-ag="close-overlay"]');
-  assert.match(await text('#ag-runs'),/Your verdicts so far \(directional only, n = 2\)/);assert.match(await text('#ag-runs'),/Matches the frozen gold 1/);
-  assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].map(tr=>tr.children[7].textContent.trim()).join("|")'),'Matches the frozen gold|Lands on a frozen fingerprint','the table lists each saved verdict');
+  assert.match(await text('#ag-runs'),/Your verdicts so far \(directional only, n = 5\)/);assert.match(await text('#ag-runs'),/Matches the frozen gold 1/);
+  assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].map(tr=>tr.children[7].textContent.trim()).join("|")'),'Matches the frozen gold|Lands on a frozen fingerprint|Not classified|Not classified|Not classified','the table lists each saved verdict');
   checks.push('detail drawer shows final answer, outputs and audit; the heuristic suggestion (gold figures, fingerprint ids) copies into the controls; verdict and fingerprint chips save and the table lists them; Escape closes and returns focus');
 
   /* 8. Simulated grader and author review are separate approvals. */
@@ -241,11 +259,37 @@ async function fillPacketAndFreeze(options){
   await click('#ag-runs [data-ag-key="run-1"]');await waitFor('!!document.querySelector("#agents-modal .ag-drawer")','mobile drawer');await screenshot('mobile-drawer',390,844);await click('#agents-modal [data-ag="close-overlay"]');
   await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
 
+  /* 9b. Start the next round from this one: a new draft with carriedFrom, the form filled from the companion, nothing approved. */
+  const firstId=(await text('#ag-strip strong')).replace(/^Round /,'').trim();assert.match(firstId,/^rnd-[0-9a-f]{12}$/);
+  await click('[data-ag="clear-draft"]');await waitFor('document.querySelector("#ag-prompt").value===""','the form to be cleared');
+  await click('[data-ag="next-round"]');
+  await waitFor(`/Carried forward from round ${firstId}/.test(document.querySelector("#ag-freeze-state").textContent)`,'the carried-forward draft');
+  const nextId=(await text('#ag-strip strong')).replace(/^Round /,'').trim();assert.notEqual(nextId,firstId);assert.match(await text('#ag-strip'),/draft/);
+  assert.equal(await evaluate('document.querySelector("#ag-prompt").value'),PROMPT,'the prompt came back from the companion');
+  assert.equal(await evaluate('document.querySelector("[data-ag-in=decision]").value'),'approve');
+  assert.equal(await evaluate('document.querySelector("#ag-count").value'),'5');
+  assert.match(await text('#ag-freeze-state'),/Not frozen yet/);
+  assert.equal(await evaluate('document.querySelector("[data-ag=open-approve]").disabled'),true,'carrying forward approves nothing');
+  await click('[data-ag="freeze"]');
+  await waitFor('/Gold and fingerprints\\s*unchanged/.test(document.querySelector("#ag-freeze-state").textContent)','the carried gold frozen with the same content');
+  assert.equal(await evaluate(`document.querySelector("#ag-strip strong").textContent.trim()`),'Round '+nextId,'the carried draft itself was frozen');
+  assert.match(await text('#ag-gate'),/frozen and ready for your approval/);
+  assert.match(await text('#ag-round'),new RegExp('Carried forward from\\s*'+firstId),'the round card names its origin');
+  await screenshot('desktop-carried',1440,1000);await screenshot('mobile-carried',390,844);
+  await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  checks.push('Start next round from this round makes a new draft with carriedFrom, refills the form from the companion, approves nothing, and freezing it shows the same content hash (unchanged)');
+
   /* 10. Second server run with the violation scenario: a DISCARDED pilot is kept, shown, and not classifiable or exportable. */
   await stopServer();
   server=await startServer({[SCENARIO_ENV]:SCENARIO_DISCARD});
   await openAgents(server.url);await waitFor('!!document.querySelector("#ag-runtime")','runtime panel after restart');
   await fillPacketAndFreeze({pilots:1});
+  await waitFor('/saved in this browser \\(last saved/.test(document.querySelector("#ag-draft").textContent)','the draft to be saved');
+  await openAgents(server.url);await waitFor('/Restored the form/.test(document.querySelector("#ag-status").textContent)','the form restored after a reload');
+  assert.equal(await evaluate('document.querySelector("#ag-prompt").value'),PROMPT);assert.equal(await evaluate('document.querySelector("[data-ag-in=decision]").value'),'approve');
+  assert.equal(await evaluate('document.querySelector("#ag-count").value'),'1');assert.equal(await evaluate('document.querySelector("[data-ag-key=fp-1-id]").value'),'fp-beta');
+  await click('[data-ag="inspect"]');await waitFor('document.querySelectorAll("#ag-packet tbody tr").length>=5','file table after the reload');
+  checks.push('a reload restores the form kept in this browser (folder, prompt, gold, fingerprints, settings)');
   await click('[data-ag="freeze"]');await waitFor('document.querySelector("[data-ag=open-approve]").disabled===false','round frozen again');
   await click('[data-ag="open-approve"]');await waitFor('!!document.querySelector("#agents-modal [data-id=shell-access]")','approval dialog');
   for(const id of ['shell-access','network','isolation-by-audit'])await click(`#agents-modal [data-id="${id}"]`);

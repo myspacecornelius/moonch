@@ -12,9 +12,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const C = require('./constants.cjs');
-const { detectClaude, buildArgs, ClaudeRun, summarizeEvents } = require('./claude-runner.cjs');
+const {
+  detectClaude, buildArgs, budgetText, ClaudeRun, summarizeEvents, readHelpFlags, missingFlags, pilotEnv, preparePilotConfigDir,
+  claudeConfigDirOf, checkAuth,
+} = require('./claude-runner.cjs');
 const { auditToolCalls } = require('./path-audit.cjs');
-const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile } = require('./pilot-folder.cjs');
+const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, GAF_RE } = require('./pilot-folder.cjs');
 const { suggest, hashFreeze, parseFigure } = require('./classify.cjs');
 
 const SCHEMA = 'finance-agent-round';
@@ -22,7 +25,6 @@ const SCHEMA_VERSION = 1;
 const ROUND_ID_RE = /^rnd-[0-9a-f]{12}$/;
 const FINGERPRINT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
-const GAF_RE = /(?:^|[/_ -])gaf(?:[/_. -]|$)/i; /* the same rule as pilot-folder.cjs */
 
 const PILOT_PROMPT_PREFIX = 'The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message.\n\n';
 const ACKNOWLEDGEMENTS = ['shell-access', 'network', 'isolation-by-audit'];
@@ -38,7 +40,11 @@ const STATEMENTS = Object.freeze({
   isolation: 'Isolation is by instruction and audit, not by an operating system sandbox. Each pilot is told to work only inside its own folder and every tool call is checked afterwards. A run that touches a path outside its folder is marked DISCARDED. Nothing stops the agent at the moment it happens.',
   directional: 'Results are directional only. No pass rate or difficulty score is computed.',
   gaf: 'The gaf/ folder matches production only if the production solver sees this file.',
+  cap: 'The spending cap is not a ceiling on everything a pilot can start: a claude process that a pilot starts from its own shell runs under your sign-in with no cap, and its tool calls are not audited. The audit discards a run whose tool calls start one, after the fact. It reads the calls as text, so a start under a name built at run time is not seen.',
 });
+
+/* What a writer can do with an approved round that no longer matches its approval: it can never launch as it is. */
+const MISMATCH_NEXT = 'Nothing was started. Cancel this round, then freeze again from the form (a new round) or start the next round from it';
 
 const WORKING_FOLDER_TEXT = 'finance-studio-pilots/<run id> in the operating system temporary folder, outside the Studio project. These folders hold copies of the packet files and the pilot\'s work, and they stay there until you delete them';
 const MAX_LABEL = 120;
@@ -70,6 +76,7 @@ class AgentError extends Error {
 }
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isPort = value => Number.isInteger(value) && value >= 1 && value <= 65535;
 const sha256Text = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 const clone = value => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 const bad = message => new AgentError(400, message);
@@ -158,7 +165,17 @@ function parseConfig(input) {
     const same = Array.isArray(config.tools) && config.tools.length === C.TOOLS.length && C.TOOLS.every((tool, index) => config.tools[index] === tool);
     if (!same) throw bad('The tool list is fixed by the server and cannot be changed');
   }
-  return { kind: 'pilot', model, effort, count, tools: C.TOOLS.slice() };
+  /* The spending cap per pilot (--max-budget-usd), in US dollars and whole cents, inside the allowlisted range. */
+  const budget = config.maxBudgetUsd === undefined ? C.BUDGET_USD.pilotDefault : config.maxBudgetUsd;
+  if (budgetText(budget) === null) {
+    throw bad(`The spending cap per pilot must be a number of US dollars from ${C.BUDGET_USD.minUsd.toFixed(2)} to ${C.BUDGET_USD.maxUsd.toFixed(2)}, in whole cents`);
+  }
+  /* How many pilots run at the same time. By default all of them, so the round is one wave; a writer may ask for fewer. */
+  const concurrency = config.concurrency === undefined ? count : config.concurrency;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > count) {
+    throw bad(`The number of pilots at a time must be a whole number from 1 to the number of pilots (${count})`);
+  }
+  return { kind: 'pilot', model, effort, count, tools: C.TOOLS.slice(), maxBudgetUsd: Math.round(budget * 100) / 100, concurrency };
 }
 
 function parseVersions(input) {
@@ -230,7 +247,49 @@ function sourceFingerprintOf(entries, promptSha256) {
 }
 
 const latestFreeze = round => (round.postHocFreezes.length ? round.postHocFreezes[round.postHocFreezes.length - 1] : round.freeze);
+/* A round stored before the spending cap existed runs with the default cap (and its old approval no longer matches). */
+const budgetOf = round => (round.config.maxBudgetUsd === undefined ? C.BUDGET_USD.pilotDefault : round.config.maxBudgetUsd);
+/* The same for the number of pilots at a time: a round stored before it existed asks for all of them at once. */
+const concurrencyOf = round => (Number.isInteger(round.config.concurrency) ? round.config.concurrency : round.config.count);
 const allFreezes = round => (round.freeze ? [round.freeze, ...round.postHocFreezes] : []);
+const roundMaxUsd = round => ((Math.round(budgetOf(round) * 100) * round.config.count) / 100).toFixed(2);
+
+/* The content of a freeze without its time stamp, version or labels: the gold and the fingerprints. Two freezes with the
+   same content have the same contentSha256, whenever they were made (sha256 covers frozenAt as well, so it differs). */
+const freezeContentSha256 = freeze => hashFreeze({ gold: freeze.gold, fingerprints: freeze.fingerprints });
+const contentShaOf = freeze => (freeze && typeof freeze.contentSha256 === 'string' ? freeze.contentSha256 : freezeContentSha256(freeze));
+
+/* A round stored before config.maxBudgetUsd and config.concurrency existed, and not launched yet, gets them when it is
+   loaded: the defaults it already ran with in budgetOf and concurrencyOf (USD 3.00 per pilot, every pilot at once), so
+   its approval summary text, and therefore its approval hash, stays the same. Without this, approval and freezing
+   again were accepted but every launch was refused (the stored config is checked against parseConfig). A launched
+   round keeps the config it ran with, and a config that is not valid is left for the launch check to refuse.
+   Returns true when the config was changed. */
+function completeConfig(round) {
+  if (round.launchedAt || !['draft', 'frozen', 'approved'].includes(round.status)) return false;
+  let config;
+  try { config = parseConfig(round.config); } catch { return false; }
+  if (JSON.stringify(config) === JSON.stringify(round.config)) return false;
+  round.config = config;
+  return true;
+}
+
+/* The settings that decide what a pilot runs, with the defaults a round stored before them gets. */
+const settingsKey = config => JSON.stringify([config.model, config.effort, config.count, config.maxBudgetUsd === undefined ? C.BUDGET_USD.pilotDefault : config.maxBudgetUsd,
+  Number.isInteger(config.concurrency) ? config.concurrency : config.count]);
+
+/* What changed between a carried-forward round and the round it came from. freezeContent is null until this round is frozen. */
+function carryChanges(round) {
+  const carried = round.carried;
+  if (!isObject(carried)) return null;
+  return {
+    packet: round.packet.packetSha256 !== carried.packetSha256,
+    prompt: round.packet.promptSha256 !== carried.promptSha256,
+    gafVisible: round.packet.gafVisible !== carried.gafVisible,
+    settings: settingsKey(round.config) !== settingsKey(carried.config),
+    freezeContent: round.freeze ? contentShaOf(round.freeze) !== carried.contentSha256 : null,
+  };
+}
 
 function sameModel(requested, resolved) {
   if (typeof resolved !== 'string' || !resolved) return false;
@@ -319,6 +378,9 @@ function roundView(round) {
     postHocFreezes: round.postHocFreezes,
     config: round.config,
     approval: round.approval,
+    carriedFrom: round.carriedFrom || null,
+    carried: round.carried || null,
+    carryChanges: carryChanges(round),
     runs: round.runs.map(runRow),
     counts: countRuns(round.runs),
     directional: directionalText(round),
@@ -331,6 +393,7 @@ function roundRow(round) {
     createdAt: round.createdAt,
     label: round.label,
     status: round.status,
+    carriedFrom: round.carriedFrom || null,
     config: round.config,
     packetSha256: round.packet.packetSha256,
     freezeSha256: round.freeze ? round.freeze.sha256 : null,
@@ -420,6 +483,8 @@ class RoundStore {
     this.exists = typeof options.exists === 'function' ? options.exists : isExecutableFile;
     this.execFile = typeof options.execFile === 'function' ? options.execFile : undefined;
     this.home = typeof options.home === 'string' && options.home ? options.home : undefined;
+    /* The companion's own port, for the loopback audit (null: not known yet, every loopback address is still flagged). */
+    this.companionPort = isPort(options.companionPort) ? options.companionPort : null;
     this.rounds = new Map();
     this.live = new Map();
     this.graderBusy = false;
@@ -427,6 +492,7 @@ class RoundStore {
     this.graderRunners = new Set(); /* every tool-less runner (simulated grader and author review) */
     this._detected = null;
     this._detecting = null;
+    this._helpFlags = new Map(); /* `claude --help` options per binary path and version (pre-flight) */
     this._load();
   }
 
@@ -447,7 +513,8 @@ class RoundStore {
         if (!isObject(round) || round.id !== name || round.schema !== SCHEMA || !isObject(round.packet) || !Array.isArray(round.packet.files) || !isObject(round.config) || !Array.isArray(round.runs)) continue;
         round.postHocFreezes = Array.isArray(round.postHocFreezes) ? round.postHocFreezes : [];
         this.rounds.set(round.id, round);
-        if (this._recover(round)) this._persistRound(round);
+        const completed = completeConfig(round);
+        if (this._recover(round) || completed) this._persistRound(round);
       } catch {
         /* A damaged round is left alone on disk and not offered. */
       }
@@ -474,10 +541,23 @@ class RoundStore {
   }
 
   /* The environment of every agent process (docs/local-agents.md section 3.2): this process's environment plus TMPDIR and
-     CLAUDE_CODE_TMPDIR pointing into the folder. The audit is given the same object, so a path held in an inherited
-     variable is seen when a command uses it. */
+     CLAUDE_CODE_TMPDIR pointing into the folder, the runtime's configuration folder moved to <scratch>/claude-config
+     (so large tool outputs the runtime saves stay inside the folder), the sign-in still read where the writer keeps it
+     (nothing is copied), and no memory or CLAUDE.md files (claude-runner.cjs pilotEnv). The audit is given the same
+     object, so a path held in an inherited variable is seen when a command uses it. Pure: _preparedEnv also creates
+     the configuration folder before a process starts. */
   _childEnv(scratch) {
-    return { ...this.env, TMPDIR: scratch, CLAUDE_CODE_TMPDIR: scratch };
+    return pilotEnv(this.env, scratch);
+  }
+
+  _preparedEnv(scratch) {
+    preparePilotConfigDir(scratch);
+    return this._childEnv(scratch);
+  }
+
+  /* The writer's own runtime configuration folder. The audit always treats it as outside every pilot (harness-spill). */
+  _originalConfigDir() {
+    return claudeConfigDirOf(this.env, this.home);
   }
 
   _roundDir(round) { return path.join(this.roundsDir, round.id); }
@@ -533,6 +613,38 @@ class RoundStore {
     return this._detecting;
   }
 
+  /* The pre-flight before any agent process starts. Neither check runs a model.
+     1. `claude --help` (read once per binary path and version) must list every flag in the argument lists that will
+        run, so a runtime that lacks one (for example the spending cap) is refused, naming the flag.
+     2. `claude auth status --json` must say the runtime is signed in, under exactly the environment a pilot gets
+        (pilotEnv), in a throwaway folder that is removed again. */
+  async _preflight(runtime, argLists) {
+    const help = await readHelpFlags({ bin: runtime.path, version: runtime.version, env: this.env, execFile: this.execFile, cache: this._helpFlags });
+    if (!help.ok) throw new AgentError(409, `Claude Code did not list its options (claude --help: ${help.error}). Nothing was started`);
+    const missing = missingFlags(argLists.flat(), help.flags);
+    if (missing.length) {
+      throw new AgentError(409, `This Claude Code (${runtime.version}) does not list ${missing.join(', ')} in claude --help, and the Studio passes ${missing.length === 1 ? 'that option' : 'those options'} to every agent. Update Claude Code, then try again. Nothing was started`);
+    }
+    let base;
+    try {
+      base = fs.mkdtempSync(path.join(this.tmpRoot, 'finance-studio-preflight-'));
+    } catch (error) {
+      throw new AgentError(500, `The sign-in check could not make its folder (${safeMessage(error)}). Nothing was started`);
+    }
+    let auth;
+    try {
+      auth = await checkAuth({ bin: runtime.path, env: this._preparedEnv(path.join(base, '.tmp')), cwd: base });
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+    if (!auth.signedIn) {
+      const why = auth.loggedIn === false ? 'it is not signed in'
+        : auth.error ? `the check did not finish (${auth.error})`
+          : `the answer could not be read (exit code ${auth.exitCode === null ? 'none' : auth.exitCode}${auth.stderrTail.trim() ? `: ${auth.stderrTail.trim().split('\n').pop().slice(0, 200)}` : ''})`;
+      throw new AgentError(409, `Claude Code is not ready for a pilot: claude auth status says ${why}. Run claude in your own terminal and sign in, then try again. Nothing was started`);
+    }
+  }
+
   async status() {
     return {
       runtime: clone(await this._detect(false)),
@@ -540,6 +652,22 @@ class RoundStore {
       models: C.MODELS.slice(),
       efforts: C.EFFORTS.slice(),
     };
+  }
+
+  /* The same pre-flight a launch makes, asked for before the writer approves, so a runtime that lacks an option or is not
+     signed in is named while there is still nothing to undo. No model is started. A problem is a 409 with the reason. */
+  async preflightRound(id) {
+    const round = this._get(id);
+    const runtime = await this._detect(true);
+    if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Install it, or run it once in your own terminal to sign in, then use Check again. Nothing was started');
+    await this._preflight(runtime, [this._pilotArgs(round)]);
+    return { ok: true, roundId: round.id, version: runtime.version, checkedAt: this.now(), checks: ['claude --help lists every option the Studio passes', 'claude auth status says it is signed in, with the environment a pilot gets'] };
+  }
+
+  /* The companion tells the store its port once it listens (backend/server.cjs), for the loopback audit. */
+  setCompanionPort(port) {
+    if (!isPort(port)) throw new AgentError(400, 'The companion port must be a whole number from 1 to 65535');
+    this.companionPort = port;
   }
 
   /* -------------------------------------------------------------- packet and round creation */
@@ -573,6 +701,7 @@ class RoundStore {
     const config = parseConfig(input.config);
     const versions = parseVersions(input.versions);
     const sourceDir = cleanText(input.sourceDir, 'sourceDir', 4096, true);
+    const carried = input.carriedFrom === undefined || input.carriedFrom === null ? null : this._carrySnapshot(input.carriedFrom);
 
     this._refuseOwnFolders(sourceDir);
     let listing;
@@ -638,16 +767,78 @@ class RoundStore {
       cancelRequestedAt: null,
       note: '',
     };
+    if (carried) {
+      round.carriedFrom = carried.roundId;
+      round.carried = carried;
+    }
     this._persistRound(round);
     fs.writeFileSync(path.join(this._roundDir(round), 'packet.sha256'), round.packet.packetSha256 + '\n', { mode: 0o600 });
     this.rounds.set(id, round);
     return roundView(round);
   }
 
+  /* -------------------------------------------------------------- carrying a round forward */
+
+  /* What a new round records about the round it was carried forward from: that round's hashes and settings, and the
+     content of its latest freeze (the gold and the fingerprints, to fill the form). The new round is not frozen by it. */
+  _carrySnapshot(fromId) {
+    if (typeof fromId !== 'string' || !ROUND_ID_RE.test(fromId)) throw bad('carriedFrom must be the id of an earlier round');
+    const previous = this.rounds.get(fromId);
+    if (!previous) throw new AgentError(404, 'The round to carry forward from does not exist');
+    const freeze = latestFreeze(previous);
+    if (!freeze) throw new AgentError(409, `Round ${previous.id} has no freeze, so there is no gold to carry forward. Freeze it first, or start a round from the form`);
+    return {
+      roundId: previous.id,
+      status: previous.status,
+      freezeVersion: freeze.version,
+      postHoc: freeze.postHoc === true,
+      freezeSha256: freeze.sha256,
+      contentSha256: freezeContentSha256(freeze),
+      packetSha256: previous.packet.packetSha256,
+      promptSha256: previous.packet.promptSha256,
+      gafVisible: previous.packet.gafVisible,
+      config: clone(previous.config),
+      content: { gold: clone(freeze.gold), fingerprints: clone(freeze.fingerprints) },
+    };
+  }
+
+  /* Start the next round from an earlier one: a new draft with the same packet selection (read from the source folder
+     again, so its hashes are current), prompt, gaf setting, settings and label, and the latest gold and fingerprints of
+     the earlier round to confirm. Nothing is frozen or approved: the new round needs its own freeze and its own approval. */
+  nextRound(id) {
+    const previous = this._get(id);
+    const included = includedFiles(previous);
+    const { kind, model, effort, count, tools, maxBudgetUsd, concurrency } = previous.config;
+    const config = { kind, model, effort, count, tools };
+    if (maxBudgetUsd !== undefined) config.maxBudgetUsd = maxBudgetUsd;
+    if (concurrency !== undefined) config.concurrency = concurrency;
+    const body = {
+      label: previous.label,
+      sourceDir: previous.packet.sourceDir,
+      include: included.map(file => file.path),
+      overrides: included.filter(file => file.overridden).map(file => file.path),
+      promptText: previous.packet.promptText,
+      gafVisible: previous.packet.gafVisible,
+      config,
+      versions: previous.versions || undefined,
+      carriedFrom: previous.id,
+    };
+    try {
+      return this.createRound(body);
+    } catch (error) {
+      const known = asAgentError(error);
+      if (known instanceof AgentError && known.status === 400) {
+        throw new AgentError(409, `Round ${previous.id} cannot be carried forward as it was: ${known.message}. Start a round from the form instead. Nothing was created`);
+      }
+      throw known;
+    }
+  }
+
   /* -------------------------------------------------------------- freeze */
 
   _makeFreeze(parts, version, extra) {
     const record = { version, frozenAt: this.now(), gold: parts.gold, fingerprints: parts.fingerprints, postHoc: false, ...(extra || {}) };
+    record.contentSha256 = freezeContentSha256(record);
     record.sha256 = hashFreeze(record);
     return record;
   }
@@ -682,8 +873,14 @@ class RoundStore {
 
   /* -------------------------------------------------------------- approval */
 
+  /* The argument list of every pilot in a round. */
+  _pilotArgs(round) {
+    const { model, effort, tools } = round.config;
+    return buildArgs({ prompt: PILOT_PROMPT_PREFIX + round.packet.promptText, model, effort, tools, maxBudgetUsd: budgetOf(round) });
+  }
+
   _commandLine(round) {
-    const args = buildArgs({ prompt: 'x', model: round.config.model, effort: round.config.effort, tools: round.config.tools });
+    const args = buildArgs({ prompt: 'x', model: round.config.model, effort: round.config.effort, tools: round.config.tools, maxBudgetUsd: budgetOf(round) });
     args[1] = '<prompt elided>';
     return 'claude ' + args.map(arg => (arg === '' || /[\s"'<>]/.test(arg) ? JSON.stringify(arg) : arg)).join(' ');
   }
@@ -694,14 +891,21 @@ class RoundStore {
     const withheld = included.filter(file => !isDelivered(round, file));
     const overridden = included.filter(file => file.overridden).map(file => displayText(file.path));
     const shown = delivered.slice(0, 60).map(file => displayText(file.path));
+    const count = round.config.count;
+    const atOnce = this._atOnce(round);
+    const waves = Math.ceil(count / atOnce);
+    const minutes = Math.round(C.LIMITS.timeoutMs / 60000);
     const lines = [
       `Local blind pilot round ${round.id}`,
       `Label: ${round.label ? displayText(round.label) : '(none)'}`,
       `Model: ${round.config.model}`,
       `Effort: ${round.config.effort}`,
-      `Pilots: ${round.config.count} (at most ${C.MAX_PILOTS_PER_ROUND} per round; at most ${C.LIMITS.concurrency} at a time)`,
+      `Pilots: ${count} (at most ${C.MAX_PILOTS_PER_ROUND} per round; ${atOnce === count ? `all ${count} at once` : `at most ${atOnce} at a time`})`,
       `Tools: ${round.config.tools.join(', ')}`,
-      `Time limit per pilot: ${Math.round(C.LIMITS.timeoutMs / 60000)} minutes`,
+      `Time limit per pilot: ${minutes} minutes`,
+      `Waves: ${waves} (${waves === 1 ? `every pilot starts at once, so the round ends within about ${minutes} minutes` : `${atOnce} at a time, so the round can take up to about ${waves * minutes} minutes`})`,
+      `Spending cap per pilot: USD ${budgetText(budgetOf(round))} (--max-budget-usd on each pilot process the Studio starts; the runtime stops a pilot that reaches it). Pilots times cap: USD ${roundMaxUsd(round)} for the pilot processes the Studio starts`,
+      STATEMENTS.cap,
       `Working folder per pilot: ${WORKING_FOLDER_TEXT}`,
       `Packet sha256: ${round.packet.packetSha256}`,
       `Packet files: ${included.length} selected, ${delivered.length} delivered to each pilot`,
@@ -712,6 +916,8 @@ class RoundStore {
       STATEMENTS.gaf,
       `Prompt sha256: ${round.packet.promptSha256}`,
       `Freeze sha256: ${round.freeze.sha256}`,
+      `Freeze content sha256 (gold and fingerprints, without the time stamp): ${contentShaOf(round.freeze)}`,
+      ...this._carryLines(round),
       `Command: ${this._commandLine(round)}`,
       STATEMENTS.shell,
       STATEMENTS.network,
@@ -719,6 +925,25 @@ class RoundStore {
       STATEMENTS.directional,
     ];
     return lines.join('\n') + '\n';
+  }
+
+  /* How many pilots of this round run at the same time: what the round asks for, never above the store's limit. */
+  _atOnce(round) {
+    return Math.max(1, Math.min(concurrencyOf(round), this.limits.concurrency, round.config.count));
+  }
+
+  /* A carried-forward round says where it came from and what changed, so the approval covers that too. */
+  _carryLines(round) {
+    const carried = round.carried;
+    const changes = carryChanges(round);
+    if (!changes) return [];
+    const changed = [['packet', 'packet files'], ['prompt', 'prompt'], ['gafVisible', 'gaf setting'], ['settings', 'model, effort, pilots or spending cap']]
+      .filter(([key]) => changes[key]).map(([, label]) => label);
+    return [
+      `Carried forward from round ${carried.roundId} (its freeze version ${carried.freezeVersion}${carried.postHoc ? ', post-hoc' : ''}: sha256 ${carried.freezeSha256}, content sha256 ${carried.contentSha256})`,
+      `Gold and fingerprints compared with round ${carried.roundId}: ${changes.freezeContent ? 'changed' : 'unchanged'}`,
+      `Other changes from round ${carried.roundId}: ${changed.length ? changed.join(', ') : 'none'}`,
+    ];
   }
 
   approvalSummary(id) {
@@ -734,6 +959,13 @@ class RoundStore {
     const input = needObject(body, 'The request body');
     if (!round.freeze) throw new AgentError(409, 'Freeze the gold before approval');
     if (round.status !== 'frozen') throw new AgentError(409, round.status === 'approved' ? 'This round is already approved' : 'This round can no longer be approved');
+    /* The launch refuses a stored configuration that parseConfig would change (_verifyBeforeLaunch), so approval refuses
+       it too: an approval that can never launch would leave the round stuck as approved. */
+    let config = null;
+    try { config = parseConfig(round.config); } catch { /* refused below */ }
+    if (!config || JSON.stringify(config) !== JSON.stringify(round.config)) {
+      throw new AgentError(409, 'This round\'s stored settings are incomplete or not valid, so it could not be launched. Freeze again from the form, which creates a new round. Nothing was approved');
+    }
     const given = typeof input.summarySha256 === 'string' ? input.summarySha256 : '';
     const expected = sha256Text(this._summaryText(round));
     const equal = given.length === expected.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
@@ -755,11 +987,11 @@ class RoundStore {
     try {
       config = parseConfig(round.config);
     } catch (error) {
-      throw new AgentError(409, `APPROVAL MISMATCH: the stored round configuration is not valid (${safeMessage(error)})`);
+      throw new AgentError(409, `APPROVAL MISMATCH: the stored round configuration is not valid (${safeMessage(error)}). ${MISMATCH_NEXT}`);
     }
-    if (JSON.stringify(config) !== JSON.stringify(round.config)) throw new AgentError(409, 'APPROVAL MISMATCH: the stored round configuration is not the one that was approved');
+    if (JSON.stringify(config) !== JSON.stringify(round.config)) throw new AgentError(409, `APPROVAL MISMATCH: the stored round configuration is not the one that was approved. ${MISMATCH_NEXT}`);
     if (!round.approval || sha256Text(this._summaryText(round)) !== round.approval.summarySha256) {
-      throw new AgentError(409, 'APPROVAL MISMATCH: the round changed after it was approved');
+      throw new AgentError(409, `APPROVAL MISMATCH: the round changed after it was approved. ${MISMATCH_NEXT}`);
     }
     let stored;
     try { stored = readJson(path.join(this._roundDir(round), 'freeze.json')); } catch { stored = null; }
@@ -790,8 +1022,15 @@ class RoundStore {
     const round = this._get(id);
     if (round.status !== 'approved') throw new AgentError(409, 'Approve the round before launching it');
     if ([...this.rounds.values()].some(other => other.status === 'running')) throw new AgentError(409, 'Another round is running. Wait for it to finish or cancel it');
+    this._refuseWhileToolLess();
     if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Install it, or run it once in your own terminal to sign in, then use Check again and launch again. If you changed PATH or CLAUDE_BIN, start the companion again. Nothing was started');
     this._verifyBeforeLaunch(round);
+    /* The pre-flight (no model) waits for two short processes, so the state is checked once more afterwards. A packet
+       file that changes meanwhile is still caught: every copy into a pilot folder is checked against its hash. */
+    await this._preflight(runtime, [this._pilotArgs(round)]);
+    if (this.rounds.get(id) !== round || round.status !== 'approved') throw new AgentError(409, 'Approve the round before launching it');
+    if ([...this.rounds.values()].some(other => other.status === 'running')) throw new AgentError(409, 'Another round is running. Wait for it to finish or cancel it');
+    this._refuseWhileToolLess();
 
     const at = this.now();
     round.runs = [];
@@ -825,7 +1064,8 @@ class RoundStore {
     }
     round.status = 'running';
     round.launchedAt = at;
-    const live = { bin: runtime.path, cancelRequested: false, queue: round.runs.map(run => run.n), active: 0, runners: new Map(), settled: false, done: null, resolveDone: null };
+    /* All pilots of the round start together (one wave) unless the round asked for fewer at a time. */
+    const live = { bin: runtime.path, atOnce: this._atOnce(round), cancelRequested: false, queue: round.runs.map(run => run.n), active: 0, runners: new Map(), settled: false, done: null, resolveDone: null };
     live.done = new Promise(resolve => { live.resolveDone = resolve; });
     this.live.set(round.id, live);
     try {
@@ -843,7 +1083,7 @@ class RoundStore {
   }
 
   _pump(round, live) {
-    while (!live.cancelRequested && live.active < this.limits.concurrency && live.queue.length) {
+    while (!live.cancelRequested && live.active < live.atOnce && live.queue.length) {
       const n = live.queue.shift();
       live.active++;
       const next = () => {
@@ -872,6 +1112,21 @@ class RoundStore {
     }
     this.live.delete(round.id);
     live.resolveDone();
+  }
+
+  /* A simulated grader or an author review puts its text on a command line any process of this account can read, so it
+     never overlaps a running round, in either order. backend/server.cjs refuses the same overlap before the service is
+     asked; this is the service's own copy of the rule. */
+  _refuseWhileToolLess() {
+    if (this.graderBusy || this.reviewBusy) {
+      throw new AgentError(409, 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started');
+    }
+  }
+
+  _refuseToolLessWhileRunning() {
+    if ([...this.rounds.values()].some(round => round.status === 'running')) {
+      throw new AgentError(409, 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started');
+    }
   }
 
   whenSettled(id) {
@@ -914,12 +1169,12 @@ class RoundStore {
       run.omitted = built.omitted;
       run.overrides = built.overrides;
       const scratch = path.join(built.folder, '.tmp');
-      const args = buildArgs({ prompt: PILOT_PROMPT_PREFIX + round.packet.promptText, model: round.config.model, effort: round.config.effort, tools: round.config.tools });
+      const args = this._pilotArgs(round);
       const runner = new ClaudeRun({
         bin: live.bin,
         args,
         cwd: built.folder,
-        env: this._childEnv(scratch),
+        env: this._preparedEnv(scratch),
         spawnFn: this.spawnFn,
         timeoutMs: this.limits.timeoutMs,
         killGraceMs: this.limits.killGraceMs,
@@ -935,7 +1190,7 @@ class RoundStore {
     }
     live.runners.delete(run.n);
     try {
-      this._finishRun(round, run, summary, setupError);
+      this._finishRun(round, run, summary, setupError, live.bin);
     } catch (error) {
       /* Whatever went wrong while finishing, the audit has not cleared this run, so it cannot be used. */
       run.state = run.state === 'running' || run.state === 'queued' ? 'failed' : run.state;
@@ -961,7 +1216,8 @@ class RoundStore {
     }
   }
 
-  _finishRun(round, run, summary, setupError) {
+  /* runtimeBin is the runtime this round started (the detected claude), so the audit also knows it by its own path. */
+  _finishRun(round, run, summary, setupError, runtimeBin) {
     run.endedAt = this.now();
     const runDir = this._runDir(round, run);
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
@@ -992,9 +1248,12 @@ class RoundStore {
     /* 1. The strict path audit over every tool call. */
     const audit = auditToolCalls(summary.events, {
       folder: run.folder,
-      claudeConfigDir: typeof this.env.CLAUDE_CONFIG_DIR === 'string' ? this.env.CLAUDE_CONFIG_DIR : undefined,
+      claudeConfigDir: this._originalConfigDir(), /* the writer's folder, never the pilot's own <folder>/.tmp/claude-config */
       projectRoot: this.root,
       env: this._childEnv(path.join(run.folder, '.tmp')),
+      companionPort: this.companionPort, /* null until the companion listens: every loopback address is flagged anyway */
+      /* A pilot that starts the runtime again gets a process with no spending cap whose tool calls are never audited. */
+      runtimeBin: typeof runtimeBin === 'string' && path.isAbsolute(runtimeBin) ? runtimeBin : null,
     });
     const notes = audit.notes.slice();
 
@@ -1233,10 +1492,12 @@ class RoundStore {
     const prompts = answers.map(answer => buildGraderPrompt(guideline, answer));
     if (prompts.some(prompt => Buffer.byteLength(prompt) > 120 * 1024)) throw new AgentError(413, 'The guidance and answer are too large for one simulated grading call');
     if (this.graderBusy) throw new AgentError(409, 'A simulated grading call is already running');
+    this._refuseToolLessWhileRunning();
     this.graderBusy = true;
     try {
       const runtime = await this._detect(true);
       if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Nothing was started');
+      await this._preflight(runtime, prompts.map(prompt => buildArgs({ prompt, model, effort, tools: [] })));
       const batch = crypto.randomBytes(6).toString('hex');
       const results = [];
       for (let index = 0; index < prompts.length; index++) results.push(await this._graderRun(`gsim-${batch}-${index + 1}`, prompts[index], model, effort, runtime.path, index));
@@ -1270,7 +1531,7 @@ class RoundStore {
         bin,
         args: buildArgs({ prompt, model, effort, tools: [] }),
         cwd: folder,
-        env: this._childEnv(scratch),
+        env: this._preparedEnv(scratch),
         spawnFn: this.spawnFn,
         timeoutMs: Math.min(this.limits.timeoutMs, GRADER_TIMEOUT_MS),
         killGraceMs: this.limits.killGraceMs,
@@ -1316,10 +1577,12 @@ class RoundStore {
     const prompt = buildReviewPrompt(promptText, packageText);
     if (Buffer.byteLength(prompt) > MAX_TOOLLESS_PROMPT_BYTES) throw new AgentError(413, 'The prompt and package text are too large for one author review');
     if (this.reviewBusy) throw new AgentError(409, 'An author review is already running');
+    this._refuseToolLessWhileRunning();
     this.reviewBusy = true;
     try {
       const runtime = await this._detect(true);
       if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Nothing was started');
+      await this._preflight(runtime, [buildArgs({ prompt, model, effort, tools: [] })]);
       const { summary, facts } = await this._toolLessRun(`rev-${crypto.randomBytes(6).toString('hex')}`, prompt, model, effort, runtime.path);
       const base = { label: REVIEW_LABEL, model, resolvedModel: summary.init.model, state: summary.state, costUsd: summary.result.total_cost_usd };
       if (facts.toolCalls.total) {
@@ -1346,4 +1609,5 @@ module.exports = {
   parseGraderOutput,
   buildReviewPrompt,
   sourceFingerprintOf,
+  freezeContentSha256,
 };

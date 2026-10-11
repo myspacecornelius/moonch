@@ -18,15 +18,33 @@ const LIMITS = {
   depth: 4,
   timeoutMs: 50 * 60 * 1000,
   killGraceMs: 5000,
-  concurrency: 3,
+  /* At most this many pilots of a round run at the same time: the round cap, so a full round runs in one wave and ends
+     within one time limit. A round may ask for fewer at a time (config.concurrency), and tests may lower it further. */
+  concurrency: MAX_PILOTS_PER_ROUND,
   bodyBytes: 1024 * 1024,
   packetBodyBytes: 256 * 1024,
   graderBatch: 5,
 };
 
-/* File names that look like grading material. A selected file whose relative path matches is refused unless the
-   writer overrides that exact file. "reference.solution" accepts a space, underscore or dash between the words. */
-const EVALUATOR_PATTERN = /answer|golden|gold|grader|evaluator|rubric|reference.solution|fingerprint|attestation|private/i;
+/* The spending cap passed to the runtime as --max-budget-usd, in US dollars with at most two decimals. A pilot round
+   may choose any amount in [minUsd, maxUsd]; tool-less runs (simulated grader, author review) use their own default. */
+const BUDGET_USD = {
+  pilotDefault: 3,
+  toolLessDefault: 0.5,
+  minUsd: 0.05,
+  maxUsd: 20,
+};
+
+/* The pilot's own runtime configuration folder, inside its scratch folder (<folder>/.tmp/claude-config). The runtime
+   keeps large tool outputs there, so they stay inside the pilot folder. */
+const PILOT_CONFIG_DIRNAME = 'claude-config';
+
+/* Paths that look like grading or private material: the files the shared rule in package-engine.js (classifyPath) gives
+   the evaluator role. A selected file that matches is refused unless the writer overrides that exact file. Not a RegExp:
+   the rule is folder first and word bounded (answers/x.csv and Reference_Memo.docx match, Goldman_Comps.xlsx and
+   gaf/Reference_Memo.docx do not), so a file the inspection includes by default is never refused. */
+const { classifyPath, WITHHELD_ROLES } = require('../../package-engine.js');
+const EVALUATOR_PATTERN = { test: rel => classifyPath(rel).role === 'evaluator' };
 
 /* Round, run and folder identifiers. Anything else from a client is refused. */
 const ID_RE = /^[a-z0-9-]{4,64}$/;
@@ -47,6 +65,9 @@ module.exports = deepFreeze({
   DEFAULT_EFFORT,
   TOOLS,
   LIMITS,
+  BUDGET_USD,
+  PILOT_CONFIG_DIRNAME,
   EVALUATOR_PATTERN,
+  WITHHELD_ROLES,
   ID_RE,
 });

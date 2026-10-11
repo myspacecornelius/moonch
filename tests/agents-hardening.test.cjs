@@ -157,6 +157,23 @@ test('the audit runs against each pilot own folder: a sibling pilot output is of
   await w.service.classifyRun(id, 4, { verdict: 'matches-frozen-gold' });
 });
 
+test('the audit knows the runtime the round started: a pilot that starts it again, by name or by its own path, is discarded', async t => {
+  const w = makeWorld(t, [
+    { resultText: GOLD_ANSWER, toolUses: [{ name: 'Bash', input: { command: 'claude -p "solve it" > outputs/inner.txt' } }] },
+    /* The runtime here is the stub, whose file name is not claude: only the path the store hands to the audit names it. */
+    { resultText: GOLD_ANSWER, toolUses: [{ name: 'Write', input: { file_path: 'outputs/again.sh', content: `node ${STUB} -p "solve it"\n` } }] },
+    { resultText: GOLD_ANSWER, toolUses: [{ name: 'Bash', input: { command: 'ls outputs filesystem' } }] },
+  ]);
+  const id = await finishedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 3 } });
+  const runs = await Promise.all([1, 2, 3].map(n => w.service.getRun(id, n)));
+  assert.equal(runs[0].audit.status, 'DISCARDED');
+  assert.deepEqual(runs[0].audit.violations.map(v => [v.kind, v.path]), [['runtime', 'claude']]);
+  assert.equal(runs[1].audit.status, 'DISCARDED');
+  assert.ok(runs[1].audit.violations.some(v => v.kind === 'runtime' && v.path === STUB), JSON.stringify(runs[1].audit.violations));
+  assert.equal(runs[2].audit.status, 'CLEAN');
+  await rejects(w.service.classifyRun(id, 1, { verdict: 'matches-frozen-gold' }), 409, /DISCARDED/);
+});
+
 /* ====================================================================== the approval hash binds what will run */
 
 test('every field of the approval summary is bound: a valid edit of the stored round after approval is refused at launch', async t => {
@@ -181,6 +198,87 @@ test('every field of the approval summary is bound: a valid edit of the stored r
     assert.equal(promptRuns(w.argvLog).length, 0, `${name}: no pilot was started`);
     assert.equal(fs.existsSync(w.pilots), false, `${name}: no pilot folder was built`);
   }
+});
+
+/* A round stored before config.maxBudgetUsd and config.concurrency existed. */
+const dropNewSettings = round => { delete round.config.maxBudgetUsd; delete round.config.concurrency; };
+
+test('a frozen round stored before the cap and pacing settings can be frozen again, approved and launched after a restart', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const id = await frozenRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  await w.service.shutdown();
+  const stored = readRound(w, id);
+  dropNewSettings(stored);
+  writeRound(w, id, stored);
+
+  const service = w.make();
+  t.after(() => service.shutdown());
+  const loaded = await service.getRound(id);
+  assert.equal(loaded.config.maxBudgetUsd, C.BUDGET_USD.pilotDefault, 'the default cap it would have run with');
+  assert.equal(loaded.config.concurrency, 2, 'every pilot at once, as before');
+  assert.equal(readRound(w, id).config.maxBudgetUsd, C.BUDGET_USD.pilotDefault, 'and the completed settings are saved');
+  await service.freezeRound(id, GOLD);
+  const { summary, summarySha256 } = await service.approvalSummary(id);
+  assert.match(summary, /Spending cap per pilot: USD 3\.00/);
+  await service.approveRound(id, { summarySha256, acknowledgements: ACK });
+  await service.launchRound(id);
+  await service.whenSettled(id);
+  assert.equal((await service.getRound(id)).status, 'finished');
+  assert.equal(promptRuns(w.argvLog).length, 2, 'both pilots ran');
+  assert.ok(promptRuns(w.argvLog).every(args => args.slice(-2).join(' ') === '--max-budget-usd 3.00'), 'with the default cap');
+});
+
+test('an approved round stored before the cap and pacing settings launches as approved; a launched one keeps the config it ran with', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const approved = await approvedRound(w);
+  const finished = await finishedRound(w);
+  await w.service.shutdown();
+  for (const id of [approved, finished]) {
+    const stored = readRound(w, id);
+    dropNewSettings(stored);
+    writeRound(w, id, stored);
+  }
+  const service = w.make();
+  t.after(() => service.shutdown());
+  /* The approval summary showed USD 3.00 and all pilots at once, so completing the settings keeps it matching. */
+  await service.launchRound(approved);
+  await service.whenSettled(approved);
+  assert.equal((await service.getRound(approved)).status, 'finished');
+  const history = readRound(w, finished).config;
+  assert.equal(history.maxBudgetUsd, undefined, 'a launched round is history: its stored config is not rewritten');
+  assert.equal(history.concurrency, undefined);
+});
+
+test('approval refuses a round whose stored settings the launch would refuse, so no round is left approved and stuck', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const store = new RoundStore({ root: w.projectRoot, env: w.env, claudeBin: STUB, tmpRoot: w.tmpRoot });
+  t.after(() => store.shutdown());
+  const round = store.createRound(roundBody(w));
+  store.freezeRound(round.id, GOLD);
+  const { summarySha256 } = store.approvalSummary(round.id);
+  dropNewSettings(store.rounds.get(round.id));
+  assert.throws(() => store.approveRound(round.id, { summarySha256: store.approvalSummary(round.id).summarySha256, acknowledgements: ACK }), error => {
+    assert.ok(error instanceof AgentError);
+    assert.equal(error.status, 409);
+    assert.match(error.message, /stored settings are incomplete or not valid.*Freeze again from the form.*Nothing was approved/);
+    return true;
+  });
+  assert.equal(store.rounds.get(round.id).status, 'frozen', 'the round is not approved');
+  assert.ok(summarySha256);
+
+  /* An approval an earlier version made over a different summary text can never launch: the refusal says what to do. */
+  const other = await approvedRound(w);
+  await w.service.shutdown();
+  const stored = readRound(w, other);
+  stored.approval.summarySha256 = 'b'.repeat(64);
+  writeRound(w, other, stored);
+  const service = w.make();
+  t.after(() => service.shutdown());
+  await rejects(service.launchRound(other), 409, /APPROVAL MISMATCH: .*Nothing was started\. Cancel this round, then freeze again from the form \(a new round\) or start the next round from it/);
+  await service.cancelRound(other);
+  const next = await service.nextRound(other);
+  assert.equal(next.status, 'draft');
+  assert.equal(next.carriedFrom, other);
 });
 
 test('a name with a control character can neither be selected nor forge a line of the approval summary', async t => {
@@ -576,8 +674,11 @@ test('the data markers around grader and review inputs are exact, and the servic
 test('keys a client adds to the config are not stored and never reach the command line', async t => {
   const w = makeWorld(t, { resultText: GOLD_ANSWER });
   const round = await newRound(w, { config: { kind: 'pilot', model: 'claude-opus-5-5', effort: 'medium', count: 1, args: ['--dangerously-skip-permissions'], bin: '/bin/sh', env: { X: '1' }, folder: '/tmp' } });
-  assert.deepEqual(Object.keys(round.config), ['kind', 'model', 'effort', 'count', 'tools']);
-  assert.deepEqual(Object.keys(readRound(w, round.id).config), ['kind', 'model', 'effort', 'count', 'tools']);
+  const keys = ['kind', 'model', 'effort', 'count', 'tools', 'maxBudgetUsd', 'concurrency'];
+  assert.deepEqual(Object.keys(round.config), keys);
+  assert.deepEqual(Object.keys(readRound(w, round.id).config), keys);
+  assert.equal(round.config.maxBudgetUsd, C.BUDGET_USD.pilotDefault);
+  assert.equal(round.config.concurrency, 1);
   const id = round.id;
   await w.service.freezeRound(id, GOLD);
   const { summarySha256 } = await w.service.approvalSummary(id);
@@ -585,7 +686,7 @@ test('keys a client adds to the config are not stored and never reach the comman
   await w.service.launchRound(id);
   await w.service.whenSettled(id);
   const [argv] = promptRuns(w.argvLog);
-  assert.deepEqual(argv.slice(2), buildArgs({ prompt: 'x', model: 'claude-opus-5-5', effort: 'medium', tools: C.TOOLS }).slice(2));
+  assert.deepEqual(argv.slice(2), buildArgs({ prompt: 'x', model: 'claude-opus-5-5', effort: 'medium', tools: C.TOOLS, maxBudgetUsd: C.BUDGET_USD.pilotDefault }).slice(2));
 });
 
 /* ====================================================================== the pilots root */
@@ -634,6 +735,41 @@ test('a pilots root owned by another account is refused', { skip: process.platfo
   assert.equal(run.state, 'failed');
   assert.match(run.stderrTail, /belongs to another account/);
   assert.deepEqual(fs.readdirSync(w.pilots), []);
+});
+
+/* ====================================================================== loopback */
+
+test('a pilot that reaches for this machine is DISCARDED, also through a script it writes and runs; a memo that mentions localhost is not', async t => {
+  const w = makeWorld(t, [
+    {
+      resultText: GOLD_ANSWER,
+      toolUses: [
+        { name: 'Write', input: { file_path: 'outputs/fetch.py', content: "import urllib.request\nprint(urllib.request.urlopen('http://localhost:43123/api/agents/rounds').read())\n" } },
+        { name: 'Bash', input: { command: 'python3 outputs/fetch.py > outputs/rounds.json' } },
+      ],
+    },
+    {
+      resultText: GOLD_ANSWER,
+      toolUses: [{ name: 'Bash', input: { command: 'exec 3<>/dev/tcp/127.0.0.1/43123; printf "GET /api/status HTTP/1.0\\r\\n\\r\\n" >&3; cat <&3' } }],
+    },
+    {
+      resultText: GOLD_ANSWER,
+      toolUses: [{ name: 'Write', input: { file_path: 'outputs/memo.md', content: 'The old reporting server ran on localhost, so the 43123 figures were exported by hand.\n' } }],
+    },
+  ]);
+  const id = await finishedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 3 } });
+  const [script, socket, memo] = await Promise.all([1, 2, 3].map(n => w.service.getRun(id, n)));
+  assert.equal(script.audit.status, 'DISCARDED');
+  assert.deepEqual(script.audit.violations.map(v => [v.tool, v.kind]), [['Write', 'loopback']], 'the address in the script is the cause');
+  assert.equal(socket.audit.status, 'DISCARDED');
+  assert.deepEqual(socket.audit.violations.map(v => v.kind), ['loopback'], 'a socket to this machine is loopback, not an access outside the folder');
+  assert.equal(memo.audit.status, 'CLEAN', 'a sentence that mentions localhost is free text');
+  const round = await w.service.getRound(id);
+  assert.equal(round.counts.discarded, 2);
+  assert.equal(round.directional, 'Directional only, n = 1. No rate or difficulty is computed.');
+  await rejects(w.service.classifyRun(id, 1, { verdict: 'matches-frozen-gold' }), 409, /DISCARDED/);
+  await rejects(w.service.classifyRun(id, 2, { verdict: 'matches-frozen-gold' }), 409, /DISCARDED/);
+  await w.service.classifyRun(id, 3, { verdict: 'matches-frozen-gold' });
 });
 
 /* ====================================================================== the runtime check */

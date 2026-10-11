@@ -824,3 +824,256 @@ test('leak-in-results ignores the physical names macOS gives its system folders'
   assert.equal(leak('/Users/me/private/var/notes').length, 1, 'only the root level /private/var is a system folder');
   assert.equal(leak('/private/variants/x').length, 1, '/private/variants is not /private/var');
 });
+
+/* ------------------------------------------------------------------ loopback: the companion and anything else on this machine */
+
+const COMPANION_PORT = 43123;
+
+test('loopback: every way of reaching this machine is a violation of its own kind, and it discards the run', t => {
+  const fx = fixture(t);
+  const forms = [
+    /* curl and wget */
+    ['curl', bash('curl -s http://127.0.0.1:43123/api/agents/rounds/rnd-000000000000')],
+    ['curl host:port', bash('curl -s localhost:43123/api/status')],
+    ['curl bare host', bash('curl localhost')],
+    ['curl IPv6', bash('curl -g "http://[::1]:43123/api/status"')],
+    ['curl 0.0.0.0', bash('curl 0.0.0.0:43123')],
+    ['curl another 127 address', bash('curl http://127.9.8.7/x')],
+    ['curl short form', bash('curl http://127.1:43123/')],
+    ['curl decimal form', bash('curl http://2130706433/')],
+    ['curl host 0', bash('curl http://0:43123/')],
+    ['curl *.localhost', bash('curl http://studio.localhost:43123/')],
+    ['curl long IPv6', bash('curl "http://[0:0:0:0:0:0:0:1]:43123/"')],
+    ['curl IPv4 mapped IPv6', bash('curl "http://[::ffff:127.0.0.1]/"')],
+    ['curl unspecified IPv6', bash('curl "http://[::]:43123/"')],
+    ['curl uppercase', bash('curl HTTP://LOCALHOST:43123/')],
+    ['curl short form as a word', bash('curl 127.1:43123')],
+    ['wget', bash('wget -qO- http://localhost:43123/api/status')],
+    ['wget bare address', bash('wget 127.0.0.1')],
+    /* nc */
+    ['nc address', bash('nc 127.0.0.1 43123')],
+    ['nc name', bash('nc localhost 80')],
+    ['nc IPv6', bash('nc -z ::1 43123')],
+    ['nc in a pipe', bash('printf "GET /api/status HTTP/1.0\\r\\n\\r\\n" | nc localhost 43123 > outputs/s.txt')],
+    /* python urllib and requests, node fetch and http */
+    ['python urllib', bash(`python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:43123/api/status').read())"`)],
+    ['python requests', bash(`python3 -c "import requests; print(requests.get('http://localhost:43123/api/status').text)"`)],
+    ['python http.client', bash(`python3 -c "import http.client; c = http.client.HTTPConnection('localhost', 43123); c.request('GET', '/x')"`)],
+    ['python socket', bash("python3 - <<'EOF'\nimport socket\ns = socket.create_connection(('127.0.0.1', 43123))\nEOF")],
+    ['node fetch', bash(`node -e "fetch('http://127.0.0.1:43123/api/status').then(r => r.text()).then(console.log)"`)],
+    ['node http', bash(`node -e "require('http').get({ host: 'localhost', port: 43123 }, r => r.pipe(process.stdout))"`)],
+    /* /dev/tcp */
+    ['/dev/tcp address', bash('exec 3<>/dev/tcp/127.0.0.1/43123')],
+    ['/dev/tcp name', bash('cat < /dev/tcp/localhost/43123')],
+    /* a bare URL, in any tool and any text */
+    ['Write script', tool('Write', { file_path: 'outputs/fetch.py', content: "import urllib.request\nurllib.request.urlopen('http://localhost:43123/api/agents/rounds')\n" })],
+    ['Write shell script', tool('Write', { file_path: 'outputs/get.sh', content: 'curl -s localhost/api/status\n' })],
+    ['Write port built at run time', tool('Write', { file_path: 'outputs/get.js', content: "const url = 'localhost:' + port;\n" })],
+    ['Edit', tool('Edit', { file_path: 'outputs/a.py', old_string: 'x', new_string: "BASE = 'http://[::1]:43123'" })],
+    ['Read of a URL', tool('Read', { file_path: 'http://127.0.0.1:43123/api/status' })],
+    ['echo of a URL', bash('echo http://localhost:43123/api/status > outputs/u.txt')],
+    ['here document', bash("cat > outputs/x.py <<'EOF'\nimport requests\nrequests.get(f'http://localhost:{port}/api/status')\nEOF")],
+    /* shell words, variables and nested shells */
+    ['ssh', bash('ssh user@localhost cat notes.txt')],
+    ['assignment', bash('H=localhost')],
+    ['variables', bash('H=localhost; P=8; curl "http://$H:$P/api/status"')],
+    ['variable host', bash('H=localhost; curl -s "$H:43123/x"')],
+    ['bash -c', bash("bash -c 'curl localhost'")],
+    ['substitution', bash('echo "$(curl -s localhost:43123/api/status)"')],
+    ['description', tool('Bash', { command: 'ls outputs', description: 'curl http://127.0.0.1:43123/api/status' })],
+  ];
+  for (const [label, event] of forms) {
+    const result = fx.audit(event);
+    assert.equal(result.status, 'DISCARDED', `${label}: ${JSON.stringify(result.violations)}`);
+    assert.ok(kinds(result).includes('loopback'), `${label} should be loopback: ${JSON.stringify(result.violations)}`);
+  }
+  const one = fx.audit(bash('curl -s http://127.0.0.1:43123/api/status'));
+  assert.deepEqual(one.violations, [{ tool: 'Bash', kind: 'loopback', path: 'http://127.0.0.1:43123', call: 'curl -s http://127.0.0.1:43123/api/status' }], 'one reference, one violation');
+  assert.deepEqual(kinds(fx.audit(bash('cat < /dev/tcp/localhost/43123'))), ['loopback'], '/dev/tcp to this machine is loopback, not abs');
+  assert.deepEqual(kinds(fx.audit(bash('cat < /dev/tcp/example.com/443'))), ['abs'], '/dev/tcp elsewhere stays an access outside the folder');
+});
+
+test('loopback: with companionPort the companion port counts with any host; without it a plain host name and port do not', t => {
+  const fx = fixture(t);
+  const portForms = [
+    bash('curl -s myhost:43123/api/status'),
+    bash('curl -s "http://$NAME:43123/api/status"'),
+    bash('curl -s http://myhost.example:43123/'),
+    bash('echo GET | nc myhost 43123'),
+    bash('echo hi > /dev/tcp/myhost/43123'),
+    bash('PORT=43123 python3 outputs/client.py'),
+    tool('Write', { file_path: 'outputs/client.yml', content: 'host: myhost\nport: 43123\n' }),
+    tool('Write', { file_path: 'outputs/client.py', content: "conn = http.client.HTTPConnection('myhost', 43123)\n" }),
+    tool('Write', { file_path: 'outputs/client.js', content: 'fetch(`http://${host}:43123/api/status`)\n' }),
+  ];
+  for (const event of portForms) {
+    const withPort = fx.audit(event, { companionPort: COMPANION_PORT });
+    assert.ok(kinds(withPort).includes('loopback'), JSON.stringify(event) + ' ' + JSON.stringify(withPort.violations));
+    assert.equal(withPort.status, 'DISCARDED');
+    assert.ok(!kinds(fx.audit(event)).includes('loopback'), 'without the option this is a host name and a port: ' + JSON.stringify(event));
+  }
+  assert.ok(kinds(fx.audit(bash('curl 127.0.0.1:8080'), { companionPort: COMPANION_PORT })).includes('loopback'), 'a loopback address is flagged on any port');
+});
+
+test('loopback: must-not-flag cases (a sentence that mentions localhost is free text, remote URLs, other ports, plain figures)', t => {
+  const fx = fixture(t);
+  const clean = [
+    /* Decided: the bare word localhost in prose is free text. Only a host position (a URL, host:port, a quoted host, a
+       shell word, a line that also names a network client) counts. */
+    tool('Write', { file_path: 'outputs/memo.md', content: 'The old reporting server ran on localhost, so the figures were exported by hand.\n' }),
+    tool('Edit', { file_path: 'outputs/memo.md', old_string: 'server', new_string: 'reporting server on localhost' }),
+    bash('echo "the source system ran on localhost" > outputs/n.md'),
+    bash("cat > outputs/memo.md <<'EOF'\nThe source system ran on localhost.\nRevenue was 43123 thousand.\nEOF"),
+    /* remote URLs, also with ports */
+    bash('curl -s https://example.com:8443/data.csv -o outputs/d.csv'),
+    bash('wget -q https://files.example.org/a.csv -O outputs/a.csv'),
+    tool('Write', { file_path: 'outputs/n.md', content: 'Source: https://example.com:8080/a and http://x.org/y' }),
+    /* port numbers that are not the companion port, and the companion port as a plain figure */
+    bash('curl -s http://example.com:8080/x -o outputs/x'),
+    bash('echo 43123 >> outputs/figures.txt'),
+    tool('Write', { file_path: 'outputs/t.csv', content: 'item,value\na,43123\nb,8080\n' }),
+    bash('curl --retry 0 --max-time 0 https://example.com/a -o outputs/a'),
+    /* numbers and slices that look like addresses */
+    bash('python3 -c "a = [1, 2, 3]; print(a[::1], a[0:2], 127.5 / 3)"'),
+    bash('echo "meeting at 10:30, ratio 0:5, version 10.0.0.1" > outputs/n.txt'),
+    tool('Write', { file_path: 'outputs/m.md', content: 'Net debt fell 127.1 to 4,312.3; FY24:FY23 = 1.2x; a::b; [::2]' }),
+    tool('Write', { file_path: 'outputs/k.py', content: "key = '::'.join(parts)\nhead, tail = key.split(\"::\")\n" }),
+    bash('echo :: >> outputs/sep.txt'),
+  ];
+  for (const event of clean) {
+    const result = fx.audit(event, { companionPort: COMPANION_PORT });
+    assert.deepEqual(result.violations, [], JSON.stringify(event));
+    assert.equal(result.status, 'CLEAN');
+  }
+});
+
+test('loopback: companionPort is validated, and no option turns the rule off', t => {
+  const fx = fixture(t);
+  for (const companionPort of [0, 65536, -1, 1.5, NaN, '43123', [43123], {}]) {
+    assert.throws(() => fx.audit(bash('ls'), { companionPort }), /companionPort/, JSON.stringify(companionPort));
+  }
+  for (const companionPort of [undefined, null, 1, 65535, COMPANION_PORT]) assert.equal(fx.audit(bash('ls'), { companionPort }).status, 'CLEAN');
+  const reach = bash('curl -s http://localhost:43123/api/status');
+  for (const extra of [{}, { allowLoopback: true }, { loopback: false }, { strict: false }, { allowedHosts: ['localhost'] }, { companionPort: 8080 }]) {
+    assert.equal(fx.audit(reach, extra).status, 'DISCARDED', JSON.stringify(extra));
+  }
+});
+
+test('loopback: a text full of loopback references costs no more than one with a few, and a huge expanded word fails closed', t => {
+  const fx = fixture(t);
+  const started = Date.now();
+  for (const content of ['"localhost" '.repeat(80000), '127.0.0.1 '.repeat(100000), ':43123 '.repeat(140000), 'curl localhost\n'.repeat(60000)]) {
+    const result = fx.audit(tool('Write', { file_path: 'outputs/x.txt', content }), { companionPort: COMPANION_PORT });
+    assert.equal(result.status, 'DISCARDED');
+    assert.deepEqual(kinds(result), ['loopback'], 'one reference repeated is one violation');
+  }
+  assert.ok(Date.now() - started < 3000, `the scan took ${Date.now() - started} ms`);
+  const doubled = fx.audit(bash('X=0123456789; ' + 'X=$X$X; '.repeat(18) + 'echo $X'));
+  assert.equal(doubled.status, 'DISCARDED');
+  assert.ok(doubled.notes.some(note => /^audit-error: .*expanded word is too long/.test(note)), doubled.notes.join(' | '));
+});
+
+/* ------------------------------------------------------------------ the agent runtime: a pilot that starts another claude */
+
+/* A pilot's shell can start the runtime again. That process runs under the writer's sign-in with no spending cap (only
+   the process the Studio starts gets --max-budget-usd) and its tool calls are never audited, so naming the runtime as a
+   program anywhere in a tool input discards the run. */
+const RUNTIME_BIN = '/opt/synthetic-tools/bin/claude';
+
+test('runtime: every way of starting the agent runtime from a tool call is a violation of its own kind, and it discards the run', t => {
+  const fx = fixture(t);
+  const env = { CLAUDE_BIN: RUNTIME_BIN };
+  const forms = [
+    /* the shell, by name, with or without a wrapper, and as an argument of a command that starts its arguments */
+    ['bare name', bash('claude -p "summarise filesystem/a.csv" > outputs/a.txt')],
+    ['no prompt', bash('echo hi | claude')],
+    ['other case', bash('Claude --print x')],
+    ['allowlisted folder', bash('/usr/local/bin/claude -p x')],
+    ['wrappers', bash('nohup timeout 600 env FOO=1 claude -p x &')],
+    ['xargs', bash('xargs claude -p < outputs/questions.txt')],
+    ['find -exec', bash('find filesystem -name "*.txt" -exec claude -p {} \;')],
+    ['which', bash('which claude')],
+    ['variable', bash('C=claude; $C -p x')],
+    ['variable pieces', bash('A=cla; B=ude; "$A$B" -p x')],
+    ['inherited CLAUDE_BIN', bash('"$CLAUDE_BIN" -p x')],
+    ['bash -c', bash("bash -c 'claude -p x'")],
+    ['eval', bash('eval "claude -p x"')],
+    ['substitution', bash('echo "$(claude -p x)" > outputs/a.txt')],
+    ['npx', bash('npx @anthropic-ai/claude-code -p x')],
+    ['description', tool('Bash', { command: 'ls outputs', description: 'claude -p "check the outputs"' })],
+    /* code that starts a program by name */
+    ['python subprocess', bash(`python3 -c "import subprocess; subprocess.run(['claude', '-p', 'x'])"`)],
+    ['python os.system', bash(`python3 -c "import os; os.system('claude -p x')"`)],
+    ['node execFile', bash(`node -e "require('child_process').execFileSync('claude', ['-p', 'x'])"`)],
+    ['here document', bash("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['claude', '--print', 'x'])\nEOF")],
+    /* a file written now and run later */
+    ['Write script', tool('Write', { file_path: 'outputs/run.sh', content: '#!/bin/sh\nclaude -p "do the task" > outputs/a.txt\n' })],
+    ['Write code with a path', tool('Write', { file_path: 'outputs/r.py', content: 'import subprocess\nsubprocess.run(["/usr/local/bin/claude", "-p", "x"])\n' })],
+    ['Edit', tool('Edit', { file_path: 'outputs/r.js', old_string: 'x', new_string: "spawn('claude', ['-p', prompt])" })],
+  ];
+  for (const [label, event] of forms) {
+    const result = fx.audit(event, { env });
+    assert.equal(result.status, 'DISCARDED', `${label}: ${JSON.stringify(result.violations)}`);
+    assert.ok(kinds(result).includes('runtime'), `${label} should be runtime: ${JSON.stringify(result.violations)}`);
+  }
+  const one = fx.audit(bash('claude -p "hi"'));
+  assert.deepEqual(one.violations, [{ tool: 'Bash', kind: 'runtime', path: 'claude', call: 'claude -p "hi"' }], 'one reference, one violation');
+});
+
+test('runtime: with runtimeBin the runtime path, its real path and its file name count too', t => {
+  const fx = fixture(t);
+  /* A runtime installed under another name, in a folder the audit otherwise lets a pilot run programs from. */
+  const other = '/usr/local/bin/synthetic-agent';
+  for (const event of [bash(`${other} -p x`), bash('synthetic-agent -p x'), tool('Write', { file_path: 'outputs/a.txt', content: `run ${other} later` })]) {
+    assert.ok(kinds(fx.audit(event, { runtimeBin: other })).includes('runtime'), JSON.stringify(event));
+    assert.deepEqual(fx.audit(event).violations, [], 'without runtimeBin this name is an ordinary program: ' + JSON.stringify(event));
+  }
+  /* A symlink to the runtime: the link and the file it points to are the same program. */
+  const real = path.join(fx.base, 'install', 'agent-cli.js');
+  fs.mkdirSync(path.dirname(real), { recursive: true });
+  fs.writeFileSync(real, '#!/bin/sh\n');
+  const link = path.join(fx.base, 'bin', 'agent');
+  fs.mkdirSync(path.dirname(link), { recursive: true });
+  fs.symlinkSync(real, link);
+  const viaReal = fx.audit(bash(`${real} -p x`), { runtimeBin: link });
+  assert.ok(kinds(viaReal).includes('runtime'), JSON.stringify(viaReal.violations));
+  const viaLink = fx.audit(bash(`node ${path.relative(fx.folder, link)} -p x`), { runtimeBin: real });
+  assert.ok(kinds(viaLink).includes('runtime'), 'a relative path through the link: ' + JSON.stringify(viaLink.violations));
+});
+
+test('runtime: must-not-flag cases (claude in a sentence, names that only contain it, the pilot own configuration folder)', t => {
+  const fx = fixture(t);
+  const clean = [
+    bash('echo "Answer prepared by Claude" > outputs/a.md'),
+    bash('cat filesystem/claude_notes.txt; ls filesystem/claude-2024'),
+    bash('ls .tmp/claude-config/projects; echo "$CLAUDE_CONFIG_DIR"'),
+    tool('Read', { file_path: '.tmp/claude-config/projects/x/tool-results/y.txt' }),
+    tool('Write', { file_path: 'outputs/memo.md', content: 'Claude Shannon wrote about information. "Claude is here" is a quote.\nSee https://claude.example/claude and a.claude -p.\n- claude\n-p is not an option of the line above\n' }),
+    tool('Write', { file_path: 'outputs/t.csv', content: 'name,value\nclaude,3\nmyclaude -p,4\n' }),
+  ];
+  for (const event of clean) {
+    const result = fx.audit(event, { runtimeBin: RUNTIME_BIN, env: { CLAUDE_CONFIG_DIR: path.join(fx.folder, '.tmp', 'claude-config') } });
+    assert.deepEqual(result.violations, [], JSON.stringify(event));
+    assert.equal(result.status, 'CLEAN');
+  }
+});
+
+test('runtime: runtimeBin is validated, no option turns the rule off, and a text full of the name stays fast', t => {
+  const fx = fixture(t);
+  for (const runtimeBin of ['claude', 'bin/claude', 42, {}, ['/x/claude'], '/x/\0claude']) {
+    assert.throws(() => fx.audit(bash('ls'), { runtimeBin }), /runtimeBin/, JSON.stringify(runtimeBin));
+  }
+  for (const runtimeBin of [undefined, null, RUNTIME_BIN]) assert.equal(fx.audit(bash('ls'), { runtimeBin }).status, 'CLEAN');
+  const start = bash('claude -p x');
+  for (const extra of [{}, { allowRuntime: true }, { runtime: false }, { strict: false }, { runtimeBin: '/elsewhere/other' }]) {
+    assert.equal(fx.audit(start, extra).status, 'DISCARDED', JSON.stringify(extra));
+  }
+  const started = Date.now();
+  for (const content of ['claude '.repeat(140000), '/claude/'.repeat(120000), ('a'.repeat(290) + '/claude"\'').repeat(3000), "x/claude' ".repeat(100000)]) {
+    /* /claude/claude/... is an absolute path (abs), but nowhere is the runtime named as a program. */
+    assert.ok(!kinds(fx.audit(tool('Write', { file_path: 'outputs/x.txt', content }), { runtimeBin: RUNTIME_BIN })).includes('runtime'), content.slice(0, 40));
+  }
+  const many = fx.audit(tool('Write', { file_path: 'outputs/x.sh', content: 'claude -p x\n'.repeat(80000) }), { runtimeBin: RUNTIME_BIN });
+  assert.deepEqual(kinds(many), ['runtime'], 'one reference repeated is one violation');
+  assert.ok(Date.now() - started < 3000, `the scan took ${Date.now() - started} ms`);
+});

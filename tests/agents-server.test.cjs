@@ -13,7 +13,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
-const { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, ASSETS } = require('../backend/server.cjs');
+const { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, ASSETS } = require('../backend/server.cjs');
 const { createAgentService, AgentError } = require('../backend/agents/index.cjs');
 const C = require('../backend/agents/constants.cjs');
 const core = require('../core.js');
@@ -177,6 +177,7 @@ const expectedArgs = (promptText, model = 'claude-opus-5-5', effort = 'medium') 
   '--permission-mode', 'acceptEdits',
   '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '',
   '--no-session-persistence',
+  '--max-budget-usd', '3.00',
 ];
 
 /* A service whose methods are replaced by the given ones, so a route can be driven with a chosen failure. */
@@ -801,6 +802,10 @@ test('full flow: inspect, create, freeze, approval summary, approve, launch, pol
   assert.equal(summary.effort, 'medium');
   assert.equal(summary.count, 2);
   assert.deepEqual(summary.tools, ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']);
+  assert.equal(summary.maxBudgetUsd, 3, 'the default spending cap per pilot');
+  assert.equal(summary.concurrency, 2, 'all pilots at once by default');
+  assert.match(summary.text, /^Spending cap per pilot: USD 3\.00 \(--max-budget-usd/m);
+  assert.match(summary.commandLine, / --no-session-persistence --max-budget-usd 3\.00$/);
   assert.equal(summary.packetSha256, created.json.packet.packetSha256);
   assert.equal(summary.freezeSha256, frozen.json.freeze.sha256);
   assert.equal(summary.gafVisible, true);
@@ -1374,6 +1379,275 @@ test('grader-sim over HTTP: one tool-less run, labelled as a simulation, five at
   assert.equal(promptRuns(w.argvLog).length, 1);
 });
 
+/* ====================================================================== blindness while a round runs */
+
+/* Text from the gold, the fingerprints, the prompt and a pilot's answer: none of it may reach a running pilot. */
+const SECRET_TEXT = ['Synthetic gold', 'fp-credit', 'Counts available credit as cash', 'available facility counted', 'Wrong cash', PROMPT, GOLD_ANSWER];
+const SECRET_KEYS = ['"gold"', '"fingerprints"', '"promptText"', '"approvalSummary"', '"summarySha256"', '"sourceDir"', '"matches"', '"text"'];
+
+test('while a round runs, every read of round data withholds the gold, the prompt and the approval summary; the full view returns when it ends', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const earlier = await finishedRound(w);
+  const full = (await w.get(`/api/agents/rounds/${earlier}`)).json;
+  assert.equal(full.freeze.gold.decision, 'hold', 'while nothing runs the full view is served');
+  assert.equal(full.redacted, undefined);
+  const frozen = await frozenRound(w);
+  assert.match(frozen.approvalSummary.text, /Freeze sha256/);
+  const running = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/launch`)).status, 200);
+  await waitFor(async () => {
+    const round = await w.service.getRound(running.id);
+    return round.runs[0].state === 'completed' && round.runs[1].state === 'running';
+  }, { label: 'run 1 to finish while run 2 is still running' });
+
+  const reads = {
+    list: await w.get('/api/agents/rounds'),
+    earlier: await w.get(`/api/agents/rounds/${earlier}`),
+    frozen: await w.get(`/api/agents/rounds/${frozen.id}`),
+    running: await w.get(`/api/agents/rounds/${running.id}`),
+    earlierRun: await w.get(`/api/agents/rounds/${earlier}/runs/1`),
+    runningRun: await w.get(`/api/agents/rounds/${running.id}/runs/1`),
+  };
+  for (const [name, response] of Object.entries(reads)) {
+    assert.equal(response.status, 200, `${name}: ${response.text}`);
+    assert.equal(response.json.redacted, true, name);
+    for (const secret of SECRET_TEXT) assert.ok(!response.text.includes(secret), `${name} leaks ${secret}`);
+    for (const key of SECRET_KEYS) assert.ok(!response.text.includes(key), `${name} carries ${key}`);
+  }
+  /* What stays: the hashes, the time stamps, the states and the verdicts. */
+  assert.deepEqual(reads.earlier.json.freeze, { sha256: full.freeze.sha256, frozenAt: full.freeze.frozenAt });
+  assert.equal(reads.earlier.json.status, 'finished');
+  assert.equal(reads.earlier.json.packet.promptSha256, full.packet.promptSha256);
+  assert.equal(reads.earlier.json.packet.packetSha256, full.packet.packetSha256);
+  assert.deepEqual(reads.frozen.json.freeze, { sha256: frozen.freeze.sha256, frozenAt: frozen.freeze.frozenAt });
+  assert.equal(reads.frozen.json.status, 'frozen');
+  assert.deepEqual(reads.running.json.runs.map(run => run.state), ['completed', 'running']);
+  assert.deepEqual(reads.running.json.freeze, { sha256: running.freeze.sha256, frozenAt: running.freeze.frozenAt });
+  assert.deepEqual(reads.runningRun.json.final, { chars: GOLD_ANSWER.length });
+  assert.deepEqual(reads.runningRun.json.classification, {
+    suggested: { verdict: 'matches-frozen-gold', label: 'heuristic', freezeVersion: 1, freezeSha256: running.freeze.sha256 },
+    human: null,
+  });
+  assert.deepEqual(reads.list.json.rounds.map(row => row.id).sort(), [earlier, frozen.id, running.id].sort());
+
+  /* A pilot can read the nonce, so the answers of the routes that change a round are redacted too. */
+  const refrozen = await w.post(`/api/agents/rounds/${earlier}/refreeze`, { ...GOLD, gold: { ...GOLD.gold, notes: 'Synthetic post-hoc gold' } });
+  assert.equal(refrozen.status, 200, refrozen.text);
+  assert.equal(refrozen.json.redacted, true);
+  assert.ok(!refrozen.text.includes('Synthetic post-hoc gold') && !refrozen.text.includes('Synthetic gold'));
+  assert.deepEqual(Object.keys(refrozen.json.postHocFreezes[0]).sort(), ['frozenAt', 'sha256']);
+
+  /* The round ends: everything comes back, for every round. */
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/cancel`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).status === 'cancelled', { label: 'the round to end' });
+  const after = (await w.get(`/api/agents/rounds/${earlier}`)).json;
+  assert.equal(after.redacted, undefined);
+  assert.deepEqual(after.freeze, full.freeze);
+  assert.equal(after.packet.promptText, PROMPT);
+  assert.equal(after.packet.sourceDir, full.packet.sourceDir);
+  assert.equal(after.postHocFreezes[0].gold.notes, 'Synthetic post-hoc gold');
+  const approval = (await w.get(`/api/agents/rounds/${frozen.id}`)).json;
+  assert.equal(approval.summarySha256, frozen.summarySha256);
+  assert.equal(approval.approvalSummary.text, frozen.approvalSummary.text);
+  const detail = (await w.get(`/api/agents/rounds/${running.id}/runs/1`)).json;
+  assert.equal(detail.final.text, GOLD_ANSWER);
+  assert.ok(detail.classification.suggested.matches.length > 0);
+  assert.equal((await w.get('/api/agents/rounds')).json.redacted, undefined);
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
+});
+
+test('while a round runs, the next round can still be frozen and approved: only the freeze answer keeps the approval summary', async t => {
+  const w = await makeWorld(t, { hang: true }, { limits: { killGraceMs: 200 } });
+  const other = await approvedRound(w);
+  assert.equal((await w.post(`/api/agents/rounds/${other.id}/launch`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(other.id)).runs[0].state === 'running', { label: 'a pilot to be running' });
+
+  const created = await createRound(w);
+  assert.equal(created.redacted, true);
+  assert.ok(!('promptText' in created.packet) && !('sourceDir' in created.packet));
+  const frozen = await w.post(`/api/agents/rounds/${created.id}/freeze`, GOLD);
+  assert.equal(frozen.status, 200, frozen.text);
+  assert.equal(frozen.json.redacted, true);
+  const stored = (await w.service.getRound(created.id)).freeze;
+  assert.deepEqual(frozen.json.freeze, { sha256: stored.sha256, frozenAt: stored.frozenAt });
+  assert.match(frozen.json.summarySha256, /^[0-9a-f]{64}$/);
+  assert.equal(frozen.json.approvalSummary.summarySha256, frozen.json.summarySha256);
+  assert.match(frozen.json.approvalSummary.commandLine, /"<prompt elided>"/);
+  for (const secret of SECRET_TEXT) assert.ok(!frozen.text.includes(secret), `the freeze answer leaks ${secret}`);
+  for (const key of ['"gold"', '"fingerprints"', '"promptText"', '"sourceDir"']) assert.ok(!frozen.text.includes(key), `the freeze answer carries ${key}`);
+  const read = (await w.get(`/api/agents/rounds/${created.id}`)).json;
+  assert.ok(!('approvalSummary' in read) && !('summarySha256' in read), 'a read does not carry the summary');
+
+  const approved = await w.post(`/api/agents/rounds/${created.id}/approve`, { summarySha256: frozen.json.summarySha256, acknowledgements: ACK });
+  assert.equal(approved.status, 200, approved.text);
+  assert.equal(approved.json.status, 'approved');
+  assert.ok(!('approvalSummary' in approved.json) && !approved.text.includes('Synthetic gold'));
+  const launch = await w.post(`/api/agents/rounds/${created.id}/launch`);
+  assert.equal(launch.status, 409);
+  assert.match(launch.json.error, /Another round is running/);
+});
+
+test('while a round runs the simulated grader and the author review answer 409 and start nothing; afterwards the grader runs again', async t => {
+  const w = await makeWorld(t, [{ resultText: '{"verdict":"meets-guidance","reason":"Synthetic reason."}' }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const calls = [];
+  const spied = patchedService(w.service, {
+    graderSim: async body => { calls.push('graderSim'); return w.service.graderSim(body); },
+    authorReview: async body => { calls.push('authorReview'); return w.service.authorReview(body); },
+  });
+  const app = createServer({ root: w.projectRoot, service: spied, port: 0, log: () => {} });
+  const { port } = await app.listen();
+  t.after(() => app.shutdown());
+  const client = clientFor(port, app.nonce);
+  const approved = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  assert.equal((await client.send('POST', `/api/agents/rounds/${approved.id}/launch`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(approved.id)).runs.some(run => run.state === 'running'), { label: 'a pilot to be running' });
+  await waitFor(() => promptRuns(w.argvLog).length === 2, { label: 'both pilot processes to start' });
+
+  const grader = await client.send('POST', '/api/agents/grader-sim', { guidelineText: 'You are grading an answer about Atlas cash.', answerText: GOLD_ANSWER });
+  assert.equal(grader.status, 409, grader.text);
+  assert.match(grader.json.error, /round of pilots is running/);
+  assert.match(grader.json.error, /command line/);
+  const review = await client.send('POST', '/api/agents/author-review', { packageText: 'FILE Facility_Terms.txt', promptText: PROMPT });
+  assert.equal(review.status, 409, review.text);
+  assert.equal(review.json.error, grader.json.error);
+  assert.equal((await w.post('/api/agents/grader-sim', { guidelineText: 'g', answerText: 'a' })).status, 409, 'the same through the first server');
+  assert.deepEqual(calls, [], 'the service was never asked');
+  assert.equal(promptRuns(w.argvLog).length, 2, 'no process beyond the two pilots was started');
+
+  assert.equal((await client.send('POST', `/api/agents/rounds/${approved.id}/cancel`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(approved.id)).status === 'cancelled', { label: 'the round to end' });
+  const again = await client.send('POST', '/api/agents/grader-sim', { guidelineText: 'You are grading an answer about Atlas cash.', answerText: GOLD_ANSWER });
+  assert.equal(again.status, 200, again.text);
+  assert.equal(again.json.verdict, 'meets-guidance');
+  assert.deepEqual(calls, ['graderSim']);
+});
+
+test('a launch is refused while a simulated grader is still running, and a grader is refused while a launch is being answered', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  let releaseGrader;
+  let releaseLaunch;
+  const graderGate = new Promise(resolve => { releaseGrader = resolve; });
+  const launchGate = new Promise(resolve => { releaseLaunch = resolve; });
+  const calls = [];
+  let holdLaunch = false; /* only the second launch is held, so a launch that is wrongly let through answers at once */
+  const spied = patchedService(w.service, {
+    graderSim: async () => { calls.push('graderSim'); await graderGate; return { held: true }; },
+    launchRound: async id => { calls.push('launchRound'); if (holdLaunch) await launchGate; return w.service.launchRound(id); },
+  });
+  const app = createServer({ root: w.projectRoot, service: spied, port: 0, log: () => {} });
+  const { port } = await app.listen();
+  t.after(() => app.shutdown());
+  const client = clientFor(port, app.nonce);
+  const approved = await approvedRound(w);
+
+  const grading = client.send('POST', '/api/agents/grader-sim', { guidelineText: 'g', answerText: 'a' });
+  await waitFor(() => calls.includes('graderSim'), { label: 'the grader to be running' });
+  const refused = await client.send('POST', `/api/agents/rounds/${approved.id}/launch`);
+  assert.equal(refused.status, 409, refused.text);
+  assert.match(refused.json.error, /simulated grader or an author review is still running/);
+  assert.ok(!calls.includes('launchRound'), 'the service was not asked to launch');
+  assert.equal(await roundStatus(w, approved.id), 'approved');
+  assert.equal(promptRuns(w.argvLog).length, 0);
+  releaseGrader();
+  assert.equal((await grading).status, 200);
+
+  holdLaunch = true;
+  const launch = client.send('POST', `/api/agents/rounds/${approved.id}/launch`);
+  await waitFor(() => calls.includes('launchRound'), { label: 'the launch to be in progress' });
+  const late = await client.send('POST', '/api/agents/grader-sim', { guidelineText: 'g', answerText: 'a' });
+  assert.equal(late.status, 409, late.text);
+  assert.equal(calls.filter(call => call === 'graderSim').length, 1, 'the grader was not started during the launch');
+  releaseLaunch();
+  assert.equal((await launch).status, 200);
+  await w.service.whenSettled(approved.id);
+  assert.equal(await roundStatus(w, approved.id), 'finished');
+  assert.equal((await client.send('POST', '/api/agents/grader-sim', { guidelineText: 'g', answerText: 'a' })).status, 200, 'allowed again once the round has ended');
+});
+
+test('a pilot that reads the companion over loopback is DISCARDED by the audit, and the cause is named', async t => {
+  const w = await makeWorld(t, {
+    resultText: GOLD_ANSWER,
+    toolUses: [{ name: 'Bash', input: { command: 'curl -s http://127.0.0.1:43123/api/agents/rounds/rnd-000000000000' }, result: '{"freeze":{}}' }],
+  });
+  const id = await finishedRound(w);
+  const round = (await w.get(`/api/agents/rounds/${id}`)).json;
+  assert.equal(round.runs[0].state, 'completed');
+  assert.equal(round.runs[0].audit.status, 'DISCARDED');
+  assert.equal(round.runs[0].classification, null);
+  const detail = (await w.get(`/api/agents/rounds/${id}/runs/1`)).json;
+  assert.deepEqual(detail.audit.violations.map(v => [v.kind, v.path]), [['loopback', 'http://127.0.0.1:43123']]);
+  assert.equal((await w.post(`/api/agents/rounds/${id}/runs/1/classify`, { verdict: 'matches-frozen-gold' })).status, 409);
+  const exported = (await w.post(`/api/agents/rounds/${id}/export`)).json;
+  assert.deepEqual(exported.records, []);
+  assert.equal(exported.discarded[0].violations[0].kind, 'loopback');
+});
+
+test('once it listens, the server hands its port to the service for the loopback audit', async t => {
+  const real = createAgentService({ root: path.join(os.tmpdir(), 'unused-root-for-port-hand-off'), claudeBin: STUB });
+  const ports = [];
+  const app = createServer({ root: REPO, service: patchedService(real, { setCompanionPort: async value => { ports.push(value); } }), port: 0, log: () => {} });
+  const { port } = await app.listen();
+  t.after(() => app.close());
+  assert.deepEqual(ports, [port]);
+  const logs = [];
+  const failing = createServer({ root: REPO, service: patchedService(real, { setCompanionPort: () => { throw new Error('synthetic refusal'); } }), port: 0, log: message => logs.push(message) });
+  const second = await failing.listen();
+  t.after(() => failing.close());
+  assert.ok(second.port > 0, 'a service that refuses the port does not stop the companion');
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /did not take the companion port \(synthetic refusal\)/);
+});
+
+test('redactRoundData keeps hashes, times and verdicts, and leaves out what comes from the gold wherever it sits', () => {
+  const at = '2026-01-01T00:00:00.000Z';
+  const freeze = { version: 1, frozenAt: at, sha256: 'a'.repeat(64), gold: { decision: 'hold', figures: [{ label: 'Usable cash', value: '1,250', tolerance: 1 }], notes: 'n' }, fingerprints: [{ id: 'fp-x', label: 'x', tokens: ['t'], figures: [] }], postHoc: false };
+  const files = [{ path: 'a.txt', sha256: 'b'.repeat(64), bytes: 1, include: true }];
+  const view = {
+    id: 'rnd-000000000000',
+    status: 'running',
+    note: 'kept',
+    packet: { sourceDir: '/synthetic/source', files, promptText: 'synthetic prompt', promptSha256: 'c'.repeat(64), packetSha256: 'd'.repeat(64), gafVisible: true },
+    freeze,
+    postHocFreezes: [{ ...freeze, version: 2, postHoc: true, supersedes: 'a'.repeat(64), sha256: 'e'.repeat(64) }],
+    summarySha256: 'f'.repeat(64),
+    approvalSummary: { text: 'summary', summarySha256: 'f'.repeat(64) },
+    runs: [{ n: 1, final: { chars: 5 }, classification: { suggestedVerdict: 'fingerprint', humanVerdict: null } }],
+    extension: { nested: [{ later: freeze }], fingerprints: ['fp-x'] },
+  };
+  const out = redactRoundData(view);
+  assert.equal(out.redacted, true);
+  assert.equal(out.note, 'kept');
+  assert.deepEqual(out.freeze, { sha256: 'a'.repeat(64), frozenAt: at });
+  assert.deepEqual(out.postHocFreezes, [{ sha256: 'e'.repeat(64), frozenAt: at }]);
+  assert.deepEqual(out.packet, { files, promptSha256: 'c'.repeat(64), packetSha256: 'd'.repeat(64), gafVisible: true });
+  assert.ok(!('summarySha256' in out) && !('approvalSummary' in out));
+  assert.deepEqual(out.runs, view.runs);
+  assert.deepEqual(out.extension, { nested: [{ later: { sha256: 'a'.repeat(64), frozenAt: at } }] }, 'a freeze record is found by its contents too');
+  assert.equal(view.packet.promptText, 'synthetic prompt', 'the input is not changed');
+
+  const detail = {
+    n: 1,
+    final: { text: 'Usable cash is 1,250.', chars: 21 },
+    outputs: [{ name: 'a.txt', bytes: 1, sha256: 'b'.repeat(64) }],
+    classification: {
+      suggested: { verdict: 'matches-frozen-gold', matches: [{ label: 'Usable cash', value: '1,250', found: true, where: 'final' }], fingerprints: [{ id: 'fp-x', label: 'x', hit: false, tokensFound: [], figuresFound: [] }], decision: { keywords: ['hold'], found: ['hold'] }, label: 'heuristic', freezeVersion: 1, freezeSha256: 'a'.repeat(64) },
+      human: { verdict: 'fingerprint', fingerprintIds: ['fp-x'], note: 'the gold is 1,250', at, freezeVersion: 1, freezeSha256: 'a'.repeat(64) },
+    },
+  };
+  const redacted = redactRoundData(detail);
+  assert.deepEqual(redacted.final, { chars: 21 });
+  assert.deepEqual(redacted.outputs, detail.outputs);
+  assert.deepEqual(redacted.classification, {
+    suggested: { verdict: 'matches-frozen-gold', label: 'heuristic', freezeVersion: 1, freezeSha256: 'a'.repeat(64) },
+    human: { verdict: 'fingerprint', at, freezeVersion: 1, freezeSha256: 'a'.repeat(64) },
+  });
+  assert.equal(redactRoundData({ freeze: null }).freeze, null);
+  assert.deepEqual(redactRoundData({ rounds: [{ id: 'x', freezeSha256: 'a' }] }), { rounds: [{ id: 'x', freezeSha256: 'a' }], redacted: true });
+  const loop = { a: {} };
+  loop.a.loop = loop;
+  assert.doesNotThrow(() => JSON.stringify(redactRoundData(loop)), 'a loop is cut off, not followed forever');
+});
+
 /* ====================================================================== the script entry */
 
 test('usableClaudeBin pins CLAUDE_BIN only when it names an executable file', t => {
@@ -1506,4 +1780,104 @@ test('run as a script it exits with a message on a bad or busy port, and ignores
   assert.notEqual(status.json.agents.runtime.path, path.join(os.tmpdir(), 'no-such-runtime-for-this-test'));
   missing.child.kill('SIGTERM');
   assert.deepEqual(await exitOf(missing), { code: 0, signal: null });
+});
+
+/* ====================================================================== round speed: carry forward, pre-flight, the port in the audit */
+
+test('POST /rounds/:id/next makes a carried-forward draft from the stored round; it needs its own freeze and approval; while a round runs the answer is redacted', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const first = await finishedRound(w);
+  const stored = await w.service.getRound(first);
+  const next = await w.post(`/api/agents/rounds/${first}/next`);
+  assert.equal(next.status, 200, next.text);
+  assert.equal(next.json.status, 'draft');
+  assert.equal(next.json.carriedFrom, first);
+  assert.equal(next.json.freeze, null);
+  assert.equal(next.json.approval, null);
+  assert.ok(!('summarySha256' in next.json) && !('approvalSummary' in next.json), 'a draft carries no approval summary');
+  assert.equal(next.json.carried.contentSha256, stored.freeze.contentSha256);
+  assert.equal(next.json.carried.freezeSha256, stored.freeze.sha256);
+  assert.deepEqual(next.json.carried.content, { gold: stored.freeze.gold, fingerprints: stored.freeze.fingerprints });
+  assert.equal(next.json.packet.promptText, PROMPT);
+
+  /* the body cannot steer it: everything comes from the stored round */
+  const steered = await w.post(`/api/agents/rounds/${first}/next`, { sourceDir: '/etc', promptText: 'other', config: { count: 5 }, carriedFrom: 'rnd-000000000000' });
+  assert.equal(steered.status, 200, steered.text);
+  assert.equal(steered.json.packet.sourceDir, stored.packet.sourceDir);
+  assert.equal(steered.json.packet.promptText, PROMPT);
+  assert.equal(steered.json.config.count, 1);
+  assert.equal(steered.json.carriedFrom, first);
+  assert.equal((await w.post('/api/agents/rounds/BAD_ID/next')).status, 400);
+  assert.equal((await w.post('/api/agents/rounds/rnd-000000000000/next')).status, 404);
+  assert.equal((await w.send('POST', `/api/agents/rounds/${first}/next`, '{}', { 'X-Finance-Local': 'wrong' })).status, 403);
+  assert.equal((await w.get(`/api/agents/rounds/${first}/next`)).status, 405);
+
+  /* freezing the carried content gives the same content hash; launch still needs an approval */
+  const frozen = await w.post(`/api/agents/rounds/${next.json.id}/freeze`, next.json.carried.content);
+  assert.equal(frozen.status, 200, frozen.text);
+  assert.equal(frozen.json.freeze.contentSha256, stored.freeze.contentSha256);
+  assert.equal(frozen.json.carryChanges.freezeContent, false);
+  assert.match(frozen.json.approvalSummary.text, new RegExp(`Gold and fingerprints compared with round ${first}: unchanged`));
+  assert.equal((await w.post(`/api/agents/rounds/${next.json.id}/launch`)).status, 409);
+
+  /* while a round runs, the answer keeps the hashes and withholds the gold */
+  const running = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/launch`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).runs[1].state === 'running', { label: 'a pilot to be running' });
+  const during = await w.post(`/api/agents/rounds/${first}/next`);
+  assert.equal(during.status, 200, during.text);
+  assert.equal(during.json.redacted, true);
+  assert.equal(during.json.carriedFrom, first);
+  assert.equal(during.json.carried.contentSha256, stored.freeze.contentSha256);
+  for (const secret of SECRET_TEXT) assert.ok(!during.text.includes(secret), `the next-round answer leaks ${secret}`);
+  for (const key of SECRET_KEYS) assert.ok(!during.text.includes(key), `the next-round answer carries ${key}`);
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/cancel`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).status === 'cancelled', { label: 'the round to end' });
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
+});
+
+test('POST /rounds/:id/preflight answers before approval: ok when the runtime is ready, a 409 that names the problem otherwise, and no model starts', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const frozen = await frozenRound(w);
+  const ok = await w.post(`/api/agents/rounds/${frozen.id}/preflight`);
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.json.ok, true);
+  assert.equal(ok.json.roundId, frozen.id);
+  assert.equal(await roundStatus(w, frozen.id), 'frozen');
+
+  const out = await makeWorld(t, {}, { env: { FINANCE_STUB_AUTH: 'logged-out' } });
+  const outFrozen = await frozenRound(out);
+  const refused = await out.post(`/api/agents/rounds/${outFrozen.id}/preflight`);
+  assert.equal(refused.status, 409, refused.text);
+  assert.match(refused.json.error, /not signed in/);
+  assert.ok(!refused.text.includes(out.base), 'no server folder in the answer');
+  const older = await makeWorld(t, {}, { env: { FINANCE_STUB_HELP_DROP: '--max-budget-usd' } });
+  const olderFrozen = await frozenRound(older);
+  const lacking = await older.post(`/api/agents/rounds/${olderFrozen.id}/preflight`);
+  assert.equal(lacking.status, 409, lacking.text);
+  assert.match(lacking.json.error, /does not list --max-budget-usd/);
+  assert.equal((await w.get(`/api/agents/rounds/${frozen.id}/preflight`)).status, 405);
+  assert.equal((await w.send('POST', `/api/agents/rounds/${frozen.id}/preflight`, '{}', { 'X-Finance-Local': 'wrong' })).status, 403);
+  assert.equal(promptRuns(w.argvLog).length + promptRuns(out.argvLog).length + promptRuns(older.argvLog).length, 0, 'no model was started');
+
+  /* a service without the method says so */
+  const bare = createServer({ root: w.projectRoot, service: patchedService(w.service, { preflightRound: undefined }), port: 0, log: () => {} });
+  const { port } = await bare.listen();
+  t.after(() => bare.close());
+  const absent = await clientFor(port, bare.nonce).send('POST', `/api/agents/rounds/${frozen.id}/preflight`);
+  assert.equal(absent.status, 404);
+});
+
+test('the port the companion listens on reaches the audit of the real service: a pilot that calls that port on any host is DISCARDED', async t => {
+  const w = await makeWorld(t, {});
+  /* The scenario is read when a pilot starts, so it can name the port the server got. */
+  const calling = port => JSON.stringify({ toolUses: [{ name: 'Bash', input: { command: `curl -s http://studio.invalid:${port}/api/status` } }], resultText: GOLD_ANSWER });
+  w.env.FINANCE_STUB_SCENARIO = calling(w.port === 65535 ? 65534 : w.port + 1);
+  const other = await finishedRound(w);
+  assert.equal((await w.get(`/api/agents/rounds/${other}/runs/1`)).json.audit.status, 'CLEAN', 'another port on a remote host is not this companion');
+  w.env.FINANCE_STUB_SCENARIO = calling(w.port);
+  const own = await finishedRound(w);
+  const detail = (await w.get(`/api/agents/rounds/${own}/runs/1`)).json;
+  assert.equal(detail.audit.status, 'DISCARDED');
+  assert.deepEqual(detail.audit.violations.map(violation => violation.kind), ['loopback']);
 });

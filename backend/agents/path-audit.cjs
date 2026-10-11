@@ -10,7 +10,51 @@
    see, command output, encoded text passed to eval or a shell, a script that builds a path) is not seen. Where the
    text shows that such a thing happened it adds a note (cwd-unresolved, unverifiable-command, unverifiable-code,
    unverifiable-input); a note never discards a run. The work per call is capped and timed, and a call that exceeds a
-   cap or the time budget fails closed. */
+   cap or the time budget fails closed.
+
+   Loopback (violation kind `loopback`). The companion answers every process on this machine, and its rounds hold the
+   gold, so a pilot that talks to a service on this machine can read what its folder does not hold. Any tool input
+   (a Bash command, or any string of any other tool) that reaches for a loopback address is a violation and discards
+   the run. Loopback means 127.0.0.0/8, localhost (also *.localhost, localhost.localdomain, ip6-localhost), ::1 and
+   [::1] (also ::ffff:127.x.y.z), and 0.0.0.0. When the audit is given `companionPort`, that port counts too, with any
+   host. What is flagged:
+     - a URL whose host is a loopback address, in any text (a command, inline code, a file a pilot writes, a path
+       field), with any scheme except file:. In a URL host the shorthands an HTTP client accepts also count (127.1,
+       2130706433, 0x7f000001, 0). A URL whose port is the companion port is flagged whatever its host;
+     - host:port with a loopback host (127.0.0.1:8080, localhost:8080, [::1]:8080), also with a port that is built at
+       run time (localhost:$PORT, 'localhost:' + port);
+     - a quoted string that is only a loopback host ('localhost', "127.0.0.1"), as code passes it to urllib, requests,
+       http.client, socket, node http or fetch;
+     - 127.x.y.z and 0.0.0.0 written out in full, anywhere;
+     - /dev/tcp/<host>/<port> and /dev/udp/... with a loopback host or the companion port;
+     - a line that names a network client (curl, wget, nc, telnet, socat, ssh, urllib, requests, http.client, socket,
+       fetch, http.get, ...) and the word localhost;
+     - in a shell command, a word that is only a loopback host (curl localhost, nc ::1 80, H=localhost, user@localhost),
+       including a word whose variables expand to one; for curl, wget, nc and the other network clients also the numeric
+       shorthands (curl 127.1) and a word that is the companion port (nc somehost <port>);
+     - the companion port as :<port>, port=<port> or port: <port>, a quoted host followed by , <port>, and in a URL.
+   Decided and stated: the bare word localhost in prose (a sentence in a file the pilot writes, an echo of a sentence,
+   a here-document line that names no network client) is free text and is not flagged. Remote URLs and port numbers
+   other than the companion port are not flagged, and the companion port written as a plain number (a figure in a
+   table) is not flagged. A host name that only resolves to this machine through the network (the machine's own name,
+   its LAN address) and a host assembled from pieces at run time are not seen; the audit reads text.
+
+   The agent runtime (violation kind `runtime`). A pilot's shell can start another `claude` process. That process runs
+   under the writer's sign-in (the pilot environment keeps it reachable on purpose), it has no --max-budget-usd cap
+   because only the process the Studio starts gets one, and its own tool calls never reach this audit (they only appear
+   inside the outer pilot's tool output). So any tool input that names the runtime as a program discards the run:
+     - in a shell command, any word whose value is the runtime: the name claude (any case, with or without a folder,
+       also claude.exe), or, when the audit is given `runtimeBin`, the runtime's own path, its real path or its file
+       name. Any word, not only the command name, because xargs, find -exec, watch and the like start their arguments
+       (so `which claude` and `ls claude` count too). Words are judged after expansion, so `$CLAUDE_BIN -p` and
+       `C=claude; $C -p` are seen;
+     - in any text (a command, inline code, a file a pilot writes, any field of any tool): claude followed by an option
+       (claude -p, /usr/local/bin/claude --print), a quoted 'claude' or a quoted path that ends in /claude (code passes
+       a program name that way to subprocess, spawn or execFile), the npm package @anthropic-ai/claude-code, and the
+       runtime's path.
+   Not flagged: claude in a sentence (prepared with Claude), and names that only contain it (claude-config,
+   claude_notes.txt, .claude). A runtime started under a name assembled at run time (command output, encoded text) or
+   from a copy whose name the call does not show is not seen. */
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -28,6 +72,9 @@ const MAX_PATH_SEGMENTS = 2048;
 const MAX_PATH_CHARS = 8192; /* twice PATH_MAX: no real path is longer, so a longer one is hostile or a loop */
 const MAX_BRACE_STEPS = 1024; /* expansion steps for one word; each step is at most one word of the result */
 const DEFAULT_BUDGET_MS = 5000;
+/* Loopback findings looked at per text, and reported per call. One finding already discards the run, so stopping there
+   loses nothing, and a text with a hundred thousand of them costs no more than one with fifty. */
+const MAX_LOOPBACK_HITS = 50;
 
 const SAFE_DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
 const SAFE_BIN_DIRS = new Set(['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin']);
@@ -60,6 +107,34 @@ const TEXT_ABS_RE = new RegExp(TEXT_BOUNDARY + ABS_PATH, 'g');
 const TEXT_DOTDOT_RE = new RegExp(TEXT_BOUNDARY + '((?:\\.\\.\\/)+[\\w.~@%+\\/-]*)', 'g');
 const TEXT_TILDE_RE = new RegExp(TEXT_BOUNDARY + '(~\\/[\\w.~@%+\\/-]*)', 'g');
 const CLOSING_TAG_RE = /^\/[\w.:-]*\s*>/;
+
+/* Loopback host names, written the way /etc/hosts and RFC 6761 name them. */
+const LOOPBACK_NAME = '(?:[a-z0-9-]{1,63}\\.){0,8}(?:localhost[46]?|ip6-localhost|ip6-loopback)(?:\\.localdomain[46]?)?';
+const LOOPBACK_NAME_RE = new RegExp('^' + LOOPBACK_NAME + '$', 'i');
+const LOOPBACK_V4_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const ANY_V4_RE = /^0\.0\.0\.0$/;
+/* IPv6 hosts as the URL parser writes them: ::1, ::, and IPv4 mapped or compatible forms of 127.x.y.z and 0.0.0.0. */
+const LOOPBACK_V6_RE = /^\[(?:::1?|::ffff:(?:7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)|::7f[0-9a-f]{2}:[0-9a-f]{1,4})\]$/;
+/* A loopback host followed by a port, or by the start of a port built at run time ($PORT, ${port}, " + port, %d). */
+const HOST_PORT_RE = new RegExp('(?<![\\w.\\/@-])(' + LOOPBACK_NAME + '|127(?:\\.\\d{1,3}){1,3}|0\\.0\\.0\\.0|\\[[0-9a-f:.%]{2,64}\\])\\.?:(?:\\d{1,5}(?!\\d)|(?=[$`{\'"+%]))', 'gi');
+const QUOTED_HOST_RE = /(['"])([\w.:[\]%-]{1,100})\1/g;
+const LOOPBACK_V4_TEXT_RE = /(?<![\w.])(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0)(?!\d|\.\d)/g;
+const DEV_TCP_RE = /\/dev\/(?:tcp|udp)\/([^/\s'"`;|&<>()]{1,255})(?:\/(\d{1,5}))?/g;
+const LOOPBACK_WORD_RE = new RegExp('(?<![\\w.-])' + LOOPBACK_NAME + '(?![\\w-])', 'i');
+/* Programs and library calls that open a network connection. A line that names one of them and a loopback name is a
+   connection to this machine, also inside a script a pilot writes and runs later. */
+const NET_CLIENT_RE = /(?:^|[^\w.-])(?:curl|wget|nc|ncat|netcat|telnet|socat|ssh|scp|sftp|ftp|aria2c|lynx|w3m|urlopen|urllib\d?|requests|httpx|aiohttp|http\.client|HTTPS?Connection|socket|fetch|axios|https?\.(?:get|request)|XMLHttpRequest|WebSocket|Invoke-WebRequest)(?![\w-])|\/dev\/(?:tcp|udp)\/|require\(\s*['"](?:node:)?(?:https?|net)['"]|from\s+['"](?:node:)?(?:https?|net)['"]/i;
+const NETWORK_COMMANDS = new Set(['curl', 'wget', 'nc', 'ncat', 'netcat', 'telnet', 'socat', 'http', 'https', 'xh', 'aria2c', 'lynx', 'links', 'w3m', 'ssh', 'scp', 'sftp', 'ftp']);
+const URL_AUTHORITY_RE = /[^\s/?#'"`<>|;&(){}\\]{0,300}/y; /* sticky: read at lastIndex, right after :// */
+
+/* The agent runtime: its program name, where that name appears in free text (each place is then judged by what is
+   around it), its npm package, an option right after the name, and the characters a path is made of. */
+const RUNTIME_NAME_RE = /^claude(?:\.exe)?$/i;
+const RUNTIME_TEXT_RE = /claude(?:\.exe)?/gi;
+const RUNTIME_PACKAGE_RE = /@anthropic-ai\/claude-code(?![\w-])/i;
+const RUNTIME_OPTION_AFTER_RE = /^[ \t]{1,16}--?[A-Za-z]/;
+const PATH_CHAR_RE = /[\w.~@%+-]/;
+const MAX_RUNTIME_WORD = 300; /* how far back the start of a path that ends in /claude is looked for */
 
 /* ------------------------------------------------------------------ small helpers */
 
@@ -171,8 +246,20 @@ function toolResultTexts(events) {
 
 /* ------------------------------------------------------------------ audit context */
 
-/* settings: { claudeConfigDir, env, budgetMs, clock }. `env` is the environment the pilot was started with: a variable
-   the command did not set itself is looked up there, so a path held in an inherited variable is still seen. */
+/* The runtime's written path, its real path (symlinks resolved) and its file name, or nothing without runtimeBin. */
+function runtimeFacts(bin, resolver) {
+  if (typeof bin !== 'string') return { paths: [], name: '' };
+  const paths = [path.resolve(bin)];
+  try {
+    const real = resolver(bin);
+    if (!paths.includes(real)) paths.push(real);
+  } catch { /* the written path is still known */ }
+  return { paths, name: path.basename(paths[0]) };
+}
+
+/* settings: { claudeConfigDir, env, budgetMs, clock, companionPort, runtimeBin }. `env` is the environment the pilot was
+   started with: a variable the command did not set itself is looked up there, so a path held in an inherited variable is
+   still seen. companionPort is a whole number or null. runtimeBin is the absolute path of the runtime or null. */
 function makeContext(folderInput, settings) {
   const folder = path.resolve(folderInput);
   const configDir = path.resolve(settings.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
@@ -189,11 +276,15 @@ function makeContext(folderInput, settings) {
   const realFolder = resolver(folder);
   const realConfig = resolver(configDir);
   const env = isObject(settings.env) ? settings.env : null;
+  const companionPort = Number.isInteger(settings.companionPort) ? settings.companionPort : null;
   return {
     folder,
     home: os.homedir(),
     tmp: path.join(folder, '.tmp'),
     env,
+    companionPort,
+    portPatterns: portPatternsFor(companionPort),
+    runtime: runtimeFacts(settings.runtimeBin, resolver),
     tick,
     real,
     inside: target => within(real(target), realFolder),
@@ -233,6 +324,8 @@ function makeRun(ctx, call, violations, notes) {
   return {
     ctx,
     statements: 0,
+    loopbackSeen: [], /* loopback references already reported for this call, so one reference is reported once */
+    runtimeSeen: [], /* the same for references to the agent runtime */
     report(kind, target) {
       const shown = truncate(String(target), 300);
       const key = kind + '\u0000' + shown;
@@ -251,6 +344,11 @@ function makeRun(ctx, call, violations, notes) {
 function classifyAbsolute(ctx, target, write = false) {
   const normal = path.resolve(target);
   if (SAFE_DEVICES.has(normal)) return null;
+  /* bash opens a network connection for /dev/tcp/<host>/<port>. To this machine it is a loopback violation. */
+  const socket = /^\/dev\/(?:tcp|udp)\/([^/]+)(?:\/(\d+))?/.exec(normal);
+  if (socket && (loopbackHost(socket[1], 'url') || (ctx.companionPort !== null && socket[2] === String(ctx.companionPort)))) {
+    return { kind: 'loopback', path: normal };
+  }
   if (!write && SAFE_BIN_DIRS.has(path.dirname(normal))) return null;
   if (/^\/[*?.]*$/.test(normal)) return { kind: 'bare-root', path: '/' };
   if (ctx.inside(normal)) return null;
@@ -325,6 +423,206 @@ function scanText(text, run, state, mode) {
     const resolved = path.join(ctx.home, match[2].slice(2));
     if (ctx.underConfig(resolved)) run.report('harness-spill', resolved);
     else run.report('home', match[2]);
+  }
+}
+
+/* ------------------------------------------------------------------ loopback */
+
+/* A host as the WHATWG URL parser reads it (the way browsers and most HTTP clients do): 127.1, 2130706433 and
+   0x7f000001 all become 127.0.0.1, 0 becomes 0.0.0.0, and IPv6 is written in its short form. null when it is no host. */
+function parsedHost(host) {
+  try { return new URL(`http://${host}/`).hostname.toLowerCase(); } catch { return null; }
+}
+
+/* Is this host text a loopback address? level 'text': only forms that are a loopback address however they are written
+   (names, 127.x.y.z, 0.0.0.0, IPv6). 'word': also the numeric shorthands for 127.0.0.0/8, which a network client accepts
+   as a host but which elsewhere are numbers. 'url': in a URL host also the shorthands for 0.0.0.0 (http://0:8080). */
+function loopbackHost(raw, level) {
+  if (typeof raw !== 'string' || !raw || raw.length > 255) return false;
+  const host = raw.endsWith('.') ? raw.slice(0, -1) : raw;
+  if (LOOPBACK_NAME_RE.test(host) || LOOPBACK_V4_RE.test(host) || ANY_V4_RE.test(host)) return true;
+  const colons = (host.match(/:/g) || []).length;
+  if (/^:+$/.test(host)) return false; /* '::' alone is a separator in code ('::'.join(parts)); [::] in a URL still counts */
+  if (host.startsWith('[') || (colons >= 2 && /^[0-9a-f:.%]+$/i.test(host))) {
+    const bracketed = (host.startsWith('[') ? host : `[${host}]`).replace(/%[^\]]*\]$/, ']');
+    const parsed = parsedHost(bracketed);
+    return parsed !== null && LOOPBACK_V6_RE.test(parsed);
+  }
+  if (level === 'text' || !/^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$/i.test(host)) return false;
+  const parsed = parsedHost(host);
+  if (parsed === null || !/^\d+\.\d+\.\d+\.\d+$/.test(parsed)) return false;
+  return parsed.startsWith('127.') || (level === 'url' && parsed === '0.0.0.0');
+}
+
+/* The host a shell word names: user@host, host:port, host/path, [v6]:port or a bare IPv6 address. */
+function hostOfWord(value) {
+  const rest = value.replace(/^[^@/\s]{0,128}@/, '');
+  if (rest.startsWith('[')) return rest.slice(0, rest.indexOf(']') + 1);
+  if ((rest.match(/:/g) || []).length >= 2 && /^[0-9a-f:.%]+$/i.test(rest)) return rest;
+  return rest.split(/[:/?#]/, 1)[0];
+}
+
+/* Every loopback reference in one text. Each finding is reported once, and a later rule does not report again what an
+   earlier rule already covered (the host inside a URL, the address inside /dev/tcp/...). */
+function scanLoopback(text, run) {
+  if (typeof text !== 'string' || !text || run.loopbackSeen.length >= MAX_LOOPBACK_HITS) return;
+  const ctx = run.ctx;
+  ctx.tick();
+  const port = ctx.companionPort === null ? null : String(ctx.companionPort);
+  const covered = [];
+  const full = () => covered.length >= MAX_LOOPBACK_HITS || run.loopbackSeen.length >= MAX_LOOPBACK_HITS;
+  const report = (start, end, shown) => {
+    if (covered.some(([a, b]) => start < b && end > a)) return;
+    covered.push([start, end]);
+    const clean = shown.split(DYN).join('$(\u2026)');
+    if (run.loopbackSeen.some(seen => seen.includes(clean) || clean.includes(seen))) return;
+    run.loopbackSeen.push(clean);
+    run.report('loopback', clean);
+  };
+  const reportAll = (re, accept) => {
+    for (const match of text.matchAll(re)) {
+      if (full()) return;
+      if (!accept || accept(match)) report(match.index, match.index + match[0].length, match[0]);
+    }
+  };
+  /* URLs: found by their :// so a long run of letters costs nothing. */
+  for (let at = text.indexOf('://'); at >= 0 && !full(); at = text.indexOf('://', at + 3)) {
+    ctx.tick();
+    let start = at;
+    while (start > 0 && at - start < 40 && /[A-Za-z0-9+.-]/.test(text[start - 1])) start--;
+    const scheme = (/[A-Za-z][A-Za-z0-9+.-]*$/.exec(text.slice(start, at)) || [''])[0];
+    if (!scheme || scheme.toLowerCase() === 'file') continue;
+    URL_AUTHORITY_RE.lastIndex = at + 3;
+    const authority = URL_AUTHORITY_RE.exec(text)[0];
+    const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
+    const parts = /^(\[[^\]]*\]|[^:]*)(?::(\d*))?/.exec(hostPort);
+    if (loopbackHost(parts[1], 'url') || (port !== null && parts[2] === port)) {
+      report(at - scheme.length, at + 3 + authority.length, `${scheme}://${authority}`);
+    }
+  }
+  reportAll(DEV_TCP_RE, match => loopbackHost(match[1], 'url') || (port !== null && match[2] === port));
+  reportAll(HOST_PORT_RE, match => !match[1].startsWith('[') || loopbackHost(match[1], 'text'));
+  reportAll(QUOTED_HOST_RE, match => {
+    const inner = match[2];
+    const host = inner.startsWith('[') || (inner.match(/:/g) || []).length >= 2 ? inner : inner.split(':', 1)[0];
+    return loopbackHost(host, 'text') || loopbackHost(hostOfWord(inner), 'text');
+  });
+  reportAll(LOOPBACK_V4_TEXT_RE);
+  for (const re of ctx.portPatterns) reportAll(re);
+  /* A line that opens a connection and names a loopback host. A sentence that only mentions localhost is free text. */
+  if (full() || !LOOPBACK_WORD_RE.test(text)) return;
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    if (full()) return;
+    ctx.tick();
+    if (NET_CLIENT_RE.test(line)) {
+      const found = LOOPBACK_WORD_RE.exec(line);
+      if (found) report(offset + found.index, offset + found.index + found[0].length, truncate(line.trim(), 200));
+    }
+    offset += line.length + 1;
+  }
+}
+
+/* The patterns that find the companion port: :<port>, port=<port> or port: <port>, and a quoted host then , <port>. */
+function portPatternsFor(port) {
+  if (port === null) return [];
+  return [
+    new RegExp(`:${port}(?!\\d)`, 'g'),
+    new RegExp(`\\bport["']?\\s{0,8}(?:[=:]|\\s)\\s{0,8}["']?${port}(?!\\d)`, 'gi'),
+    new RegExp(`["']\\s{0,8},\\s{0,8}${port}(?!\\d)`, 'g'),
+  ];
+}
+
+/* The words of one shell command. A word that is only a loopback host is a host argument (curl localhost, ssh
+   user@localhost, H=localhost). A word that holds a variable is scanned again after expansion, so a URL or a host:port
+   assembled from variables is seen. Network clients also take the numeric shorthands and the bare companion port. */
+function checkLoopbackWords(words, run, state) {
+  let idx = 0;
+  while (idx < words.length && parseAssignment(words[idx])) idx++;
+  idx = skipPrefix(words, idx);
+  const network = idx < words.length && NETWORK_COMMANDS.has(path.posix.basename(literal(words[idx])));
+  const port = run.ctx.companionPort;
+  for (const word of words) {
+    if (run.loopbackSeen.length >= MAX_LOOPBACK_HITS) return;
+    const exp = expand(word, state, run);
+    /* Only the part that is known: a value that is still unknown has already been read in its written form. */
+    const known = exp.dynamic ? exp.prefix : exp.text;
+    if (known.length > MAX_COMMAND_CHARS) throw new RangeError('an expanded word is too long to audit');
+    if (known !== literal(word)) scanLoopback(known, run);
+    const value = exp.text.replace(/^-{0,2}[A-Za-z_][\w.-]*=/, '');
+    if (!value || value.length > 300 || /\s/.test(value)) continue;
+    if (!loopbackHost(hostOfWord(value), network ? 'word' : 'text') && !(network && port !== null && value === String(port))) continue;
+    const shown = value.split(DYN).join('$(\u2026)');
+    /* The same reference found in the text of the call (curl localhost:8080/x after localhost:8080) is not repeated. */
+    if (run.loopbackSeen.some(seen => seen.includes(shown) || shown.includes(seen))) continue;
+    run.loopbackSeen.push(shown);
+    run.report('loopback', shown);
+  }
+}
+
+/* ------------------------------------------------------------------ the agent runtime */
+
+/* One reference to the runtime is reported once per call, also when a later rule finds it again in another form. */
+function reportRuntime(run, shown) {
+  const text = truncate(shown, 300);
+  if (run.runtimeSeen.some(seen => seen.includes(text) || text.includes(seen))) return;
+  run.runtimeSeen.push(text);
+  run.report('runtime', text);
+}
+
+/* Every place in one text where the runtime is named as a program (see `runtime` at the top). The first one found is
+   enough: it already discards the run. The work is one pass over the text plus a short look around each `claude`. */
+function scanRuntime(text, run) {
+  if (typeof text !== 'string' || !text || run.runtimeSeen.length) return;
+  const ctx = run.ctx;
+  ctx.tick();
+  const pkg = RUNTIME_PACKAGE_RE.exec(text);
+  if (pkg) { reportRuntime(run, pkg[0]); return; }
+  for (const bin of ctx.runtime.paths) {
+    for (let at = text.indexOf(bin); at >= 0; at = text.indexOf(bin, at + 1)) {
+      const next = text[at + bin.length] || '';
+      if (next !== '/' && !PATH_CHAR_RE.test(next)) { reportRuntime(run, bin); return; }
+    }
+  }
+  for (const match of text.matchAll(RUNTIME_TEXT_RE)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const before = start ? text[start - 1] : '';
+    /* xclaude, my-claude and .claude are other names; /claude ends a path. */
+    if (before && before !== '/' && PATH_CHAR_RE.test(before)) continue;
+    const after = text[end] || '';
+    const quoted = after === '"' || after === "'" || after === '`';
+    if (!quoted && !RUNTIME_OPTION_AFTER_RE.test(text.slice(end, end + 20))) continue;
+    ctx.tick();
+    let from = start;
+    while (from > 0 && start - from < MAX_RUNTIME_WORD && (text[from - 1] === '/' || PATH_CHAR_RE.test(text[from - 1]))) from--;
+    /* A quoted name must be the whole quoted string: 'claude', "/usr/local/bin/claude". */
+    if (quoted && text[from - 1] !== after) continue;
+    reportRuntime(run, text.slice(from, end));
+    return;
+  }
+}
+
+/* Is this expanded shell word the runtime? Its last path segment is claude, or it is the runtime's own path (as written
+   or through a symlink) or, as a bare name, the runtime's file name. A part that is still unknown is never guessed. */
+function isRuntimeWord(value, ctx, state) {
+  const base = value.slice(value.lastIndexOf('/') + 1);
+  if (RUNTIME_NAME_RE.test(base)) return true;
+  const runtime = ctx.runtime;
+  if (!runtime.paths.length || value.includes(DYN)) return false;
+  if (!value.includes('/')) return value === runtime.name;
+  const full = value.startsWith('/') ? value : state.cwd === null ? null : path.resolve(state.cwd, value);
+  return full !== null && (runtime.paths.includes(path.resolve(full)) || runtime.paths.includes(ctx.real(full)));
+}
+
+/* Every word of one shell command, not only the command name: xargs claude, find -exec claude, watch claude and
+   CLAUDE=claude all name the runtime. Words are judged after expansion (and without a NAME= or --option= prefix). */
+function checkRuntimeWords(words, run, state) {
+  for (const word of words) {
+    const exp = expand(word, state, run);
+    const value = exp.text.replace(/^-{0,2}[A-Za-z_][\w.-]*=/, '');
+    if (!value || value.length > MAX_PATH_CHARS || !isRuntimeWord(value, run.ctx, state)) continue;
+    reportRuntime(run, value.split(DYN).join('$(…)'));
   }
 }
 
@@ -1021,6 +1319,8 @@ function evaluateCommand(command, run, state, depth) {
   const words = expandCommandWords(command.words);
   auditSubstitutions(command, run, state, depth);
   command.redirs.forEach(redirect => checkRedirect(redirect, run, state));
+  checkLoopbackWords(words, run, state);
+  checkRuntimeWords(words, run, state);
   let idx = 0;
   const assignments = [];
   while (idx < words.length) {
@@ -1157,9 +1457,24 @@ function inheritedOldpwd(env) {
   return value.startsWith('/') && !value.includes('\0') ? path.resolve(value) : null;
 }
 
-/* auditToolCalls(events, { folder, claudeConfigDir, projectRoot?, env?, budgetMs?, clock? })
+/* Every string in a tool input (keys are not looked at), depth first, at most 8 levels deep. */
+function inputStrings(value, out = [], depth = 0) {
+  if (depth > 8) return out;
+  if (typeof value === 'string') out.push(value);
+  else if (Array.isArray(value)) value.forEach(item => inputStrings(item, out, depth + 1));
+  else if (isObject(value)) Object.values(value).forEach(item => inputStrings(item, out, depth + 1));
+  return out;
+}
+
+/* auditToolCalls(events, { folder, claudeConfigDir, projectRoot?, env?, budgetMs?, clock?, companionPort?, runtimeBin? })
    events: parsed stream-json objects. folder: the pilot folder (required). claudeConfigDir defaults to
    $CLAUDE_CONFIG_DIR or ~/.claude. projectRoot only enables the leak-in-results note; it never relaxes the audit.
+   companionPort: the TCP port the local companion listens on (a whole number from 1 to 65535). Loopback addresses are
+   violations without it; with it, a reference to that port with any host is one too (see `loopback` at the top). Any
+   other value is refused with a TypeError, so a caller cannot weaken the audit by passing a port it got wrong.
+   runtimeBin: the absolute path of the agent runtime the Studio started (the store's detected `claude`). The name
+   claude is a `runtime` violation without it; with it, that path, its real path and its file name count too (see
+   `runtime` at the top). Anything but an absolute path or null is refused with a TypeError.
    env: the environment the pilot was started with. A variable that the command did not set itself is looked up there,
    so `$SOME_VAR/x` is checked when the pilot inherited SOME_VAR=/some/absolute/path. Without it, such a variable is
    unknown and a path that starts with it cannot be checked.
@@ -1171,11 +1486,21 @@ function auditToolCalls(events, options) {
   if (typeof opts.folder !== 'string' || !opts.folder || opts.folder.includes('\0')) throw new TypeError('auditToolCalls needs the pilot folder');
   const folder = path.resolve(opts.folder);
   if (folder === path.parse(folder).root) throw new TypeError('The pilot folder cannot be the filesystem root');
+  const companionPort = opts.companionPort === undefined || opts.companionPort === null ? null : opts.companionPort;
+  if (companionPort !== null && !(Number.isInteger(companionPort) && companionPort >= 1 && companionPort <= 65535)) {
+    throw new TypeError('companionPort must be a whole number from 1 to 65535');
+  }
+  const runtimeBin = opts.runtimeBin === undefined || opts.runtimeBin === null ? null : opts.runtimeBin;
+  if (runtimeBin !== null && !(typeof runtimeBin === 'string' && path.isAbsolute(runtimeBin) && !runtimeBin.includes('\0'))) {
+    throw new TypeError('runtimeBin must be the absolute path of the agent runtime');
+  }
   const ctx = makeContext(folder, {
     claudeConfigDir: typeof opts.claudeConfigDir === 'string' ? opts.claudeConfigDir : '',
     env: opts.env,
     budgetMs: opts.budgetMs,
     clock: opts.clock,
+    companionPort,
+    runtimeBin,
   });
   const startingOldpwd = inheritedOldpwd(ctx.env);
   const violations = [];
@@ -1185,9 +1510,16 @@ function auditToolCalls(events, options) {
     const run = makeRun(ctx, call, violations, notes);
     try {
       ctx.tick();
+      if (call.name === 'Bash' && typeof call.input.command === 'string' && call.input.command.length > MAX_COMMAND_CHARS) {
+        throw new RangeError('the command is too long to audit');
+      }
+      /* Loopback and the runtime first, over every string of every tool, so a call the shell analysis cannot finish still
+         names them. */
+      const strings = inputStrings(call.input);
+      strings.forEach(text => scanLoopback(text, run));
+      strings.forEach(text => scanRuntime(text, run));
       if (call.name === 'Bash') {
         if (typeof call.input.command === 'string') {
-          if (call.input.command.length > MAX_COMMAND_CHARS) throw new RangeError('the command is too long to audit');
           /* The working directory carries over from call to call. The previous directory (OLDPWD) does not: it is only
              trusted inside one command, because each call may start a new shell. */
           shell.oldpwd = startingOldpwd;

@@ -8,20 +8,19 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { EVALUATOR_PATTERN, ID_RE, LIMITS } = require('./constants.cjs');
-const { inferRole } = require('../../package-engine.js');
+const { EVALUATOR_PATTERN, ID_RE, LIMITS, WITHHELD_ROLES } = require('./constants.cjs');
+const { classifyPath, GAF_PATTERN } = require('../../package-engine.js');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const MAX_ENTRIES = 5000; /* visited directory entries before inspection gives up */
 const MAX_OUTPUT_ENTRIES = 1000;
 const MAX_OUTPUT_DEPTH = 8;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-const GAF_RE = /(?:^|[/_ -])gaf(?:[/_. -]|$)/i;
+const GAF_RE = GAF_PATTERN; /* the shared rule, so the role table and the gaf setting agree */
 const JUNK_NAMES = new Set(['.DS_Store', '__MACOSX']);
 /* C0 and C1 controls, DEL and the Unicode line and paragraph separators. A file name with one of these could forge a
    line in the text the writer approves, so such a file is listed but never usable. */
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-const WITHHELD_ROLES = new Set(['evaluator', 'run-evidence', 'audit']);
 
 /* A refusal with an HTTP style status: 400 for bad input, 409 for a packet that changed. */
 class PacketError extends Error {
@@ -76,14 +75,12 @@ function resolveSourceDir(sourceDir, projectRoot) {
 
 const segmentsOf = rel => rel.split('/').length;
 
+/* The role and default inclusion come from the one rule the page also uses (package-engine.js classifyPath). A withheld
+   file always says why; an included one has no reason. */
 function classify(rel) {
-  const role = inferRole(rel);
-  const looksLikeEvaluator = EVALUATOR_PATTERN.test(rel);
-  if (role === 'evaluator') return { role, defaultInclude: false, reason: 'Looks like grading material (answer, golden, rubric or similar).' };
-  if (looksLikeEvaluator) return { role, defaultInclude: false, reason: 'The name matches an evaluator pattern.' };
-  if (role === 'run-evidence') return { role, defaultInclude: false, reason: 'Looks like evidence from an earlier run.' };
-  if (role === 'audit') return { role, defaultInclude: false, reason: 'Looks like an audit or review document.' };
-  return { role, defaultInclude: !WITHHELD_ROLES.has(role), reason: '' };
+  const { role, reason } = classifyPath(rel);
+  const defaultInclude = !WITHHELD_ROLES.includes(role);
+  return { role, defaultInclude, reason: defaultInclude ? '' : reason || 'Withheld by default.' };
 }
 
 /* Walk the tree without following links. Returns { regular: [{rel, abs, bytes, hidden}], links: [{rel, why}] }. */
@@ -122,7 +119,7 @@ function walk(root) {
 }
 
 /* The one rule for which files belong to the gaf folder: the pilot folder build and the round summary use it, and the
-   page keeps a copy of the same pattern (tests/agents-browser-rules.test.cjs compares the two). */
+   page keeps a copy of the same pattern (tests/agents-page.test.cjs compares the two). */
 const isGafPath = rel => GAF_RE.test(rel);
 
 /* inspectSource(sourceDir, { projectRoot }) -> { files: [{ path, bytes, sha256, inferredRole, defaultInclude, reason }], totalBytes }

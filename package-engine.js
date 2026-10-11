@@ -39,7 +39,43 @@
   const textOf=el=>nodes(el,'t').map(x=>x.textContent).join('');
   const child=(el,name)=>Array.from(el.children).find(x=>x.localName===name);
   function partPath(base,target){if(target.startsWith('/'))return safePath(target.slice(1));const parts=base.split('/').slice(0,-1);for(const t of target.split('/')){if(t==='..')parts.pop();else if(t&&t!=='.')parts.push(t);}return safePath(parts.join('/'));}
-  function inferRole(name){const n=name.toLowerCase();if(/(?:^|[\/_ -])(gaf|template)(?:[\/_. -]|$)/.test(n))return 'template';if(/(?:answer|golden|gold|grader|evaluator|rubric|reference.solution)/.test(n))return 'evaluator';if(/(?:prompt|instruction|task.request)/.test(n))return 'prompt';if(/(?:run|trajectory|batch|score|receipt)/.test(n))return 'run-evidence';if(/(?:review|audit|analysis|candidate)/.test(n))return 'audit';return 'source';}
+  /* Role of a file from its relative path. One rule for the browser and the local companion (backend/agents/pilot-folder.cjs,
+     backend/agents/constants.cjs). Folder conventions first: a grader/, evaluator/, reference/, answers/ or private/ folder is
+     withheld; a gaf/ folder is the solver-visible template. Then whole words only (split on punctuation, spaces, camel case and
+     digits). Grading words fail closed; run and audit hints need context, so runway, run-rate, rerun, analysis and audit
+     committee stay sources. Every withheld role carries a reason. */
+  const WITHHELD_ROLES=Object.freeze(['evaluator','run-evidence','audit']);
+  const words=s=>new Set(s.split(' '));
+  const WITHHELD_FOLDERS=words('grader graders grading evaluator evaluators reference references answer answers private');
+  const GRADING_WORDS=words('guideline guidelines guidance grading grader graders rubric rubrics solution solutions expected answer answers golden gold reference references memo memos evaluator evaluators fingerprint fingerprints attestation attestations private');
+  const GRADING_AFFIXES=words('key keys note notes sheet guide response responses output outputs standard model sample final set'); /* run-together names: answerkey, goldenresponse */
+  const RUN_WORDS=words('run runs batch batches'),RUN_ACTORS=words('pilot pilots agent agents solver harness eval');
+  const RUN_EVIDENCE=words('log logs record records transcript transcripts receipt receipts trace traces output outputs result results score scores'),RUN_FILES=words('id ids json jsonl');
+  const AUDIT_WORDS=words('review reviews audit audits candidate candidates');
+  const ORDINARY_AFTER_AUDIT=words('committee committees opinion opinions fee fees trail trails'),ORDINARY_BEFORE_REVIEW=words('credit loan annual quarterly portfolio business');
+  /* A gaf file: gaf as a word of the path, after the start, a slash, an underscore, a space or a dash, and before a slash,
+     an underscore, a dot, a space, a dash or the end (gaf/x.csv, gaf-hedge.csv, GAF_notes.txt; not gafHedge.csv, gaf2024.xlsx
+     or x.gaf.csv). One pattern for the template role here, the companion's gaf setting (backend/agents/pilot-folder.cjs) and
+     the page's gaf toggle (agents.js isGaf), so a file the role table calls a gaf template is always one the toggle hides. */
+  const GAF_PATTERN=/(?:^|[/_ -])gaf(?:[/_. -]|$)/i;
+  function pathWords(name){return String(name??'').replace(/(\p{Ll})(\p{Lu})/gu,'$1 $2').replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu,'$1 $2').replace(/(\p{L})(\p{N})/gu,'$1 $2').replace(/(\p{N})(\p{L})/gu,'$1 $2').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);}
+  function gradingWord(w){if(GRADING_WORDS.has(w))return w;for(let i=2;i<=w.length-2;i++){const a=w.slice(0,i),b=w.slice(i);if(GRADING_WORDS.has(a)&&(GRADING_WORDS.has(b)||GRADING_AFFIXES.has(b)))return a;if(GRADING_AFFIXES.has(a)&&GRADING_WORDS.has(b))return b;}return '';}
+  function runPhrase(t){for(let i=0;i<t.length;i++){const w=t[i],prev=t[i-1]||'',next=t[i+1]||'';if(w==='trajectory'||w==='trajectories')return w;if(RUN_WORDS.has(w)&&/^\d{1,3}$/.test(next))return w+' '+next;if((w==='run'||w==='runs')&&(RUN_EVIDENCE.has(next)||RUN_FILES.has(next)))return w+' '+next;if((w==='run'||w==='runs')&&RUN_ACTORS.has(prev))return prev+' '+w;if(RUN_ACTORS.has(w)&&RUN_EVIDENCE.has(next))return w+' '+next;}return '';}
+  function auditWord(t){for(let i=0;i<t.length;i++){const w=t[i];if(!AUDIT_WORDS.has(w))continue;if(/^audits?$/.test(w)&&ORDINARY_AFTER_AUDIT.has(t[i+1]))continue;if(/^reviews?$/.test(w)&&ORDINARY_BEFORE_REVIEW.has(t[i-1]))continue;return w;}return '';}
+  function classifyPath(name){
+    const withheld=(role,reason)=>({role,withheld:true,reason:'Withheld by default: '+reason}),kept=role=>({role,withheld:false,reason:''});
+    const folders=String(name??'').split('/').slice(0,-1).map(s=>s.replace(/^ +| +$/g,'').toLowerCase()),folder=folders.find(s=>WITHHELD_FOLDERS.has(s));
+    if(folder)return withheld('evaluator','it is under '+folder+'/, a folder that by convention holds grading or private material.');
+    if(folders.includes('gaf'))return kept('template');
+    const t=pathWords(name);let hit;
+    if((hit=t.map(gradingWord).find(Boolean)))return withheld('evaluator','the name contains the word "'+hit+'", which usually marks grading or private material.');
+    if(GAF_PATTERN.test(String(name??''))||t.some(w=>w==='template'||w==='templates'))return kept('template');
+    if(t.some((w,i)=>/^(?:prompts?|instructions?)$/.test(w)||w==='task'&&t[i+1]==='request'))return kept('prompt');
+    if((hit=runPhrase(t)))return withheld('run-evidence','"'+hit+'" looks like evidence from an earlier run.');
+    if((hit=auditWord(t)))return withheld('audit','"'+hit+'" looks like a review or audit of the task, not a solver file.');
+    return kept('source');
+  }
+  function inferRole(name){return classifyPath(name).role;}
   function record(locator,text,extra={}){return {locator,text:clean(text),...extra};}
   async function parseXlsx(bytes,name,budget){const z=await readZip(bytes,budget),book=xml(await z.text('xl/workbook.xml'),'workbook'),rels=xml(await z.text('xl/_rels/workbook.xml.rels'),'workbook relationships'),relMap={};nodes(rels,'Relationship').forEach(x=>{if(x.getAttribute('TargetMode')!=='External')relMap[x.getAttribute('Id')]=partPath('xl/workbook.xml',x.getAttribute('Target'));});
     const ss=await z.text('xl/sharedStrings.xml'),strings=ss?nodes(xml(ss,'shared strings'),'si').map(textOf):[];
@@ -101,5 +137,5 @@
   }
   const adapters=new Map();
   const adapterBoundary={status:()=>adapters.size?{connected:true,names:[...adapters.keys()]}:{connected:false,message:'No model or harness adapter is connected.'},register:adapter=>{if(!adapter||typeof adapter.name!=='string'||typeof adapter.analyze!=='function'||adapter.credentials)fail('Adapters must provide an analysis function without browser-side credentials.');adapters.set(adapter.name,adapter);},run:async(name,pkg)=>{const adapter=adapters.get(name);if(!adapter)fail('No connected analysis adapter. No model run has started.');return adapter.analyze(validatePackage(pkg));}};
-  const api={ENGINE_VERSION,LIMITS,readZip,crc32,sha256,parseCsv,parseDocument,ingestFiles,inferRole,detectedFacts,analyzePackage,validatePackage,validateAnalysisRuns,citation,adapterBoundary};if(typeof module!=='undefined'&&module.exports)module.exports=api;else scope.FinancePackageEngine=api;
+  const api={ENGINE_VERSION,LIMITS,readZip,crc32,sha256,parseCsv,parseDocument,ingestFiles,inferRole,classifyPath,WITHHELD_ROLES,GAF_PATTERN,detectedFacts,analyzePackage,validatePackage,validateAnalysisRuns,citation,adapterBoundary};if(typeof module!=='undefined'&&module.exports)module.exports=api;else scope.FinancePackageEngine=api;
 })(typeof window!=='undefined'?window:globalThis);

@@ -14,6 +14,18 @@
   const PACKAGE_DIGEST_CHARS=90000;   /* the companion refuses a review prompt over 120 KiB */
   const ID_RE=/^[a-z0-9-]{4,64}$/;
   const FINGERPRINT_ID_RE=/^[a-z0-9-]{2,40}$/;
+  const DEFAULT_PILOTS=5;             /* a full round by default, capped by the maxPilotsPerRound the companion reports */
+  /* The spending cap per pilot (--max-budget-usd). Display and form checks only: the companion enforces the same range
+     (BUDGET_USD in backend/agents/constants.cjs) and refuses anything else. */
+  const BUDGET={pilotDefault:3,minUsd:0.05,maxUsd:20};
+  const TIME_LIMIT_MINUTES=50;        /* the companion's time limit per pilot */
+  /* The in-progress form is kept in this browser's localStorage under this key, so a reload does not lose it. Nothing is
+     written while a round is running, and a successful launch removes it: from then on the companion holds the round. */
+  const DRAFT_KEY='finance-studio.agents.draft.v1';
+  const DRAFT_SAVE_MS=400;
+  const BASE_TITLE=(()=>{try{return document.title||'Finance Task Studio';}catch{return 'Finance Task Studio';}})();
+  const RUNNING_TOOL_LESS='A round is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read.';
+  const RUNNING_NEXT='A round is running. Start the next round when it has ended: while a round runs, the companion withholds the gold and the prompt from this page.';
   const ACKNOWLEDGEMENTS=[
     {id:'shell-access',label:'Shell access as me',text:'Each pilot is a Claude Code agent that can run shell commands as my user account on this computer.'},
     {id:'network',label:'Network use by the agent runtime',text:'The agent runtime (the claude program) sends the packet files and the prompt to Anthropic over the network. This page itself only talks to the companion on this computer.'},
@@ -34,8 +46,12 @@
     dotdot:'A relative path with .. segments that resolves outside the pilot folder.',
     home:'A reference to the home directory.',
     'harness-spill':'The agent runtime pointed the agent at a file in its own configuration area (for example a large output file). That path is outside the pilot folder, so the run is discarded. This is a known cause and not necessarily misbehaviour. The run is kept for reading; start a new round to run it again.',
-    'bare-cd':'cd with no argument moves to the home directory.'
+    'bare-cd':'cd with no argument moves to the home directory.',
+    loopback:'A tool call reached for this computer itself over the network (localhost, a 127.x.x.x address, or the port of this companion). A pilot can read round data from the companion that way, so the run is discarded.',
+    runtime:'A tool call started the agent runtime (the claude program) again, or wrote code that does. That process runs under your sign-in with no spending cap, and its own tool calls are not audited, so the run is discarded.'
   });
+  /* What the spending cap covers, in the settings and the approval dialog (backend/agents/rounds.cjs STATEMENTS.cap). */
+  const CAP_STATEMENT='The cap applies to each pilot process the Studio starts. It is not a ceiling on everything a pilot can start: a claude process that a pilot starts from its own shell has no cap and its tool calls are not audited. The audit discards a run whose tool calls start one, after the fact.';
   const causeOf=kind=>Object.prototype.hasOwnProperty.call(VIOLATION_CAUSES,kind)?VIOLATION_CAUSES[kind]:null;
 
   /* ---------- Escaping and markup. Interpolated values are escaped unless they are the result of html or raw. ---------- */
@@ -66,13 +82,19 @@
     packet:{dir:'',inspectedDir:'',files:null,gafVisible:true,error:''},
     prompt:'',
     label:'',
-    config:{model:'',effort:'',count:1},
-    fz:{decision:'',notes:'',figures:[blankFigure()],fingerprints:[blankFingerprint(1)],errors:[]},
+    config:blankConfig(),
+    fz:blankFreezeForm(),
     rounds:[],
     roundId:null,
     round:null,
     sigs:{},                 // round id -> input signature at creation, to flag a freeze that no longer matches the form
     commands:{},             // round id -> the command line (prompt elided) the companion showed at approval
+    approvals:{},            // round id -> {summary,hash} from the freeze answer, which keeps them while another round runs
+    preflights:{},           // round id -> the last pre-flight result {state,ok,message,version}
+    carry:null,              // {from: round id} after "Start next round", until a round made from it is launched
+    draftInclude:null,       // {dir,paths}: the include boxes of a restored draft, applied at the next inspect of that folder
+    draftTimer:null,
+    draftSavedAt:'',
     working:'',
     overlay:null,
     returnKey:null,
@@ -82,6 +104,9 @@
   };
   function blankFigure(){return {label:'',value:'',tolerance:''};}
   function blankFingerprint(n){return {id:'fp-'+n,label:'',tokens:'',figures:[]};}
+  function blankFreezeForm(){return {decision:'',notes:'',figures:[blankFigure()],fingerprints:[blankFingerprint(1)],errors:[]};}
+  /* atOnce 0 means every pilot at once (one wave); a number below the pilot count runs that many at a time. */
+  function blankConfig(model='',effort=''){return {model,effort,count:DEFAULT_PILOTS,atOnce:0,budget:BUDGET.pilotDefault.toFixed(2)};}
 
   /* ---------- Small helpers ---------- */
   const isLocal=()=>location.protocol==='http:'&&location.hostname==='127.0.0.1';
@@ -109,17 +134,45 @@
     const t=Date.parse(iso);
     return Number.isFinite(t)?new Date(t).toLocaleString():String(iso||'');
   }
-  function elapsedText(run){
-    const start=Date.parse(run.startedAt);
+  function elapsedText(run){return spanText(run.startedAt,run.endedAt);}
+  function spanText(startIso,endIso){
+    const start=Date.parse(startIso);
     if(!Number.isFinite(start))return '-';
-    const end=run.endedAt?Date.parse(run.endedAt):Date.now();
+    const end=endIso?Date.parse(endIso):Date.now();
     const seconds=Math.max(0,Math.round(((Number.isFinite(end)?end:Date.now())-start)/1000));
     return Math.floor(seconds/60)+'m '+String(seconds%60).padStart(2,'0')+'s';
+  }
+  /* The spending cap typed in the settings, as a number of dollars in whole cents inside the allowed range, or NaN. */
+  function budgetNumber(text){
+    const value=String(text==null?'':text).trim();
+    if(!/^\d{1,3}(?:\.\d{1,2})?$/.test(value))return NaN;
+    const n=Number(value);
+    return n>=BUDGET.minUsd&&n<=BUDGET.maxUsd?Math.round(n*100)/100:NaN;
+  }
+  const usd=n=>'USD '+(Math.round(Number(n)*100)/100).toFixed(2);
+  const roundMax=(count,budget)=>usd(Math.round(Number(budget)*100)*Number(count)/100);
+  /* How many pilots run at the same time for a config, and how many waves that makes. */
+  function atOnceOf(cfg){
+    const count=Number(cfg&&cfg.count)||1,asked=Number(cfg&&(cfg.concurrency!==undefined?cfg.concurrency:cfg.atOnce));
+    return Number.isInteger(asked)&&asked>=1&&asked<count?asked:count;
+  }
+  function pacingText(cfg){
+    const count=Number(cfg&&cfg.count)||1,atOnce=atOnceOf(cfg),waves=Math.ceil(count/atOnce);
+    return atOnce===count?'all '+count+' at once, one wave: the round ends within about '+TIME_LIMIT_MINUTES+' minutes'
+      :atOnce+' at a time, '+waves+' waves: the round can take up to about '+(waves*TIME_LIMIT_MINUTES)+' minutes';
   }
   const shortHash=h=>String(h||'').slice(0,12);
   /* The same pattern the companion uses to decide which files belong to the gaf folder (GAF_RE in backend/agents/pilot-folder.cjs;
      tests/agents-page.test.cjs checks that the two stay identical). A name such as gaf-hedge.csv counts, not only a gaf/ folder. */
   const isGaf=path=>/(?:^|[/_ -])gaf(?:[/_. -]|$)/i.test(String(path));
+  /* Inside a gaf/ folder a file is included even when its own name has a grading word (Golden_Response.docx), because gaf/
+     is what the production solver sees. The shared rule (classifyPath in package-engine.js) withholds that name anywhere
+     else, so the packet table marks such a file for a second look. Without the engine nothing is marked. */
+  function gafGradingWord(path){
+    const E=window.FinancePackageEngine,parts=String(path).split('/');
+    if(!E||typeof E.classifyPath!=='function'||!parts.slice(0,-1).some(s=>s.trim().toLowerCase()==='gaf'))return false;
+    try{return E.classifyPath(parts[parts.length-1]).role==='evaluator';}catch{return false;}
+  }
   const lines=text=>[...new Set(String(text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean))];
   const shellQuote=arg=>/^[\w@%+=:,./-]+$/.test(arg)?arg:"'"+String(arg).replace(/'/g,"'\\''")+"'";
   function idOk(id){return typeof id==='string'&&ID_RE.test(id);}
@@ -187,6 +240,7 @@
     if(!ids(S.status.models).includes(S.config.model))S.config.model=S.status.defaultModel;
     if(!ids(S.status.efforts).includes(S.config.effort))S.config.effort=S.status.defaultEffort;
     S.config.count=Math.min(Math.max(1,S.config.count),S.status.max);
+    if(S.config.atOnce>=S.config.count)S.config.atOnce=0;
   }
   function normalizeRound(data){
     const round=data&&data.round&&typeof data.round==='object'?data.round:data;
@@ -202,6 +256,14 @@
     const round=normalizeRound(await api('GET',roundPath(id)));
     if(S.roundId===id)S.round=round;
     return round;
+  }
+  /* Is any round running? The selected round, or any row of the list. While one is, the companion withholds round data
+     (redacted: true), and the simulated grader, the author review and "Start next round" wait. */
+  const anyRunning=()=>!!((S.round&&S.round.status==='running')||S.rounds.some(r=>r&&r.status==='running'));
+  /* The approval summary and its hash: from the round view, or, when a read withheld them because another round is
+     running, from the freeze answer that carried them. The companion checks the hash again when it approves. */
+  function rememberApproval(data){
+    if(data&&idOk(data.id)&&typeof data.summarySha256==='string'&&data.summarySha256)S.approvals[data.id]={summary:data.approvalSummary||null,hash:data.summarySha256};
   }
 
   /* ---------- Painting ---------- */
@@ -225,9 +287,16 @@
     }
     return true;
   }
-  const SECTIONS={runtime:runtimeHtml,packet:packetHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml};
-  function paintSection(name){setHtml($('#ag-'+name),SECTIONS[name]());}
+  const SECTIONS={strip:stripHtml,draft:draftHtml,runtime:runtimeHtml,packet:packetHtml,settings:settingsHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml};
+  function paintSection(name){setHtml($('#ag-'+name),SECTIONS[name]());if(name==='strip'||name==='runs')updateTitle();}
   function paintAll(){if(S.phase==='ready')Object.keys(SECTIONS).forEach(paintSection);}
+  /* The tab title counts the pilots of the selected round that have ended, like "(3/5) Agents", while this page shows. */
+  function titleText(){
+    const runs=runsOf(S.round);
+    if(!S.mounted||S.phase!=='ready'||!runs.length)return BASE_TITLE;
+    return '('+runs.filter(run=>!isActiveRun(run)).length+'/'+runs.length+') Agents · '+BASE_TITLE;
+  }
+  function updateTitle(){try{const next=titleText();if(document.title!==next)document.title=next;}catch{/* no title to set */}}
   function paintRoot(){setHtml($('#ag-root'),pageInner(),true);}
   function paintOverlay(){setHtml($('#agents-modal'),overlayHtml());}
   /* The gate and the freeze state live inside the round and freeze cards. Repainting them leaves the parent's cached markup out of date, so clear it. */
@@ -276,12 +345,48 @@
     if(S.phase!=='ready')return html`<section class="card" aria-busy="true" role="status"><p>Checking for the local companion.</p></section>`;
     return html`
       <div class="dash-heading"><div><div class="eyebrow">Local agents</div><h1>Run blind pilots on your packet.</h1><p>Start Claude Code agents on this computer, one folder per pilot, then read what they did and classify the answers against a gold written before any output. Nothing starts until you approve a round. Results are directional. No rate or difficulty is computed.</p></div></div>
-      <div id="ag-status" class="ag-status ${S.msg.error?'error':''}" role="status" aria-live="polite" aria-atomic="true">${S.msg.text}</div>
+      <div class="ag-top"><div id="ag-strip" class="ag-strip" aria-label="Selected round">${stripHtml()}</div>
+      <div id="ag-status" class="ag-status ${S.msg.error?'error':''}" role="status" aria-live="polite" aria-atomic="true">${S.msg.text}</div></div>
+      <div id="ag-draft" class="ag-draft">${draftHtml()}</div>
       <section class="card" id="ag-runtime" aria-label="Runtime">${runtimeHtml()}</section>
       <section class="card" id="ag-packet" aria-label="Packet">${packetHtml()}</section>
+      <section class="card" id="ag-settings" aria-label="Settings">${settingsHtml()}</section>
       <section class="card" id="ag-freeze" aria-label="Freeze">${freezeHtml()}</section>
       <section class="card" id="ag-round" aria-label="Round">${roundHtml()}</section>
       <section class="card" id="ag-runs" aria-label="Runs">${runsHtml()}</section>`;
+  }
+
+  /* Status strip: the selected round at a glance, repainted on every poll. */
+  function roundCounts(runs){
+    const c={total:runs.length,done:0,running:0,waiting:0,failed:0,cancelled:0};
+    runs.forEach(run=>{
+      if(run.state==='completed')c.done++;
+      else if(run.state==='running')c.running++;
+      else if(run.state==='queued')c.waiting++;
+      else if(run.state==='failed')c.failed++;
+      else if(run.state==='cancelled')c.cancelled++;
+    });
+    return c;
+  }
+  function stripHtml(){
+    const r=S.round;
+    const other=S.rounds.find(x=>x&&x.status==='running'&&(!r||x.id!==r.id));
+    const otherNote=other?html`<span class="ag-strip-item ag-strip-other">Round ${other.id} is running.</span>`:'';
+    if(!r)return html`<span class="ag-strip-item">No round selected.</span>${otherNote}`;
+    const c=roundCounts(runsOf(r));
+    const kind=r.status==='finished'?'green':r.status==='running'?'amber':r.status==='failed'||r.status==='cancelled'?'red':'';
+    return html`<span class="ag-strip-item"><strong>Round ${r.id}</strong> ${pill(r.status||'draft',kind)}</span>
+      <span class="ag-strip-item" id="ag-strip-pilots">${c.total?'Pilots '+c.total+': done '+c.done+' · running '+c.running+(c.waiting?' · waiting '+c.waiting:'')+' · failed '+c.failed+(c.cancelled?' · cancelled '+c.cancelled:''):'No pilots started yet'}</span>
+      <span class="ag-strip-item" id="ag-strip-elapsed">${r.launchedAt?'Elapsed '+spanText(r.launchedAt,r.endedAt):'Not launched'}</span>${otherNote}`;
+  }
+
+  /* The draft kept in this browser, and the button that removes it. */
+  function draftHtml(){
+    const paused=anyRunning();
+    const note=paused?'A round is running, so the form is not saved in this browser until it has ended.'
+      :S.draftSavedAt?'Your form is saved in this browser (last saved '+timeText(S.draftSavedAt)+'), so a reload keeps it. Launching a round removes it.'
+        :'The form is saved in this browser as you type, so a reload keeps it. Launching a round removes it.';
+    return html`<p class="muted">${note}</p><button type="button" class="small" data-ag="clear-draft" data-ag-key="clear-draft" data-ag-lock ${locked()?'disabled':''}>Clear draft</button>`;
   }
 
   /* 1. Runtime */
@@ -319,9 +424,10 @@ ${S.prompt}</textarea></label>
     if(!files.length)return html`<div class="empty">The folder has no regular files.</div>`;
     return html`<div class="table-wrap"><table class="ag-table"><caption class="sr-only">Files in the packet folder</caption><thead><tr><th scope="col">Include</th><th scope="col">File</th><th scope="col">Role</th><th scope="col">Size</th><th scope="col">Note</th></tr></thead><tbody>${files.map((f,i)=>{
       const hidden=isGaf(f.path)&&!S.packet.gafVisible,unusable=!!f.excluded,override=f.include&&!hidden&&!unusable&&!f.defaultInclude;
+      const check=!unusable&&f.defaultInclude&&gafGradingWord(f.path);
       return html`<tr><td data-label="Include"><label class="check ag-include"><input type="checkbox" data-ag-in="include" data-i="${i}" data-ag-key="inc-${i}" ${f.include&&!hidden&&!unusable?'checked':''} ${hidden||unusable?'disabled':''} aria-label="${(f.defaultInclude?'Include ':'Include anyway, override: ')+f.path}">${f.defaultInclude?'':html`<small>override</small>`}</label></td>
-        <td data-label="File"><code class="ag-path">${f.path}</code>${override?pill('Override','amber'):''}${hidden?pill('Hidden: gaf/ is off'):''}${unusable?pill('Cannot be used','amber'):''}</td>
-        <td data-label="Role">${f.role}</td><td data-label="Size">${bytesText(f.bytes)}</td><td data-label="Note">${f.reason||(f.defaultInclude?'':'Excluded by default')}</td></tr>`;
+        <td data-label="File"><code class="ag-path">${f.path}</code>${override?pill('Override','amber'):''}${hidden?pill('Hidden: gaf/ is off'):''}${unusable?pill('Cannot be used','amber'):''}${check?pill('Check: grading word in a gaf/ file','amber'):''}</td>
+        <td data-label="Role">${f.role}</td><td data-label="Size">${bytesText(f.bytes)}</td><td data-label="Note">${f.reason||(check?'Included because it is in gaf/, which the production solver sees. Its name has a grading word, which withholds a file anywhere else: make sure pilots should see it.':f.defaultInclude?'':'Excluded by default')}</td></tr>`;
     })}</tbody></table></div>`;
   }
   function normalizeFile(f){
@@ -341,11 +447,44 @@ ${S.prompt}</textarea></label>
     el.classList.toggle('over',words>limit);
   }
 
-  /* 3. Freeze */
+  /* 3. Settings: everything the freeze fixes besides the packet and the gold, so it is chosen before freezing. */
+  function settingsHtml(){
+    const st=S.status,cfg=S.config,budget=budgetNumber(cfg.budget);
+    return html`<div class="card-title"><div><div class="eyebrow">3 Settings</div><h2>Model, effort, pilots and spending cap</h2></div>${pill(cfg.count+(cfg.count===1?' pilot':' pilots')+(atOnceOf(cfg)===cfg.count?' · one wave':' · '+Math.ceil(cfg.count/atOnceOf(cfg))+' waves'))}</div>
+      <p class="muted">Choose these before you freeze: freezing fixes them for the round it creates. Change one afterwards and the freeze no longer matches, so you freeze again, which creates a new round.</p>
+      <div class="field-row three">
+        <label class="field">Model<select data-ag-in="model" data-ag-key="model">${st.models.map(m=>html`<option value="${m.id}" ${m.id===cfg.model?'selected':''}>${m.id}</option>`)}</select></label>
+        <label class="field">Effort<select data-ag-in="effort" data-ag-key="effort">${st.efforts.map(m=>html`<option value="${m.id}" ${m.id===cfg.effort?'selected':''}>${m.id}</option>`)}</select></label>
+        <div class="field"><span id="ag-count-label">Pilots (1 to ${st.max})</span><div class="ag-stepper" role="group" aria-labelledby="ag-count-label">
+          <button type="button" class="small" data-ag="count-dec" data-ag-key="count-dec" aria-label="Fewer pilots" ${cfg.count<=1?'disabled':''}>-</button>
+          <input type="number" id="ag-count" data-ag-in="count" data-ag-key="count" min="1" max="${st.max}" step="1" value="${cfg.count}" aria-labelledby="ag-count-label">
+          <button type="button" class="small" data-ag="count-inc" data-ag-key="count-inc" aria-label="More pilots" ${cfg.count>=st.max?'disabled':''}>+</button></div></div>
+      </div>
+      <div class="field-row three">
+        <label class="field">Pilots at a time<select id="ag-atonce" data-ag-in="atonce" data-ag-key="atonce"><option value="0" ${atOnceOf(cfg)===cfg.count?'selected':''}>All ${cfg.count} at once</option>${Array.from({length:Math.max(0,cfg.count-1)},(_,i)=>i+1).map(n=>html`<option value="${n}" ${cfg.atOnce===n?'selected':''}>${n} at a time</option>`)}</select><small>All at once ends the round within one time limit (${TIME_LIMIT_MINUTES} minutes). Fewer at a time takes longer.</small></label>
+        <label class="field">Spending cap per pilot (USD)<input type="text" inputmode="decimal" id="ag-budget" data-ag-in="budget" data-ag-key="budget" value="${cfg.budget}" maxlength="6" autocomplete="off" spellcheck="false"><small>Passed to each pilot as --max-budget-usd. From ${BUDGET.minUsd.toFixed(2)} to ${BUDGET.maxUsd.toFixed(2)}.</small></label>
+        <div class="field"><span>Round maximum spend</span><strong id="ag-roundmax" class="ag-spend">${spendText()}</strong><small>The pilots times the cap per pilot. The runtime stops a pilot that reaches its cap.</small></div>
+      </div>
+      <p class="footnote" id="ag-cap-note">${CAP_STATEMENT}</p>
+      <p id="ag-budget-error" class="ag-why" role="alert">${Number.isNaN(budget)?'The spending cap per pilot must be a number of US dollars from '+BUDGET.minUsd.toFixed(2)+' to '+BUDGET.maxUsd.toFixed(2)+', in whole cents.':''}</p>
+      <label class="field">Round label (optional)<input type="text" data-ag-in="label" data-ag-key="label" value="${S.label}" maxlength="120" autocomplete="off" placeholder="Pilot round"></label>`;
+  }
+  function spendText(){
+    const budget=budgetNumber(S.config.budget);
+    return Number.isNaN(budget)?'Not set: fix the cap per pilot':roundMax(S.config.count,budget)+' ('+S.config.count+' × '+usd(budget)+')';
+  }
+  function updateSpend(){
+    const el=$('#ag-roundmax'),error=$('#ag-budget-error');
+    if(el)el.textContent=spendText();
+    if(error)error.textContent=Number.isNaN(budgetNumber(S.config.budget))?'The spending cap per pilot must be a number of US dollars from '+BUDGET.minUsd.toFixed(2)+' to '+BUDGET.maxUsd.toFixed(2)+', in whole cents.':'';
+    const card=$('#ag-settings');if(card)card.agHtml=null;
+  }
+
+  /* 4. Freeze */
   function freezeHtml(){
     const f=S.fz;
-    return html`<div class="card-title"><div><div class="eyebrow">3 Freeze</div><h2>Freeze the gold before any run</h2></div></div>
-      <p class="muted">Write down what a correct answer says and which wrong answers you expect, before you see any output. Freezing stores a hash and a time stamp. It also fixes the packet, prompt and settings for this round: change any of them afterwards and you must freeze again, which creates a new round.</p>
+    return html`<div class="card-title"><div><div class="eyebrow">4 Freeze</div><h2>Freeze the gold before any run</h2></div></div>
+      <p class="muted">Write down what a correct answer says and which wrong answers you expect, before you see any output. Freezing stores a hash and a time stamp, and a content hash of the gold and fingerprints alone, which stays the same when the same content is frozen again. It also fixes the packet, prompt and settings for this round: change any of them afterwards and you must freeze again, which creates a new round.</p>
       <label class="field">Gold decision keywords or phrase<input type="text" data-ag-in="decision" data-ag-key="decision" value="${f.decision}" maxlength="500" autocomplete="off" placeholder="What a correct answer must say, as typed"><small>Separate alternatives with a semicolon; any one of them counts. Used only for the heuristic suggestion. You make the final call on every run.</small></label>
       <h3>Gold figures</h3>
       <div class="ag-figlist">${f.figures.map((fig,j)=>figureRowHtml('gfig',0,j,fig,'gold figure'))}</div>
@@ -400,13 +539,31 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const r=S.round,fr=r&&r.freeze,stale=r&&isStale(r),versions=freezeVersions(r);
     const afterDraft=r&&r.status&&!['draft','frozen'].includes(r.status);      /* approved or later: the freeze cannot be edited any more */
     const wasLaunched=!!(r&&(r.launchedAt||runsOf(r).length));               /* only a launched round can take a post-hoc version */
+    /* The form is known to match the round only when this page froze it from the form (a signature it kept). */
+    const known=!!(r&&S.sigs[r.id]),settled=!!(fr&&!afterDraft&&!stale&&known);
     return html`${S.fz.errors.length?html`<div class="notice" role="alert"><strong>Fix before freezing</strong><ul class="plain-list">${S.fz.errors.map(e=>html`<li>${e}</li>`)}</ul></div>`:''}
+      ${r&&r.carriedFrom?carryHtml(r):''}
       ${fr?versions.map(v=>html`<div class="notice neutral"><strong>${v.postHoc?'Post-hoc freeze version ':'Frozen '}${v.version?'(version '+v.version+')':''}</strong>
-        <dl class="history-details"><dt>Round</dt><dd>${r.id}</dd><dt>${v.postHoc?'Saved at':'Frozen at'}</dt><dd>${timeText(v.frozenAt)}</dd><dt>Freeze SHA-256</dt><dd>${v.sha256}</dd>${v.postHoc?html`<dt>Label</dt><dd>Post-hoc: written after launch, stored beside the original freeze</dd>`:''}</dl></div>`):html`<p class="muted">No freeze record for the selected round. Launch stays disabled until the gold is frozen.</p>`}
+        <dl class="history-details"><dt>Round</dt><dd>${r.id}</dd><dt>${v.postHoc?'Saved at':'Frozen at'}</dt><dd>${timeText(v.frozenAt)}</dd><dt>Freeze SHA-256</dt><dd>${v.sha256}</dd>${v.contentSha256?html`<dt>Content SHA-256</dt><dd>${v.contentSha256} <small>(gold and fingerprints, without the time stamp)</small></dd>`:''}${v.postHoc?html`<dt>Label</dt><dd>Post-hoc: written after launch, stored beside the original freeze</dd>`:''}</dl></div>`):html`<p class="muted">No freeze record for the selected round. Launch stays disabled until the gold is frozen.</p>`}
       ${stale?html`<div class="notice" role="status">The packet, prompt, settings or gold on this page no longer match the freeze of round ${r.id}. Freeze again to create a new round.</div>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="freeze" data-ag-key="freeze" data-ag-lock ${locked()||(fr&&!afterDraft&&!stale)?'disabled':''}>${fr&&!afterDraft&&!stale?'Gold is frozen':fr?'Freeze again (new round)':'Freeze gold'}</button>
+      ${fr&&!afterDraft&&!known?html`<p class="footnote" id="ag-unknown-form">This page did not freeze round ${r.id} (or was reloaded since), so it cannot tell whether the form matches it. The approval dialog shows exactly what the round holds. Freeze again to make a new round from the form.</p>`:''}
+      <div class="actions"><button type="button" class="primary" data-ag="freeze" data-ag-key="freeze" data-ag-lock ${locked()||settled?'disabled':''}>${settled?'Gold is frozen':fr?'Freeze again (new round)':'Freeze gold'}</button>
       ${wasLaunched&&fr?html`<button type="button" data-ag="refreeze" data-ag-key="refreeze" data-ag-lock ${locked()?'disabled':''}>Save a post-hoc freeze version</button>`:''}</div>
       ${wasLaunched&&fr?html`<p class="footnote">A post-hoc version is stored beside the original, labelled post-hoc. It never replaces the original freeze. Fingerprints it adds can be chosen when you classify a run.</p>`:''}`;
+  }
+  /* A round started from an earlier one: where it came from, both content hashes, and whether the content changed. */
+  function carryHtml(r){
+    const c=r.carried&&typeof r.carried==='object'?r.carried:{},ch=r.carryChanges&&typeof r.carryChanges==='object'?r.carryChanges:{};
+    const own=r.freeze&&r.freeze.contentSha256;
+    const content=ch.freezeContent===true?'changed':ch.freezeContent===false?'unchanged':'not frozen yet';
+    const other=[['packet','packet files'],['prompt','prompt'],['gafVisible','gaf setting'],['settings','settings']].filter(([k])=>ch[k]===true).map(([,label])=>label);
+    return html`<div class="notice neutral" id="ag-carry"><strong>Carried forward from round ${r.carriedFrom}</strong>
+      <dl class="history-details"><dt>Its freeze</dt><dd>Version ${c.freezeVersion||'?'}${c.postHoc?', post-hoc':''}: SHA-256 ${c.freezeSha256||'not reported'}</dd>
+        <dt>Its content SHA-256</dt><dd>${c.contentSha256||'not reported'}</dd>
+        <dt>This round's content SHA-256</dt><dd>${own||(r.freeze?'not reported':'Not frozen yet. Check the gold and fingerprints below, then freeze to confirm them.')}</dd>
+        <dt>Gold and fingerprints</dt><dd>${content}</dd>
+        <dt>Also changed</dt><dd>${other.length?other.join(', '):'nothing'}</dd></dl>
+      <p class="footnote">Carrying a round forward fills the form. It never freezes, approves or launches anything: this round needs its own freeze and its own approval.</p></div>`;
   }
   function cleanFigure(fig,name,errors){
     const label=String(fig.label||'').trim();
@@ -446,13 +603,13 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   function inputSig(){
     const files=S.packet.files||[];
     return JSON.stringify({dir:S.packet.inspectedDir,include:files.filter(effectiveInclude).map(f=>f.path),prompt:S.prompt.trim(),gaf:S.packet.gafVisible,
-      model:S.config.model,effort:S.config.effort,count:S.config.count,freeze:freezeContent()});
+      model:S.config.model,effort:S.config.effort,count:S.config.count,atOnce:atOnceOf(S.config),budget:budgetNumber(S.config.budget),freeze:freezeContent()});
   }
   function isStale(round){
     const sig=S.sigs[round.id];
     return !!sig&&sig!==inputSig();
   }
-  function preflight(){
+  function formErrors(){
     const errors=[],p=S.packet;
     if(!p.files)errors.push('Inspect a packet folder first.');
     else{
@@ -460,29 +617,35 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       if(!p.files.some(effectiveInclude))errors.push('Include at least one file in the packet.');
     }
     if(!S.prompt.trim())errors.push('Write the solver prompt.');
+    if(Number.isNaN(budgetNumber(S.config.budget)))errors.push('Set the spending cap per pilot: a number of US dollars from '+BUDGET.minUsd.toFixed(2)+' to '+BUDGET.maxUsd.toFixed(2)+'.');
     return errors;
   }
   function roundBody(){
     const files=(S.packet.files||[]).filter(effectiveInclude);
-    return {label:S.label.trim()||'Pilot round',sourceDir:S.packet.inspectedDir,include:files.map(f=>f.path),overrides:files.filter(f=>!f.defaultInclude).map(f=>f.path),
-      promptText:S.prompt,gafVisible:S.packet.gafVisible,config:{kind:'pilot',model:S.config.model,effort:S.config.effort,count:S.config.count}};
+    const body={label:S.label.trim()||'Pilot round',sourceDir:S.packet.inspectedDir,include:files.map(f=>f.path),overrides:files.filter(f=>!f.defaultInclude).map(f=>f.path),
+      promptText:S.prompt,gafVisible:S.packet.gafVisible,
+      config:{kind:'pilot',model:S.config.model,effort:S.config.effort,count:S.config.count,maxBudgetUsd:budgetNumber(S.config.budget),concurrency:atOnceOf(S.config)}};
+    /* A round frozen from the form after "Start next round" still names the round it came from. */
+    if(S.carry&&idOk(S.carry.from))body.carriedFrom=S.carry.from;
+    return body;
   }
 
-  /* 4. Round */
+  /* 5. Round: the settings the selected round was frozen with, the statements, and the approval gate. */
   function roundHtml(){
-    const st=S.status,cfg=S.config;
-    return html`<div class="card-title"><div><div class="eyebrow">4 Round</div><h2>Model, effort and pilots</h2></div>${S.round?pill('Round '+S.round.id+' · '+(S.round.status||'draft'),S.round.status==='frozen'?'green':''):pill('No round yet')}</div>
-      <div class="field-row three">
-        <label class="field">Model<select data-ag-in="model" data-ag-key="model">${st.models.map(m=>html`<option value="${m.id}" ${m.id===cfg.model?'selected':''}>${m.id}</option>`)}</select></label>
-        <label class="field">Effort<select data-ag-in="effort" data-ag-key="effort">${st.efforts.map(m=>html`<option value="${m.id}" ${m.id===cfg.effort?'selected':''}>${m.id}</option>`)}</select></label>
-        <div class="field"><span id="ag-count-label">Pilots (1 to ${st.max})</span><div class="ag-stepper" role="group" aria-labelledby="ag-count-label">
-          <button type="button" class="small" data-ag="count-dec" data-ag-key="count-dec" aria-label="Fewer pilots" ${cfg.count<=1?'disabled':''}>-</button>
-          <input type="number" id="ag-count" data-ag-in="count" data-ag-key="count" min="1" max="${st.max}" step="1" value="${cfg.count}" aria-labelledby="ag-count-label">
-          <button type="button" class="small" data-ag="count-inc" data-ag-key="count-inc" aria-label="More pilots" ${cfg.count>=st.max?'disabled':''}>+</button></div></div>
-      </div>
-      <label class="field">Round label (optional)<input type="text" data-ag-in="label" data-ag-key="label" value="${S.label}" maxlength="120" autocomplete="off" placeholder="Pilot round"></label>
+    const r=S.round;
+    return html`<div class="card-title"><div><div class="eyebrow">5 Round</div><h2>Approve and launch</h2></div>${r?pill('Round '+r.id+' · '+(r.status||'draft'),r.status==='frozen'?'green':''):pill('No round yet')}</div>
+      ${r&&r.config?roundFactsHtml(r):html`<p class="muted">Freezing the gold creates a round with the settings above.</p>`}
       <div class="notice"><strong>Read this before you launch</strong><ul class="plain-list"><li>${SHELL_STATEMENT}</li><li>${ISOLATION_STATEMENT}</li><li>${NETWORK_STATEMENT}</li><li>Each pilot works in its own folder holding only the files you ticked, an empty outputs folder and an empty scratch folder.</li></ul></div>
       <div id="ag-gate">${gateHtml()}</div>`;
+  }
+  /* What the round itself holds (the companion's copy), so the spend shown is what the approval covers. */
+  function roundFactsHtml(r){
+    const cfg=r.config,budget=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd);
+    return html`<dl class="history-details" id="ag-round-facts"><dt>Model and effort</dt><dd>${cfg.model||'-'} · ${cfg.effort||'-'}</dd>
+      <dt>Pilots</dt><dd>${cfg.count} (${pacingText(cfg)})</dd>
+      <dt>Spending cap per pilot</dt><dd>${usd(budget)} (--max-budget-usd ${budget.toFixed(2)})</dd>
+      <dt>Round maximum spend</dt><dd>${roundMax(cfg.count,budget)}</dd>
+      ${r.carriedFrom?html`<dt>Carried forward from</dt><dd>${r.carriedFrom}</dd>`:''}</dl>`;
   }
   function launchGate(){
     const r=S.round;
@@ -495,8 +658,11 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   function gateHtml(){
     const gate=launchGate();
+    const check=gate.ok&&S.round?S.preflights[S.round.id]:null;
     return html`<p class="${gate.ok?'muted':'ag-why'}">${gate.ok?(gate.resume?'Round '+S.round.id+' is approved but not launched.':'Round '+S.round.id+' is frozen and ready for your approval. Nothing runs until you approve it in the next step.'):gate.why}</p>
-      <div class="actions"><button type="button" class="primary" data-ag="open-approve" data-ag-key="open-approve" data-ag-lock ${gate.ok&&!locked()?'':'disabled'}>${gate.resume?'Review and launch':'Review and approve'}</button></div>`;
+      ${check&&!check.ok?html`<div class="notice" role="alert" id="ag-preflight-gate"><strong>Claude Code is not ready for this round.</strong> ${check.message}</div>`:''}
+      <div class="actions"><button type="button" class="primary" data-ag="open-approve" data-ag-key="open-approve" data-ag-lock ${gate.ok&&!locked()?'':'disabled'}>${gate.resume?'Review and launch':'Review and approve'}</button></div>
+      <p class="footnote">Before the approval dialog opens, the companion checks that Claude Code lists every option the Studio passes and that it is signed in (claude --help and claude auth status). No model is started by that check.</p>`;
   }
 
   /* 6 to 10. Runs, classification, banner, export, simulated grader, author review */
@@ -541,7 +707,8 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   function runsHtml(){
     const r=S.round,runs=runsOf(r),t=tally(runs),n=t.clean;
     const options=S.rounds.length>1||(S.rounds.length===1&&!r);
-    return html`<div class="card-title"><div><div class="eyebrow">5 Runs</div><h2>Pilots and what they did</h2></div>${r?pill((r.status||'draft'),r.status==='finished'?'green':''):''}</div>
+    const running=anyRunning(),carry=canCarry(r);
+    return html`<div class="card-title"><div><div class="eyebrow">6 Runs</div><h2>Pilots and what they did</h2></div>${r?pill((r.status||'draft'),r.status==='finished'?'green':''):''}</div>
       ${options?html`<label class="field">Round<select data-ag-in="select-round" data-ag-key="select-round">${r?'':html`<option value="" selected>Choose a round</option>`}${S.rounds.map(x=>html`<option value="${x.id}" ${r&&x.id===r.id?'selected':''}>${(x.label||'Round')+' · '+x.id+' · '+(x.status||'')+' · '+timeText(x.createdAt)}</option>`)}</select></label>`:''}
       ${r&&r.note?html`<div class="notice" role="status" id="ag-round-note"><strong>Note on this round:</strong> ${r.note}${/companion stopped/.test(r.note)?' Pilots that were interrupted show as failed and were not audited. A pilot process may still be running if the companion was killed without a chance to stop it. Start a new round to run them again.':''}</div>`:''}
       <div class="notice neutral" id="ag-banner"><strong>Directional only, n = ${n}.</strong> No rate or difficulty is computed.
@@ -550,8 +717,11 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         ${t.discarded?html`<div class="ag-counts">Discarded runs are kept and shown, but they are not classified and not counted in the export.</div>`:''}</div>
       ${runs.length?runsTableHtml(runs):html`<div class="empty">${r?'No pilots have started in this round yet.':'No round selected. Freeze the gold to create one.'}</div>`}
       <div class="actions">${r&&['approved','running'].includes(r.status)?html`<button type="button" class="danger" data-ag="cancel-round" data-ag-key="cancel-round" data-ag-lock ${locked()?'disabled':''}>Cancel round</button>`:''}
-        <button type="button" data-ag="open-grader" data-ag-key="open-grader" ${graderRuns().length?'':'disabled'}>Simulated grader…</button>
-        <button type="button" data-ag="open-review" data-ag-key="open-review" ${packageDocuments().length?'':'disabled'}>Author review…</button></div>
+        ${carry.show?html`<button type="button" data-ag="next-round" data-ag-key="next-round" data-ag-lock ${carry.ok&&!locked()?'':'disabled'}>Start next round from this round</button>`:''}
+        <button type="button" data-ag="open-grader" data-ag-key="open-grader" ${graderRuns().length&&!running?'':'disabled'}>Simulated grader…</button>
+        <button type="button" data-ag="open-review" data-ag-key="open-review" ${packageDocuments().length&&!running?'':'disabled'}>Author review…</button></div>
+      ${carry.show?html`<p class="footnote" id="ag-next-note">${carry.ok?'Start next round from this round fills the form with its packet selection, prompt, gaf setting, settings, gold and fingerprints, as a new draft round. Nothing is frozen, approved or launched by it: the new round needs its own freeze and approval.':carry.why}</p>`:''}
+      ${running?html`<p class="ag-why" id="ag-toolless-why">${RUNNING_TOOL_LESS}</p>`:''}
       <p class="footnote">The simulated grader and the author review each ask for their own approval and use no tools. The grader is a simulation, not Studio grading, and it needs a completed pilot with a clean audit. The author review needs a task package loaded on the Overview page.</p>
       <div class="ag-export"><h3>Export</h3>
         <p class="muted">Adds one experiment record per clean, completed pilot to the project in the task editor, and downloads the round JSON. Discarded runs are listed separately and are not added.</p>
@@ -567,6 +737,14 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <td data-label="Your verdict">${verdict?verdictLabel(verdict):'Not classified'}</td>
         <td data-label=""><button type="button" class="small" data-ag="open-run" data-n="${run.n}" data-ag-key="run-${run.n}" aria-label="Open details for pilot ${run.n}">Details</button></td></tr>`;
     })}</tbody></table></div>`;
+  }
+  /* "Start next round" is offered for a round that has run (or is running) and has a freeze to carry forward. */
+  function canCarry(r){
+    const show=!!(r&&r.freeze&&['running','finished','cancelled','failed'].includes(r.status));
+    if(!show)return {show:false,ok:false,why:''};
+    if(anyRunning())return {show:true,ok:false,why:RUNNING_NEXT};
+    if(r.redacted)return {show:true,ok:false,why:'The companion withheld this round\'s data. Wait for the page to read it again.'};
+    return {show:true,ok:true,why:''};
   }
   const packageDocuments=()=>S.ctx.package&&Array.isArray(S.ctx.package.documents)?S.ctx.package.documents:[];
   const graderRuns=()=>runsOf(S.round).filter(run=>run.state==='completed'&&auditStatus(run)==='CLEAN');
@@ -616,14 +794,18 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
 
   /* Approve and launch */
   function approvalSummary(round){
-    const summary=round.approvalSummary||round.summary||(round.approval&&round.approval.summary)||null;
-    const hash=round.summarySha256||round.approvalSummarySha256||(summary&&(summary.summarySha256||summary.sha256))||'';
+    let summary=round.approvalSummary||round.summary||(round.approval&&round.approval.summary)||null;
+    let hash=round.summarySha256||round.approvalSummarySha256||(summary&&(summary.summarySha256||summary.sha256))||'';
+    /* A read made while another round runs withholds both; the freeze answer of this round kept them. */
+    const kept=S.approvals[round.id];
+    if(!hash&&kept){summary=summary||kept.summary;hash=kept.hash;}
     return {summary:summary&&typeof summary==='object'?summary:null,hash:typeof hash==='string'?hash:''};
   }
   function documentedCommand(cfg){
     const tools=(cfg.tools&&cfg.tools.length?cfg.tools:['Bash','Read','Write','Edit','Glob','Grep']).join(',');
+    const budget=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd);
     return ['claude','-p','<prompt elided>','--model',cfg.model||'?','--effort',cfg.effort||'?','--output-format','stream-json','--verbose','--tools',tools,'--allowedTools',tools,
-      '--permission-mode','acceptEdits','--disable-slash-commands','--strict-mcp-config','--setting-sources','','--no-session-persistence'].map((x,i,all)=>x==='<prompt elided>'?x:shellQuote(x)).join(' ');
+      '--permission-mode','acceptEdits','--disable-slash-commands','--strict-mcp-config','--setting-sources','','--no-session-persistence','--max-budget-usd',budget.toFixed(2)].map((x,i,all)=>x==='<prompt elided>'?x:shellQuote(x)).join(' ');
   }
   function commandLineFor(summary,round){
     const given=summary&&(summary.commandLine||summary.command);
@@ -633,8 +815,9 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     return {text:documentedCommand(round.config||{}),source:'documented'};
   }
   /* The prompt as stored with the round, cut for display only; the hash shown beside it covers the whole text. */
-  function promptShown(packet){
+  function promptShown(packet,redacted){
     const text=typeof packet.promptText==='string'?packet.promptText:'';
+    if(!text&&redacted)return '(withheld while a round is running: a running pilot could read it from the companion. The hash below covers the prompt; the text comes back when the round has ended.)';
     if(!text)return '(the companion did not send the prompt text)';
     return text.length>4000?text.slice(0,4000)+'\n... ('+text.length+' characters in all; the hash covers all of them)':text;
   }
@@ -656,9 +839,14 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const overrides=Array.isArray(s.overrides)?s.overrides:Array.isArray(packet.files)?packet.files.filter(f=>f.overridden).map(f=>f.path):localOverrides;
     const allChecked=ACKNOWLEDGEMENTS.every(a=>o.acks[a.id]);
     const model=s.model||cfg.model,effort=s.effort||cfg.effort,count=s.count||cfg.count,tools=s.tools||cfg.tools;
+    const budget=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd);
+    const check=o.preflight||{state:'unknown'},ready=check.state==='ok'||check.state==='unavailable';
     return dialogFrame('Approve and launch this round',html`
       <p class="muted">You are approving exactly what is shown here. Nothing has started. The companion checks that this summary still matches before it runs anything.</p>
-      <dl class="history-details"><dt>Round</dt><dd>${round.id}</dd><dt>Model</dt><dd>${model}</dd><dt>Effort</dt><dd>${effort}</dd><dt>Pilots</dt><dd>${count} (at most ${S.status.max})</dd>
+      ${preflightHtml(check)}
+      <dl class="history-details"><dt>Round</dt><dd>${round.id}</dd><dt>Model</dt><dd>${model}</dd><dt>Effort</dt><dd>${effort}</dd><dt>Pilots</dt><dd>${count} (at most ${S.status.max}; ${pacingText({count,concurrency:cfg.concurrency})})</dd>
+        <dt>Spending cap per pilot</dt><dd>${usd(budget)} (--max-budget-usd ${budget.toFixed(2)})</dd><dt>Round maximum spend</dt><dd>${roundMax(count,budget)} (${count} × ${usd(budget)}) <span id="ag-approve-cap-note">${CAP_STATEMENT}</span></dd>
+        ${round.carriedFrom?html`<dt>Carried forward from</dt><dd>Round ${round.carriedFrom}. Gold and fingerprints ${round.carryChanges&&round.carryChanges.freezeContent===true?'changed':'unchanged'} (content SHA-256 ${round.carried&&round.carried.contentSha256||'?'} then, ${round.freeze&&round.freeze.contentSha256||'see the summary text'} now).</dd>`:''}
         <dt>Tools</dt><dd>${Array.isArray(tools)?tools.join(', '):'Bash, Read, Write, Edit, Glob, Grep'}</dd>
         <dt>Working folder</dt><dd>${s.workingFolder||s.folder||'One new folder per pilot, outside this project, under the system temporary folder'}</dd>
         <dt>Packet SHA-256</dt><dd>${s.packetSha256||packet.packetSha256||'not reported'}</dd><dt>Freeze SHA-256</dt><dd>${s.freezeSha256||freeze.sha256||'not reported'}</dd>
@@ -666,7 +854,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <dt>Overridden files</dt><dd>${overrides.length?overrides.map(p=>html`<code class="ag-path">${p}</code> `):'None'}</dd>
         <dt>Summary SHA-256</dt><dd>${o.hash||'not provided by the companion'}</dd></dl>
       <h3>Prompt</h3>
-      <pre class="ag-final" tabindex="0" aria-label="The prompt every pilot receives">${promptShown(packet)}</pre>
+      <pre class="ag-final" tabindex="0" aria-label="The prompt every pilot receives">${promptShown(packet,round.redacted===true)}</pre>
       <p class="footnote">Prompt SHA-256 <span class="hash">${packet.promptSha256||'not reported'}</span>. Every pilot gets this text after a short fixed lead-in that points to ./filesystem and ./outputs.</p>
       <h3>Files</h3>
       ${fileListsHtml(packet)}
@@ -678,23 +866,60 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       <fieldset class="ag-acks"><legend>Required before launch</legend>${ACKNOWLEDGEMENTS.map((a,i)=>html`<label class="check"><input type="checkbox" data-ag-in="ack" data-id="${a.id}" data-ag-key="ack-${a.id}" ${o.acks[a.id]?'checked':''} ${i===0?'data-ag-initial':''}><span><strong>${a.label}</strong>${a.text}</span></label>`)}</fieldset>
       ${!o.hash?html`<div class="notice" role="alert">The companion did not send an approval hash for this round, so it cannot be approved from here. Update the companion and try again.</div>`:''}
       ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="approve-launch" data-ag-key="approve-launch" ${allChecked&&o.hash&&!locked()?'':'disabled'}>Approve and launch</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-approve">Cancel</button></div>`);
+      <div class="actions"><button type="button" class="primary" data-ag="approve-launch" data-ag-key="approve-launch" ${allChecked&&o.hash&&ready&&!locked()?'':'disabled'}>Approve and launch</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-approve">Cancel</button></div>`);
+  }
+  /* The pre-flight result at the top of the approval dialog. A problem blocks the approval until a check passes. */
+  function preflightHtml(check){
+    if(check.state==='ok')return html`<div class="notice neutral" role="status" id="ag-preflight"><strong>Claude Code is ready.</strong> It lists every option the Studio passes and it is signed in${check.version?' (version '+check.version+')':''}. Checked with claude --help and claude auth status; no model was started.</div>`;
+    if(check.state==='unavailable')return html`<div class="notice neutral" role="status" id="ag-preflight">This companion cannot check Claude Code before approval. The launch still checks it, and refuses with the reason if something is missing.</div>`;
+    if(check.state==='failed')return html`<div class="notice" role="alert" id="ag-preflight"><strong>Fix this before you approve.</strong> ${check.message}<div class="actions"><button type="button" class="small" data-ag="recheck-preflight" data-ag-key="recheck-preflight" ${locked()?'disabled':''}>Check again</button></div></div>`;
+    return html`<div class="notice neutral" role="status" id="ag-preflight">Checking Claude Code (claude --help and claude auth status; no model is started).</div>`;
+  }
+  /* Asks the companion for the launch pre-flight of a round. Never throws: the result says what happened. */
+  async function checkRound(id){
+    try{
+      const data=await api('POST',roundPath(id,'/preflight'),{});
+      const result={state:'ok',ok:true,version:typeof data.version==='string'?data.version:'',message:''};
+      S.preflights[id]=result;
+      return result;
+    }catch(error){
+      /* An older companion has no such route (405), or a service without the check says so (404). */
+      if(error.status===405||(error.status===404&&/not available/i.test(error.message))){delete S.preflights[id];return {state:'unavailable',ok:true,message:''};}
+      const result={state:'failed',ok:false,message:error.message};
+      S.preflights[id]=result;
+      return result;
+    }
   }
   async function openApprove(){
     const gate=launchGate();
     if(!gate.ok){say(gate.why,true);return;}
     const id=S.roundId;
-    await work('approve-open',async()=>{await refreshRound(id);});
+    let check=null;
+    await work('approve-open',async()=>{await refreshRound(id);check=await checkRound(id);});
     const again=launchGate();
     if(!again.ok){say(again.why,true);return;}
     const {summary,hash}=approvalSummary(S.round);
     if(summary&&typeof summary.commandLine==='string'&&summary.commandLine)S.commands[id]=summary.commandLine;
-    openOverlay({type:'approve',roundId:id,acks:{},summary,hash,error:''});
+    openOverlay({type:'approve',roundId:id,acks:{},summary,hash,error:'',preflight:check});
+    if(check&&check.state==='failed')say('Claude Code is not ready for round '+id+': '+check.message,true);
+  }
+  async function recheckPreflight(){
+    const o=S.overlay;
+    if(!o||o.type!=='approve')return;
+    o.preflight={state:'checking'};paintOverlay();
+    let check=null;
+    await work('preflight',async()=>{check=await checkRound(o.roundId);});
+    if(S.overlay!==o)return;
+    o.preflight=check;
+    paintOverlay();gates();
+    if(check.state==='ok')say('Claude Code is ready for round '+o.roundId+'.');
+    else if(check.state==='failed')say(check.message,true);
   }
   async function approveAndLaunch(){
     const o=S.overlay;
     if(!o||o.type!=='approve')return;
     if(!ACKNOWLEDGEMENTS.every(a=>o.acks[a.id])||!o.hash)return;
+    if(!o.preflight||!['ok','unavailable'].includes(o.preflight.state))return;
     const id=o.roundId;
     try{
       await work('launch',async()=>{
@@ -717,7 +942,10 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       return;
     }
     closeOverlay();
-    say('Round '+id+' launched. Pilots run on this computer. This page refreshes every 1.5 seconds.');
+    /* The companion holds the launched round now, so the draft in this browser goes, and nothing is saved while it runs. */
+    clearStoredDraft();
+    S.carry=null;
+    say('Round '+id+' launched: '+pacingText(S.round&&S.round.config||{count:1})+'. Pilots run on this computer. This page refreshes every 1.5 seconds. The draft saved in this browser was removed.');
     paintAll();gates();schedulePoll();
   }
 
@@ -740,6 +968,8 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         if(!o.form.verdict&&!o.form.note&&!o.form.ids.length)o.form=formFor(o.run);
         o.loading=false;
         paintOverlay();
+        /* A withheld detail means a round is running, perhaps one this page has not seen: read the list and poll until it ends. */
+        if(o.run.redacted===true){await loadRounds();paintAll();gates();schedulePoll();}
       }
     }catch(error){
       const o=S.overlay;
@@ -756,7 +986,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     o.run={...fromRound,...(data.run&&typeof data.run==='object'?data.run:data)};
     paintOverlay();
   }
-  function canClassify(run){return run.state==='completed'&&auditStatus(run)==='CLEAN';}
+  function canClassify(run){return run.state==='completed'&&auditStatus(run)==='CLEAN'&&run.redacted!==true;}
   /* The companion's suggestion lists every fingerprint it checked as {id,label,hit,...} and every gold figure as {label,value,found,where}. */
   function suggestedFingerprintIds(suggested){
     const list=suggested&&Array.isArray(suggested.fingerprints)?suggested.fingerprints:[];
@@ -775,6 +1005,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const run=o.run||{},calls=run.toolCalls||{},audit=run.audit||{},violations=Array.isArray(audit.violations)?audit.violations:[];
     const final=run.final&&typeof run.final.text==='string'?run.final.text:null;
     const outputs=Array.isArray(run.outputs)?run.outputs:[];
+    const withheld=run.redacted===true&&final===null&&!isActiveRun(run)&&!o.loading;
     return dialogFrame('Pilot '+o.n+' · '+(run.state||''),html`
       <div class="actions">${stateBadge(run)}${auditBadge(run)}${o.loading?pill('Loading details'):''}</div>
       ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
@@ -785,7 +1016,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       ${auditSectionHtml(run,audit,violations)}
       ${run.state==='failed'?failureHtml(run):''}
       <h3>${run.state==='failed'?"Runtime message (the run failed)":'Final answer'}</h3>
-      ${final!==null?html`<pre class="ag-final" tabindex="0" aria-label="${run.state==='failed'?'Runtime message of':'Final answer of'} pilot ${o.n}">${final||'(empty)'}</pre><p class="footnote">${run.final&&run.final.chars!=null?run.final.chars+' characters. ':''}Shown as plain text.${run.state==='failed'?' This is what the runtime printed as its result. It is not an answer to grade.':''}</p>`:html`<p class="muted">${isActiveRun(run)?'The pilot has not finished.':o.loading?'Loading.':run.state==='failed'?'The runtime recorded no message.':'No final answer was recorded.'}</p>`}
+      ${final!==null?html`<pre class="ag-final" tabindex="0" aria-label="${run.state==='failed'?'Runtime message of':'Final answer of'} pilot ${o.n}">${final||'(empty)'}</pre><p class="footnote">${run.final&&run.final.chars!=null?run.final.chars+' characters. ':''}Shown as plain text.${run.state==='failed'?' This is what the runtime printed as its result. It is not an answer to grade.':''}</p>`:withheld?html`<p class="muted" id="ag-withheld">Hidden while a round is running, because a running pilot could read it from the companion${run.final&&run.final.chars!=null?' ('+run.final.chars+' characters)':''}. The answer, the suggestion and classification come back when the round has ended.</p>`:html`<p class="muted">${isActiveRun(run)?'The pilot has not finished.':o.loading?'Loading.':run.state==='failed'?'The runtime recorded no message.':'No final answer was recorded.'}</p>`}
       <h3>Outputs</h3>
       ${outputs.length?html`<div class="table-wrap"><table class="ag-table"><caption class="sr-only">Files the pilot wrote to its outputs folder</caption><thead><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">SHA-256</th></tr></thead><tbody>${outputs.map(f=>html`<tr><td data-label="Name"><code class="ag-path">${f.name}</code></td><td data-label="Size">${bytesText(f.bytes)}</td><td data-label="SHA-256"><span class="hash">${f.sha256}</span></td></tr>`)}</tbody></table></div>`:html`<p class="muted">No files in the outputs folder.</p>`}
       ${classifyHtml(o,run)}`,'drawer');
@@ -794,7 +1025,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const discarded=audit.status==='DISCARDED';
     const modified=Array.isArray(audit.inputsModified)?audit.inputsModified:[],notes=Array.isArray(audit.notes)?audit.notes:[];
     return html`<h3>Audit</h3>
-      ${discarded?html`<div class="notice" role="status"><strong>DISCARDED</strong><br>This pilot read or wrote outside its own folder. The run is kept on disk and shown here, but it cannot be classified and it is left out of the export counts.</div>`:html`<p class="muted">${audit.status==='CLEAN'?'Every recorded tool call stayed inside the pilot folder, as far as the audit can tell. It reads the commands as text and does not run anything, so a path assembled while a command runs (from a variable or command output it cannot see, or from encoded text) is not seen. It does not prove nothing else happened.':endedWithoutAudit(run)?'This pilot ended before the audit ran, so it was not audited. It cannot be classified or exported.':'The audit runs when the pilot finishes.'}</p>`}
+      ${discarded?html`<div class="notice" role="status"><strong>DISCARDED</strong><br>A tool call of this pilot went outside its own folder, reached for this computer over the network, or started the agent runtime again (the causes are listed below). The run is kept on disk and shown here, but it cannot be classified and it is left out of the export counts.</div>`:html`<p class="muted">${audit.status==='CLEAN'?'Every recorded tool call stayed inside the pilot folder, as far as the audit can tell. It reads the commands as text and does not run anything, so a path assembled while a command runs (from a variable or command output it cannot see, or from encoded text) is not seen, and neither is a claude process started under a name built at run time. It does not prove nothing else happened.':endedWithoutAudit(run)?'This pilot ended before the audit ran, so it was not audited. It cannot be classified or exported.':'The audit runs when the pilot finishes.'}</p>`}
       ${violations.length?html`<div class="table-wrap"><table class="ag-table"><caption class="sr-only">Violations found by the audit</caption><thead><tr><th scope="col">Tool</th><th scope="col">Kind</th><th scope="col">Path</th><th scope="col">Offending call</th></tr></thead><tbody>${violations.map(v=>html`<tr><td data-label="Tool">${v.tool}</td><td data-label="Kind">${v.kind}</td><td data-label="Path"><code class="ag-path">${v.path}</code></td><td data-label="Offending call"><code class="ag-path">${String(v.call==null?'':v.call).slice(0,600)}</code></td></tr>`)}</tbody></table></div>
         <ul class="plain-list">${[...new Set(violations.map(v=>v.kind))].filter(causeOf).map(k=>html`<li><strong>${k}:</strong> ${causeOf(k)}</li>`)}</ul>`:''}
       ${modified.length?html`<p><strong>Solver files changed during the run:</strong> ${modified.map(m=>html`<code class="ag-path">${m}</code> `)}</p>`:''}
@@ -805,6 +1036,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     timeout:()=>'The pilot ran out of time (50 minutes) and was stopped.',
     'no-result':()=>'The program ended without sending a final result.',
     'error-result':()=>'The runtime reported an error as its result. Its message is shown below.',
+    budget:()=>{const cfg=S.round&&S.round.config||{};const cap=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd);return 'The pilot reached its spending cap of '+usd(cap)+' (--max-budget-usd '+cap.toFixed(2)+') and the runtime stopped it before it finished. A later round can set a higher cap per pilot in Settings.';},
     'empty-result':()=>'The program finished with an empty result.',
     'spawn-error':()=>'The program could not be started.',
     'setup-error':()=>'The pilot folder could not be built, so nothing was started.',
@@ -828,7 +1060,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const enabled=canClassify(run),form=o.form,suggested=run.classification&&run.classification.suggested;
     const fingerprints=knownFingerprints(S.round);
     return html`<h3>Classify this answer</h3>
-      ${enabled?'':html`<p class="muted">${auditStatus(run)==='DISCARDED'?'Classification is disabled because this run is DISCARDED.':'Classification opens when the pilot has completed with a clean audit.'}</p>`}
+      ${enabled?'':html`<p class="muted">${auditStatus(run)==='DISCARDED'?'Classification is disabled because this run is DISCARDED.':run.redacted===true&&!isActiveRun(run)?'Classification waits until no round is running.':'Classification opens when the pilot has completed with a clean audit.'}</p>`}
       ${suggested?html`<div class="notice neutral"><strong>Suggested verdict, heuristic: ${verdictLabel(suggested.verdict)}</strong><br>This is a keyword and number match against the frozen gold and fingerprints. It is not a judgement and it is never stored as your verdict.
         ${suggestedMatches(suggested).length?html`<br>Gold figures: ${suggestedMatches(suggested).map(m=>html`<code class="ag-path">${m}</code> `)}`:''}
         ${suggestedFingerprintIds(suggested).length?html`<br>Fingerprint candidates: ${suggestedFingerprintIds(suggested).join(', ')}`:''}
@@ -883,6 +1115,7 @@ ${o.guideline}</textarea></label>
       <div class="actions"><button type="button" class="primary" data-ag="run-grader" data-ag-key="run-grader" ${allChecked&&o.guideline.trim()&&runs.length&&!o.busy?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-grader">Close</button></div>`);
   }
   function openGrader(){
+    if(anyRunning()){say(RUNNING_TOOL_LESS,true);return;}
     const runs=graderRuns();
     if(!runs.length){say('A simulated grader needs a completed run with a clean audit.',true);return;}
     const project=currentProject();
@@ -937,6 +1170,7 @@ ${o.guideline}</textarea></label>
       <div class="actions"><button type="button" class="primary" data-ag="run-review" data-ag-key="run-review" ${allChecked&&docs.length&&!o.busy?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-review">Close</button></div>`);
   }
   function openReview(){
+    if(anyRunning()){say(RUNNING_TOOL_LESS,true);return;}
     if(!packageDocuments().length){say('Load a task package on the Overview page first.',true);return;}
     openOverlay({type:'review',model:S.config.model,leaveOut:false,acks:{},busy:false,error:'',result:null});
   }
@@ -1029,22 +1263,32 @@ ${o.guideline}</textarea></label>
     if(!dir)throw new Error('Enter the folder path first.');
     S.packet.error='';
     try{
-      await work('inspect',async()=>{
-        const data=await api('POST','/api/agents/packet/inspect',{sourceDir:dir});
-        const list=Array.isArray(data)?data:Array.isArray(data.files)?data.files:null;
-        if(!list)throw new Error('The companion returned no file list.');
-        S.packet.files=list.map(normalizeFile).filter(f=>f.path);
-        S.packet.inspectedDir=dir;
-        (S.packet.files||[]).forEach(f=>{if(isGaf(f.path)&&!f.excluded)f.include=S.packet.gafVisible;});
-      });
+      await work('inspect',async()=>{await listPacket(dir);});
       say('Listed '+S.packet.files.length+' files. Review the include boxes. Files that look like evaluator material are off by default.');
+      saveDraftSoon();
     }catch(error){
       S.packet.error=error.message;
       paintSection('packet');
     }
   }
+  /* Lists a packet folder. chosen: the paths to tick (a carried round, or a restored draft for the same folder); without
+     it the companion's defaults apply. gaf files follow the gaf setting either way. */
+  async function listPacket(dir,chosen){
+    const data=await api('POST','/api/agents/packet/inspect',{sourceDir:dir});
+    const list=Array.isArray(data)?data:Array.isArray(data.files)?data.files:null;
+    if(!list)throw new Error('The companion returned no file list.');
+    S.packet.files=list.map(normalizeFile).filter(f=>f.path);
+    S.packet.inspectedDir=dir;
+    const pick=chosen||(S.draftInclude&&S.draftInclude.dir===dir?new Set(S.draftInclude.paths):null);
+    S.draftInclude=null;
+    S.packet.files.forEach(f=>{
+      if(f.excluded)return;
+      if(pick)f.include=pick.has(f.path);
+      if(isGaf(f.path))f.include=S.packet.gafVisible&&(pick?f.include:true);
+    });
+  }
   async function freeze(){
-    const built=buildFreeze(),errors=[...preflight(),...built.errors];
+    const built=buildFreeze(),errors=[...formErrors(),...built.errors];
     if(errors.length){S.fz.errors=errors;gates();say('Fix '+errors.length+(errors.length===1?' item':' items')+' before freezing.',true);return;}
     S.fz.errors=[];
     await work('freeze',async()=>{
@@ -1055,12 +1299,14 @@ ${o.guideline}</textarea></label>
         S.roundId=round.id;
         S.round=round;
       }
-      await api('POST',roundPath(round.id,'/freeze'),{gold:built.gold,fingerprints:built.fingerprints});
+      rememberApproval(await api('POST',roundPath(round.id,'/freeze'),{gold:built.gold,fingerprints:built.fingerprints}));
       await refreshRound(round.id);
       await loadRounds();
     });
-    const fr=S.round&&S.round.freeze;
-    say('Gold frozen for round '+S.round.id+(fr&&fr.sha256?'. Freeze hash '+shortHash(fr.sha256)+'.':'.')+' Nothing has run.');
+    const r=S.round,fr=r&&r.freeze,ch=r&&r.carryChanges;
+    say('Gold frozen for round '+r.id+(fr&&fr.sha256?'. Freeze hash '+shortHash(fr.sha256)+'.':'.')
+      +(r.carriedFrom&&ch&&typeof ch.freezeContent==='boolean'?' Compared with round '+r.carriedFrom+', the gold and fingerprints are '+(ch.freezeContent?'changed':'unchanged')+'.':'')+' Nothing has run.');
+    saveDraftSoon();
   }
   async function refreeze(){
     if(!S.round||!S.round.freeze)return;
@@ -1072,6 +1318,44 @@ ${o.guideline}</textarea></label>
       await refreshRound(S.round.id);
     });
     say('Post-hoc freeze version saved beside the original for round '+S.round.id+'.');
+  }
+  /* "Start next round from this round": the companion makes a new draft from the stored round, and the form is filled
+     from it (the folder is listed again, so the file table is current). Nothing is frozen or approved. */
+  function fzFromContent(content){
+    const gold=content&&content.gold&&typeof content.gold==='object'?content.gold:{};
+    const figure=f=>({label:String(f&&f.label!=null?f.label:''),value:String(f&&f.value!=null?f.value:''),tolerance:f&&f.tolerance!=null&&f.tolerance!==''?String(f.tolerance):''});
+    const figures=Array.isArray(gold.figures)?gold.figures.slice(0,50).map(figure):[];
+    const prints=Array.isArray(content&&content.fingerprints)?content.fingerprints.slice(0,20).map(fp=>({id:String(fp&&fp.id||''),label:String(fp&&fp.label||''),
+      tokens:Array.isArray(fp&&fp.tokens)?fp.tokens.map(String).join('\n'):'',figures:Array.isArray(fp&&fp.figures)?fp.figures.slice(0,50).map(figure):[]})):[];
+    return {decision:String(gold.decision||''),notes:String(gold.notes||''),figures:figures.length?figures:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],errors:[]};
+  }
+  async function loadFormFromRound(round){
+    const p=round.packet||{},cfg=round.config||{},ids=list=>list.map(c=>c.id);
+    S.packet={dir:String(p.sourceDir||''),inspectedDir:'',files:null,gafVisible:p.gafVisible!==false,error:''};
+    S.prompt=String(p.promptText||'');
+    S.label=String(round.label||'');
+    const count=Math.min(Math.max(1,Number(cfg.count)||1),S.status.max),atOnce=atOnceOf({count,concurrency:cfg.concurrency});
+    S.config={model:ids(S.status.models).includes(cfg.model)?cfg.model:S.status.defaultModel,effort:ids(S.status.efforts).includes(cfg.effort)?cfg.effort:S.status.defaultEffort,
+      count,atOnce:atOnce<count?atOnce:0,budget:Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd).toFixed(2)};
+    S.fz=fzFromContent(round.carried&&round.carried.content);
+    S.draftInclude=null;
+    await listPacket(S.packet.dir,new Set((Array.isArray(p.files)?p.files:[]).filter(f=>f&&f.include).map(f=>f.path)));
+  }
+  async function startNext(){
+    const from=S.round,carry=canCarry(from);
+    if(!carry.ok){say(carry.why||'This round cannot be carried forward.',true);return;}
+    let created=null;
+    await work('next',async()=>{
+      created=normalizeRound(await api('POST',roundPath(from.id,'/next'),{}));
+      S.roundId=created.id;S.round=created;
+      await loadRounds();
+      if(created.redacted)throw new Error('Round '+created.id+' was made from round '+from.id+', but a round started running meanwhile, so the companion withheld its gold and prompt from this page. Select it again when the running round has ended.');
+      S.carry={from:from.id};
+      await loadFormFromRound(created);
+      S.sigs[created.id]=inputSig();
+    });
+    saveDraftSoon();
+    say('Round '+created.id+' starts from round '+from.id+': the form now holds its packet selection, prompt, settings, gold and fingerprints. Nothing is frozen or approved. Check them, then freeze to confirm; the new round needs its own approval.');
   }
   async function cancelRound(){
     if(!S.round)return;
@@ -1097,13 +1381,104 @@ ${o.guideline}</textarea></label>
     const n=Math.round(Number(value));
     if(!Number.isFinite(n))return;
     S.config.count=Math.min(Math.max(1,n),S.status.max);
+    if(S.config.atOnce>=S.config.count)S.config.atOnce=0;
+    updateSpend();
     gates();
+  }
+
+  /* ---------- The draft kept in this browser ---------- */
+  function storage(){try{return window.localStorage||null;}catch{return null;}}
+  function draftData(){
+    const files=S.packet.files;
+    return {v:1,savedAt:new Date().toISOString(),dir:S.packet.dir,
+      include:files&&S.packet.inspectedDir?{dir:S.packet.inspectedDir,paths:files.filter(effectiveInclude).map(f=>f.path)}:S.draftInclude,
+      prompt:S.prompt,label:S.label,gafVisible:S.packet.gafVisible,
+      config:{model:S.config.model,effort:S.config.effort,count:S.config.count,atOnce:S.config.atOnce,budget:S.config.budget},
+      fz:{decision:S.fz.decision,notes:S.fz.notes,figures:S.fz.figures,fingerprints:S.fz.fingerprints},
+      carry:S.carry,sigs:waitingSigs()};
+  }
+  /* The form signatures of rounds that are not launched yet, so a reload still knows which round the form froze. */
+  function waitingSigs(){
+    const waiting=new Set(S.rounds.filter(r=>r&&['draft','frozen','approved'].includes(r.status)).map(r=>r.id));
+    if(S.round&&['draft','frozen','approved'].includes(S.round.status))waiting.add(S.round.id);
+    const out={};
+    Object.keys(S.sigs).filter(id=>waiting.has(id)).slice(-10).forEach(id=>{out[id]=S.sigs[id];});
+    return out;
+  }
+  /* Saved a moment after the last change. Never while a round runs: from launch on, the companion holds the round, and
+     nothing beyond what it holds is written here. */
+  function saveDraftSoon(){
+    if(anyRunning())return;
+    clearTimeout(S.draftTimer);
+    S.draftTimer=setTimeout(saveDraft,DRAFT_SAVE_MS);
+  }
+  function saveDraft(){
+    S.draftTimer=null;
+    if(anyRunning())return;
+    const st=storage();
+    if(!st)return;
+    try{const data=draftData();st.setItem(DRAFT_KEY,JSON.stringify(data));S.draftSavedAt=data.savedAt;}
+    catch{return;/* full or blocked storage: the form lives in this page only */}
+    if(S.phase==='ready')paintSection('draft');
+  }
+  function clearStoredDraft(){
+    clearTimeout(S.draftTimer);S.draftTimer=null;S.draftSavedAt='';
+    const st=storage();
+    if(st){try{st.removeItem(DRAFT_KEY);}catch{/* blocked storage holds nothing to remove */}}
+  }
+  function readDraft(){
+    const st=storage();
+    if(!st)return null;
+    try{
+      const text=st.getItem(DRAFT_KEY);
+      if(!text)return null;
+      const data=JSON.parse(text);
+      return data&&typeof data==='object'&&data.v===1?data:null;
+    }catch{return null;}
+  }
+  const textOf=(value,max)=>typeof value==='string'?value.slice(0,max):'';
+  /* A stored draft is only text the page put there, but it is read like any input: types checked, lengths capped. */
+  function applyDraft(d){
+    const figure=f=>({label:textOf(f&&f.label,120),value:textOf(f&&f.value,40),tolerance:textOf(f&&f.tolerance,40)});
+    const figures=list=>Array.isArray(list)?list.slice(0,50).filter(f=>f&&typeof f==='object').map(figure):[];
+    S.packet.dir=textOf(d.dir,1024);
+    S.packet.gafVisible=d.gafVisible!==false;
+    S.prompt=textOf(d.prompt,20000);
+    S.label=textOf(d.label,120);
+    const inc=d.include;
+    S.draftInclude=inc&&typeof inc==='object'&&typeof inc.dir==='string'&&Array.isArray(inc.paths)?{dir:inc.dir.slice(0,1024),paths:inc.paths.filter(x=>typeof x==='string').slice(0,500)}:null;
+    const c=d.config&&typeof d.config==='object'?d.config:{};
+    if(typeof c.model==='string'&&S.status.models.some(m=>m.id===c.model))S.config.model=c.model;
+    if(typeof c.effort==='string'&&S.status.efforts.some(m=>m.id===c.effort))S.config.effort=c.effort;
+    if(Number.isInteger(c.count))S.config.count=Math.min(Math.max(1,c.count),S.status.max);
+    S.config.atOnce=Number.isInteger(c.atOnce)&&c.atOnce>0&&c.atOnce<S.config.count?c.atOnce:0;
+    if(typeof c.budget==='string')S.config.budget=c.budget.slice(0,6);
+    const fz=d.fz&&typeof d.fz==='object'?d.fz:{};
+    const gold=figures(fz.figures);
+    const prints=Array.isArray(fz.fingerprints)?fz.fingerprints.slice(0,20).filter(fp=>fp&&typeof fp==='object').map(fp=>({id:textOf(fp.id,40),label:textOf(fp.label,160),tokens:textOf(fp.tokens,4000),figures:figures(fp.figures)})):[];
+    S.fz={decision:textOf(fz.decision,500),notes:textOf(fz.notes,4000),figures:gold.length?gold:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],errors:[]};
+    S.carry=d.carry&&typeof d.carry==='object'&&idOk(d.carry.from)?{from:d.carry.from}:null;
+    if(d.sigs&&typeof d.sigs==='object')Object.keys(d.sigs).slice(0,10).forEach(id=>{if(idOk(id)&&typeof d.sigs[id]==='string'&&d.sigs[id].length<=200000)S.sigs[id]=d.sigs[id];});
+    S.draftSavedAt=textOf(d.savedAt,40);
+  }
+  function clearDraft(){
+    clearStoredDraft();
+    S.packet={dir:'',inspectedDir:'',files:null,gafVisible:true,error:''};
+    S.prompt='';S.label='';S.fz=blankFreezeForm();
+    S.config=blankConfig(S.status.defaultModel,S.status.defaultEffort);
+    S.config.count=Math.min(S.config.count,S.status.max);
+    S.carry=null;S.draftInclude=null;
+    paintAll();gates();
+    say('Draft cleared: the form is empty and nothing is saved in this browser. Rounds the companion holds are not touched.');
   }
 
   /* ---------- Polling every 1500 ms while a round has work in flight ---------- */
   function shouldPoll(){
-    if(!S.mounted||S.phase!=='ready'||!S.round)return false;
-    return ['approved','running'].includes(S.round.status)||runsOf(S.round).some(isActiveRun);
+    if(!S.mounted||S.phase!=='ready')return false;
+    if(S.rounds.some(r=>r&&r.status==='running'))return true;
+    if(S.overlay&&S.overlay.type==='drawer'&&S.overlay.run&&S.overlay.run.redacted===true)return true;
+    if(!S.round)return false;
+    return ['approved','running'].includes(S.round.status)||runsOf(S.round).some(isActiveRun)||S.round.redacted===true;
   }
   function schedulePoll(){
     clearTimeout(S.timer);
@@ -1115,11 +1490,13 @@ ${o.guideline}</textarea></label>
     if(!S.mounted||document.hidden){schedulePoll();return;}
     try{
       if(S.working){return;}
-      const before=S.round&&S.round.status;
-      await refreshRound(S.roundId);
-      if(S.round&&S.round.status!==before)await loadRounds();
-      paintSection('runs');paintSection('round');gates();
-      if(S.overlay&&S.overlay.type==='drawer'&&isActiveRun(S.overlay.run||{}))await refreshDrawer();
+      const wasRunning=anyRunning();
+      if(S.roundId)await refreshRound(S.roundId);
+      await loadRounds();
+      if(wasRunning&&!anyRunning()){paintAll();gates();}
+      else{['strip','draft','runs','round'].forEach(paintSection);gates();}
+      const o=S.overlay;
+      if(o&&o.type==='drawer'&&(isActiveRun(o.run||{})||(o.run&&o.run.redacted===true&&!anyRunning())))await refreshDrawer();
     }catch(error){say(error.message,true);}
     finally{schedulePoll();}
   }
@@ -1135,11 +1512,14 @@ ${o.guideline}</textarea></label>
       paintRoot();
       return;
     }
+    const draft=readDraft();
+    if(draft)applyDraft(draft);
     paintRoot();
     try{
       await loadRounds();
       if(!S.roundId&&S.rounds.length){S.roundId=S.rounds[0].id;await refreshRound(S.roundId);}
       paintAll();gates();
+      if(draft)say('Restored the form you were working on from this browser'+(S.draftSavedAt?' (saved '+timeText(S.draftSavedAt)+')':'')+'.'+(S.packet.dir?' Inspect the folder again to see its files.':'')+' Clear draft empties it.');
     }catch(error){say(error.message,true);}
     schedulePoll();
   }
@@ -1154,17 +1534,22 @@ ${o.guideline}</textarea></label>
       S.mounted=false;
       clearTimeout(S.timer);S.timer=null;
       if(S.overlay)closeOverlay();
+      updateTitle();
       return;
     }
     S.mounted=true;
     if(S.phase==='idle'||(S.phase==='offline'&&isLocal()))boot();
     else if(S.phase==='ready'){
       loadStatus().then(()=>{paintSection('runtime');}).catch(()=>{});
+      updateTitle();
       schedulePoll();
     }
   }
 
   /* ---------- Events ---------- */
+  /* Inputs and clicks that change the form: each one saves the draft a moment later. */
+  const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','model','effort','count','label','budget','atonce']);
+  const DRAFT_CLICKS=new Set(['use-project-prompt','add-gfig','add-pfig','remove-fig','add-fp','remove-fp','count-dec','count-inc']);
   const CLICK={
     'check-runtime':()=>checkRuntime(),
     inspect:()=>inspect(),
@@ -1184,11 +1569,14 @@ ${o.guideline}</textarea></label>
     'remove-fp':t=>{S.fz.fingerprints.splice(+t.dataset.i,1);paintSection('freeze');gates();},
     freeze:()=>freeze(),
     refreeze:()=>refreeze(),
-    'count-dec':()=>{setCount(S.config.count-1);paintSection('round');},
-    'count-inc':()=>{setCount(S.config.count+1);paintSection('round');},
+    'count-dec':()=>{setCount(S.config.count-1);paintSection('settings');},
+    'count-inc':()=>{setCount(S.config.count+1);paintSection('settings');},
     'open-approve':()=>openApprove(),
+    'recheck-preflight':()=>recheckPreflight(),
     'approve-launch':()=>approveAndLaunch(),
     'cancel-round':()=>cancelRound(),
+    'next-round':()=>startNext(),
+    'clear-draft':()=>clearDraft(),
     'open-run':t=>openRun(Number(t.dataset.n)),
     'close-overlay':()=>closeOverlay(),
     chip:t=>{
@@ -1226,7 +1614,9 @@ ${o.guideline}</textarea></label>
     fp:t=>{const fp=S.fz.fingerprints[+t.dataset.i];if(fp&&['id','label','tokens'].includes(t.dataset.f)){fp[t.dataset.f]=t.value;gates();}},
     model:t=>{S.config.model=t.value;gates();},
     effort:t=>{S.config.effort=t.value;gates();},
-    count:(t,e)=>{setCount(t.value);if(e.type==='change'){t.value=S.config.count;paintSection('round');}},
+    count:(t,e)=>{setCount(t.value);if(e.type==='change'){t.value=S.config.count;paintSection('settings');}},
+    atonce:t=>{const n=Number(t.value);S.config.atOnce=Number.isInteger(n)&&n>0&&n<S.config.count?n:0;paintSection('settings');gates();},
+    budget:t=>{S.config.budget=String(t.value==null?'':t.value).trim().slice(0,6);updateSpend();gates();},
     label:t=>{S.label=t.value;},
     'select-round':t=>{if(t.value&&(t.value!==S.roundId||!S.round))return selectRound(t.value);},
     ack:t=>{
@@ -1264,13 +1654,13 @@ ${o.guideline}</textarea></label>
       if(el.dataset.ag==='backdrop'){if(e.target===el)closeOverlay();return;}
       if(el.disabled)return;
       const handler=CLICK[el.dataset.ag];
-      if(handler)guarded(()=>handler(el));
+      if(handler){guarded(()=>handler(el));if(DRAFT_CLICKS.has(el.dataset.ag))saveDraftSoon();}
       return;
     }
     const el=target.closest('[data-ag-in]');
     if(!el||!(el.closest('#ag-root')||el.closest('#agents-modal')))return;
     const handler=INPUT[el.dataset.agIn];
-    if(handler)guarded(()=>handler(el,e));
+    if(handler){guarded(()=>handler(el,e));if(DRAFT_INPUTS.has(el.dataset.agIn))saveDraftSoon();}
   }
   ['click','input','change','keydown'].forEach(type=>document.addEventListener(type,handleEvent));
 

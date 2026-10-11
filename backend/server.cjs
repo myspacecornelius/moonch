@@ -10,10 +10,24 @@
    The browser never supplies a command, a binary path or an argument: it sends text, numbers, file names and choices, and the
    agent service validates all of them and builds every argument itself.
 
+   Blindness while a round runs. A pilot is an agent with a shell on this machine, so it can reach this companion like any
+   other local process (the nonce is in GET /api/status). While any round is running:
+     - every response that carries round data (the round list, a round, a run, and the POST routes that answer with a round
+       or a run) is passed through redactRoundData: each freeze record shrinks to { sha256, frozenAt }, and the gold, the
+       fingerprints, the prompt text, the approval summary and its hash, the source folder, a run's final text and the
+       details of a classification are left out. The answer carries redacted: true. When the round has ended the full view
+       comes back. This sits here, on the response, so it does not depend on how the service builds its views. The one
+       exception is the answer to a freeze, which keeps the approval summary of the round just frozen;
+     - POST /api/agents/grader-sim and /api/agents/author-review answer 409: their text (the grading guidance, the package)
+       would be on a command line a pilot can read. A launch is refused with 409 while one of them is still running.
+   The audit (agents/path-audit.cjs, kind loopback) discards a run whose tool calls reach for this machine at all. After
+   listen() the server hands its port to the service (service.setCompanionPort, when the service has it) for that audit.
+
    Module API (used by the tests):
      createServer({ root, service, port, runner?, state?, log? }) -> { server, nonce, runner, listen(), close(), shutdown() }
        listen() resolves { port, url }. close() stops the listener and drops connections. shutdown() also cancels the
        archived adapter and every running round (service.shutdown()) before it closes.
+     redactRoundData(value, { keepApproval? }) -> a copy of round data with what a running pilot must not read left out
      installSignalHandlers(app, { proc?, exit?, log?, forceAfterMs? })
      localServerRecord({ url, pid, startedAt, runApprovedOnce }) -> the LOCAL_SERVER.json content
      usableClaudeBin(value) -> value when it names an executable file, otherwise undefined */
@@ -36,6 +50,8 @@ const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415]);
 const GENERIC_ERROR = 'The companion hit an internal error. The details are in the terminal where it is running.';
 const DRAIN_ALLOWANCE = 16 * 1024 * 1024; /* bytes read and thrown away after a 413 before the connection is dropped */
 const SETTLE_MS = 10000; /* shutdown waits this long for requests that are still being answered */
+const TOOL_LESS_WHILE_RUNNING = 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started';
+const LAUNCH_WHILE_TOOL_LESS = 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started';
 
 /* An error that is safe to show the writer, with the HTTP status to send. */
 class HttpError extends Error {
@@ -137,6 +153,60 @@ function summaryLine(text, prefix, last = false) {
 
 const contentType = name => (name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8');
 
+/* ------------------------------------------------------------------ blindness while a round runs */
+
+/* Left out wherever they appear in round data: the gold and the fingerprints, the prompt and the approval summary (with the
+   hash the page approves by: without the text there is nothing to approve), the folder the packet came from (the excluded
+   grading material sits there), and the text a tool-less run was given. */
+const WITHHELD_KEYS = new Set(['gold', 'fingerprints', 'promptText', 'approvalSummary', 'summarySha256', 'sourceDir', 'guidelineText', 'packageText']);
+const FREEZE_KEYS = new Set(['freeze', 'postHocFreezes']);
+const MAX_REDACT_DEPTH = 32;
+
+const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const textOrNull = value => (typeof value === 'string' ? value : null);
+
+/* A freeze record, the original or a post-hoc version, wherever it sits: only its hash and its time stamp. */
+function freezeStub(record) {
+  return { sha256: textOrNull(record.sha256), frozenAt: textOrNull(record.frozenAt) };
+}
+
+/* A classification keeps its verdicts. Matched figures, fingerprints, decision keywords and the writer's note come from
+   the gold, and next to a final answer even a verdict says what the gold is, so the final text goes as well. */
+function keepVerdict(record, extra) {
+  const out = { verdict: textOrNull(record.verdict) };
+  for (const key of extra) if (key in record) out[key] = record[key];
+  return out;
+}
+
+function redactNode(value, key, depth) {
+  if (depth > MAX_REDACT_DEPTH) return null;
+  if (Array.isArray(value)) return value.map(item => redactNode(item, key, depth + 1));
+  if (!isPlainObject(value)) return value;
+  if (FREEZE_KEYS.has(key) || 'gold' in value || ('fingerprints' in value && 'sha256' in value)) return freezeStub(value);
+  if (key === 'suggested') return keepVerdict(value, ['label', 'freezeVersion', 'freezeSha256']);
+  if (key === 'human') return keepVerdict(value, ['at', 'freezeVersion', 'freezeSha256']);
+  if (key === 'final') return { chars: Number.isFinite(value.chars) ? value.chars : null };
+  const out = {};
+  for (const [name, child] of Object.entries(value)) {
+    if (WITHHELD_KEYS.has(name)) continue;
+    out[name] = redactNode(child, name, depth + 1);
+  }
+  return out;
+}
+
+/* Round data as a running pilot may see it. It works on the response, whatever the service put in it. keepApproval keeps
+   the approval summary and its hash (the freeze answer: the writer who just froze a round approves it from there; the
+   summary names files and hashes and elides the prompt, so it carries no gold and no prompt text). */
+function redactRoundData(value, options = {}) {
+  const out = redactNode(value, '', 0);
+  if (!isPlainObject(out)) return out;
+  const kept = {};
+  if (options.keepApproval === true && isPlainObject(value)) {
+    for (const key of ['summarySha256', 'approvalSummary']) if (key in value) kept[key] = value[key];
+  }
+  return { ...out, ...kept, redacted: true };
+}
+
 /* ------------------------------------------------------------------ route table */
 
 /* pattern: path with :id (a round id) and :n (a run number). Handlers get { params, body } and return the JSON to send.
@@ -217,6 +287,9 @@ function createServer(options = {}) {
           effort: view.config.effort,
           count: view.config.count,
           tools: view.config.tools,
+          /* null for a round stored before these settings existed (its old approval no longer matches anyway) */
+          maxBudgetUsd: Number.isFinite(view.config.maxBudgetUsd) ? view.config.maxBudgetUsd : null,
+          concurrency: Number.isInteger(view.config.concurrency) ? view.config.concurrency : null,
           packetSha256: view.packet.packetSha256,
           freezeSha256: view.freeze.sha256,
           gafVisible: view.packet.gafVisible,
@@ -230,30 +303,86 @@ function createServer(options = {}) {
 
   const round = async promise => withApproval(await promise);
 
+  /* Is any round running? Asked through the service's own list, so it holds for every round, whoever reads which one. When
+     the answer cannot be read the companion assumes a round is running: it withholds rather than leaks. */
+  async function anyRoundRunning() {
+    try {
+      const rows = await service.listRounds();
+      return !Array.isArray(rows) || rows.some(row => isPlainObject(row) && row.status === 'running');
+    } catch (error) {
+      log(`companion: the list of rounds could not be read, so round data is withheld as if a round were running (${error && error.message ? error.message : error})`);
+      return true;
+    }
+  }
+
+  /* A simulated grader or an author review puts its text on a command line, where any process of this account can read it.
+     So it never runs while a round runs or is being launched, and a launch waits until none of them is running. Each side
+     counts itself in before it looks at the other, so two requests that arrive together cannot both pass. */
+  let toolLessInFlight = 0;
+  let launchesInFlight = 0;
+
+  async function toolLess(work) {
+    toolLessInFlight++;
+    try {
+      if (launchesInFlight || await anyRoundRunning()) throw new HttpError(409, TOOL_LESS_WHILE_RUNNING);
+      return await work();
+    } finally {
+      toolLessInFlight--;
+    }
+  }
+
+  async function launching(work) {
+    launchesInFlight++;
+    try {
+      if (toolLessInFlight) throw new HttpError(409, LAUNCH_WHILE_TOOL_LESS);
+      return await work();
+    } finally {
+      launchesInFlight--;
+    }
+  }
+
+  /* roundData: the answer is round data, redacted while any round runs (redactRoundData). keepApproval: the freeze answer
+     keeps the approval summary, so the next round can be frozen and approved while another one runs. The export is left
+     out on purpose: it carries hashes, verdicts and fingerprint ids but no gold, and the page stores it as evidence as it
+     is. */
   const routes = [
     { method: 'GET', pattern: '/api/status', handler: async () => ({ state: currentState(), connection: 'local-sdk-adapter', canStart: false, nonce, adapter: 'deepseek-account', agents: await agentsStatus() }) },
     { method: 'POST', pattern: '/api/cancel', legacy: true, handler: async () => { runner.cancel(); return { cancelRequested: true, state: currentState() }; } },
     { method: 'POST', pattern: '/api/agents/packet/inspect', limit: 'packet', handler: ({ body }) => service.inspectPacket(body) },
-    { method: 'GET', pattern: '/api/agents/rounds', handler: async () => ({ rounds: await service.listRounds() }) },
-    { method: 'POST', pattern: '/api/agents/rounds', limit: 'packet', handler: ({ body }) => round(service.createRound(body)) },
-    { method: 'GET', pattern: '/api/agents/rounds/:id', handler: ({ params }) => round(service.getRound(params.id)) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/freeze', handler: ({ params, body }) => round(service.freezeRound(params.id, body)) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/refreeze', handler: ({ params, body }) => round(service.refreezeRound(params.id, body)) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/approve', handler: ({ params, body }) => round(service.approveRound(params.id, body)) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/launch', handler: ({ params }) => round(service.launchRound(params.id)) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/cancel', handler: ({ params }) => round(service.cancelRound(params.id)) },
+    { method: 'GET', pattern: '/api/agents/rounds', roundData: true, handler: async () => ({ rounds: await service.listRounds() }) },
+    { method: 'POST', pattern: '/api/agents/rounds', limit: 'packet', roundData: true, handler: ({ body }) => round(service.createRound(body)) },
+    { method: 'GET', pattern: '/api/agents/rounds/:id', roundData: true, handler: ({ params }) => round(service.getRound(params.id)) },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/freeze', roundData: true, keepApproval: true, handler: ({ params, body }) => round(service.freezeRound(params.id, body)) },
+    /* Start the next round from this one: a new draft that carries the packet selection, prompt, gaf setting, settings,
+       gold and fingerprints forward (carriedFrom). It is not frozen or approved; it needs both, like any round. The body
+       carries nothing: the service reads everything from the stored round. */
+    { method: 'POST', pattern: '/api/agents/rounds/:id/next', roundData: true, handler: ({ params }) => round(service.nextRound(params.id)) },
+    /* The launch pre-flight (claude --help lists every option, claude auth status says signed in), asked for before the
+       writer approves. No model is started. A problem is a 409 that names it. */
+    {
+      method: 'POST',
+      pattern: '/api/agents/rounds/:id/preflight',
+      handler: ({ params }) => {
+        if (typeof service.preflightRound !== 'function') throw new AgentError(404, 'The pre-flight check is not available in this version of the companion');
+        return service.preflightRound(params.id);
+      },
+    },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/refreeze', roundData: true, handler: ({ params, body }) => round(service.refreezeRound(params.id, body)) },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/approve', roundData: true, handler: ({ params, body }) => round(service.approveRound(params.id, body)) },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/launch', roundData: true, handler: ({ params }) => launching(() => round(service.launchRound(params.id))) },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/cancel', roundData: true, handler: ({ params }) => round(service.cancelRound(params.id)) },
     { method: 'POST', pattern: '/api/agents/rounds/:id/export', handler: ({ params }) => service.exportRound(params.id) },
-    { method: 'GET', pattern: '/api/agents/rounds/:id/runs/:n', handler: ({ params }) => service.getRun(params.id, params.n) },
-    { method: 'POST', pattern: '/api/agents/rounds/:id/runs/:n/classify', handler: ({ params, body }) => service.classifyRun(params.id, params.n, body) },
-    { method: 'POST', pattern: '/api/agents/grader-sim', handler: ({ body }) => service.graderSim(body) },
+    { method: 'GET', pattern: '/api/agents/rounds/:id/runs/:n', roundData: true, handler: ({ params }) => service.getRun(params.id, params.n) },
+    { method: 'POST', pattern: '/api/agents/rounds/:id/runs/:n/classify', roundData: true, handler: ({ params, body }) => service.classifyRun(params.id, params.n, body) },
+    { method: 'POST', pattern: '/api/agents/grader-sim', handler: ({ body }) => toolLess(() => service.graderSim(body)) },
     {
       /* The Agents page has an author review button. The service has no such method yet, so the answer says so plainly. */
       method: 'POST',
       pattern: '/api/agents/author-review',
-      handler: ({ body }) => {
+      handler: ({ body }) => toolLess(() => {
         if (typeof service.authorReview !== 'function') throw new AgentError(404, 'Author review is not available in this version of the companion');
         return service.authorReview(body);
-      },
+      }),
     },
   ];
   for (const route of routes) route.parts = pathParts(route.pattern);
@@ -328,7 +457,10 @@ function createServer(options = {}) {
     if (route.method !== 'GET' && !route.legacy) {
       body = parseJsonObject(await readBody(req, route.limit === 'packet' ? C.LIMITS.packetBodyBytes : C.LIMITS.bodyBytes));
     }
-    return sendJson(res, 200, await route.handler({ params, body }));
+    let value = await route.handler({ params, body });
+    /* Asked after the data was read: a round that started meanwhile is running now, and the answer is redacted. */
+    if (route.roundData && await anyRoundRunning()) value = redactRoundData(value, { keepApproval: route.keepApproval === true });
+    return sendJson(res, 200, value);
   }
 
   function answerError(res, error, req) {
@@ -346,6 +478,17 @@ function createServer(options = {}) {
 
   /* ---------- starting and stopping */
 
+  /* The audit flags a pilot that reaches for this port (path-audit.cjs, companionPort), so the service is told the port
+     once it is known. A service without setCompanionPort still has every loopback address flagged. */
+  async function tellServicePort(bound) {
+    if (typeof service.setCompanionPort !== 'function') return;
+    try {
+      await service.setCompanionPort(bound);
+    } catch (error) {
+      log(`companion: the agent service did not take the companion port (${error && error.message ? error.message : error}); loopback addresses are still flagged`);
+    }
+  }
+
   function listen() {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
@@ -353,7 +496,7 @@ function createServer(options = {}) {
         server.off('error', reject);
         server.on('error', error => log(`companion: server error: ${error && error.message ? error.message : error}`));
         boundPort = server.address().port;
-        resolve({ port: boundPort, url: `http://${HOST}:${boundPort}` });
+        tellServicePort(boundPort).then(() => resolve({ port: boundPort, url: `http://${HOST}:${boundPort}` }));
       });
     });
   }
@@ -513,4 +656,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, HttpError, ASSETS };
+module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, HttpError, ASSETS };
