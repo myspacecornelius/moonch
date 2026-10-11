@@ -17,6 +17,9 @@ const path = require('node:path');
 
 const KEYCHAIN_SERVICE = 'finance-studio-pilot-token';
 const TOKEN_ENV = 'FINANCE_STUDIO_PILOT_TOKEN';
+/* Set to `off` in the companion's environment to never read the Keychain (the tests set it, so a token stored on a
+   developer's Mac cannot reach a test; a writer can use it to run pilots under their own sign-in on purpose). */
+const KEYCHAIN_SWITCH = 'FINANCE_STUDIO_KEYCHAIN';
 const RUNTIME_TOKEN_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
 /* What stands where the token stood, in a transcript line, a stderr tail or a file. */
 const REDACTED = '[pilot-token redacted]';
@@ -86,7 +89,7 @@ async function readPilotToken(options = {}) {
     if (token) return { token, source: 'env', error: null };
     return { token: null, source: 'env', error: `${TOKEN_ENV} is set but is not a usable token (${describeInvalid(fromEnv)})` };
   }
-  if (platform !== 'darwin') return { token: null, source: null, error: null };
+  if (platform !== 'darwin' || env[KEYCHAIN_SWITCH] === 'off') return { token: null, source: null, error: null };
   const run = typeof options.execFile === 'function' ? options.execFile : defaultExecFile;
   const timeout = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : SECURITY_TIMEOUT_MS;
   let output;
@@ -192,10 +195,12 @@ function containsSecret(text, secrets) {
 }
 
 /* redactFilesUnder(folder, secrets) -> { redacted: [relative paths], skipped: [relative paths] }
-   Walks a folder (regular files only; symbolic links are not followed) and rewrites every file that holds one of the
-   secrets, with the secret replaced by REDACTED. The file keeps its mode. A file over 128 MB, or beyond the file and
-   depth caps, is listed as skipped. Secrets are ASCII, so the bytes of a file are handled as latin1 text and written
-   back unchanged where nothing matched. */
+   Walks a folder (regular files and folders; symbolic links are not followed) and rewrites every file that holds one of
+   the secrets, with the secret replaced by REDACTED. The file keeps its mode. A file or folder whose NAME holds a secret
+   is renamed the same way (a name that is taken gets " (2)", " (3)" and so on). The lists name entries as they are
+   after the change, so they never hold a secret. A file over 128 MB, or beyond the file and depth caps, is listed as
+   skipped. Secrets are ASCII, so the bytes of a file are handled as latin1 text and written back unchanged where
+   nothing matched. */
 function redactFilesUnder(folder, secrets) {
   const forms = [];
   for (const secret of Array.isArray(secrets) ? secrets : []) {
@@ -204,40 +209,75 @@ function redactFilesUnder(folder, secrets) {
   const redacted = [];
   const skipped = [];
   if (!forms.length || typeof folder !== 'string') return { redacted, skipped };
+  const scrub = text => forms.reduce((value, form) => (value.includes(form) ? value.split(form).join(REDACTED) : value), text);
+  /* Renames dir/oldName to its scrubbed name. Returns the new name, or null when the rename failed. */
+  const rename = (dir, oldName) => {
+    const base = scrub(oldName);
+    let target = base;
+    try {
+      for (let n = 2; fs.existsSync(path.join(dir, target)); n++) target = `${base} (${n})`;
+      fs.renameSync(path.join(dir, oldName), path.join(dir, target));
+      return target;
+    } catch {
+      return null;
+    }
+  };
   let count = 0;
   const walk = (dir, rel, depth) => {
-    if (depth > MAX_REDACT_DEPTH) { skipped.push(rel + '/'); return; }
+    if (depth > MAX_REDACT_DEPTH) { skipped.push(scrub(rel) + '/'); return; }
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       const name = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) { walk(full, name, depth + 1); continue; }
+      const named = scrub(entry.name) !== entry.name;
+      if (entry.isSymbolicLink()) {
+        if (named) skipped.push(scrub(name)); /* a link is never followed, so it is not renamed; it is reported */
+        continue;
+      }
+      if (entry.isDirectory()) {
+        walk(full, name, depth + 1);
+        if (named) {
+          if (rename(dir, entry.name) === null) skipped.push(scrub(name) + '/');
+          else redacted.push(scrub(name) + '/');
+        }
+        continue;
+      }
       if (!entry.isFile()) continue;
-      if (++count > MAX_REDACT_FILES) { skipped.push(name); continue; }
+      if (++count > MAX_REDACT_FILES) { skipped.push(scrub(name)); continue; }
+      let changed = false;
       let stat;
       try { stat = fs.statSync(full); } catch { continue; }
-      if (stat.size > MAX_REDACT_FILE_BYTES) { skipped.push(name); continue; }
-      let buffer;
-      try { buffer = fs.readFileSync(full); } catch { skipped.push(name); continue; }
-      if (!forms.some(form => buffer.indexOf(form) >= 0)) continue;
-      let text = buffer.toString('latin1');
-      for (const form of forms) text = text.split(form).join(REDACTED);
-      try {
-        fs.writeFileSync(full, Buffer.from(text, 'latin1'), { mode: stat.mode & 0o777 });
-        redacted.push(name);
-      } catch {
-        skipped.push(name);
+      if (stat.size > MAX_REDACT_FILE_BYTES) {
+        skipped.push(scrub(name));
+      } else {
+        let buffer = null;
+        try { buffer = fs.readFileSync(full); } catch { skipped.push(scrub(name)); }
+        if (buffer !== null && forms.some(form => buffer.indexOf(form) >= 0)) {
+          let text = buffer.toString('latin1');
+          for (const form of forms) text = text.split(form).join(REDACTED);
+          try {
+            fs.writeFileSync(full, Buffer.from(text, 'latin1'), { mode: stat.mode & 0o777 });
+            changed = true;
+          } catch {
+            skipped.push(scrub(name));
+          }
+        }
       }
+      if (named) {
+        if (rename(dir, entry.name) === null) skipped.push(scrub(name));
+        else changed = true;
+      }
+      if (changed) redacted.push(scrub(name));
     }
   };
   walk(path.resolve(folder), '', 0);
-  return { redacted: redacted.sort(), skipped: skipped.sort() };
+  return { redacted: [...new Set(redacted)].sort(), skipped: [...new Set(skipped)].sort() };
 }
 
 module.exports = {
   KEYCHAIN_SERVICE,
+  KEYCHAIN_SWITCH,
   TOKEN_ENV,
   RUNTIME_TOKEN_VAR,
   REDACTED,

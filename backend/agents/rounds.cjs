@@ -17,7 +17,7 @@ const {
   claudeConfigDirOf, checkAuth,
 } = require('./claude-runner.cjs');
 const { auditToolCalls } = require('./path-audit.cjs');
-const { readPilotToken, gatewayFindings, describeFindings, redactFilesUnder, sourceText, validToken } = require('./pilot-token.cjs');
+const { readPilotToken, gatewayFindings, describeFindings, redactFilesUnder, makeRedactor, sourceText, validToken } = require('./pilot-token.cjs');
 const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, GAF_RE } = require('./pilot-folder.cjs');
 const { suggest, hashFreeze, parseFigure } = require('./classify.cjs');
 
@@ -1349,15 +1349,18 @@ class RoundStore {
     if (copied.skipped) notes.push(`outputs-truncated: ${copied.skipped} output file${copied.skipped === 1 ? ' was' : 's were'} not copied (size limit)`);
 
     /* 5. The token must not stay on disk. The whole pilot folder (its outputs, its scratch space, the runtime's own files)
-       and the evidence copy are scanned, and the token is blanked out wherever it was written. Such a run is DISCARDED.
-       The output snapshot above was taken first, so its hashes are those of the files as the pilot left them. */
+       and the evidence copy are scanned, and the token is blanked out wherever it was written, in file contents and in
+       file and folder names (a name is renamed, and the stored output list is redacted the same way). Such a run is
+       DISCARDED. The output snapshot above was taken first, so its hashes are those of the files as the pilot left them. */
     if (token) {
       const inFolder = redactFilesUnder(run.folder, [token]);
       const inCopy = redactFilesUnder(path.join(runDir, 'outputs'), [token]);
       const scrubbed = [...inFolder.redacted.map(name => `${name} (pilot folder)`), ...inCopy.redacted.map(name => `outputs/${name} (evidence copy)`)];
       if (scrubbed.length) {
+        const hide = makeRedactor([token]);
+        run.outputs = snapshot.map(entry => ({ ...entry, name: hide(entry.name) }));
         violations.push({ tool: '(files)', kind: 'secret', path: '(the pilot token in a file)', call: scrubbed.slice(0, 10).join(', ') });
-        notes.push(`secret-redacted: the pilot token was blanked out of ${scrubbed.length} file${scrubbed.length === 1 ? '' : 's'}; the output snapshot hashes were taken before that`);
+        notes.push(`secret-redacted: the pilot token was blanked out of ${scrubbed.length} file${scrubbed.length === 1 ? '' : 's'} (contents or names); the output snapshot hashes were taken before that`);
       }
       const unscanned = inFolder.skipped.length + inCopy.skipped.length;
       if (unscanned) notes.push(`secret-scan-skipped: ${unscanned} file${unscanned === 1 ? ' was' : 's were'} too large or unreadable to scan for the pilot token`);

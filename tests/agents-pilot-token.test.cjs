@@ -128,6 +128,13 @@ test('readPilotToken: the environment variable first, then the Keychain on macOS
   assert.deepEqual(linux, { token: null, source: null, error: null });
   assert.deepEqual(calls, [], 'no security call off macOS');
 
+  const switchedOff = await PT.readPilotToken({ env: { [PT.KEYCHAIN_SWITCH]: 'off' }, platform: 'darwin', execFile: security(TOKEN) });
+  assert.deepEqual(switchedOff, { token: null, source: null, error: null }, 'FINANCE_STUDIO_KEYCHAIN=off never asks the Keychain');
+  assert.deepEqual(calls, [], 'no security call with the switch off');
+  assert.equal((await PT.readPilotToken({ env: { [PT.KEYCHAIN_SWITCH]: 'off', FINANCE_STUDIO_PILOT_TOKEN: TOKEN }, platform: 'darwin', execFile: security('other') })).source, 'env', 'the variable still counts');
+  assert.equal(PT.KEYCHAIN_SWITCH, 'FINANCE_STUDIO_KEYCHAIN');
+  assert.equal(cleanEnv()[PT.KEYCHAIN_SWITCH], 'off', 'the test environment never reaches a Keychain token');
+
   const found = await PT.readPilotToken({ env: { PATH: '/usr/bin' }, platform: 'darwin', execFile: security(TOKEN + '\n') });
   assert.deepEqual(found, { token: TOKEN, source: 'keychain', error: null });
   assert.deepEqual(calls, [['security', 'find-generic-password', '-s', 'finance-studio-pilot-token', '-w']]);
@@ -250,6 +257,27 @@ test('redactFilesUnder rewrites every file that holds the secret, keeps the mode
   assert.deepEqual(PT.redactFilesUnder(dir, [TOKEN]), { redacted: [], skipped: [] }, 'a second pass finds nothing');
   assert.deepEqual(PT.redactFilesUnder(dir, []), { redacted: [], skipped: [] });
   assert.deepEqual(PT.redactFilesUnder(path.join(dir, 'no-such-folder'), [TOKEN]), { redacted: [], skipped: [] });
+});
+
+test('redactFilesUnder also renames files and folders whose NAME holds the secret, reports them as renamed, and never follows or renames a link', t => {
+  const dir = tempDir(t);
+  const marker = PT.REDACTED;
+  fs.mkdirSync(path.join(dir, 'outputs', `${TOKEN}-dir`), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'outputs', `${TOKEN}.txt`), 'content without the secret\n');
+  fs.writeFileSync(path.join(dir, 'outputs', `${TOKEN}-dir`, 'inner.txt'), `inside ${TOKEN}\n`);
+  fs.writeFileSync(path.join(dir, 'outputs', `${marker}.txt`), 'a file that already has the new name\n');
+  fs.symlinkSync(path.join(dir, 'outputs', 'inner-target'), path.join(dir, 'outputs', `${TOKEN}-link`));
+  const result = PT.redactFilesUnder(dir, [TOKEN]);
+  assert.deepEqual(result.redacted, [`outputs/${marker}-dir/`, `outputs/${marker}-dir/inner.txt`, `outputs/${marker}.txt`].sort());
+  assert.deepEqual(result.skipped, [`outputs/${marker}-link`], 'a link is reported, not followed and not renamed');
+  assert.ok(![...JSON.stringify(result)].join('').includes(TOKEN), 'the lists never hold the secret');
+  const left = [];
+  const walk = (folder, rel) => { for (const entry of fs.readdirSync(folder, { withFileTypes: true })) { const name = rel ? `${rel}/${entry.name}` : entry.name; left.push(name); if (entry.isDirectory()) walk(path.join(folder, entry.name), name); } };
+  walk(dir, '');
+  assert.deepEqual(left.filter(name => name.includes(TOKEN)), [`outputs/${TOKEN}-link`], 'only the link keeps its name');
+  assert.equal(fs.readFileSync(path.join(dir, 'outputs', `${marker}-dir`, 'inner.txt'), 'utf8'), `inside ${marker}\n`, 'contents of a renamed folder are scrubbed too');
+  assert.equal(fs.readFileSync(path.join(dir, 'outputs', `${marker}.txt`), 'utf8'), 'a file that already has the new name\n', 'a taken name is not overwritten');
+  assert.equal(fs.readFileSync(path.join(dir, 'outputs', `${marker}.txt (2)`), 'utf8'), 'content without the secret\n', 'the renamed file takes the next free name');
 });
 
 /* ====================================================================== the runner */
@@ -500,6 +528,28 @@ test('a pilot that reads its sign-in is DISCARDED (environ and secret), and the 
   assert.ok(ownRun.final.text.includes('(no token)'));
 });
 
+test('a pilot that writes a file NAMED with the token is DISCARDED, and no stored name, output list or file on disk keeps the token', async t => {
+  const w = makeWorld(t, { writeFiles: [{ path: `outputs/${TOKEN}.txt`, content: `pilot token: ${TOKEN}\n` }, { path: `outputs/${TOKEN}-dir/inner.txt`, content: 'nothing\n' }], resultText: 'Usable cash is 1,250. Hold.' }, { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN });
+  const id = await approvedRound(w);
+  await w.service.launchRound(id);
+  await w.service.whenSettled(id);
+  const run = await w.service.getRun(id, 1);
+  assert.equal(run.state, 'completed');
+  assert.equal(run.audit.status, 'DISCARDED');
+  assert.deepEqual(kinds({ violations: run.audit.violations }), ['secret'], JSON.stringify(run.audit.violations));
+  assert.deepEqual(run.outputs.map(entry => entry.name).sort(), [`${PT.REDACTED}-dir/inner.txt`, `${PT.REDACTED}.txt`].sort(), 'the stored output list is redacted');
+  const names = [];
+  for (const base of [path.join(w.rounds, id), path.join(w.pilots, `${id}-1`)]) {
+    const walk = folder => { for (const entry of fs.readdirSync(folder, { withFileTypes: true })) { const full = path.join(folder, entry.name); names.push(path.relative(base, full)); if (entry.isDirectory()) walk(full); } };
+    walk(base);
+  }
+  assert.ok(names.some(name => name.includes(PT.REDACTED)), 'the renamed files exist');
+  assert.deepEqual(names.filter(name => name.includes(TOKEN)), [], 'no file or folder name on disk holds the token');
+  for (const base of [path.join(w.rounds, id), path.join(w.pilots, `${id}-1`)]) for (const [name, text] of filesUnder(base)) assert.ok(!text.includes(TOKEN), `${name} holds the token`);
+  assert.ok(!JSON.stringify(await w.service.getRound(id)).includes(TOKEN));
+  assert.ok(!JSON.stringify(run).includes(TOKEN));
+});
+
 test('tool-less runs (simulated grader, author review) get the token and never show it', async t => {
   const w = makeWorld(t, { resultText: `{"verdict": "pass", "reason": "token ${TOKEN} seen"}` }, { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN });
   const graded = await w.service.graderSim({ guidelineText: 'Synthetic guideline', answerText: 'Synthetic answer' });
@@ -553,27 +603,47 @@ function runSmoke(t, args, extraEnv) {
 
 const runSmokeS0 = (t, extraEnv) => runSmoke(t, [], extraEnv);
 
-test('live-smoke S3 against the stub: a runtime that leaks the token and one that hides it both pass; no token or no approval refuses', t => {
+const S3_STAGE = ['--stage', 'S3', smoke.APPROVE_FLAG];
+const printenvCall = result => ({ name: 'Bash', input: { command: 'printenv CLAUDE_CODE_OAUTH_TOKEN' }, result });
+
+test('live-smoke S3 against the stub: each way the token can (or cannot) show up is reported as measured, and only a wrong audit or a leftover token is a FAIL', t => {
   const token = { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN };
+  const stage = (scenario, extra = {}) => runSmoke(t, S3_STAGE, { ...token, FINANCE_STUB_SCENARIO: JSON.stringify(scenario), ...extra });
   /* a runtime that passes the token to the pilot's shell (the stub's echoToken): blanked out everywhere, kind secret */
-  const leaking = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ echoToken: true, resultText: 'done' }) });
+  const leaking = stage({ echoToken: true, resultText: 'done' });
   assert.equal(leaking.status, 0, leaking.stdout + leaking.stderr);
-  assert.match(leaking.stdout, /the audit is DISCARDED for reading the environment\s+PASS\s+DISCARDED; kinds: environ, secret/);
-  assert.match(leaking.stdout, /what the pilot's shell saw\s+INFO\s+the token reached the runtime's output and was blanked out/);
-  assert.match(leaking.stdout, /the token is in no file the round kept\s+PASS/);
-  assert.match(leaking.stdout, /the token is nowhere in the pilot folder\s+PASS/);
-  assert.match(leaking.stdout, /the final answer shows the marker where the token was\s+PASS\s+"done The token is \[pilot-token redacted\]\./);
+  assert.match(leaking.stdout, /the audit is DISCARDED for reading the environment\s+PASS\s+DISCARDED; kinds: (?:environ, secret|secret, environ)/, 'the order of the kinds does not matter');
+  assert.match(leaking.stdout, /did the token reach the runtime's output\s+INFO\s+yes, and it was blanked out \(a tool result, the final answer\)/);
+  assert.match(leaking.stdout, /the token is in no file the round kept\s+PASS\s+checked \d+ files? under /);
+  assert.match(leaking.stdout, /the token is nowhere in the pilot folder\s+PASS\s+checked \d+ files? under /);
+  assert.match(leaking.stdout, /the pilot's answer\s+INFO\s+holds the marker where the token was/);
   assert.ok(!(leaking.stdout + leaking.stderr).includes(TOKEN), 'the token is never printed');
   assert.match(leaking.stdout, /CLAUDE_CODE_OAUTH_TOKEN=<redacted>/, 'the command line shows the token redacted');
   assert.deepEqual(leaking.leftovers, [], 'the scratch folders are removed');
   /* a runtime that keeps the token from the shell, as Claude Code 2.1.287 does: environ only, nothing to blank out */
-  const hiding = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ toolUses: [{ name: 'Bash', input: { command: 'printenv CLAUDE_CODE_OAUTH_TOKEN' }, result: '' }], resultText: 'The variable is not set.' }) });
+  const hiding = stage({ toolUses: [printenvCall('')], resultText: 'The variable is not set.' });
   assert.equal(hiding.status, 0, hiding.stdout + hiding.stderr);
   assert.match(hiding.stdout, /the audit is DISCARDED for reading the environment\s+PASS\s+DISCARDED; kinds: environ\s*\n/);
-  assert.match(hiding.stdout, /what the pilot's shell saw\s+INFO\s+the runtime kept the token from the pilot's shell/);
-  assert.match(hiding.stdout, /the final answer shows the marker where the token was\s+INFO\s+"The variable is not set\."/);
+  assert.match(hiding.stdout, /did the token reach the runtime's output\s+INFO\s+no sign of it in the output, the tool results, the answer or any file/);
+  assert.match(hiding.stdout, /the pilot's answer\s+INFO\s+starts: "The variable is not set\."/);
+  /* a pilot that saw the token but did not repeat it: the marker is in the tool result only, and that is not a FAIL */
+  const declining = stage({ toolUses: [printenvCall(TOKEN)], resultText: 'Saved it.' });
+  assert.equal(declining.status, 0, declining.stdout + declining.stderr);
+  assert.match(declining.stdout, /did the token reach the runtime's output\s+INFO\s+yes, and it was blanked out \(a tool result\)/);
+  assert.match(declining.stdout, /the pilot's answer\s+INFO\s+does not hold the marker where the token was/);
+  /* the token only in a file: not in the stream, found and scrubbed by the round, and said so without a FAIL */
+  const filed = stage({ toolUses: [{ name: 'Bash', input: { command: 'printenv CLAUDE_CODE_OAUTH_TOKEN > outputs/t.txt' }, result: '' }], writeFiles: [{ path: 'outputs/t.txt', content: `${TOKEN}\n` }], resultText: 'Saved to outputs/t.txt' });
+  assert.equal(filed.status, 0, filed.stdout + filed.stderr);
+  assert.match(filed.stdout, /did the token reach the runtime's output\s+INFO\s+no, but the pilot wrote it into a file \(blanked out afterwards\)/);
+  assert.match(filed.stdout, /the token is in no file the round kept\s+PASS/);
+  assert.match(filed.stdout, /the pilot's answer\s+INFO\s+starts: "Saved to outputs\/t\.txt"/);
+  /* a credential-store read is the kind secret, but it is not the token reaching the output */
+  const keychain = stage({ toolUses: [printenvCall(''), { name: 'Bash', input: { command: 'security find-generic-password -s finance-studio-pilot-token -w' }, result: 'not found' }], resultText: 'Nothing there.' });
+  assert.equal(keychain.status, 0, keychain.stdout + keychain.stderr);
+  assert.match(keychain.stdout, /DISCARDED; kinds: (?:environ, secret|secret, environ)/);
+  assert.match(keychain.stdout, /did the token reach the runtime's output\s+INFO\s+no sign of it/);
   /* a runtime that lets a pilot read the environment without a discard would be a FAIL */
-  const silent = runSmoke(t, ['--stage', 'S3', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ resultText: 'I did nothing.' }) });
+  const silent = stage({ resultText: 'I did nothing.' });
   assert.equal(silent.status, 1);
   assert.match(silent.stdout, /the audit is DISCARDED for reading the environment\s+FAIL\s+CLEAN; kinds: none/);
   /* refusals: no approval flag, no token */
@@ -585,6 +655,57 @@ test('live-smoke S3 against the stub: a runtime that leaks the token and one tha
   assert.equal(tokenless.status, 2);
   assert.match(tokenless.stdout, /Refusing S3: it needs a pilot token/);
   assert.equal(tokenless.argv.some(args => args.includes('-p')), false, 'nothing ran');
+});
+
+test('live-smoke scanForSecret looks at contents and at names, says when the folder is missing, and refuses a token that is not a string; the report blanks the token out of every row', t => {
+  const dir = tempDir(t);
+  fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'clean.txt'), 'nothing\n');
+  assert.deepEqual(smoke.scanForSecret(dir, TOKEN), { exists: true, scanned: 1, holding: [] });
+  fs.writeFileSync(path.join(dir, 'a', 'b', 'content.txt'), `x ${TOKEN} y`);
+  fs.writeFileSync(path.join(dir, 'a', 'escaped.json'), JSON.stringify({ t: TOKEN }));
+  fs.writeFileSync(path.join(dir, `${TOKEN}.txt`), 'a name that holds it');
+  fs.mkdirSync(path.join(dir, `${TOKEN}-dir`));
+  fs.writeFileSync(path.join(dir, 'marker.txt'), `only the marker ${PT.REDACTED}`);
+  const found = smoke.scanForSecret(dir, TOKEN);
+  assert.equal(found.exists, true);
+  assert.deepEqual(found.holding, [`${TOKEN}-dir/`, `${TOKEN}.txt`, 'a/b/content.txt', 'a/escaped.json'].sort(), 'contents, the JSON-escaped form and names; the marker alone is what should be there');
+  const missing = smoke.scanForSecret(path.join(dir, 'no-such-folder'), TOKEN);
+  assert.deepEqual(missing, { exists: false, scanned: 0, holding: [] });
+  assert.equal(smoke.scanForSecret(path.join(dir, 'clean.txt'), TOKEN).exists, false, 'a file is not a folder');
+  assert.throws(() => smoke.scanForSecret(dir, undefined), /string of at least 8 characters/);
+  assert.throws(() => smoke.scanForSecret(dir, 'short'), /string of at least 8 characters/);
+
+  const lines = [];
+  const report = smoke.makeReport(line => lines.push(line));
+  report.secrets.push(TOKEN);
+  smoke.addScanRow(report, 'T', 'the folder is checked', path.join(dir, 'no-such-folder'), missing);
+  smoke.addScanRow(report, 'T', 'the folder holds nothing', dir, { exists: true, scanned: 3, holding: [] });
+  smoke.addScanRow(report, 'T', 'the folder holds it', dir, found);
+  report.add('T', 'an excerpt', null, `the pilot said ${TOKEN} and then ${JSON.stringify(TOKEN)}`);
+  report.print();
+  const printed = lines.join('\n');
+  assert.ok(!printed.includes(TOKEN), 'no row shows the token, also not inside a file name or an excerpt');
+  assert.match(printed, /the folder is checked\s+FAIL\s+cannot check: .*no-such-folder is not a folder/, 'a missing folder is a FAIL, not a pass');
+  assert.match(printed, /the folder holds nothing\s+PASS\s+checked 3 files under /);
+  assert.match(printed, /the folder holds it\s+FAIL\s+.*\[pilot-token redacted\]/);
+  assert.match(printed, /an excerpt\s+INFO\s+the pilot said \[pilot-token redacted\] and then "\[pilot-token redacted\]"/);
+});
+
+test('live-smoke S1 against the stub: the call is judged by what it did (a redaction in a tool-less call is a FAIL), and a clean call passes', t => {
+  const token = { FINANCE_STUB_AUTH: 'token', FINANCE_STUDIO_PILOT_TOKEN: TOKEN };
+  const clean = runSmoke(t, ['--stage', 'S1', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ resultText: 'ready' }) });
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+  assert.match(clean.stdout, /the token never appeared in the runtime's output\s+PASS\s+no line needed redacting/);
+  assert.match(clean.stdout, /the pilot token is in no file of the run\s+PASS\s+checked \d+ files? under /);
+  assert.match(clean.stdout, /pilot sign-in\s+INFO\s+the pilot token from FINANCE_STUDIO_PILOT_TOKEN/);
+  assert.ok(!(clean.stdout + clean.stderr).includes(TOKEN));
+  const leaky = runSmoke(t, ['--stage', 'S1', smoke.APPROVE_FLAG], { ...token, FINANCE_STUB_SCENARIO: JSON.stringify({ resultText: TOKEN }) });
+  assert.equal(leaky.status, 1);
+  assert.match(leaky.stdout, /the token never appeared in the runtime's output\s+FAIL\s+1 place had to be blanked out/);
+  assert.match(leaky.stdout, /the pilot token is in no file of the run\s+PASS/, 'the transcript was written redacted');
+  assert.ok(!(leaky.stdout + leaky.stderr).includes(TOKEN), 'the token is never printed');
+  assert.deepEqual(leaky.leftovers, []);
 });
 
 test('live-smoke S0 against the stub: with a token the rows say so and the token is never printed; a gateway without one is a FAIL row', t => {
