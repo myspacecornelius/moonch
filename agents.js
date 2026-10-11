@@ -287,8 +287,19 @@
     }
     return true;
   }
-  const SECTIONS={strip:stripHtml,draft:draftHtml,runtime:runtimeHtml,packet:packetHtml,settings:settingsHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml};
-  function paintSection(name){setHtml($('#ag-'+name),SECTIONS[name]());if(name==='strip'||name==='runs')updateTitle();}
+  const SECTIONS={strip:stripHtml,draft:draftHtml,rail:railHtml,runtime:runtimeHtml,packet:packetHtml,settings:settingsHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml};
+  /* The step rail summarises every other section, so it is repainted after any of them (it changes only when its markup does). */
+  function paintRail(){setHtml($('#ag-rail'),railHtml());centerCurrentStep();}
+  /* On a narrow screen the steps form a scrolling row. Bring the current step into view by moving only that row, never the page. */
+  function centerCurrentStep(){
+    try{
+      const row=$('#ag-rail .ag-steps'),current=row&&row.querySelector&&row.querySelector('[aria-current="step"]');
+      if(!current||!(row.scrollWidth>row.clientWidth))return;
+      const item=current.parentNode||current;
+      row.scrollLeft=Math.max(0,item.offsetLeft-(row.clientWidth-item.offsetWidth)/2);
+    }catch{/* nothing to scroll */}
+  }
+  function paintSection(name){setHtml($('#ag-'+name),SECTIONS[name]());if(name!=='rail')paintRail();if(name==='strip'||name==='runs')updateTitle();}
   function paintAll(){if(S.phase==='ready')Object.keys(SECTIONS).forEach(paintSection);}
   /* The tab title counts the pilots of the selected round that have ended, like "(3/5) Agents", while this page shows. */
   function titleText(){
@@ -297,7 +308,7 @@
     return '('+runs.filter(run=>!isActiveRun(run)).length+'/'+runs.length+') Agents · '+BASE_TITLE;
   }
   function updateTitle(){try{const next=titleText();if(document.title!==next)document.title=next;}catch{/* no title to set */}}
-  function paintRoot(){setHtml($('#ag-root'),pageInner(),true);}
+  function paintRoot(){setHtml($('#ag-root'),pageInner(),true);centerCurrentStep();}
   function paintOverlay(){setHtml($('#agents-modal'),overlayHtml());}
   /* The gate and the freeze state live inside the round and freeze cards. Repainting them leaves the parent's cached markup out of date, so clear it. */
   function gates(){
@@ -305,6 +316,7 @@
     const gate=$('#ag-gate'),state=$('#ag-freeze-state');
     if(gate){setHtml(gate,gateHtml());const card=$('#ag-round');if(card)card.agHtml=null;}
     if(state){setHtml(state,freezeStateHtml());const card=$('#ag-freeze');if(card)card.agHtml=null;}
+    paintRail();
   }
   const activeKey=()=>{const el=document.activeElement;return el&&el.getAttribute?el.getAttribute('data-ag-key'):null;};
   function focusKey(key){
@@ -343,17 +355,60 @@
   function pageInner(){
     if(S.phase==='offline')return offlineHtml();
     if(S.phase!=='ready')return html`<section class="card" aria-busy="true" role="status"><p>Checking for the local companion.</p></section>`;
-    return html`
-      <div class="dash-heading"><div><div class="eyebrow">Local agents</div><h1>Run blind pilots on your packet.</h1><p>Start Claude Code agents on this computer, one folder per pilot, then read what they did and classify the answers against a gold written before any output. Nothing starts until you approve a round. Results are directional. No rate or difficulty is computed.</p></div></div>
-      <div class="ag-top"><div id="ag-strip" class="ag-strip" aria-label="Selected round">${stripHtml()}</div>
-      <div id="ag-status" class="ag-status ${S.msg.error?'error':''}" role="status" aria-live="polite" aria-atomic="true">${S.msg.text}</div></div>
-      <div id="ag-draft" class="ag-draft">${draftHtml()}</div>
-      <section class="card" id="ag-runtime" aria-label="Runtime">${runtimeHtml()}</section>
-      <section class="card" id="ag-packet" aria-label="Packet">${packetHtml()}</section>
-      <section class="card" id="ag-settings" aria-label="Settings">${settingsHtml()}</section>
-      <section class="card" id="ag-freeze" aria-label="Freeze">${freezeHtml()}</section>
-      <section class="card" id="ag-round" aria-label="Round">${roundHtml()}</section>
-      <section class="card" id="ag-runs" aria-label="Runs">${runsHtml()}</section>`;
+    return html`<div class="ag-shell">
+      <aside class="ag-side"><nav id="ag-rail" class="ag-rail" aria-label="Round steps">${railHtml()}</nav>
+        <div id="ag-draft" class="ag-draft">${draftHtml()}</div></aside>
+      <div class="ag-main">
+        <div class="dash-heading"><div><div class="eyebrow">Local agents</div><h1>Run blind pilots on your packet.</h1><p>Each pilot is a Claude Code agent working in its own folder on this computer. Write the gold before any output, approve the round, then read what the pilots did and classify their answers. Results are directional: no rate or difficulty is computed.</p></div></div>
+        <div class="ag-top"><div id="ag-strip" class="ag-strip" aria-label="Selected round">${stripHtml()}</div>
+        <div id="ag-status" class="ag-status ${S.msg.error?'error':''}" role="status" aria-live="polite" aria-atomic="true">${S.msg.text}</div></div>
+        <section class="card" id="ag-runtime" aria-label="Runtime">${runtimeHtml()}</section>
+        <section class="card" id="ag-packet" aria-label="Packet">${packetHtml()}</section>
+        <section class="card" id="ag-settings" aria-label="Settings">${settingsHtml()}</section>
+        <section class="card" id="ag-freeze" aria-label="Freeze">${freezeHtml()}</section>
+        <section class="card" id="ag-round" aria-label="Round">${roundHtml()}</section>
+        <section class="card" id="ag-runs" aria-label="Runs">${runsHtml()}</section>
+      </div></div>`;
+  }
+
+  /* The step rail: where the round stands, step by step, and the one thing to do next. Each step has a state:
+     done, warn (needs attention), active (pilots are running) or todo. The first step that is not done is the current one. */
+  const STEPS=[['runtime','Runtime'],['packet','Packet'],['settings','Settings'],['freeze','Freeze'],['round','Approve and launch'],['runs','Runs']];
+  function stepStates(){
+    const rt=S.status&&S.status.runtime,r=S.round,runs=runsOf(r),c=roundCounts(runs),cfg=S.config;
+    const files=S.packet.files,included=files?files.filter(effectiveInclude).length:0,words=wordsOf(S.prompt);
+    const budget=budgetNumber(cfg.budget),budgetOk=!Number.isNaN(budget);
+    const frozen=!!(r&&r.freeze&&r.status&&r.status!=='draft'),stale=!!(r&&isStale(r)),launched=!!(r&&(r.launchedAt||runs.length));
+    const gate=launchGate(),live=c.running+c.waiting>0,over=!!(r&&['finished','failed','cancelled'].includes(r.status));
+    const out={};
+    out.runtime=rt&&rt.found?{s:'done',t:'Claude Code '+(rt.version||'found'),next:''}:{s:'warn',t:'Not found',next:'Install Claude Code, or set CLAUDE_BIN, then check again.'};
+    if(S.packet.error)out.packet={s:'warn',t:'The folder could not be read',next:'Fix the folder path and inspect it again.'};
+    else if(files&&included&&words)out.packet={s:'done',t:included+' of '+files.length+' files · '+words+(words===1?' word':' words'),next:''};
+    else out.packet={s:'todo',t:!files?'Choose a folder':!included?'Include at least one file':'Write the prompt',next:!files?'Choose the folder that holds the solver files, then inspect it.':!included?'Include at least one file in the packet.':'Write the solver prompt.'};
+    /* The defaults are usable, but the step only counts as done once the packet is: the settings are the next thing to look at. */
+    out.settings=!budgetOk?{s:'warn',t:'Fix the spending cap',next:'Set a spending cap per pilot.'}:{s:out.packet.s==='done'?'done':'todo',t:cfg.model+' · '+cfg.effort+' · '+cfg.count+(cfg.count===1?' pilot':' pilots')+' · up to '+roundMax(cfg.count,budget),next:'Check the model, effort, pilots and spending cap.'};
+    out.freeze=stale?{s:'warn',t:'The form changed since the freeze',next:'Freeze again: that makes a new round.'}:frozen?{s:'done',t:'Frozen',next:''}:{s:'todo',t:'Not frozen yet',next:'Write the gold and freeze it before any run.'};
+    out.round=launched?{s:live?'active':'done',t:live?'Running':r.status==='finished'?'Finished':'Launched',next:''}:{s:'todo',t:gate.ok?(gate.resume?'Approved, not launched':'Ready for your approval'):'Waiting for the freeze',next:gate.ok?'Review and approve the round.':'Freeze the gold first.'};
+    out.runs=runs.length?{s:live?'active':'done',t:c.done+' of '+runs.length+' finished'+(c.failed?' · '+c.failed+' failed':''),next:live?'':over?'Open a pilot to classify its answer.':''}:{s:'todo',t:'No pilots yet',next:'Pilots appear here once the round is launched.'};
+    return out;
+  }
+  function railHtml(){
+    if(S.phase!=='ready')return '';
+    const states=stepStates();
+    const current=STEPS.find(([id])=>states[id].s!=='done');
+    const mark=(s,i)=>s==='done'?'✓':s==='warn'?'!':s==='active'?'●':String(i+1);
+    return html`<ol class="ag-steps">${STEPS.map(([id,label],i)=>html`<li><button type="button" class="ag-step is-${states[id].s}" data-ag="goto-step" data-step="${id}" data-ag-key="step-${id}" ${current&&current[0]===id?new Raw('aria-current="step"'):''}><span class="ag-step-mark" aria-hidden="true">${mark(states[id].s,i)}</span><span class="ag-step-text"><strong>${label}</strong><small>${states[id].t}</small></span></button></li>`)}</ol>
+      ${current?html`<div class="ag-next" id="ag-next"><span class="ag-next-label">Next</span><p>${states[current[0]].next||(states[current[0]].s==='active'?'Pilots are running. Their results appear under Runs.':'Continue with '+current[1]+'.')}</p><button type="button" class="small primary" data-ag="goto-step" data-step="${current[0]}" data-ag-key="step-next">Go to ${current[1]}</button></div>`:html`<div class="ag-next" id="ag-next"><span class="ag-next-label">All steps done</span><p>Classify each clean pilot, then export the round.</p><button type="button" class="small" data-ag="goto-step" data-step="runs" data-ag-key="step-next">Go to Runs</button></div>`}`;
+  }
+  /* Scroll to a step's card and put the keyboard on its first control. */
+  function goStep(step){
+    const card=STEPS.some(([id])=>id===step)?document.getElementById('ag-'+step):null;
+    if(!card)return;
+    let smooth=true;
+    try{smooth=!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}catch{smooth=true;}
+    if(typeof card.scrollIntoView==='function')card.scrollIntoView({behavior:smooth?'smooth':'auto',block:'start'});
+    const control=card.querySelector&&card.querySelector('input:not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not([disabled])');
+    if(control&&typeof control.focus==='function')control.focus({preventScroll:true});
   }
 
   /* Status strip: the selected round at a glance, repainted on every poll. */
@@ -393,10 +448,9 @@
   function runtimeHtml(){
     const rt=S.status.runtime;
     if(rt.found){
-      return html`<div class="card-title"><div><div class="eyebrow">1 Runtime</div><h2>Claude Code was found</h2></div>${pill('Found','green')}</div>
+      return html`<div class="card-title"><div><div class="eyebrow">1 Runtime</div><h2>Claude Code was found</h2></div><div class="actions">${pill('Found','green')}<button type="button" class="small" data-ag="check-runtime" data-ag-key="check-runtime">Check again</button></div></div>
         <dl class="history-details"><dt>Version</dt><dd>${rt.version||'unknown'}</dd><dt>Path</dt><dd>${rt.path||'unknown'}</dd><dt>Found by</dt><dd>${rt.source||'unknown'}</dd><dt>Pilot limit</dt><dd>At most ${S.status.max} per round</dd></dl>
-        <p class="footnote">Detection only runs claude --version. It never starts a model.</p>
-        <div class="actions"><button type="button" class="small" data-ag="check-runtime" data-ag-key="check-runtime">Check again</button></div>`;
+        <p class="footnote">Detection only runs claude --version. It never starts a model.</p>`;
     }
     return html`<div class="card-title"><div><div class="eyebrow">1 Runtime</div><h2>Claude Code was not found</h2></div>${pill('Not found','amber')}</div>
       <div class="notice">Pilots need the claude command. Install Claude Code and sign in from your own terminal, or set CLAUDE_BIN to its path before running npm start, then check again. Nothing here will install or sign in for you.</div>
@@ -712,7 +766,8 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       ${options?html`<label class="field">Round<select data-ag-in="select-round" data-ag-key="select-round">${r?'':html`<option value="" selected>Choose a round</option>`}${S.rounds.map(x=>html`<option value="${x.id}" ${r&&x.id===r.id?'selected':''}>${(x.label||'Round')+' · '+x.id+' · '+(x.status||'')+' · '+timeText(x.createdAt)}</option>`)}</select></label>`:''}
       ${r&&r.note?html`<div class="notice" role="status" id="ag-round-note"><strong>Note on this round:</strong> ${r.note}${/companion stopped/.test(r.note)?' Pilots that were interrupted show as failed and were not audited. A pilot process may still be running if the companion was killed without a chance to stop it. Start a new round to run them again.':''}</div>`:''}
       <div class="notice neutral" id="ag-banner"><strong>Directional only, n = ${n}.</strong> No rate or difficulty is computed.
-        <div class="ag-counts">Completed and clean: ${t.clean} (directional only, n = ${n}) · Discarded: ${t.discarded} · Failed: ${t.failed} · Cancelled: ${t.cancelled} · Still running: ${t.active}</div>
+        <div class="ag-tiles" aria-hidden="true"><div class="ag-tile good"><strong>${t.clean}</strong><span>Clean</span></div><div class="ag-tile ${t.discarded?'bad':''}"><strong>${t.discarded}</strong><span>Discarded</span></div><div class="ag-tile ${t.failed?'warn':''}"><strong>${t.failed}</strong><span>Failed</span></div><div class="ag-tile"><strong>${t.cancelled}</strong><span>Cancelled</span></div><div class="ag-tile ${t.active?'warn':''}"><strong>${t.active}</strong><span>Running</span></div></div>
+        <div class="ag-counts sr-only">Completed and clean: ${t.clean} (directional only, n = ${n}) · Discarded: ${t.discarded} · Failed: ${t.failed} · Cancelled: ${t.cancelled} · Still running: ${t.active}</div>
         ${t.classified?html`<div class="ag-counts">Your verdicts so far (directional only, n = ${n}): ${VERDICTS.map(v=>verdictLabel(v.id)+' '+(t.verdicts[v.id]||0)).join(' · ')}</div>`:''}
         ${t.discarded?html`<div class="ag-counts">Discarded runs are kept and shown, but they are not classified and not counted in the export.</div>`:''}</div>
       ${runs.length?runsTableHtml(runs):html`<div class="empty">${r?'No pilots have started in this round yet.':'No round selected. Freeze the gold to create one.'}</div>`}
@@ -863,10 +918,12 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       <p class="footnote">${command.source==='companion'?'As built by the companion, with the prompt elided. The browser cannot change it.':'The companion did not send its own copy, so this is the documented command with the prompt elided.'}</p>
       <div class="notice"><strong>Isolation</strong><br>${ISOLATION_STATEMENT}</div>
       ${s.text?html`<details><summary>The exact text this approval covers</summary><pre class="ag-command" tabindex="0" aria-label="Approval summary text">${s.text}</pre><p class="footnote">The summary hash above is the SHA-256 of this text. The companion refuses to launch if it no longer matches.</p></details>`:''}
-      <fieldset class="ag-acks"><legend>Required before launch</legend>${ACKNOWLEDGEMENTS.map((a,i)=>html`<label class="check"><input type="checkbox" data-ag-in="ack" data-id="${a.id}" data-ag-key="ack-${a.id}" ${o.acks[a.id]?'checked':''} ${i===0?'data-ag-initial':''}><span><strong>${a.label}</strong>${a.text}</span></label>`)}</fieldset>
-      ${!o.hash?html`<div class="notice" role="alert">The companion did not send an approval hash for this round, so it cannot be approved from here. Update the companion and try again.</div>`:''}
-      ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="approve-launch" data-ag-key="approve-launch" ${allChecked&&o.hash&&ready&&!locked()?'':'disabled'}>Approve and launch</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-approve">Cancel</button></div>`);
+      <div class="ag-foot">
+        <fieldset class="ag-acks"><legend>Required before launch</legend>${ACKNOWLEDGEMENTS.map((a,i)=>html`<label class="check"><input type="checkbox" data-ag-in="ack" data-id="${a.id}" data-ag-key="ack-${a.id}" ${o.acks[a.id]?'checked':''} ${i===0?'data-ag-initial':''}><span><strong>${a.label}</strong>${a.text}</span></label>`)}</fieldset>
+        ${!o.hash?html`<div class="notice" role="alert">The companion did not send an approval hash for this round, so it cannot be approved from here. Update the companion and try again.</div>`:''}
+        ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
+        <div class="actions"><button type="button" class="primary" data-ag="approve-launch" data-ag-key="approve-launch" ${allChecked&&o.hash&&ready&&!locked()?'':'disabled'}>Approve and launch</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-approve">Cancel</button></div>
+      </div>`);
   }
   /* The pre-flight result at the top of the approval dialog. A problem blocks the approval until a check passes. */
   function preflightHtml(check){
@@ -1551,6 +1608,7 @@ ${o.guideline}</textarea></label>
   const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','model','effort','count','label','budget','atonce']);
   const DRAFT_CLICKS=new Set(['use-project-prompt','add-gfig','add-pfig','remove-fig','add-fp','remove-fp','count-dec','count-inc']);
   const CLICK={
+    'goto-step':t=>goStep(t.dataset.step),
     'check-runtime':()=>checkRuntime(),
     inspect:()=>inspect(),
     'use-project-prompt':()=>{

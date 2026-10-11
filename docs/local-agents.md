@@ -224,7 +224,11 @@ A new top-level view `agents` in `dashboard.js`, implemented in `agents.js`.
 
 A sticky status strip shows the selected round, its status, pilots done, running, waiting, failed and cancelled, elapsed time, and any other running round. While the Agents page shows, the tab title reads `(ended/total) Agents · Finance Task Studio`. The form (folder, include boxes, prompt, label, gaf setting, settings, gold, fingerprints, carry origin, and the form signatures of rounds not yet launched) is kept as a draft in `localStorage` (`finance-studio.agents.draft.v1`): saved 400 ms after a change, never while a round runs, removed by a successful launch, restored with type and length checks on load, and emptied by **Clear draft**. Every storage call is guarded, so blocked storage only loses the draft. The companion binds a free port by default, so a restarted companion is a new origin with an empty draft unless `FINANCE_STUDIO_PORT` is fixed.
 
-Accessibility and layout follow the existing views (mobile no horizontal overflow, keyboard reachable controls, `aria-live` status).
+Layout. The page has a left **step rail** (Runtime, Packet, Settings, Freeze, Round, Runs) that shows each step as done, needing attention or running, names the next action in a "Next" callout, and scrolls to the step's card with a keyboard focus on its first control. Below 1180 px the rail becomes a horizontal stepper that keeps the current step in view. The draft-saved note sits under the rail. The top bar on this view offers **Package analysis** and **Task editor** instead of the four package buttons, and the sidebar groups its items under "Package analysis" and "Pilots". The results banner shows the run counts as tiles (with the same counts as text for screen readers). In the approval dialog the three acknowledgements, notices and the buttons form a sticky footer, so they stay visible while the summary scrolls.
+
+On the Overview, with nothing loaded, the Load card and its drop zone come first with a four-step outline (Load, Inspect, Lock, Pilot); the counts and status cards appear once a package or an imported audit is loaded.
+
+Accessibility and layout follow the existing views (mobile no horizontal overflow, keyboard reachable controls, `aria-live` status, `aria-current="step"` on the current step).
 
 ## 10. Files
 
