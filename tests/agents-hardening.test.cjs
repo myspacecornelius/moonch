@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanEnv } = require('./fixtures/clean-env.cjs');
 
 const { buildArgs, ClaudeRun } = require('../backend/agents/claude-runner.cjs');
 const { createAgentService, AgentError } = require('../backend/agents/index.cjs');
@@ -67,7 +68,7 @@ function makeWorld(t, scenario = {}, options = {}) {
   put('Facility_Terms.txt', 'Atlas facility terms, synthetic. Available credit is not cash received.\n');
   put('Cash_Facts.csv', 'Label,Value\nOpening usable cash,100\nConfirmed funded draw,500\n');
   const env = {
-    ...process.env,
+    ...cleanEnv(),
     FINANCE_STUB_SCENARIO: JSON.stringify(scenario).split('__PROJECT_ROOT__').join(projectRoot).split('__PILOTS_ROOT__').join(pilots),
     FINANCE_STUB_ARGV_LOG: argvLog,
     ...(options.env || {}),

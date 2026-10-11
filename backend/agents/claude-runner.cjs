@@ -15,6 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { MODELS, EFFORTS, TOOLS, LIMITS, BUDGET_USD, PILOT_CONFIG_DIRNAME } = require('./constants.cjs');
 const { extractToolCalls } = require('./path-audit.cjs');
+const { RUNTIME_TOKEN_VAR, TOKEN_ENV, DROPPED_WITH_TOKEN, validToken, makeRedactor } = require('./pilot-token.cjs');
 
 const VERSION_TIMEOUT_MS = 5000;
 const HELP_TIMEOUT_MS = 10000;
@@ -224,7 +225,7 @@ function secureStorageDirFor(env) {
   return '';
 }
 
-/* pilotEnv(parentEnv, scratch) -> the environment of an agent process whose scratch folder is `scratch`
+/* pilotEnv(parentEnv, scratch, { token }) -> the environment of an agent process whose scratch folder is `scratch`
    (<folder>/.tmp): the parent environment plus
      TMPDIR, CLAUDE_CODE_TMPDIR        the scratch folder;
      CLAUDE_CONFIG_DIR                 <scratch>/claude-config, so the runtime's own files (large tool outputs saved under
@@ -232,10 +233,22 @@ function secureStorageDirFor(env) {
      CLAUDE_SECURESTORAGE_CONFIG_DIR   where the writer's sign-in is (secureStorageDirFor);
      CLAUDE_CODE_DISABLE_AUTO_MEMORY,
      CLAUDE_CODE_DISABLE_CLAUDE_MDS    "1": no memory or CLAUDE.md file from anywhere reaches a blind pilot.
-   Nothing else is added or removed. Pure: preparePilotConfigDir creates the folder. */
-function pilotEnv(parentEnv, scratch) {
-  const env = isObject(parentEnv) ? parentEnv : process.env;
+   FINANCE_STUDIO_PILOT_TOKEN (the companion's own source of the pilot token) is always left out. With `token` (the
+   dedicated pilot sign-in, pilot-token.cjs) the process gets CLAUDE_CODE_OAUTH_TOKEN = token and nothing else that
+   would sign it in or route it: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, the other gateway and
+   provider variables and the model overrides (DROPPED_WITH_TOKEN) are left out. Without a token nothing else is added
+   or removed. Pure: preparePilotConfigDir creates the folder. */
+function pilotEnv(parentEnv, scratch, options = {}) {
+  const parent = isObject(parentEnv) ? parentEnv : process.env;
   if (typeof scratch !== 'string' || !path.isAbsolute(scratch) || scratch.includes('\0')) throw new TypeError('The scratch folder must be an absolute path');
+  const token = isObject(options) && options.token !== undefined && options.token !== null ? options.token : null;
+  if (token !== null && validToken(token) !== token) throw new TypeError('The pilot token is not usable');
+  const env = { ...parent };
+  delete env[TOKEN_ENV];
+  if (token !== null) {
+    for (const name of DROPPED_WITH_TOKEN) delete env[name];
+    env[RUNTIME_TOKEN_VAR] = token;
+  }
   return {
     ...env,
     TMPDIR: scratch,
@@ -395,14 +408,16 @@ function summarizeEvents(events) {
 /* ------------------------------------------------------------------ one run */
 
 /* A single `claude -p` process.
-     new ClaudeRun({ bin, args, cwd, env, spawnFn, timeoutMs, killGraceMs, transcriptPath, promptVia, prompt })
+     new ClaudeRun({ bin, args, cwd, env, spawnFn, timeoutMs, killGraceMs, transcriptPath, promptVia, prompt, redact })
        promptVia 'argv' (default): the prompt is in args and stdin is closed. 'stdin': args come from
        buildArgs({ ..., promptVia: 'stdin' }) and `prompt` is written to the process's stdin, which is then closed.
+       redact: secrets (the pilot token) that are blanked out of every stdout line before it is written to the
+       transcript, parsed or emitted, and out of the stderr tail, so no event, record or file the Studio keeps holds them.
      start()  -> Promise<summary> (never rejects)
      cancel() -> true if a running or pending run was asked to stop
    Events: 'line' (raw stdout line), 'event' (parsed event, tool results truncated), 'end' (summary).
    summary = { state: 'completed' | 'failed' | 'cancelled', exitCode, signal, init, result, stderrTail, events,
-               timedOut, failureReason, spawnError, leftoverStopped, junkLines, transcriptBytes }
+               timedOut, failureReason, spawnError, leftoverStopped, junkLines, transcriptBytes, redactions }
    leftoverStopped is true when the process exited by itself but left processes in its group, which were then killed.
    A run is completed only when the process exits with code 0, it was not cancelled or timed out, and a result event
    with non empty text (and is_error not true) was seen. A run whose result says the spending cap was reached is failed
@@ -425,6 +440,8 @@ class ClaudeRun extends EventEmitter {
     this.killGraceMs = Number.isFinite(options.killGraceMs) && options.killGraceMs >= 0 ? options.killGraceMs : LIMITS.killGraceMs;
     this.drainMs = Number.isFinite(options.drainMs) && options.drainMs >= 0 ? options.drainMs : EXIT_DRAIN_MS;
     this.transcriptPath = typeof options.transcriptPath === 'string' && options.transcriptPath ? options.transcriptPath : null;
+    this.redact = makeRedactor(options.redact);
+    this.redactions = 0; /* stdout lines and the stderr tail in which a secret was blanked out */
     this.child = null;
     this.events = [];
     this.junkLines = 0;
@@ -545,7 +562,10 @@ class ClaudeRun extends EventEmitter {
   }
 
   _handleLine(raw) {
-    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    /* Secrets are blanked out first, so the transcript, the parsed events and every listener see the same redacted line. */
+    const stripped = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const line = this.redact(stripped);
+    if (line !== stripped) this.redactions++;
     if (!line.trim()) return;
     this._appendTranscript(line);
     this.emit('line', line);
@@ -646,13 +666,15 @@ class ClaudeRun extends EventEmitter {
     else if (result.is_error) failureReason = 'error-result';
     else if (!result.text.trim()) failureReason = 'empty-result';
     else state = 'completed';
+    const rawStderr = this._stderrTail();
+    const stderrTail = this.redact(rawStderr);
     return {
       state,
       exitCode: this.exitCode,
       signal: this.signal,
       init,
       result,
-      stderrTail: this._stderrTail(),
+      stderrTail,
       events: this.events,
       timedOut: this._timedOut,
       failureReason: state === 'completed' ? null : failureReason,
@@ -660,6 +682,8 @@ class ClaudeRun extends EventEmitter {
       leftoverStopped: this.leftoverStopped === true,
       junkLines: this.junkLines,
       transcriptBytes: this.transcriptBytes,
+      /* how many stdout lines, plus the stderr tail, held a secret that was blanked out (0 without `redact`) */
+      redactions: this.redactions + (stderrTail !== rawStderr ? 1 : 0),
     };
   }
 }

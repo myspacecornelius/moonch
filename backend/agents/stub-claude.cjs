@@ -16,7 +16,10 @@
      FINANCE_STUB_ARGV_LOG   file that receives one JSON line per invocation: the argument list.
      FINANCE_STUB_ENV_LOG    file that receives one JSON line per run: { TMPDIR, CLAUDE_CODE_TMPDIR, CLAUDE_CONFIG_DIR,
                              CLAUDE_SECURESTORAGE_CONFIG_DIR, CLAUDE_CODE_DISABLE_AUTO_MEMORY,
-                             CLAUDE_CODE_DISABLE_CLAUDE_MDS, cwd } (null for an unset variable).
+                             CLAUDE_CODE_DISABLE_CLAUDE_MDS, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, cwd } (null for an
+                             unset variable), plus CLAUDE_CODE_OAUTH_TOKEN_SET, CLAUDE_CODE_OAUTH_TOKEN_CHARS,
+                             ANTHROPIC_AUTH_TOKEN_SET and FINANCE_STUDIO_PILOT_TOKEN_SET (a token's presence and length,
+                             never its text).
      FINANCE_STUB_PROMPT_LOG file that receives one JSON line per run: { via: 'argv' | 'stdin', prompt }.
      FINANCE_STUB_HELP_DROP  comma separated options this "older CLI" does not have: left out of --help and refused.
      FINANCE_STUB_AUTH       what `auth status` answers:
@@ -24,6 +27,7 @@
                                logged-out    {"loggedIn": false}, exit 1
                                file          signed in only when <credentials folder>/.credentials.json exists, where
                                              the credentials folder follows the real CLI's rule (see credentialsDir)
+                               token         signed in only when CLAUDE_CODE_OAUTH_TOKEN is set and not empty
                                broken        text that is not JSON on stdout, a message on stderr, exit 2
                                hang          never answers
      FINANCE_STUB_AUTH_LOG   file that receives one JSON line per `auth status`: the same fields as the env log, plus
@@ -36,6 +40,11 @@
                              large, saved the way the runtime saves it, under
                              $CLAUDE_CONFIG_DIR/projects/<cwd key>/<session>/tool-results/<tool id>.txt, then a Read of
                              that file. CLAUDE_CONFIG_DIR must be set: the stub never writes under a home folder.
+     echoToken               true: after toolUses, the stub behaves like a pilot that reads its sign-in: a Bash call
+                             `printenv CLAUDE_CODE_OAUTH_TOKEN` whose result is the variable's real value, a Write of
+                             outputs/token_note.txt holding it (the file is really written, and a copy goes to
+                             .tmp/token_copy.txt), a line with it on stderr, and the final answer repeats it. Without the
+                             variable the text "(no token)" stands in. For the redaction and secret tests only.
      writeFiles:[{path,content}]     files written (relative to the working folder) before the result
      deleteFiles:[path]              files removed (relative to the working folder) before the result
      background              true: start a long lived child process (same process group) and leave it running; its pid
@@ -178,6 +187,12 @@ function envFacts() {
     CLAUDE_SECURESTORAGE_CONFIG_DIR: value('CLAUDE_SECURESTORAGE_CONFIG_DIR'),
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: value('CLAUDE_CODE_DISABLE_AUTO_MEMORY'),
     CLAUDE_CODE_DISABLE_CLAUDE_MDS: value('CLAUDE_CODE_DISABLE_CLAUDE_MDS'),
+    ANTHROPIC_BASE_URL: value('ANTHROPIC_BASE_URL'),
+    ANTHROPIC_MODEL: value('ANTHROPIC_MODEL'),
+    CLAUDE_CODE_OAUTH_TOKEN_SET: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN),
+    CLAUDE_CODE_OAUTH_TOKEN_CHARS: (process.env.CLAUDE_CODE_OAUTH_TOKEN || '').length,
+    ANTHROPIC_AUTH_TOKEN_SET: Boolean(process.env.ANTHROPIC_AUTH_TOKEN),
+    FINANCE_STUDIO_PILOT_TOKEN_SET: Boolean(process.env.FINANCE_STUDIO_PILOT_TOKEN),
     cwd: process.cwd(),
   };
 }
@@ -202,10 +217,11 @@ async function authCommand(list) {
     return;
   }
   const store = credentialsDir(process.env);
-  const loggedIn = mode === 'ok' || (mode === 'file' && fs.existsSync(path.join(store, '.credentials.json')));
+  const byToken = mode === 'token' && Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+  const loggedIn = mode === 'ok' || byToken || (mode === 'file' && fs.existsSync(path.join(store, '.credentials.json')));
   const report = {
     loggedIn,
-    authMethod: loggedIn ? 'claude.ai' : 'none',
+    authMethod: byToken ? 'oauth-token' : loggedIn ? 'claude.ai' : 'none',
     apiProvider: 'firstParty',
     configDirectory: configDir,
     credentialsDirectory: store,
@@ -352,6 +368,22 @@ async function main() {
     await toolCall('Read', { file_path: spillPath }, fs.readFileSync(spillPath, 'utf8').slice(0, 2000));
   }
 
+  let tokenEcho = '';
+  if (scenario.echoToken) {
+    /* A pilot that reads its sign-in and lets it out everywhere a run leaves traces: a tool result, a file in outputs/,
+       a file in its scratch space, stderr and the final answer. */
+    const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || '(no token)';
+    await toolCall('Bash', { command: 'printenv CLAUDE_CODE_OAUTH_TOKEN' }, token + '\n');
+    const note = 'pilot token: ' + token + '\n';
+    fs.mkdirSync(path.join(process.cwd(), 'outputs'), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), 'outputs', 'token_note.txt'), note);
+    fs.mkdirSync(path.join(process.cwd(), '.tmp'), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), '.tmp', 'token_copy.txt'), note);
+    await toolCall('Write', { file_path: 'outputs/token_note.txt', content: note }, 'File written');
+    await write(process.stderr, 'stub debug: token=' + token + '\n');
+    tokenEcho = ' The token is ' + token + '.';
+  }
+
   for (const file of Array.isArray(scenario.writeFiles) ? scenario.writeFiles : []) {
     if (!file || typeof file.path !== 'string') continue;
     const target = path.resolve(process.cwd(), file.path);
@@ -391,7 +423,7 @@ async function main() {
       modelUsage: scenario.modelUsage || { [model]: { inputTokens: 1, outputTokens: 1, costUSD: 0.0123 } },
     });
   } else if (!scenario.noResult) {
-    const resultText = scenario.echoPrompt ? prompt : typeof scenario.resultText === 'string' ? scenario.resultText : 'stub answer';
+    const resultText = (scenario.echoPrompt ? prompt : typeof scenario.resultText === 'string' ? scenario.resultText : 'stub answer') + tokenEcho;
     await emit({
       type: 'result',
       subtype: scenario.isError ? 'error_during_execution' : 'success',

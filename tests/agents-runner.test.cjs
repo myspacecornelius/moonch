@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanEnv } = require('./fixtures/clean-env.cjs');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
@@ -81,7 +82,7 @@ function makeWorld(t, scenario = {}, options = {}) {
   put('Facility_Terms.txt', 'Atlas facility terms, synthetic. Available credit is not cash received.\n');
   put('Cash_Facts.csv', 'Label,Value\nOpening usable cash,100\nConfirmed funded draw,500\n');
   const env = {
-    ...process.env,
+    ...cleanEnv(),
     FINANCE_STUB_SCENARIO: JSON.stringify(scenario).split('__PROJECT_ROOT__').join(projectRoot),
     FINANCE_STUB_ARGV_LOG: argvLog,
     FINANCE_STUB_ENV_LOG: envLog,
@@ -154,7 +155,7 @@ function stubRun(t, scenario, extra = {}) {
     bin: STUB,
     args: buildArgs({ prompt: 'Synthetic prompt', model: 'claude-opus-5-5', effort: 'low', tools: C.TOOLS }),
     cwd: dir,
-    env: { ...process.env, FINANCE_STUB_SCENARIO: JSON.stringify(scenario) },
+    env: { ...cleanEnv(), FINANCE_STUB_SCENARIO: JSON.stringify(scenario) },
     transcriptPath,
     killGraceMs: 150,
     ...extra,
@@ -1650,7 +1651,8 @@ test('the audit keeps the writer\'s folder as harness-spill and resolves the pil
   assert.equal((await audited('ls "$TMPDIR/claude-config"')).status, 'CLEAN');
   const signIn = await audited('cat $CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json', { CLAUDE_SECURESTORAGE_CONFIG_DIR: original });
   assert.equal(signIn.status, 'DISCARDED');
-  assert.deepEqual(signIn.violations.map(violation => violation.kind), ['harness-spill']);
+  /* the credentials file is a credential store (kind secret) and the writer's folder (kind harness-spill) */
+  assert.deepEqual(signIn.violations.map(violation => violation.kind), ['secret', 'harness-spill']);
   const direct = await audited(`cat ${path.join(original, 'projects', 'x', 'tool-results', 'y.txt')}`);
   assert.deepEqual(direct.violations.map(violation => violation.kind), ['harness-spill']);
   /* with no CLAUDE_CONFIG_DIR the writer's folder is <HOME>/.claude of the environment the pilot inherits */
@@ -1663,7 +1665,7 @@ test('the audit keeps the writer\'s folder as harness-spill and resolves the pil
 /* ====================================================================== prompt delivery and the strict stub */
 
 function runStub(args, extraEnv = {}, input) {
-  const result = childProcess.spawnSync(process.execPath, [STUB, ...args], { env: { ...process.env, FINANCE_STUB_SCENARIO: '', ...extraEnv }, input: input === undefined ? '' : input, encoding: 'utf8', timeout: 15000 });
+  const result = childProcess.spawnSync(process.execPath, [STUB, ...args], { env: { ...cleanEnv(), FINANCE_STUB_SCENARIO: '', ...extraEnv }, input: input === undefined ? '' : input, encoding: 'utf8', timeout: 15000 });
   return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -1678,7 +1680,7 @@ test('promptVia stdin: the prompt leaves the argument list, --input-format text 
 
   const dir = tempDir(t);
   const promptLog = path.join(dir, 'prompt.log');
-  const env = { ...process.env, FINANCE_STUB_SCENARIO: JSON.stringify({ echoPrompt: true }), FINANCE_STUB_PROMPT_LOG: promptLog };
+  const env = { ...cleanEnv(), FINANCE_STUB_SCENARIO: JSON.stringify({ echoPrompt: true }), FINANCE_STUB_PROMPT_LOG: promptLog };
   const viaStdin = await new ClaudeRun({ bin: STUB, args: stdinArgs, cwd: dir, env, promptVia: 'stdin', prompt }).start();
   assert.equal(viaStdin.state, 'completed', viaStdin.stderrTail);
   assert.equal(viaStdin.result.text, prompt);
@@ -1938,7 +1940,8 @@ test('the pre-flight can be asked for before approval: it names a missing option
   assert.equal(result.ok, true);
   assert.equal(result.roundId, id);
   assert.equal(typeof result.version, 'string');
-  assert.equal(result.checks.length, 2);
+  assert.equal(result.checks.length, 4, 'the options, the sign-in, where pilots sign in from, and the gateway variables');
+  assert.equal(result.signIn, 'Pilots use your own Claude Code sign-in; no pilot token is stored.');
   const invocations = readJsonLines(ok.argvLog);
   assert.ok(invocations.some(args => args.includes('--help')), 'claude --help was read');
   assert.ok(invocations.some(args => args[0] === 'auth' && args[1] === 'status'), 'claude auth status was asked');

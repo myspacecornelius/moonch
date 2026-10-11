@@ -11,7 +11,8 @@
        tmpRoot    where finance-studio-pilots/ is created (default os.tmpdir())
        companionPort  the companion's port, when it is known in advance (otherwise setCompanionPort after listen)
      Test only: limits ({ timeoutMs, killGraceMs, concurrency, drainMs } can be lowered, never raised), exists,
-     execFile, home. */
+     execFile, home, pilotToken (the dedicated pilot sign-in, instead of reading it) and readPilotToken (replaces the
+     Keychain and environment read, pilot-token.cjs). */
 
 const { RoundStore, AgentError } = require('./rounds.cjs');
 

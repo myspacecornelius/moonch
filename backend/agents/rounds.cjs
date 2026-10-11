@@ -17,6 +17,7 @@ const {
   claudeConfigDirOf, checkAuth,
 } = require('./claude-runner.cjs');
 const { auditToolCalls } = require('./path-audit.cjs');
+const { readPilotToken, gatewayFindings, describeFindings, redactFilesUnder, sourceText, validToken } = require('./pilot-token.cjs');
 const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, GAF_RE } = require('./pilot-folder.cjs');
 const { suggest, hashFreeze, parseFigure } = require('./classify.cjs');
 
@@ -485,6 +486,11 @@ class RoundStore {
     this.home = typeof options.home === 'string' && options.home ? options.home : undefined;
     /* The companion's own port, for the loopback audit (null: not known yet, every loopback address is still flagged). */
     this.companionPort = isPort(options.companionPort) ? options.companionPort : null;
+    /* The dedicated pilot sign-in (pilot-token.cjs): a token given as an option (tests), otherwise read at every
+       pre-flight from the Keychain item or FINANCE_STUDIO_PILOT_TOKEN (readPilotToken can be replaced by tests). It is
+       held in memory for one launch and never written anywhere. */
+    this.pilotToken = validToken(options.pilotToken);
+    this.readPilotToken = typeof options.readPilotToken === 'function' ? options.readPilotToken : readPilotToken;
     this.rounds = new Map();
     this.live = new Map();
     this.graderBusy = false;
@@ -543,16 +549,29 @@ class RoundStore {
   /* The environment of every agent process (docs/local-agents.md section 3.2): this process's environment plus TMPDIR and
      CLAUDE_CODE_TMPDIR pointing into the folder, the runtime's configuration folder moved to <scratch>/claude-config
      (so large tool outputs the runtime saves stay inside the folder), the sign-in still read where the writer keeps it
-     (nothing is copied), and no memory or CLAUDE.md files (claude-runner.cjs pilotEnv). The audit is given the same
-     object, so a path held in an inherited variable is seen when a command uses it. Pure: _preparedEnv also creates
-     the configuration folder before a process starts. */
-  _childEnv(scratch) {
-    return pilotEnv(this.env, scratch);
+     (nothing is copied), and no memory or CLAUDE.md files (claude-runner.cjs pilotEnv). With the dedicated pilot token
+     the process gets CLAUDE_CODE_OAUTH_TOKEN instead and no gateway, provider or model variable. The audit is given
+     the same object, so a path held in an inherited variable is seen when a command uses it. Pure: _preparedEnv also
+     creates the configuration folder before a process starts. */
+  _childEnv(scratch, token = null) {
+    return pilotEnv(this.env, scratch, { token });
   }
 
-  _preparedEnv(scratch) {
+  _preparedEnv(scratch, token = null) {
     preparePilotConfigDir(scratch);
-    return this._childEnv(scratch);
+    return this._childEnv(scratch, token);
+  }
+
+  /* The pilot sign-in for the processes about to start: { token, source, error }. Never rejects. */
+  async _signIn() {
+    if (this.pilotToken) return { token: this.pilotToken, source: 'option', error: null };
+    try {
+      const found = await this.readPilotToken({ env: this.env });
+      if (!isObject(found)) return { token: null, source: null, error: null };
+      return { token: validToken(found.token), source: typeof found.source === 'string' ? found.source : null, error: typeof found.error === 'string' && found.error ? found.error : null };
+    } catch (error) {
+      return { token: null, source: null, error: safeMessage(error) };
+    }
   }
 
   /* The writer's own runtime configuration folder. The audit always treats it as outside every pilot (harness-spill). */
@@ -613,17 +632,30 @@ class RoundStore {
     return this._detecting;
   }
 
-  /* The pre-flight before any agent process starts. Neither check runs a model.
+  /* The pre-flight before any agent process starts. No check runs a model. Returns { token, source, dropped }: the
+     pilot sign-in the processes will get (token null: the writer's own sign-in) and the gateway variables left out of
+     their environment because of it.
      1. `claude --help` (read once per binary path and version) must list every flag in the argument lists that will
         run, so a runtime that lacks one (for example the spending cap) is refused, naming the flag.
-     2. `claude auth status --json` must say the runtime is signed in, under exactly the environment a pilot gets
-        (pilotEnv), in a throwaway folder that is removed again. */
+     2. The pilot token is read (pilot-token.cjs). A token that is there but cannot be used is refused, naming its place.
+     3. A variable that would route a pilot through a gateway or another provider, or rename its models
+        (gatewayFindings), is refused by name unless the pilot token is there, in which case the pilot does not inherit
+        it. Without the token the Studio could not tell what such a pilot tests.
+     4. `claude auth status --json` must say the runtime is signed in, under exactly the environment a pilot gets
+        (pilotEnv, token included), in a throwaway folder that is removed again. */
   async _preflight(runtime, argLists) {
     const help = await readHelpFlags({ bin: runtime.path, version: runtime.version, env: this.env, execFile: this.execFile, cache: this._helpFlags });
     if (!help.ok) throw new AgentError(409, `Claude Code did not list its options (claude --help: ${help.error}). Nothing was started`);
     const missing = missingFlags(argLists.flat(), help.flags);
     if (missing.length) {
       throw new AgentError(409, `This Claude Code (${runtime.version}) does not list ${missing.join(', ')} in claude --help, and the Studio passes ${missing.length === 1 ? 'that option' : 'those options'} to every agent. Update Claude Code, then try again. Nothing was started`);
+    }
+    const signIn = await this._signIn();
+    if (signIn.error) throw new AgentError(409, `The pilot token could not be used: ${signIn.error}. Store a usable token or remove it (README, "Pilot sign-in"), then try again. Nothing was started`);
+    const token = signIn.token;
+    const findings = gatewayFindings(this.env);
+    if (findings.length && !token) {
+      throw new AgentError(409, `Your environment would send a pilot through a gateway or change its models (${describeFindings(findings)}), and the Studio cannot tell what such a pilot tests. Store a dedicated pilot token (README, "Pilot sign-in") or unset ${findings.length === 1 ? 'that variable' : 'those variables'}, then try again. Nothing was started`);
     }
     let base;
     try {
@@ -633,7 +665,7 @@ class RoundStore {
     }
     let auth;
     try {
-      auth = await checkAuth({ bin: runtime.path, env: this._preparedEnv(path.join(base, '.tmp')), cwd: base });
+      auth = await checkAuth({ bin: runtime.path, env: this._preparedEnv(path.join(base, '.tmp'), token), cwd: base });
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }
@@ -641,8 +673,19 @@ class RoundStore {
       const why = auth.loggedIn === false ? 'it is not signed in'
         : auth.error ? `the check did not finish (${auth.error})`
           : `the answer could not be read (exit code ${auth.exitCode === null ? 'none' : auth.exitCode}${auth.stderrTail.trim() ? `: ${auth.stderrTail.trim().split('\n').pop().slice(0, 200)}` : ''})`;
+      if (token) {
+        throw new AgentError(409, `Claude Code is not ready for a pilot: with the pilot token from ${sourceText(signIn.source)}, claude auth status says ${why}. Run claude setup-token again and store the new token (README, "Pilot sign-in"), then try again. Nothing was started`);
+      }
       throw new AgentError(409, `Claude Code is not ready for a pilot: claude auth status says ${why}. Run claude in your own terminal and sign in, then try again. Nothing was started`);
     }
+    return { token, source: token ? signIn.source : null, dropped: token ? findings.map(finding => finding.name) : [] };
+  }
+
+  /* One sentence on the pilot sign-in a pre-flight found, for the page and the pre-flight answer. */
+  static signInSentence(flight) {
+    return flight.token
+      ? `Pilots sign in with the dedicated pilot token from ${sourceText(flight.source)}.`
+      : 'Pilots use your own Claude Code sign-in; no pilot token is stored.';
   }
 
   async status() {
@@ -660,8 +703,21 @@ class RoundStore {
     const round = this._get(id);
     const runtime = await this._detect(true);
     if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Install it, or run it once in your own terminal to sign in, then use Check again. Nothing was started');
-    await this._preflight(runtime, [this._pilotArgs(round)]);
-    return { ok: true, roundId: round.id, version: runtime.version, checkedAt: this.now(), checks: ['claude --help lists every option the Studio passes', 'claude auth status says it is signed in, with the environment a pilot gets'] };
+    const flight = await this._preflight(runtime, [this._pilotArgs(round)]);
+    const signIn = RoundStore.signInSentence(flight);
+    return {
+      ok: true,
+      roundId: round.id,
+      version: runtime.version,
+      checkedAt: this.now(),
+      signIn,
+      checks: [
+        'claude --help lists every option the Studio passes',
+        `claude auth status says it is signed in, with the environment a pilot gets${flight.token ? ' and the pilot token' : ''}`,
+        signIn,
+        flight.dropped.length ? `left out of the pilot environment: ${flight.dropped.join(', ')}` : 'no gateway variable in the environment',
+      ],
+    };
   }
 
   /* The companion tells the store its port once it listens (backend/server.cjs), for the loopback audit. */
@@ -1027,7 +1083,7 @@ class RoundStore {
     this._verifyBeforeLaunch(round);
     /* The pre-flight (no model) waits for two short processes, so the state is checked once more afterwards. A packet
        file that changes meanwhile is still caught: every copy into a pilot folder is checked against its hash. */
-    await this._preflight(runtime, [this._pilotArgs(round)]);
+    const flight = await this._preflight(runtime, [this._pilotArgs(round)]);
     if (this.rounds.get(id) !== round || round.status !== 'approved') throw new AgentError(409, 'Approve the round before launching it');
     if ([...this.rounds.values()].some(other => other.status === 'running')) throw new AgentError(409, 'Another round is running. Wait for it to finish or cancel it');
     this._refuseWhileToolLess();
@@ -1065,7 +1121,8 @@ class RoundStore {
     round.status = 'running';
     round.launchedAt = at;
     /* All pilots of the round start together (one wave) unless the round asked for fewer at a time. */
-    const live = { bin: runtime.path, atOnce: this._atOnce(round), cancelRequested: false, queue: round.runs.map(run => run.n), active: 0, runners: new Map(), settled: false, done: null, resolveDone: null };
+    /* token: the pilot sign-in for this launch, in memory only; it goes to each pilot's environment and to the audit. */
+    const live = { bin: runtime.path, token: flight.token, atOnce: this._atOnce(round), cancelRequested: false, queue: round.runs.map(run => run.n), active: 0, runners: new Map(), settled: false, done: null, resolveDone: null };
     live.done = new Promise(resolve => { live.resolveDone = resolve; });
     this.live.set(round.id, live);
     try {
@@ -1174,12 +1231,13 @@ class RoundStore {
         bin: live.bin,
         args,
         cwd: built.folder,
-        env: this._preparedEnv(scratch),
+        env: this._preparedEnv(scratch, live.token),
         spawnFn: this.spawnFn,
         timeoutMs: this.limits.timeoutMs,
         killGraceMs: this.limits.killGraceMs,
         drainMs: this.limits.drainMs,
         transcriptPath: path.join(this._runDir(round, run), 'transcript.jsonl'),
+        redact: live.token ? [live.token] : [],
       });
       live.runners.set(run.n, runner);
       runner.on('event', event => this._countLive(run, event, seenTools));
@@ -1190,7 +1248,7 @@ class RoundStore {
     }
     live.runners.delete(run.n);
     try {
-      this._finishRun(round, run, summary, setupError, live.bin);
+      this._finishRun(round, run, summary, setupError, live.bin, live.token);
     } catch (error) {
       /* Whatever went wrong while finishing, the audit has not cleared this run, so it cannot be used. */
       run.state = run.state === 'running' || run.state === 'queued' ? 'failed' : run.state;
@@ -1216,8 +1274,10 @@ class RoundStore {
     }
   }
 
-  /* runtimeBin is the runtime this round started (the detected claude), so the audit also knows it by its own path. */
-  _finishRun(round, run, summary, setupError, runtimeBin) {
+  /* runtimeBin is the runtime this round started (the detected claude), so the audit also knows it by its own path.
+     token is the pilot sign-in the run had (null: the writer's own); the audit is told its value, and afterwards every
+     file the run left behind is scanned for it. */
+  _finishRun(round, run, summary, setupError, runtimeBin, token = null) {
     run.endedAt = this.now();
     const runDir = this._runDir(round, run);
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
@@ -1250,12 +1310,18 @@ class RoundStore {
       folder: run.folder,
       claudeConfigDir: this._originalConfigDir(), /* the writer's folder, never the pilot's own <folder>/.tmp/claude-config */
       projectRoot: this.root,
-      env: this._childEnv(path.join(run.folder, '.tmp')),
+      env: this._childEnv(path.join(run.folder, '.tmp'), token),
       companionPort: this.companionPort, /* null until the companion listens: every loopback address is flagged anyway */
       /* A pilot that starts the runtime again gets a process with no spending cap whose tool calls are never audited. */
       runtimeBin: typeof runtimeBin === 'string' && path.isAbsolute(runtimeBin) ? runtimeBin : null,
+      secretValues: token ? [token] : [],
     });
     const notes = audit.notes.slice();
+    const violations = audit.violations.slice();
+    /* The runner blanked the token out of the runtime's output: it was there, whatever the events the audit saw show. */
+    if (summary.redactions && !violations.some(item => item.kind === 'secret')) {
+      violations.push({ tool: '(runtime output)', kind: 'secret', path: '(the pilot token)', call: `blanked out of ${summary.redactions} place${summary.redactions === 1 ? '' : 's'} in the runtime's output` });
+    }
 
     /* 2. Did the pilot change the files it was given? */
     let inputsModified = [];
@@ -1282,13 +1348,28 @@ class RoundStore {
     const copied = this._copyOutputs(run, path.join(runDir, 'outputs'), snapshot);
     if (copied.skipped) notes.push(`outputs-truncated: ${copied.skipped} output file${copied.skipped === 1 ? ' was' : 's were'} not copied (size limit)`);
 
-    run.audit = { status: audit.status, violations: audit.violations, inputsModified, notes };
+    /* 5. The token must not stay on disk. The whole pilot folder (its outputs, its scratch space, the runtime's own files)
+       and the evidence copy are scanned, and the token is blanked out wherever it was written. Such a run is DISCARDED.
+       The output snapshot above was taken first, so its hashes are those of the files as the pilot left them. */
+    if (token) {
+      const inFolder = redactFilesUnder(run.folder, [token]);
+      const inCopy = redactFilesUnder(path.join(runDir, 'outputs'), [token]);
+      const scrubbed = [...inFolder.redacted.map(name => `${name} (pilot folder)`), ...inCopy.redacted.map(name => `outputs/${name} (evidence copy)`)];
+      if (scrubbed.length) {
+        violations.push({ tool: '(files)', kind: 'secret', path: '(the pilot token in a file)', call: scrubbed.slice(0, 10).join(', ') });
+        notes.push(`secret-redacted: the pilot token was blanked out of ${scrubbed.length} file${scrubbed.length === 1 ? '' : 's'}; the output snapshot hashes were taken before that`);
+      }
+      const unscanned = inFolder.skipped.length + inCopy.skipped.length;
+      if (unscanned) notes.push(`secret-scan-skipped: ${unscanned} file${unscanned === 1 ? ' was' : 's were'} too large or unreadable to scan for the pilot token`);
+    }
+
+    run.audit = { status: violations.length ? 'DISCARDED' : 'CLEAN', violations, inputsModified, notes };
     const finalText = summary.result.text;
     run.final = { text: finalText.slice(0, FINAL_TEXT_LIMIT), chars: finalText.length };
 
-    /* 5. The assistive suggestion, for runs the audit cleared. */
+    /* 6. The assistive suggestion, for runs the audit cleared. */
     run.classification = null;
-    if (audit.status === 'CLEAN' && run.state === 'completed') this._resuggest(round, run, latestFreeze(round));
+    if (run.audit.status === 'CLEAN' && run.state === 'completed') this._resuggest(round, run, latestFreeze(round));
     this._persistRun(round, run);
   }
 
@@ -1497,10 +1578,10 @@ class RoundStore {
     try {
       const runtime = await this._detect(true);
       if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Nothing was started');
-      await this._preflight(runtime, prompts.map(prompt => buildArgs({ prompt, model, effort, tools: [] })));
+      const flight = await this._preflight(runtime, prompts.map(prompt => buildArgs({ prompt, model, effort, tools: [] })));
       const batch = crypto.randomBytes(6).toString('hex');
       const results = [];
-      for (let index = 0; index < prompts.length; index++) results.push(await this._graderRun(`gsim-${batch}-${index + 1}`, prompts[index], model, effort, runtime.path, index));
+      for (let index = 0; index < prompts.length; index++) results.push(await this._graderRun(`gsim-${batch}-${index + 1}`, prompts[index], model, effort, runtime.path, index, flight.token));
       const first = results[0];
       return clone({
         label: GRADER_LABEL,
@@ -1515,8 +1596,9 @@ class RoundStore {
     }
   }
 
-  /* One tool-less run in an empty folder (only the scratch directory exists). Nothing is persisted. */
-  async _toolLessRun(runId, prompt, model, effort, bin) {
+  /* One tool-less run in an empty folder (only the scratch directory exists). Nothing is persisted. token is the pilot
+     sign-in the pre-flight found (null: the writer's own). */
+  async _toolLessRun(runId, prompt, model, effort, bin, token = null) {
     const folder = path.join(this.pilotsRoot, runId);
     const scratch = path.join(folder, '.tmp');
     try {
@@ -1531,11 +1613,12 @@ class RoundStore {
         bin,
         args: buildArgs({ prompt, model, effort, tools: [] }),
         cwd: folder,
-        env: this._preparedEnv(scratch),
+        env: this._preparedEnv(scratch, token),
         spawnFn: this.spawnFn,
         timeoutMs: Math.min(this.limits.timeoutMs, GRADER_TIMEOUT_MS),
         killGraceMs: this.limits.killGraceMs,
         drainMs: this.limits.drainMs,
+        redact: token ? [token] : [],
       });
       this.graderRunners.add(runner);
       let summary;
@@ -1550,8 +1633,8 @@ class RoundStore {
     }
   }
 
-  async _graderRun(runId, prompt, model, effort, bin, index) {
-    const { summary, facts } = await this._toolLessRun(runId, prompt, model, effort, bin);
+  async _graderRun(runId, prompt, model, effort, bin, index, token = null) {
+    const { summary, facts } = await this._toolLessRun(runId, prompt, model, effort, bin, token);
     const base = { index, state: summary.state, resolvedModel: summary.init.model, costUsd: summary.result.total_cost_usd, label: GRADER_LABEL };
     if (facts.toolCalls.total) {
       return { ...base, verdict: null, reason: 'The simulated grader tried to use a tool, so its answer was discarded.', discarded: true };
@@ -1582,8 +1665,8 @@ class RoundStore {
     try {
       const runtime = await this._detect(true);
       if (!runtime.found) throw new AgentError(409, 'Claude Code was not found. Nothing was started');
-      await this._preflight(runtime, [buildArgs({ prompt, model, effort, tools: [] })]);
-      const { summary, facts } = await this._toolLessRun(`rev-${crypto.randomBytes(6).toString('hex')}`, prompt, model, effort, runtime.path);
+      const flight = await this._preflight(runtime, [buildArgs({ prompt, model, effort, tools: [] })]);
+      const { summary, facts } = await this._toolLessRun(`rev-${crypto.randomBytes(6).toString('hex')}`, prompt, model, effort, runtime.path, flight.token);
       const base = { label: REVIEW_LABEL, model, resolvedModel: summary.init.model, state: summary.state, costUsd: summary.result.total_cost_usd };
       if (facts.toolCalls.total) {
         return clone({ ...base, text: '', discarded: true, reason: 'The reviewer tried to use a tool, so its answer was discarded.' });

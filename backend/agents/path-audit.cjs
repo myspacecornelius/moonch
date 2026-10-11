@@ -54,11 +54,37 @@
        runtime's path.
    Not flagged: claude in a sentence (prepared with Claude), and names that only contain it (claude-config,
    claude_notes.txt, .claude). A runtime started under a name assembled at run time (command output, encoded text) or
-   from a copy whose name the call does not show is not seen. */
+   from a copy whose name the call does not show is not seen.
+
+   The environment (violation kind `environ`). A pilot's process environment holds its sign-in (CLAUDE_CODE_OAUTH_TOKEN
+   when the Studio hands it the dedicated pilot token, pilot-token.cjs) and whatever else the writer's shell exported,
+   and a finance task never needs any of it. So any tool input that reads the environment discards the run:
+     - in a shell command: `env` with nothing to run after it (only options or NAME=value words), `printenv` anywhere in
+       the command (also after xargs, find -exec or watch), a bare `export` or `export -p`, `declare` or `typeset` with
+       no name (bare, -p or -x), a bare `set`, `compgen -e`, `-v` or `-A export|variable`, `ps` with an `e` in a BSD style
+       option word (ps e, ps axeww), `ps -E`, or a format (-o, -O, --format) that names env or environ, and
+       `launchctl getenv` or `launchctl export`;
+     - in any text (a command, inline code, a file a pilot writes, any field of any tool): /proc/<pid>/environ, the
+       names of the sign-in variables (CLAUDE_CODE_OAUTH_TOKEN, FINANCE_STUDIO_PILOT_TOKEN, ANTHROPIC_API_KEY,
+       ANTHROPIC_AUTH_TOKEN), code that reads the environment (os.environ, process.env, getenv(, System.getenv, %ENV,
+       $ENV{, Ruby's ENV[, os.Environ(, std::env::, Sys.getenv, Environment.GetEnvironmentVariable) and the shell's
+       indirect expansion ${!name}.
+   Not flagged: `env python3 x.py` (a command follows), `export NAME=value`, `set -e`, `ps aux`, `ps -ef`, `ps -C sleep`,
+   and the words env or environment in prose.
+
+   The sign-in itself (violation kind `secret`). The audit is given the pilot token (`secretValues`) and the runner
+   blanks it out of the stream before anything is parsed or written (the marker `[pilot-token redacted]` stands where it
+   was). Any tool input, tool result, assistant text or final answer that holds the token, in plain or JSON-escaped
+   form, or that holds the marker, discards the run; the report says "(the pilot token)" and never the value. So do a
+   read of a credential store: `security find-generic-password`, `find-internet-password`, `dump-keychain`, `export` or
+   `find-key`, and the names finance-studio-pilot-token, Claude Code-credentials and .credentials.json in any text. A
+   tool result is seen as the runner kept it (its first 2000 characters); the runner's own count of redactions covers
+   the rest (rounds.cjs). */
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { RUNTIME_TOKEN_VAR, TOKEN_ENV, KEYCHAIN_SERVICE, containsSecret, makeRedactor } = require('./pilot-token.cjs');
 
 const DYN = '\u0001'; /* stands in for an expansion whose value is unknown */
 const MAX_SHELL_DEPTH = 4;
@@ -135,6 +161,15 @@ const RUNTIME_PACKAGE_RE = /@anthropic-ai\/claude-code(?![\w-])/i;
 const RUNTIME_OPTION_AFTER_RE = /^[ \t]{1,16}--?[A-Za-z]/;
 const PATH_CHAR_RE = /[\w.~@%+-]/;
 const MAX_RUNTIME_WORD = 300; /* how far back the start of a path that ends in /claude is looked for */
+
+/* The environment and the credential stores (see `environ` and `secret` at the top). */
+const SECRET_NAMES = [RUNTIME_TOKEN_VAR, TOKEN_ENV, 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+const SECRET_NAME_RE = new RegExp('(?<![A-Za-z0-9_])(?:' + SECRET_NAMES.join('|') + ')(?![A-Za-z0-9_])');
+const SECRET_STORE_RE = new RegExp(KEYCHAIN_SERVICE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '|Claude Code-credentials|\\.credentials\\.json(?![\\w-])');
+const PROC_ENVIRON_RE = /\/proc\/[^/\s'"`]{1,32}\/environ(?![\w.-])/;
+const ENV_CODE_RE = /\bos\.environ\b|\bprocess\.env\b|\bgetenv\s*\(|\bSystem\.getenv\b|%ENV\b|\$ENV\{|(?<![\w.$])ENV\s*(?:\[|\.(?:fetch|to_h|each|keys|values|select|map)\b)|\bos\.Environ\s*\(|\bstd::env::|\bSys\.getenv\b|\bEnvironment\.GetEnvironmentVariables?\b|\$\{!/;
+const SECURITY_READS = new Set(['find-generic-password', 'find-internet-password', 'dump-keychain', 'export', 'find-key']);
+const SECRET_SHOWN = '(the pilot token)';
 
 /* ------------------------------------------------------------------ small helpers */
 
@@ -257,9 +292,10 @@ function runtimeFacts(bin, resolver) {
   return { paths, name: path.basename(paths[0]) };
 }
 
-/* settings: { claudeConfigDir, env, budgetMs, clock, companionPort, runtimeBin }. `env` is the environment the pilot was
-   started with: a variable the command did not set itself is looked up there, so a path held in an inherited variable is
-   still seen. companionPort is a whole number or null. runtimeBin is the absolute path of the runtime or null. */
+/* settings: { claudeConfigDir, env, budgetMs, clock, companionPort, runtimeBin, secretValues }. `env` is the environment
+   the pilot was started with: a variable the command did not set itself is looked up there, so a path held in an
+   inherited variable is still seen. companionPort is a whole number or null. runtimeBin is the absolute path of the
+   runtime or null. secretValues are the secrets (the pilot token) whose appearance anywhere discards the run. */
 function makeContext(folderInput, settings) {
   const folder = path.resolve(folderInput);
   const configDir = path.resolve(settings.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
@@ -285,6 +321,9 @@ function makeContext(folderInput, settings) {
     companionPort,
     portPatterns: portPatternsFor(companionPort),
     runtime: runtimeFacts(settings.runtimeBin, resolver),
+    secretValues: Array.isArray(settings.secretValues) ? settings.secretValues : [],
+    /* every text the report shows (a path, a call) passes through this, so the report itself never holds a secret */
+    redact: makeRedactor(Array.isArray(settings.secretValues) ? settings.secretValues : []),
     tick,
     real,
     inside: target => within(real(target), realFolder),
@@ -319,7 +358,7 @@ function renderCall(call) {
 
 /* One run object per tool call: collects violations (de-duplicated by kind and path) and notes. */
 function makeRun(ctx, call, violations, notes) {
-  const callText = renderCall(call);
+  const callText = ctx.redact(renderCall(call));
   const seen = new Set();
   return {
     ctx,
@@ -327,7 +366,7 @@ function makeRun(ctx, call, violations, notes) {
     loopbackSeen: [], /* loopback references already reported for this call, so one reference is reported once */
     runtimeSeen: [], /* the same for references to the agent runtime */
     report(kind, target) {
-      const shown = truncate(String(target), 300);
+      const shown = truncate(ctx.redact(String(target)), 300);
       const key = kind + '\u0000' + shown;
       if (seen.has(key)) return;
       seen.add(key);
@@ -623,6 +662,133 @@ function checkRuntimeWords(words, run, state) {
     const value = exp.text.replace(/^-{0,2}[A-Za-z_][\w.-]*=/, '');
     if (!value || value.length > MAX_PATH_CHARS || !isRuntimeWord(value, run.ctx, state)) continue;
     reportRuntime(run, value.split(DYN).join('$(…)'));
+  }
+}
+
+/* ------------------------------------------------------------------ the environment and the credential stores */
+
+/* Every reference in one text to the environment or to a credential store, and the pilot token itself (see `environ`
+   and `secret` at the top). Each form is reported once per call. */
+function scanSecrets(text, run) {
+  if (typeof text !== 'string' || !text) return;
+  const ctx = run.ctx;
+  ctx.tick();
+  const named = SECRET_NAME_RE.exec(text);
+  if (named) run.report('environ', named[0]);
+  const proc = PROC_ENVIRON_RE.exec(text);
+  if (proc) run.report('environ', proc[0]);
+  const code = ENV_CODE_RE.exec(text);
+  if (code) run.report('environ', code[0]);
+  const store = SECRET_STORE_RE.exec(text);
+  if (store) run.report('secret', store[0]);
+  if (containsSecret(text, ctx.secretValues)) run.report('secret', SECRET_SHOWN);
+}
+
+/* Does this `ps` argument list show the environment? BSD style option words (no dash) with an e (ps e, ps axeww) when no
+   dash option precedes them, -E (macOS), or a format that names env or environ. */
+function psShowsEnvironment(texts) {
+  let dashed = false;
+  for (let i = 0; i < texts.length; i++) {
+    const text = texts[i];
+    if (text.startsWith('-')) {
+      dashed = true;
+      if (/^-[a-zA-Z]*E/.test(text) && !text.startsWith('--')) return true;
+      const format = /^-[oO](.*)$/.exec(text) || /^--format(?:=(.*))?$/.exec(text);
+      if (format) {
+        const value = format[1] ? format[1] : texts[i + 1] || '';
+        if (/env/i.test(value)) return true;
+      }
+    } else if (!dashed && /^[a-zA-Z]+$/.test(text) && text.includes('e')) return true;
+  }
+  return false;
+}
+
+/* The words of one shell command: a command that prints the environment or reads a credential store. Wrapper words
+   (nohup, time, sudo, ...) are skipped to reach the command that runs; a lister that is an argument (xargs printenv,
+   find -exec printenv) counts too. */
+function checkEnvironWords(words, run, state) {
+  let idx = 0;
+  while (idx < words.length && parseAssignment(words[idx])) idx++;
+  if (idx >= words.length) return;
+  const shown = list => truncate(list.map(literal).join(' '), 300);
+  /* env is itself a wrapper that skipPrefix steps over, so it is looked for behind the other wrappers by hand (nohup env,
+     timeout 5 env). */
+  let envAt = -1;
+  for (let i = idx; i < words.length; i++) {
+    const name = path.posix.basename(literal(words[i]));
+    if (name === 'env') { envAt = i; break; }
+    if (RESERVED.has(name)) continue;
+    if (!WRAPPERS.has(name)) break;
+    const valueOptions = WRAPPER_VALUE_OPTS.get(name) || [];
+    let j = i + 1;
+    while (j < words.length) {
+      const text = literal(words[j]);
+      if (valueOptions.includes(text)) { j += 2; continue; }
+      if (text.startsWith('-') || parseAssignment(words[j])) { j++; continue; }
+      break;
+    }
+    if (name === 'timeout') j++;
+    i = j - 1;
+  }
+  if (envAt >= 0) {
+    idx = envAt;
+    /* env with nothing to run prints the environment: only options (with their values) and NAME=value words follow it.
+       -S hands env a command line, so something runs. */
+    let prints = true;
+    for (let i = idx + 1; i < words.length; i++) {
+      const text = literal(words[i]);
+      if (text === '-u' || text === '--unset' || text === '-C' || text === '--chdir') { i++; continue; }
+      if (text === '-S' || text === '--split-string' || text.startsWith('--split-string=')) { prints = false; break; }
+      if ((text.startsWith('-') && text !== '-') || parseAssignment(words[i]) !== null) continue;
+      prints = false;
+      break;
+    }
+    if (prints) { run.report('environ', shown(words.slice(idx))); return; }
+  }
+  const at = skipPrefix(words, idx);
+  if (at >= words.length) return;
+  const name = path.posix.basename(literal(words[at]));
+  const args = words.slice(at + 1);
+  const texts = args.map(literal);
+  const options = texts.filter(text => text.startsWith('-') && text !== '-');
+  const operands = texts.filter(text => !text.startsWith('-') || text === '-');
+  const line = shown(words.slice(at));
+  if (name === 'printenv') run.report('environ', line);
+  else if (name === 'export' && !operands.length && options.every(option => /^-p/.test(option))) run.report('environ', line);
+  else if ((name === 'declare' || name === 'typeset') && !operands.length && (!options.length || options.some(option => /^-[a-zA-Z]*[px]/.test(option)))) run.report('environ', line);
+  else if (name === 'set' && !texts.length) run.report('environ', line);
+  else if (name === 'compgen' && (options.some(option => /^-[a-zA-Z]*[ev]/.test(option)) || texts.some((text, i) => text === '-A' && /^(?:export|variable|arrayvar)$/.test(texts[i + 1] || '')))) run.report('environ', line);
+  else if (name === 'ps' && psShowsEnvironment(texts)) run.report('environ', line);
+  else if (name === 'launchctl' && texts.some(text => text === 'getenv' || text === 'export')) run.report('environ', line);
+  else if (name === 'security' && texts.some(text => SECURITY_READS.has(text))) run.report('secret', line);
+  for (const word of args) {
+    const value = expand(word, state, run).text;
+    if (path.posix.basename(value) === 'printenv') { run.report('environ', line); break; }
+  }
+}
+
+/* The tool results, the assistant's own text and the final answer: the pilot token (or the runner's marker) in any of
+   them discards the run. Each place is reported once. */
+function addSecretViolations(events, ctx, violations) {
+  const calls = new Map(extractToolCalls(events).map(call => [call.id, call]));
+  const seen = new Set();
+  const report = (tool, where, call) => {
+    if (seen.has(where)) return;
+    seen.add(where);
+    violations.push({ tool, kind: 'secret', path: `(the pilot token in ${where})`, call });
+  };
+  for (const result of toolResultTexts(events)) {
+    if (!containsSecret(result.text, ctx.secretValues)) continue;
+    const call = calls.get(result.toolUseId);
+    report(call ? call.name : '(tool result)', 'a tool result', call ? ctx.redact(renderCall(call)) : '');
+  }
+  for (const event of asArray(events)) {
+    if (!isObject(event)) continue;
+    if (event.type === 'result' && containsSecret(event.result, ctx.secretValues)) report('(final answer)', 'the final answer', '');
+    if (event.type !== 'assistant' || !isObject(event.message)) continue;
+    for (const block of asArray(event.message.content)) {
+      if (isObject(block) && block.type === 'text' && containsSecret(block.text, ctx.secretValues)) report('(assistant text)', 'the assistant text', '');
+    }
   }
 }
 
@@ -1321,6 +1487,7 @@ function evaluateCommand(command, run, state, depth) {
   command.redirs.forEach(redirect => checkRedirect(redirect, run, state));
   checkLoopbackWords(words, run, state);
   checkRuntimeWords(words, run, state);
+  checkEnvironWords(words, run, state);
   let idx = 0;
   const assignments = [];
   while (idx < words.length) {
@@ -1466,9 +1633,13 @@ function inputStrings(value, out = [], depth = 0) {
   return out;
 }
 
-/* auditToolCalls(events, { folder, claudeConfigDir, projectRoot?, env?, budgetMs?, clock?, companionPort?, runtimeBin? })
+/* auditToolCalls(events, { folder, claudeConfigDir, projectRoot?, env?, budgetMs?, clock?, companionPort?, runtimeBin?,
+   secretValues? })
    events: parsed stream-json objects. folder: the pilot folder (required). claudeConfigDir defaults to
    $CLAUDE_CONFIG_DIR or ~/.claude. projectRoot only enables the leak-in-results note; it never relaxes the audit.
+   secretValues: the pilot token, when a round has one, as a list of strings of at least 8 characters (anything else is
+   refused with a TypeError). Its appearance in any tool input, tool result, assistant text or final answer is a `secret`
+   violation; so is the runner's redaction marker, with or without the list (see `secret` at the top).
    companionPort: the TCP port the local companion listens on (a whole number from 1 to 65535). Loopback addresses are
    violations without it; with it, a reference to that port with any host is one too (see `loopback` at the top). Any
    other value is refused with a TypeError, so a caller cannot weaken the audit by passing a port it got wrong.
@@ -1494,6 +1665,10 @@ function auditToolCalls(events, options) {
   if (runtimeBin !== null && !(typeof runtimeBin === 'string' && path.isAbsolute(runtimeBin) && !runtimeBin.includes('\0'))) {
     throw new TypeError('runtimeBin must be the absolute path of the agent runtime');
   }
+  const secretValues = opts.secretValues === undefined || opts.secretValues === null ? [] : opts.secretValues;
+  if (!Array.isArray(secretValues) || secretValues.some(value => typeof value !== 'string' || value.length < 8 || value.includes('\0'))) {
+    throw new TypeError('secretValues must be a list of strings of at least 8 characters');
+  }
   const ctx = makeContext(folder, {
     claudeConfigDir: typeof opts.claudeConfigDir === 'string' ? opts.claudeConfigDir : '',
     env: opts.env,
@@ -1501,6 +1676,7 @@ function auditToolCalls(events, options) {
     clock: opts.clock,
     companionPort,
     runtimeBin,
+    secretValues,
   });
   const startingOldpwd = inheritedOldpwd(ctx.env);
   const violations = [];
@@ -1513,11 +1689,12 @@ function auditToolCalls(events, options) {
       if (call.name === 'Bash' && typeof call.input.command === 'string' && call.input.command.length > MAX_COMMAND_CHARS) {
         throw new RangeError('the command is too long to audit');
       }
-      /* Loopback and the runtime first, over every string of every tool, so a call the shell analysis cannot finish still
-         names them. */
+      /* Loopback, the runtime, the environment and the token first, over every string of every tool, so a call the shell
+         analysis cannot finish still names them. */
       const strings = inputStrings(call.input);
       strings.forEach(text => scanLoopback(text, run));
       strings.forEach(text => scanRuntime(text, run));
+      strings.forEach(text => scanSecrets(text, run));
       if (call.name === 'Bash') {
         if (typeof call.input.command === 'string') {
           /* The working directory carries over from call to call. The previous directory (OLDPWD) does not: it is only
@@ -1535,6 +1712,7 @@ function auditToolCalls(events, options) {
       run.report('abs', '(call could not be analysed)');
     }
   }
+  addSecretViolations(events, ctx, violations);
   addLeakNotes(events, opts.projectRoot, notes);
   return { status: violations.length ? 'DISCARDED' : 'CLEAN', violations, notes: [...notes] };
 }

@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanEnv } = require('./fixtures/clean-env.cjs');
 const vm = require('node:vm');
 
 const { createServer } = require('../backend/server.cjs');
@@ -56,7 +57,7 @@ async function makeWorld(t, scenario = {}, options = {}) {
   };
   put('Facility_Terms.txt', 'Atlas facility terms, synthetic. Available credit is not cash received.\n');
   put('Cash_Facts.csv', 'Label,Value\nOpening usable cash,100\nConfirmed funded draw,500\n');
-  const env = { ...process.env, FINANCE_STUB_SCENARIO: JSON.stringify(scenario), ...(options.env || {}) };
+  const env = { ...cleanEnv(), FINANCE_STUB_SCENARIO: JSON.stringify(scenario), ...(options.env || {}) };
   const claudeBin = options.claudeBin || STUB;
   const service = createAgentService({ root: projectRoot, env, claudeBin, tmpRoot, limits: options.limits });
   const app = createServer({ root: projectRoot, service, port: 0, log: () => {} });

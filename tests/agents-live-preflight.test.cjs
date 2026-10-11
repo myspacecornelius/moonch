@@ -10,6 +10,7 @@ const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanEnv } = require('./fixtures/clean-env.cjs');
 
 const {
   buildArgs, REQUIRED_FLAGS, parseHelpFlags, missingFlags, readHelpFlags, claudeConfigDirOf, secureStorageDirFor, pilotEnv,
@@ -49,7 +50,7 @@ function makeWorld(t, scenario = {}, extraEnv = {}) {
   fs.writeFileSync(path.join(source, 'Cash_Facts.csv'), 'Label,Value\nOpening usable cash,100\n');
   const logs = { argv: path.join(base, 'argv.log'), env: path.join(base, 'env.log'), auth: path.join(base, 'auth.log') };
   const env = {
-    ...process.env,
+    ...cleanEnv(),
     FINANCE_STUB_SCENARIO: JSON.stringify(scenario),
     FINANCE_STUB_ARGV_LOG: logs.argv,
     FINANCE_STUB_ENV_LOG: logs.env,
@@ -138,7 +139,7 @@ test('REQUIRED_FLAGS is exactly the set of flags buildArgs can produce', () => {
 test('readHelpFlags runs claude --help once per binary path and version, and never caches a failure', async t => {
   const dir = tempDir(t);
   const log = path.join(dir, 'argv.log');
-  const env = { ...process.env, FINANCE_STUB_ARGV_LOG: log };
+  const env = { ...cleanEnv(), FINANCE_STUB_ARGV_LOG: log };
   const cache = new Map();
   const first = await readHelpFlags({ bin: STUB, version: '0.0.0-stub', env, cache });
   assert.equal(first.ok, true);
@@ -225,7 +226,7 @@ test('under the pilot environment the runtime reads the same sign-in as under th
 
 test('checkAuth is signed in only on exit 0 with loggedIn true, and keeps no account fields', async t => {
   const dir = tempDir(t);
-  const env = mode => ({ ...process.env, FINANCE_STUB_AUTH: mode });
+  const env = mode => ({ ...cleanEnv(), FINANCE_STUB_AUTH: mode });
   const ok = await checkAuth({ bin: STUB, env: env('ok'), cwd: dir });
   assert.equal(ok.signedIn, true);
   assert.equal(ok.loggedIn, true);
@@ -354,7 +355,7 @@ test('with the sign-in kept in a credentials file, the pilot finds it through th
 test('live-smoke: S1 and S2 need the explicit approval flag; the options are checked', () => {
   assert.deepEqual(smoke.parseOptions([]), { stages: ['S0'], approved: false, promptVia: 'argv', keep: false, help: false });
   assert.deepEqual(smoke.parseOptions(['--stage', 'S1']).approved, false);
-  assert.deepEqual(smoke.parseOptions(['--stage', 'all', '--i-approve-model-calls', '--prompt-via', 'stdin']), { stages: ['S0', 'S1', 'S2'], approved: true, promptVia: 'stdin', keep: false, help: false });
+  assert.deepEqual(smoke.parseOptions(['--stage', 'all', '--i-approve-model-calls', '--prompt-via', 'stdin']), { stages: ['S0', 'S1', 'S2', 'S3'], approved: true, promptVia: 'stdin', keep: false, help: false });
   assert.equal(smoke.APPROVE_FLAG, '--i-approve-model-calls');
   assert.match(smoke.parseOptions(['--stage', 'S9']).error, /Unknown stage/);
   assert.match(smoke.parseOptions(['--prompt-via', 'file']).error, /argv or stdin/);
@@ -415,7 +416,7 @@ function runSmokeS0(t, extraEnv) {
   fs.mkdirSync(scratchRoot);
   const argvLog = path.join(dir, 'argv.log');
   const result = childProcess.spawnSync(process.execPath, [SMOKE], {
-    env: { ...process.env, CLAUDE_BIN: STUB, CLAUDE_CONFIG_DIR: original, TMPDIR: scratchRoot, FINANCE_STUB_ARGV_LOG: argvLog, FINANCE_STUB_SCENARIO: '', ...extraEnv },
+    env: { ...cleanEnv(), CLAUDE_BIN: STUB, CLAUDE_CONFIG_DIR: original, TMPDIR: scratchRoot, FINANCE_STUB_ARGV_LOG: argvLog, FINANCE_STUB_SCENARIO: '', ...extraEnv },
     encoding: 'utf8',
     timeout: 60000,
   });

@@ -9,8 +9,8 @@
     },
     {
       "file": "Finance_Task_Studio.html",
-      "bytes": 443996,
-      "sha256": "1c38e03cba84fe0f4acc0f0eab3870576211982f8d409168d74b96b93546d1c0"
+      "bytes": 444090,
+      "sha256": "031cbbf29c7752285473cde43b7a648212285dd178a6ab762bd56b264ce35ca7"
     },
     {
       "file": "README.md",
@@ -29,8 +29,8 @@
     },
     {
       "file": "agents.js",
-      "bytes": 126608,
-      "sha256": "8c42c2b5fdd2d37b371e61d3e9c6ae750d0e5ed095f52b717f086cfda39280d6"
+      "bytes": 126702,
+      "sha256": "83e80585f6cb072245b0508610d20cb6677bb4af1f537427eae9b70a1675d3e2"
     },
     {
       "file": "app.js",
@@ -44,8 +44,8 @@
     },
     {
       "file": "backend/agents/claude-runner.cjs",
-      "bytes": 33581,
-      "sha256": "ed88b01a08b724c95e147cd3ba9ade442803a9dcc621e772b2c168c8c8aafe87"
+      "bytes": 35441,
+      "sha256": "17fb680ebbb9659b0b8c638d692758b18baa6921d2346f48cf144e505ff8a7d2"
     },
     {
       "file": "backend/agents/constants.cjs",
@@ -54,13 +54,13 @@
     },
     {
       "file": "backend/agents/index.cjs",
-      "bytes": 2851,
-      "sha256": "1f2f35db0e92dbc8d30d6db8bac905077c1783f48382409f1b940287d5f15238"
+      "bytes": 3002,
+      "sha256": "8c13c2bc03e16e9fc87e4179583c11eb32b18a2cc56b85184e0ded4109178755"
     },
     {
       "file": "backend/agents/path-audit.cjs",
-      "bytes": 77870,
-      "sha256": "20b7d61c3fd2807d6837ea1bf2514a592b194b04530252d2612841ef18c3439b"
+      "bytes": 87869,
+      "sha256": "34350a8d274ad94ea465f4a72fe29924445d5b5099e7f9c9b263c635929f92b8"
     },
     {
       "file": "backend/agents/pilot-folder.cjs",
@@ -68,14 +68,19 @@
       "sha256": "d29a7759186e7233eb5859ade4a0bc6ba737766c8c16b652645b24c829354b5a"
     },
     {
+      "file": "backend/agents/pilot-token.cjs",
+      "bytes": 12785,
+      "sha256": "af4024a1dc2aa757acb07dcf4b194f75ffedf193ca4416938ba380de26683e97"
+    },
+    {
       "file": "backend/agents/rounds.cjs",
-      "bytes": 81968,
-      "sha256": "dc518d7c613224b9b4f1f0eb0253d1f508612b2ac1bae16f660177503d38966d"
+      "bytes": 88320,
+      "sha256": "38d837be8755dd8d62a9e420316d6bd18dbdbe58f8be5bd4240c377c00f7b10b"
     },
     {
       "file": "backend/agents/stub-claude.cjs",
-      "bytes": 22328,
-      "sha256": "52184f6fb02cb6e4f2fefa7a6cafacf0fa6d215a1e0aa5978b185755dcaaa1a8"
+      "bytes": 24861,
+      "sha256": "2fe2a473c38a70caa84990f8116bffa776712db9700679533b4df997bbec6314"
     },
     {
       "file": "backend/harness.cjs",
@@ -84,8 +89,8 @@
     },
     {
       "file": "backend/server.cjs",
-      "bytes": 33412,
-      "sha256": "c66bdbf25c2085a36541060be844b3464fb2319d6182df53bc88d8d002b2c39b"
+      "bytes": 34501,
+      "sha256": "73a40a18bef61aa9f63e678e2d8b81bfc1b36bf148b09430dd5e238c1570866a"
     },
     {
       "file": "candidate-engine.js",
@@ -529,8 +534,8 @@
     },
     {
       "file": "tests/agents-browser.cjs",
-      "bytes": 38974,
-      "sha256": "cf8584ca085690f2c988b982998a9fb871552a1081371fe0631fe21e5f601a6a"
+      "bytes": 39027,
+      "sha256": "f4655714b2ef904fcb99718ea1883fbc63782ff9d9ab363c3d45311b05b5aaa2"
     },
     {
       "file": "tests/agents-classify.test.cjs",
@@ -544,28 +549,28 @@
     },
     {
       "file": "tests/agents-hardening.test.cjs",
-      "bytes": 45563,
-      "sha256": "1587b2217a14f7095b745be419ae5298004fe34e8eeb1d737e14504c6a873eab"
+      "bytes": 45620,
+      "sha256": "1d5dfea88e0be311226a4073f7cd266a1275fe8050fe3c7be4c218b46d460e98"
     },
     {
       "file": "tests/agents-live-preflight.test.cjs",
-      "bytes": 26959,
-      "sha256": "ef6cca5674c000d88dd6307d9d13dc22efbac508402cba3e654df365b0eb63f0"
+      "bytes": 27013,
+      "sha256": "85332e9ed4810f2384190e7ff45cff962ff1193d90f9aaad4fed52f27d0fcfd4"
     },
     {
       "file": "tests/agents-page.test.cjs",
-      "bytes": 49785,
-      "sha256": "f419ada61977295d1ac0cb4ee3d8e00bc267c353e0b9b6ce716c77eff8eb554f"
+      "bytes": 49842,
+      "sha256": "07e6ce06a3ce4da1e965e58e019c932e303a1b11de5fc6053339704d86f4019c"
     },
     {
       "file": "tests/agents-runner.test.cjs",
-      "bytes": 117710,
-      "sha256": "2ab3b18c887413729708dc76fc6e4ad4093658b57f47d1d194b417c9a89e94d5"
+      "bytes": 117764,
+      "sha256": "e995c39c5215c3f7488a08eeeca05a64fddb342c37b5f7ecbf29ef35a044f024"
     },
     {
       "file": "tests/agents-server.test.cjs",
-      "bytes": 114408,
-      "sha256": "ac552f77b6cd047ee39ac9dad0c7a7527293308f2f19f4ecad26a4060fc7ae66"
+      "bytes": 114464,
+      "sha256": "ad904b5905cedb17ab198118f899970350eb99ea276c7ff7f92c379473da00ac"
     },
     {
       "file": "tests/browser.cjs",
@@ -596,6 +601,11 @@
       "file": "tests/dashboard-browser.cjs",
       "bytes": 13091,
       "sha256": "aa96c91a0fc823cb9eca7df9eb7bfd30107ecf6232e65b1a16456e4a7ec4a863"
+    },
+    {
+      "file": "tests/fixtures/clean-env.cjs",
+      "bytes": 622,
+      "sha256": "f12d6664a2569242e877b36eb85b4ea0abebc95509d6dd0b01d69f117bb6feae"
     },
     {
       "file": "tests/fixtures/package.zip",

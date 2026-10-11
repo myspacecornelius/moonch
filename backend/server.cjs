@@ -39,6 +39,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { HarnessRun } = require('./harness.cjs');
 const { createAgentService, AgentError } = require('./agents/index.cjs');
+const { readPilotToken, sourceText, gatewayFindings, describeFindings } = require('./agents/pilot-token.cjs');
 const C = require('./agents/constants.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -624,6 +625,16 @@ function usableClaudeBin(value) {
   }
 }
 
+/* One line for the terminal on how pilots will sign in (pilot-token.cjs). Reads the token once; never prints it. */
+async function describePilotSignIn(env) {
+  const signIn = await readPilotToken({ env });
+  const findings = gatewayFindings(env);
+  if (signIn.error) return `a pilot token is stored but cannot be used (${signIn.error}); pilots will be refused until it is fixed or removed`;
+  if (signIn.token) return `the dedicated pilot token from ${sourceText(signIn.source)}${findings.length ? `; left out of the pilot environment: ${findings.map(finding => finding.name).join(', ')}` : ''}`;
+  if (findings.length) return `none stored, and this environment sets ${describeFindings(findings)}; pilots will be refused until a pilot token is stored or that is unset (README, "Pilot sign-in")`;
+  return 'your own Claude Code sign-in (no pilot token stored; README, "Pilot sign-in")';
+}
+
 async function runCompanion(argv = process.argv.slice(2), env = process.env) {
   const audit = loadEvidenceAudit(ROOT);
   const service = createAgentService({ root: ROOT, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
@@ -633,6 +644,7 @@ async function runCompanion(argv = process.argv.slice(2), env = process.env) {
   const runApprovedOnce = argv.includes('--run-approved-once');
   fs.writeFileSync(path.join(ROOT, 'LOCAL_SERVER.json'), JSON.stringify(localServerRecord({ url, pid: process.pid, startedAt: new Date().toISOString(), runApprovedOnce }), null, 2));
   console.log('Finance Task Studio: ' + url + (audit ? '' : ' (no private evidence module found; viewer only)'));
+  console.log('Pilot sign-in: ' + await describePilotSignIn(env));
   if (argv.includes('--open')) {
     const opener = require('node:child_process').spawn('open', [url], { stdio: 'ignore' });
     opener.on('error', () => console.log('Could not open a browser automatically. Open the address above.'));
@@ -656,4 +668,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, HttpError, ASSETS };
+module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, describePilotSignIn, HttpError, ASSETS };

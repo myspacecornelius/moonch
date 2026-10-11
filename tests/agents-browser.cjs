@@ -15,6 +15,7 @@
    Environment: CHROME_BIN (default /opt/pw-browsers/chromium-1194/chrome-linux/chrome when it exists), QA_OUTPUT (default qa/agents),
    AGENTS_TEST_SERVER (debugging only: run another server entry point instead of the copy of backend/server.cjs). */
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),net=require('node:net'),{spawn}=require('node:child_process'),assert=require('node:assert/strict');
+const {cleanEnv}=require('./fixtures/clean-env.cjs');
 const root=path.resolve(__dirname,'..'),out=path.join(root,process.env.QA_OUTPUT||'qa/agents'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));
 const defaultChrome='/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const binary=process.env.CHROME_BIN||(fs.existsSync(defaultChrome)?defaultChrome:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
@@ -55,7 +56,7 @@ function makeCompanionRoot(){
 async function startServer(extraEnv){
   const port=await freePort();
   const serverEntry=process.env.AGENTS_TEST_SERVER||path.join(companionRoot,'backend','server.cjs');
-  const child=spawn(process.execPath,[serverEntry],{cwd:companionRoot,env:{...process.env,FINANCE_STUDIO_PORT:String(port),CLAUDE_BIN:stub,...extraEnv},stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,[serverEntry],{cwd:companionRoot,env:{...cleanEnv(),FINANCE_STUDIO_PORT:String(port),CLAUDE_BIN:stub,...extraEnv},stdio:['ignore','pipe','pipe']});
   let log='';
   await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(new Error('Companion did not start. Output so far: '+log.slice(-800))),15000);const onData=d=>{log+=d;if(log.includes('http://127.0.0.1:'+port)){clearTimeout(t);resolve();}};child.stdout.on('data',onData);child.stderr.on('data',onData);child.on('exit',code=>{clearTimeout(t);reject(new Error('Companion exited '+code+': '+log.slice(-800)));});});
   allowedPorts.add(String(port));

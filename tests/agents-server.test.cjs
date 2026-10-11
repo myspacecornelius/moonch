@@ -11,6 +11,7 @@ const net = require('node:net');
 const childProcess = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanEnv } = require('./fixtures/clean-env.cjs');
 const { EventEmitter } = require('node:events');
 
 const { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, ASSETS } = require('../backend/server.cjs');
@@ -108,7 +109,7 @@ async function makeWorld(t, scenario = {}, options = {}) {
   const argvLog = path.join(base, 'argv.log');
   const envLog = path.join(base, 'env.log');
   const env = {
-    ...process.env,
+    ...cleanEnv(),
     FINANCE_STUB_SCENARIO: JSON.stringify(scenario),
     FINANCE_STUB_ARGV_LOG: argvLog,
     FINANCE_STUB_ENV_LOG: envLog,
@@ -1692,7 +1693,7 @@ function startScript(t, { args = [], env = {}, scenario = {} } = {}) {
   const argvLog = path.join(base, 'argv.log');
   const child = childProcess.spawn(process.execPath, [path.join(project, 'backend', 'server.cjs'), ...args], {
     cwd: base,
-    env: { ...process.env, FINANCE_STUDIO_PORT: '0', CLAUDE_BIN: STUB, TMPDIR: tmp, FINANCE_STUB_SCENARIO: JSON.stringify(scenario), FINANCE_STUB_ARGV_LOG: argvLog, ...env },
+    env: { ...cleanEnv(), FINANCE_STUDIO_PORT: '0', CLAUDE_BIN: STUB, TMPDIR: tmp, FINANCE_STUB_SCENARIO: JSON.stringify(scenario), FINANCE_STUB_ARGV_LOG: argvLog, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const script = { base, project, source, argvLog, child, output: '' };

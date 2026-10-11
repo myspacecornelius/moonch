@@ -90,7 +90,7 @@
     sigs:{},                 // round id -> input signature at creation, to flag a freeze that no longer matches the form
     commands:{},             // round id -> the command line (prompt elided) the companion showed at approval
     approvals:{},            // round id -> {summary,hash} from the freeze answer, which keeps them while another round runs
-    preflights:{},           // round id -> the last pre-flight result {state,ok,message,version}
+    preflights:{},           // round id -> the last pre-flight result {state,ok,message,version,signIn}
     carry:null,              // {from: round id} after "Start next round", until a round made from it is launched
     draftInclude:null,       // {dir,paths}: the include boxes of a restored draft, applied at the next inspect of that folder
     draftTimer:null,
@@ -870,7 +870,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   /* The pre-flight result at the top of the approval dialog. A problem blocks the approval until a check passes. */
   function preflightHtml(check){
-    if(check.state==='ok')return html`<div class="notice neutral" role="status" id="ag-preflight"><strong>Claude Code is ready.</strong> It lists every option the Studio passes and it is signed in${check.version?' (version '+check.version+')':''}. Checked with claude --help and claude auth status; no model was started.</div>`;
+    if(check.state==='ok')return html`<div class="notice neutral" role="status" id="ag-preflight"><strong>Claude Code is ready.</strong> It lists every option the Studio passes and it is signed in${check.version?' (version '+check.version+')':''}.${check.signIn?' '+check.signIn:''} Checked with claude --help and claude auth status; no model was started.</div>`;
     if(check.state==='unavailable')return html`<div class="notice neutral" role="status" id="ag-preflight">This companion cannot check Claude Code before approval. The launch still checks it, and refuses with the reason if something is missing.</div>`;
     if(check.state==='failed')return html`<div class="notice" role="alert" id="ag-preflight"><strong>Fix this before you approve.</strong> ${check.message}<div class="actions"><button type="button" class="small" data-ag="recheck-preflight" data-ag-key="recheck-preflight" ${locked()?'disabled':''}>Check again</button></div></div>`;
     return html`<div class="notice neutral" role="status" id="ag-preflight">Checking Claude Code (claude --help and claude auth status; no model is started).</div>`;
@@ -879,7 +879,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   async function checkRound(id){
     try{
       const data=await api('POST',roundPath(id,'/preflight'),{});
-      const result={state:'ok',ok:true,version:typeof data.version==='string'?data.version:'',message:''};
+      const result={state:'ok',ok:true,version:typeof data.version==='string'?data.version:'',signIn:typeof data.signIn==='string'?data.signIn:'',message:''};
       S.preflights[id]=result;
       return result;
     }catch(error){
