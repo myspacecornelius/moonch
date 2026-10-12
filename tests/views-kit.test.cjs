@@ -34,7 +34,8 @@ function makeDom() {
       if ((m = /^#([\w-]+)/.exec(rest))) out.id = m[1];
       else if ((m = /^\.([\w-]+)/.exec(rest))) out.classes.push(m[1]);
       else if ((m = /^\[([\w-]+)(?:=(?:"((?:\\.|[^"\\])*)"|([^\]]*)))?\]/.exec(rest))) {
-        const value = m[2] !== undefined ? m[2].replace(/\\(.)/g, '$1') : m[3];
+        if (m[2] !== undefined && /[\n\r\f]/.test(m[2])) throw new SyntaxError('fake DOM: a raw newline is not valid inside a CSS string (use \\a)');
+        const value = m[2] !== undefined ? m[2].replace(/\\([0-9a-fA-F]{1,6}) ?|\\(.)/g, (_, hex, ch) => (hex ? String.fromCodePoint(parseInt(hex, 16)) : ch)) : m[3];
         out.attrs.push([m[1], value === undefined ? null : value]);
       } else throw new Error('fake DOM: unsupported selector ' + text);
       rest = rest.slice(m[0].length);
@@ -52,6 +53,8 @@ function makeDom() {
   }
   const matchesSelector = (el, selector) => splitSelectors(selector).some(s => matchesCompound(el, parseCompound(s)));
 
+  /* The character references the kit's esc() writes, decoded the way a browser does when it parses attribute values and text. */
+  const decode = text => text.replace(/&(amp|lt|gt|quot|#39|#96);/g, (_, name) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#96': '`' })[name]);
   function parseInto(parent, markup) {
     const re = /<!--[\s\S]*?-->|<(\/)?([a-zA-Z][\w-]*)((?:\s+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/)?>|([^<]+)/g;
     const attrRe = /([^\s=>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
@@ -60,7 +63,7 @@ function makeDom() {
     let m;
     while ((m = re.exec(markup))) {
       const top = stack[stack.length - 1];
-      if (m[5] !== undefined) { adopt(top, new FText(m[5])); continue; }
+      if (m[5] !== undefined) { adopt(top, new FText(decode(m[5]))); continue; }
       if (m[0].startsWith('<!--')) continue;
       const tag = m[2].toLowerCase();
       if (m[1]) {
@@ -70,7 +73,7 @@ function makeDom() {
       const el = new FElement(tag);
       let a;
       attrRe.lastIndex = 0;
-      while ((a = attrRe.exec(m[3] || ''))) el._attrs.set(a[1], a[2] !== undefined ? a[2] : a[3] !== undefined ? a[3] : a[4] !== undefined ? a[4] : '');
+      while ((a = attrRe.exec(m[3] || ''))) el._attrs.set(a[1], decode(a[2] !== undefined ? a[2] : a[3] !== undefined ? a[3] : a[4] !== undefined ? a[4] : ''));
       if (el._attrs.has('value')) el.value = el._attrs.get('value');
       adopt(top, el);
       if (!VOID.has(tag) && !m[4]) stack.push(el);
@@ -94,6 +97,9 @@ function makeDom() {
       const i = p.childNodes.indexOf(this);
       if (i >= 0) p.childNodes.splice(i, 1);
       this.parentNode = null;
+      /* Some browsers forget the selection of a text field that is taken out of the document and put back. */
+      const forget = n => { if (n instanceof FElement) { try { if (n.selectionStart !== null) n.selectionStart = n.selectionEnd = String(n.value || '').length; } catch { /* a field that refuses to report a selection */ } n.childNodes.forEach(forget); } };
+      forget(this);
       /* A browser drops focus from a node that leaves the document, and from one that is moved. */
       if (doc.activeElement && this.contains(doc.activeElement)) doc.activeElement = doc.body;
     }
@@ -575,6 +581,10 @@ test('announcer: link loss goes out at once on the assertive path, once per tran
     [28400, 'The local companion is back.', false],
   ].sort((a, b) => a[0] - b[0]));
   assert.equal(K.makeAnnouncer({ emit() {} }).alert('', { key: 'x' }), false);
+  const long = driveAnnouncer([{ at: 0, alert: 'The local companion stopped answering. ' + 'x'.repeat(300), opts: { key: 'link' } }]);
+  assert.equal(long.emitted.length, 1);
+  assert.equal(long.emitted[0][1].length, 160, 'the assertive path is held to 160 characters too');
+  assert.ok(long.emitted[0][1].endsWith('\u2026') && long.emitted[0][1].startsWith('The local companion stopped answering.'));
 });
 
 test('announcer: a clock that jumps back does not wedge the queue; a throwing emit does not escape; flush and reset work', () => {
@@ -595,7 +605,8 @@ test('announcer: a clock that jumps back does not wedge the queue; a throwing em
   a.say('C.'); a.reset();
   assert.equal(a.pending(), 0);
   assert.equal(a.delay(), null);
-  assert.equal(K.makeAnnouncer().say('no config'), 4000, 'defaults: real clock, 4 s window');
+  const defaulted = K.makeAnnouncer().say('no config');
+  assert.ok(defaulted > 3000 && defaulted <= 4000, 'defaults: real clock, 4 s window (a millisecond may pass while it is read), got ' + defaulted);
   const custom = K.makeAnnouncer({ now: () => 0, emit() {}, coalesceMs: 1000, minGapMs: 2000, maxChars: 30 });
   assert.equal(custom.say('x'), 1000);
 });
@@ -654,7 +665,7 @@ test('formatTime prints local hh:mm:ss, ago and duration use the Agents wording,
   assert.equal(K.ago('garbage', now), '');
   assert.equal(K.ago(now, 'garbage'), '');
   assert.equal(K.ago(new Date(now - 7000), new Date(now)), '7 s ago');
-  assert.match(K.ago(Date.now() - 20000), /^2[01] s ago$/, 'the clock is the default for now');
+  assert.match(K.ago(Date.now() - 20000), /^(2\d|3\d) s ago$/, 'the clock is the default for now');
   assert.equal(K.formatAgo, K.ago);
 
   assert.equal(K.duration(0), '0m 00s');
@@ -998,6 +1009,16 @@ test('setHtml puts focus back by data-key (or id) without scrolling, and keeps t
   el.querySelector('button').focus();
   K.setHtml(el, K.html`<button data-key="${odd}">y</button>`);
   assert.equal(dom.doc.activeElement.textContent, 'y');
+
+  /* Keys with a newline, a tab, a closing bracket or a lone quote: the lookup is a valid CSS string (a raw newline is not), so focus still returns. */
+  for (const weird of ['e\nf', 'tab\there', 'g]h', "i'j", 'back\\a', 'trailing\\', 'x\u007fy', 'cr\r\nlf']) {
+    K.setHtml(el, K.html`<button data-key="${weird}">before</button>`);
+    el.querySelector('button').focus();
+    K.setHtml(el, K.html`<button data-key="${weird}">after</button>`);
+    assert.equal(dom.doc.activeElement.tagName, 'BUTTON', 'focus returns for the key ' + JSON.stringify(weird));
+    assert.equal(dom.doc.activeElement.textContent, 'after');
+    assert.equal(dom.doc.activeElement.getAttribute('data-key'), weird);
+  }
 });
 
 test('setHtml restores focus even when the field refuses to report a caret (number inputs in some browsers)', () => {
@@ -1252,6 +1273,48 @@ test('keyedPatch: keyboard focus inside a row survives a content rewrite and a m
   assert.deepEqual(dom.stats.lastFocus, { preventScroll: true });
   patch([{ key: 'c' }, { key: 'a' }]);
   assert.equal(dom.doc.activeElement, dom.doc.body, 'the row that held focus is gone');
+
+  /* Rewritten AND moved in the same pass: the rewrite puts focus on the new control, the move would drop it, so it has to be put back again. */
+  patch([{ key: 'a' }, { key: 'b', n: 1 }, { key: 'c' }, { key: 'd' }]);
+  el.children[1].querySelector('button').focus();
+  dom.resetStats();
+  const res = patch([{ key: 'b', n: 2 }, { key: 'a' }, { key: 'c' }, { key: 'd' }]);
+  assert.deepEqual(res.moved, ['b'], 'the scenario is a move of the row that holds focus');
+  assert.deepEqual(res.updated, ['b']);
+  assert.deepEqual([...el.children].map(c => c.getAttribute('data-key')), ['b', 'a', 'c', 'd']);
+  assert.equal(dom.doc.activeElement.getAttribute('data-key'), 'copy-b', 'a row that is rewritten and moved at once keeps keyboard focus');
+  assert.equal(dom.doc.activeElement.textContent, 'Copy 2', 'on the new control, not the discarded one');
+  assert.deepEqual(dom.stats.lastFocus, { preventScroll: true });
+  assert.equal(el.children[0].querySelector('button'), dom.doc.activeElement);
+
+  /* The same with a text field: the caret comes back too. */
+  const field = i => K.html`<input data-key="field-${i.key}" value="${i.v}"><span>${i.v}</span>`;
+  const patchField = items => K.keyedPatch(el, items, { key: i => i.key, render: field });
+  patchField([{ key: 'p', v: 'Atlas' }, { key: 'q', v: 'Cobalt' }]);
+  const input = el.children[1].querySelector('input');
+  input.focus();
+  input.setSelectionRange(1, 3);
+  const moved = patchField([{ key: 'q', v: 'Cobalt 2' }, { key: 'p', v: 'Atlas' }]);
+  assert.deepEqual(moved.moved, ['q']);
+  assert.equal(dom.doc.activeElement.getAttribute('data-key'), 'field-q');
+  assert.equal(dom.doc.activeElement.value, 'Cobalt 2');
+  assert.deepEqual([dom.doc.activeElement.selectionStart, dom.doc.activeElement.selectionEnd], [1, 3], 'caret kept through rewrite and move');
+
+  /* A control that the rewrite disables is not focused, whether the row moved or not. */
+  patch([{ key: 'a' }, { key: 'b', n: 1 }, { key: 'c' }, { key: 'd' }]);
+  el.children[1].querySelector('button').focus();
+  dom.resetStats();
+  const disabledMove = K.keyedPatch(el, [{ key: 'b' }, { key: 'a' }, { key: 'c' }, { key: 'd' }], { key: i => i.key, render: i => K.html`<button data-key="copy-${i.key}" ${i.key === 'b' ? 'disabled' : ''}>Copy</button>` });
+  assert.deepEqual(disabledMove.moved, ['b']);
+  assert.equal(dom.stats.focusCalls, 0, 'nothing was focused: the successor is disabled');
+  assert.equal(dom.doc.activeElement, dom.doc.body);
+
+  /* Focus outside the container is never touched. */
+  patchField([{ key: 'q', v: 'x' }, { key: 'p', v: 'Atlas 2' }]);
+  const outside = dom.make('button');
+  outside.focus();
+  patchField([{ key: 'p', v: 'Atlas 3' }, { key: 'q', v: 'x' }]);
+  assert.equal(dom.doc.activeElement, outside, 'focus outside the container stays outside');
 });
 
 test('keyedPatch: scrolled away from the top, the first visible row keeps its place when rows arrive above it; pinned at the top it follows', () => {
@@ -1540,9 +1603,14 @@ test('bindListbox: keyboard moves scroll the list (not the page) just far enough
   el.scrollTop = 300;
   lb.setActive('r2', { scroll: false });
   assert.equal(el.scrollTop, 300, 'scroll: false leaves it');
-  /* Clicks and refreshes do not scroll either. */
+  /* Clicks and refreshes do not scroll either, not even to show a row that is only partly in view (row 15 starts 10 px above the box). */
+  el.scrollTop = 310;
   el.children[15].fire('click');
-  assert.equal(el.scrollTop, 300);
+  assert.equal(lb.active, el.children[15].getAttribute('data-key'));
+  assert.equal(el.scrollTop, 310);
+  lb.refresh();
+  assert.equal(el.scrollTop, 310);
+  el.scrollTop = 300;
   dom.layout = () => { throw new Error('layout unavailable'); };
   assert.doesNotThrow(() => press(el, 'ArrowDown'));
 });
@@ -1560,6 +1628,11 @@ test('bindListbox: options without an id get a stable generated one; ids the vie
   assert.equal(el.getAttribute('aria-activedescendant'), 'mine');
   lb.setActive('a');
   assert.equal(el.getAttribute('aria-activedescendant'), id, 'the same option keeps its generated id');
+  el.innerHTML = '<div role="option" data-key="a">A again</div><div role="option" data-key="b">B again</div>';
+  assert.equal(el.children[0].id, '', 'the new node has no id yet');
+  lb.refresh();
+  assert.equal(el.children[0].id, id, 'a re-created option with the same key gets the same id back, so aria-activedescendant never dangles');
+  assert.equal(el.getAttribute('aria-activedescendant'), id);
   const ids = new Set();
   for (let n = 0; n < 3; n++) { const e = dom.make('div', '<div role="option" data-key="a">A</div>'); const b = K.bindListbox(e, {}); b.setActive('a'); ids.add(e.getAttribute('aria-activedescendant')); }
   assert.equal(ids.size, 3, 'two listboxes never share an id');

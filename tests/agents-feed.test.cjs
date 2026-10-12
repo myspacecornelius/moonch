@@ -879,6 +879,34 @@ test('a line longer than the parse limit is counted, not read into memory or par
   await cancelRound(w, live);
 });
 
+test('while a round runs, a tool that is not one of the six is reported as "other", and nothing a pilot wrote in an event reaches the page', async t => {
+  const w = await makeWorld(t);
+  const ended = await craftedRound(w, [
+    event('system', { subtype: 'init', model: 'SECRET-MODEL-5a5a', cwd: '/home/SECRET-CWD-7b7b' }),
+    event('assistant', { timestamp: '2026-03-01T10:00:00Z', message: { content: [{ type: 'text', text: 'SECRET-SAY-1c1c' }, { type: 'tool_use', id: 'SECRET-ID-2d2d', name: 'SECRET_TOOL_3e3e', input: { command: 'SECRET-INPUT-4f4f', file_path: '/etc/SECRET-PATH-6a6a' } }] } }),
+    event('assistant', { message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'SECRET-BASH-8c8c' } }] } }),
+    event('assistant', { message: { content: [{ type: 'tool_use', name: { SECRET: 'SECRET-NAME-9d9d' }, input: [] }] } }),
+    event('user', { message: { content: [{ type: 'tool_result', tool_use_id: 'SECRET-ID-2d2d', content: [{ type: 'text', text: 'SECRET-RESULT-0e0e' }] }] } }),
+    event('result', { subtype: 'success', result: 'SECRET-FINAL-1f1f', total_cost_usd: 1.5 }),
+    event('SECRET_EVENT_TYPE', { detail: 'SECRET-DETAIL-2a2a' }),
+  ].join('\n') + '\n');
+  w.scenario({ hang: true });
+  const live = await runningRound(w);
+  const response = await w.get(logUrl(ended));
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.withheld, true);
+  assert.deepEqual(response.json.lines.map(line => [line.seq, line.kind, line.tool]), [[1, 'init', undefined], [2, 'tool', 'other'], [3, 'tool', 'Bash'], [4, 'tool', 'other'], [5, 'tool', undefined], [6, 'result', undefined], [7, 'system', undefined]]);
+  assert.equal(response.json.lines[1].at, '2026-03-01T10:00:00.000Z');
+  assert.equal(response.json.lines[5].chars, 'SECRET-FINAL-1f1f'.length);
+  assert.ok(!/SECRET/.test(response.text), 'nothing the pilot wrote: ' + response.text);
+  await cancelRound(w, live);
+  const open = (await w.get(logUrl(ended))).json;
+  assert.equal(open.withheld, false);
+  assert.equal(open.lines[1].tool, 'SECRET_TOOL_3e3e', 'with no round running the tool name is shown as it is');
+  assert.equal(open.lines[3].tool, undefined, 'a name that is not text is no name');
+  assert.ok(!JSON.stringify(open).includes('/etc/SECRET-PATH-6a6a'), 'a path outside the pilot folder is not shown');
+});
+
 /* fs.readSync, counted: how many bytes a request read from the file, and where */
 function spyReads() {
   const real = fs.readSync;
@@ -961,6 +989,12 @@ test('the index of a run remembers where lines start: a follow-up page reads onl
   assert.deepEqual(page.lines.map(line => line.text), ['row 2001', 'row 2002', 'row 2003']);
   assert.ok(reads.calls[0].position > 0 && reads.calls[0].position <= starts[2000], `the seek starts at ${reads.calls[0].position}, line 2001 is at ${starts[2000]}`);
   assert.ok(reads.calls[0].position >= starts[2000 - LOG_LIMITS.checkpointLines], 'and not further back than the last recorded point');
+  /* a cursor that is exactly at a recorded place starts there, not at the one before */
+  assert.equal(LOG_LIMITS.checkpointLines, 64);
+  reads = spyReads();
+  try { page = (await w.get(logUrl(id, 1, '?after=1984&limit=2'))).json; } finally { reads.stop(); }
+  assert.deepEqual(page.lines.map(line => line.text), ['row 1985', 'row 1986']);
+  assert.equal(reads.calls[0].position, starts[1984], 'line 1985 starts where the place for line 1984 ends');
   reads = spyReads();
   try { page = (await w.get(logUrl(id, 1, '?after=1&limit=2'))).json; } finally { reads.stop(); }
   assert.deepEqual(page.lines.map(line => line.text), ['row 2', 'row 3']);
@@ -1361,4 +1395,111 @@ test('the log reader is exercised through the service too: bad arguments are 400
   assert.ok(!JSON.stringify(forced).includes(SECRET_CMD) && !JSON.stringify(forced).includes('text'));
   assert.deepEqual(forced.lines.map(line => line.kind), EXPECTED_KINDS);
   assert.deepEqual(await w.service.listRuns(), await w.service.listRuns({}), 'no options is the default');
+});
+
+/* ====================================================================== properties and damaged records */
+
+test('property: random lines appended in steps and read with random cursors and page sizes give the lines of a plain split, once each, from a warm index and from a cold one', { timeout: 90000 }, async t => {
+  const w = await makeWorld(t);
+  const id = await finishedRound(w);
+  const file = w.transcript(id);
+  let seed = 20260301;
+  const rand = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  const pick = count => Math.floor(rand() * count);
+  /* sizes around the edges of the reader: the read chunk, the parse limit, and empty and tiny lines */
+  const pads = [0, 1, 7, 90, 1500, LOG_LIMITS.chunk - 100, LOG_LIMITS.chunk - 62, LOG_LIMITS.chunk, LOG_LIMITS.chunk + 5, 2 * LOG_LIMITS.chunk - 70, LOG_LIMITS.parseBytes - 130, LOG_LIMITS.parseBytes - 60, LOG_LIMITS.parseBytes + 10];
+  const make = (seq, pad) => textEvent(`#${seq}:` + 'p'.repeat(pad));
+  const service = () => createAgentService({ root: w.projectRoot, env: w.env, claudeBin: STUB, tmpRoot: w.tmpRoot });
+  const MALFORMED = 'This line is not a readable event.';
+
+  /* what the reader must say about one line of the reference */
+  const check = (line, reference) => {
+    const text = reference[line.seq - 1];
+    const bytes = Buffer.byteLength(text);
+    if (bytes > LOG_LIMITS.parseBytes) {
+      assert.deepEqual([line.kind, line.chars, line.text], ['system', bytes, `This line is ${bytes} bytes long, too long to show.`], `line ${line.seq}`);
+    } else if (!text.startsWith('{"type"')) {
+      assert.deepEqual([line.kind, line.text], ['system', MALFORMED], `line ${line.seq}`);
+    } else {
+      const body = JSON.parse(text).message.content[0].text;
+      assert.deepEqual([line.kind, line.chars, line.text], ['text', body.length, body.slice(0, 2000)], `line ${line.seq}`);
+    }
+  };
+
+  /* every line after `after`, page by page with random limits, checked against the reference */
+  const walk = async (svc, reference, after, label) => {
+    const seen = [];
+    const first = Math.min(after, reference.length);
+    for (let guard = 0; guard < 3000; guard++) {
+      const limit = 1 + pick(rand() < 0.5 ? 4 : 200);
+      const page = await svc.readRunLog(id, 1, { after, limit });
+      assert.ok(page.lines.length <= limit, label);
+      page.lines.forEach((line, index) => {
+        assert.equal(line.seq, Math.min(after, reference.length) + index + 1, `${label}: contiguous from the cursor`);
+        check(line, reference);
+      });
+      seen.push(...page.lines.map(line => line.seq));
+      if (!page.lines.length) {
+        assert.equal(page.next, reference.length, `${label}: an empty page brings the cursor to the end of the complete lines`);
+        assert.equal(page.done, true, label);
+        assert.deepEqual(seen, Array.from({ length: reference.length - first }, (_, index) => first + index + 1), `${label}: every line once, in order`);
+        return seen;
+      }
+      assert.equal(page.next, page.lines[page.lines.length - 1].seq, label);
+      after = page.next;
+    }
+    throw new Error(`${label}: the cursor never reached the end`);
+  };
+
+  for (let trial = 0; trial < 6; trial++) {
+    const warm = service();
+    const reference = []; /* the complete lines of the file, without their newline */
+    let partial = null; /* { line, cut }: the file ends with line.slice(0, cut), no newline yet */
+    fs.rmSync(file);
+    fs.writeFileSync(file, '');
+    for (let step = 0; step < 5; step++) {
+      let chunk = '';
+      if (partial) {
+        chunk += partial.line.slice(partial.cut) + '\n';
+        reference.push(partial.line);
+        partial = null;
+      }
+      for (let more = 1 + pick(25); more > 0; more--) {
+        const roll = rand();
+        const line = roll < 0.05 ? '' : roll < 0.1 ? 'not json {' + 'j'.repeat(pick(50)) : make(reference.length + 1, pads[pick(pads.length)]);
+        reference.push(line);
+        chunk += line + '\n';
+      }
+      if (rand() < 0.5) {
+        const line = make(reference.length + 1, pads[pick(pads.length)]);
+        partial = { line, cut: 1 + pick(Math.min(line.length - 1, 70000)) };
+        chunk += line.slice(0, partial.cut);
+      }
+      fs.appendFileSync(file, chunk);
+      await walk(warm, reference, rand() < 0.3 ? 0 : pick(reference.length + 3), `trial ${trial} step ${step}`);
+    }
+    /* a companion started later has no index: the same numbers for the same lines */
+    const start = pick(reference.length + 1);
+    assert.deepEqual(await walk(service(), reference, start, `trial ${trial} cold`), await walk(warm, reference, start, `trial ${trial} warm`));
+  }
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
+});
+
+test('a run record damaged on disk is left out of the feed; the other runs, and the round list, are not affected', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const first = await finishedRound(w, { label: 'Atlas round 1', task: 'Atlas', config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  const second = await finishedRound(w, { label: 'Atlas round 2', task: 'Atlas' });
+  const edit = (id, change) => {
+    const file = path.join(w.roundsDir, id, 'round.json');
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    change(stored);
+    fs.writeFileSync(file, JSON.stringify(stored));
+  };
+  edit(first, stored => { delete stored.runs[0].toolCalls; });
+  const again = createAgentService({ root: w.projectRoot, env: w.env, claudeBin: STUB, tmpRoot: w.tmpRoot });
+  assert.equal((await again.listRounds()).length, 2, 'the round is still listed');
+  const keys = (await again.listRuns()).map(row => row.key).sort();
+  assert.deepEqual(keys, [`${first}:2`, `${second}:1`].sort(), 'the damaged run is not offered');
+  assert.deepEqual((await again.listRuns({ limit: 1 })).length, 1, 'the limit counts rows that are offered');
+  assert.deepEqual((await again.listRuns({ round: first })).map(row => row.key), [`${first}:2`]);
 });

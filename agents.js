@@ -70,6 +70,11 @@
     return new Raw(out);
   }
   const pill=(label,kind='')=>html`<span class="pill ${kind}">${label}</span>`;
+  /* One kind per state, at every place a state is shown (status strip, round and runs cards, pilots table, drawer).
+     green is a pass (with its check glyph), red a failure, amber a stop or a warning; violet marks a live or settled step and
+     the default (neutral) kind a plain label. Counting or selecting something is never green. */
+  const STATUS_KIND={draft:'',queued:'',frozen:'violet',approved:'violet',running:'violet',completed:'green',finished:'green',failed:'red',cancelled:'amber'};
+  const statusKind=state=>Object.prototype.hasOwnProperty.call(STATUS_KIND,state)?STATUS_KIND[state]:'';
   const $=selector=>document.querySelector(selector);
 
   /* ---------- State ---------- */
@@ -82,6 +87,7 @@
     packet:{dir:'',inspectedDir:'',files:null,gafVisible:true,error:''},
     prompt:'',
     label:'',
+    task:'',                 // the task name typed in Settings: metadata stored with the round, not part of the freeze signature
     config:blankConfig(),
     fz:blankFreezeForm(),
     rounds:[],
@@ -100,7 +106,10 @@
     returnKey:null,
     msg:{text:'',error:false},
     timer:null,
-    mounted:false
+    mounted:false,
+    pending:null,            // {roundId,n,step,at,bad}: what openRun / openRound asked for, applied when this view is mounted and ready
+    applying:false,
+    noncePromise:null        // one shared /api/status request while the nonce is loaded for link, get and post
   };
   function blankFigure(){return {label:'',value:'',tolerance:''};}
   function blankFingerprint(n){return {id:'fp-'+n,label:'',tokens:'',figures:[]};}
@@ -109,7 +118,7 @@
   function blankConfig(model='',effort=''){return {model,effort,count:DEFAULT_PILOTS,atOnce:0,budget:BUDGET.pilotDefault.toFixed(2)};}
 
   /* ---------- Small helpers ---------- */
-  const isLocal=()=>location.protocol==='http:'&&location.hostname==='127.0.0.1';
+  const isLocal=()=>{try{return location.protocol==='http:'&&location.hostname==='127.0.0.1';}catch{return false;}};
   const wordsOf=text=>{
     const C=window.FinanceCore;
     return C&&C.words?C.words(text):String(text).trim().split(/\s+/u).filter(Boolean).length;
@@ -185,6 +194,30 @@
     if(!Number.isInteger(number)||number<1||number>99)throw new Error('That pilot number is not valid.');
     return roundPath(id,'/runs/'+number+tail);
   }
+  /* Where the evidence copy of a run's outputs lands once the run has ended (backend/agents/rounds.cjs _copyOutputs). The path is
+     relative to the project folder the companion runs from; no absolute path is ever sent to this page. */
+  const evidencePath=(roundId,n)=>'private/agent-rounds/'+roundId+'/runs/'+n+'/outputs/';
+  /* The task a round belongs to is one line of at most 120 characters, cleaned like the companion cleans it. It is a label for
+     grouping rounds: it is stored with the round, it is not in the input signature, so it never makes a freeze stale. */
+  const TASK_MAX=120;
+  const taskText=value=>String(value==null?'':value).replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,TASK_MAX).replace(/[\ud800-\udbff]$/,'');
+  const taskKeyOf=value=>{
+    const text=taskText(value).replace(/\s+/g,' ');
+    try{return text.normalize('NFC').toLowerCase();}catch{return text.toLowerCase();}
+  };
+  /* The version labels of the project in the task editor, for round.versions. The companion wants all three as non-empty single
+     lines of at most 200 characters and refuses the round otherwise, so anything else is left out and the round has no labels. */
+  function projectVersions(){
+    const project=currentProject(),versions=project&&project.versions;
+    if(!versions||typeof versions!=='object')return null;
+    const out={};
+    for(const key of ['prompt','workbook','evaluator']){
+      const text=typeof versions[key]==='string'?versions[key].trim():'';
+      if(!text||text.length>200||/[\u0000-\u001f\u007f]/.test(text))return null;
+      out[key]=text;
+    }
+    return out;
+  }
 
   /* ---------- Companion calls ---------- */
   class ApiError extends Error{constructor(message,status){super(message);this.status=status;}}
@@ -242,6 +275,50 @@
     S.config.count=Math.min(Math.max(1,S.config.count),S.status.max);
     if(S.config.atOnce>=S.config.count)S.config.atOnce=0;
   }
+
+  /* ---------- What other views may ask of this module: link, get, post ---------- */
+  /* The nonce, from /api/status, once. Concurrent callers share one request; a failure is not remembered. */
+  async function ensureNonce(){
+    if(S.nonce)return;
+    if(!S.noncePromise){
+      S.noncePromise=(async()=>{
+        try{const data=await api('GET','/api/status');S.nonce=data&&typeof data.nonce==='string'?data.nonce:'';}
+        finally{S.noncePromise=null;}
+      })();
+    }
+    await S.noncePromise;
+    if(!S.nonce)throw new ApiError('The companion did not send a session code. Reload the page.',0);
+  }
+  /* What a view calls first: is this page served by the companion (local) and, if so, is the companion reachable (ok, with the session
+     code loaded once). The file edition answers local: false without any network call. It never rejects: a companion that cannot be
+     reached answers local: true, ok: false and says why in error. */
+  async function link(){
+    const base={local:isLocal(),ok:false,offlineMessage:OFFLINE_MESSAGE,error:''};
+    if(!base.local)return base;
+    try{await ensureNonce();return {...base,ok:true};}
+    catch(error){return {...base,error:String(error&&error.message||error)};}
+  }
+  /* Only a plain path under /api/ is ever requested: no scheme, no host, no fragment, no dot segments. A query is allowed. */
+  const API_PATH_RE=/^\/api\/[\w\-.~!$&'()*+,;=:@%/]*(?:\?[\w\-.~!$&'()*+,;=:@%/?]*)?$/;
+  function apiTarget(path){
+    if(typeof path!=='string'||path.length>2048||!API_PATH_RE.test(path))return '';
+    for(const segment of path.split('?')[0].split('/')){
+      let decoded;
+      try{decoded=decodeURIComponent(segment);}catch{return '';}
+      if(decoded==='.'||decoded==='..'||/[\u0000-\u001f\u007f\\/]/.test(decoded))return '';
+    }
+    return path;
+  }
+  async function viaApi(method,path,body){
+    const target=apiTarget(path);
+    if(!target)throw new ApiError('Only paths under /api/ can be requested.',400);
+    if(!isLocal())throw new ApiError(OFFLINE_MESSAGE,0);
+    if(method!=='GET')await ensureNonce();
+    return api(method,target,body);
+  }
+  const get=path=>viaApi('GET',path);
+  const post=(path,body)=>viaApi('POST',path,body);
+
   function normalizeRound(data){
     const round=data&&data.round&&typeof data.round==='object'?data.round:data;
     if(!round||!idOk(round.id))throw new ApiError('The companion returned no usable round.',0);
@@ -392,17 +469,32 @@
     out.runs=runs.length?{s:live?'active':'done',t:c.done+' of '+runs.length+' finished'+(c.failed?' · '+c.failed+' failed':''),next:live?'':over?'Open a pilot to classify its answer.':''}:{s:'todo',t:'No pilots yet',next:'Pilots appear here once the round is launched.'};
     return out;
   }
+  /* Yellow is for one action at a time. Of the buttons that would be primary together (Inspect, Freeze, Review and approve, and the
+     rail's Next), only the one that moves the current step forward is: Inspect before a folder is listed, Freeze at the freeze
+     step, Review and approve at the launch step, else the rail's Next button. Every other one is a default button. The
+     buttons inside a dialog are alone in their dialog and keep their own primary. */
+  function primaryId(){
+    if(S.phase!=='ready')return '';
+    const states=stepStates(),current=STEPS.find(([id])=>states[id].s!=='done');
+    if(!current)return '';
+    if(current[0]==='packet'&&!S.packet.files)return 'inspect';
+    if(current[0]==='freeze')return 'freeze';
+    if(current[0]==='round'&&launchGate().ok)return 'open-approve';
+    return 'goto-step';
+  }
+  const primaryClass=id=>primaryId()===id?'primary':'';
   function railHtml(){
     if(S.phase!=='ready')return '';
     const states=stepStates();
     const current=STEPS.find(([id])=>states[id].s!=='done');
+    const nextClass=primaryClass('goto-step');
     const mark=(s,i)=>s==='done'?'✓':s==='warn'?'!':s==='active'?'●':String(i+1);
     return html`<ol class="ag-steps">${STEPS.map(([id,label],i)=>html`<li><button type="button" class="ag-step is-${states[id].s}" data-ag="goto-step" data-step="${id}" data-ag-key="step-${id}" ${current&&current[0]===id?new Raw('aria-current="step"'):''}><span class="ag-step-mark" aria-hidden="true">${mark(states[id].s,i)}</span><span class="ag-step-text"><strong>${label}</strong><small>${states[id].t}</small></span></button></li>`)}</ol>
-      ${current?html`<div class="ag-next" id="ag-next"><span class="ag-next-label">Next</span><p>${states[current[0]].next||(states[current[0]].s==='active'?'Pilots are running. Their results appear under Runs.':'Continue with '+current[1]+'.')}</p><button type="button" class="small primary" data-ag="goto-step" data-step="${current[0]}" data-ag-key="step-next">Go to ${current[1]}</button></div>`:html`<div class="ag-next" id="ag-next"><span class="ag-next-label">All steps done</span><p>Classify each clean pilot, then export the round.</p><button type="button" class="small" data-ag="goto-step" data-step="runs" data-ag-key="step-next">Go to Runs</button></div>`}`;
+      ${current?html`<div class="ag-next" id="ag-next"><span class="ag-next-label">Next</span><p>${states[current[0]].next||(states[current[0]].s==='active'?'Pilots are running. Their results appear under Runs.':'Continue with '+current[1]+'.')}</p><button type="button" class="small ${nextClass}" data-ag="goto-step" data-step="${current[0]}" data-ag-key="step-next">Go to ${current[1]}</button></div>`:html`<div class="ag-next" id="ag-next"><span class="ag-next-label">All steps done</span><p>Classify each clean pilot, then export the round.</p><button type="button" class="small" data-ag="goto-step" data-step="runs" data-ag-key="step-next">Go to Runs</button></div>`}`;
   }
   /* Scroll to a step's card and put the keyboard on its first control. */
   function goStep(step){
-    const card=STEPS.some(([id])=>id===step)?document.getElementById('ag-'+step):null;
+    const card=STEPS.some(([id])=>id===step)?$('#ag-'+step):null;
     if(!card)return;
     let smooth=true;
     try{smooth=!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}catch{smooth=true;}
@@ -429,8 +521,7 @@
     const otherNote=other?html`<span class="ag-strip-item ag-strip-other">Round ${other.id} is running.</span>`:'';
     if(!r)return html`<span class="ag-strip-item">No round selected.</span>${otherNote}`;
     const c=roundCounts(runsOf(r));
-    const kind=r.status==='finished'?'green':r.status==='running'?'amber':r.status==='failed'||r.status==='cancelled'?'red':'';
-    return html`<span class="ag-strip-item"><strong>Round ${r.id}</strong> ${pill(r.status||'draft',kind)}</span>
+    return html`<span class="ag-strip-item"><strong>Round ${r.id}</strong> ${pill(r.status||'draft',statusKind(r.status))}</span>
       <span class="ag-strip-item" id="ag-strip-pilots">${c.total?'Pilots '+c.total+': done '+c.done+' · running '+c.running+(c.waiting?' · waiting '+c.waiting:'')+' · failed '+c.failed+(c.cancelled?' · cancelled '+c.cancelled:''):'No pilots started yet'}</span>
       <span class="ag-strip-item" id="ag-strip-elapsed">${r.launchedAt?'Elapsed '+spanText(r.launchedAt,r.endedAt):'Not launched'}</span>${otherNote}`;
   }
@@ -461,9 +552,9 @@
   function packetHtml(){
     const p=S.packet,files=p.files,included=files?files.filter(effectiveInclude).length:0,gafCount=files?files.filter(f=>isGaf(f.path)).length:0;
     const words=wordsOf(S.prompt),limit=promptLimit();
-    return html`<div class="card-title"><div><div class="eyebrow">2 Packet</div><h2>Choose the solver files and prompt</h2></div>${files?pill(included+' of '+files.length+' files included','green'):pill('Not inspected')}</div>
+    return html`<div class="card-title"><div><div class="eyebrow">2 Packet</div><h2>Choose the solver files and prompt</h2></div>${files?pill(included+' of '+files.length+' files included','violet'):pill('Not inspected')}</div>
       <p class="muted">Enter a folder on this computer. The companion lists its regular files (no symlinks). Nothing is copied anywhere until you launch a round, and each pilot gets only the files ticked below. Inside its own folder a pilot finds them under <code>./filesystem/</code>, with the folder structure kept, so choose the folder that is the production <code>filesystem</code> folder itself.</p>
-      <div class="ag-row"><label class="field ag-grow">Folder path<input type="text" id="ag-dir" data-ag-in="dir" data-ag-key="dir" value="${p.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/path/to/solver-packet"></label><button type="button" class="primary" data-ag="inspect" data-ag-key="inspect" data-ag-lock ${locked()?'disabled':''}>Inspect</button></div>
+      <div class="ag-row"><label class="field ag-grow">Folder path<input type="text" id="ag-dir" data-ag-in="dir" data-ag-key="dir" value="${p.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/path/to/solver-packet"></label><button type="button" class="${primaryClass('inspect')}" data-ag="inspect" data-ag-key="inspect" data-ag-lock ${locked()?'disabled':''}>Inspect</button></div>
       ${p.error?html`<div class="notice" role="alert">${p.error}</div>`:''}
       ${files&&files.some(f=>/^filesystem\//.test(f.path))?html`<div class="notice" role="status"><strong>This folder already holds a filesystem/ folder.</strong> Pilots would see ./filesystem/filesystem/..., which is not the production layout. Choose the filesystem folder itself, or go on if this nesting is what you want.</div>`:''}
       ${files?filesTableHtml(files):html`<div class="empty">No folder inspected yet.</div>`}
@@ -521,7 +612,21 @@ ${S.prompt}</textarea></label>
       </div>
       <p class="footnote" id="ag-cap-note">${CAP_STATEMENT}</p>
       <p id="ag-budget-error" class="ag-why" role="alert">${Number.isNaN(budget)?'The spending cap per pilot must be a number of US dollars from '+BUDGET.minUsd.toFixed(2)+' to '+BUDGET.maxUsd.toFixed(2)+', in whole cents.':''}</p>
-      <label class="field">Round label (optional)<input type="text" data-ag-in="label" data-ag-key="label" value="${S.label}" maxlength="120" autocomplete="off" placeholder="Pilot round"></label>`;
+      <div class="field-row">
+        <label class="field">Task<input type="text" id="ag-task" data-ag-in="task" data-ag-key="task" list="ag-task-list" value="${S.task}" maxlength="${TASK_MAX}" autocomplete="off" spellcheck="false" placeholder="Task name, for example Atlas" aria-describedby="ag-task-note"></label>
+        <label class="field">Round label (optional)<input type="text" data-ag-in="label" data-ag-key="label" value="${S.label}" maxlength="120" autocomplete="off" placeholder="Pilot round"></label>
+      </div>
+      <datalist id="ag-task-list">${knownTasks().map(name=>html`<option value="${name}"></option>`)}</datalist>
+      <p class="footnote" id="ag-task-note">The task groups this round with the others for the same task package. It is stored with the round when you freeze. Changing it later does not make the freeze stale and does not change a round that already exists.</p>`;
+  }
+  /* The task names of the rounds the companion holds, one per name (compared without case or extra spaces), for the Task field's suggestions. */
+  function knownTasks(){
+    const seen=new Map();
+    S.rounds.forEach(r=>{
+      const name=taskText(r&&r.task).replace(/\s+/g,' ');
+      if(name&&!seen.has(taskKeyOf(name)))seen.set(taskKeyOf(name),name);
+    });
+    return [...seen.values()].sort((a,b)=>a.localeCompare(b)).slice(0,100);
   }
   function spendText(){
     const budget=budgetNumber(S.config.budget);
@@ -601,7 +706,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <dl class="history-details"><dt>Round</dt><dd>${r.id}</dd><dt>${v.postHoc?'Saved at':'Frozen at'}</dt><dd>${timeText(v.frozenAt)}</dd><dt>Freeze SHA-256</dt><dd>${v.sha256}</dd>${v.contentSha256?html`<dt>Content SHA-256</dt><dd>${v.contentSha256} <small>(gold and fingerprints, without the time stamp)</small></dd>`:''}${v.postHoc?html`<dt>Label</dt><dd>Post-hoc: written after launch, stored beside the original freeze</dd>`:''}</dl></div>`):html`<p class="muted">No freeze record for the selected round. Launch stays disabled until the gold is frozen.</p>`}
       ${stale?html`<div class="notice" role="status">The packet, prompt, settings or gold on this page no longer match the freeze of round ${r.id}. Freeze again to create a new round.</div>`:''}
       ${fr&&!afterDraft&&!known?html`<p class="footnote" id="ag-unknown-form">This page did not freeze round ${r.id} (or was reloaded since), so it cannot tell whether the form matches it. The approval dialog shows exactly what the round holds. Freeze again to make a new round from the form.</p>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="freeze" data-ag-key="freeze" data-ag-lock ${locked()||settled?'disabled':''}>${settled?'Gold is frozen':fr?'Freeze again (new round)':'Freeze gold'}</button>
+      <div class="actions"><button type="button" class="${primaryClass('freeze')}" data-ag="freeze" data-ag-key="freeze" data-ag-lock ${locked()||settled?'disabled':''}>${settled?'Gold is frozen':fr?'Freeze again (new round)':'Freeze gold'}</button>
       ${wasLaunched&&fr?html`<button type="button" data-ag="refreeze" data-ag-key="refreeze" data-ag-lock ${locked()?'disabled':''}>Save a post-hoc freeze version</button>`:''}</div>
       ${wasLaunched&&fr?html`<p class="footnote">A post-hoc version is stored beside the original, labelled post-hoc. It never replaces the original freeze. Fingerprints it adds can be chosen when you classify a run.</p>`:''}`;
   }
@@ -676,9 +781,13 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   function roundBody(){
     const files=(S.packet.files||[]).filter(effectiveInclude);
-    const body={label:S.label.trim()||'Pilot round',sourceDir:S.packet.inspectedDir,include:files.map(f=>f.path),overrides:files.filter(f=>!f.defaultInclude).map(f=>f.path),
+    /* task is always sent, also when empty: a round carried forward keeps its task only when the request names none, so an empty
+       Task field after the writer cleared it must say so. Neither task nor versions is in inputSig: they never make a freeze stale. */
+    const body={label:S.label.trim()||'Pilot round',task:taskText(S.task),sourceDir:S.packet.inspectedDir,include:files.map(f=>f.path),overrides:files.filter(f=>!f.defaultInclude).map(f=>f.path),
       promptText:S.prompt,gafVisible:S.packet.gafVisible,
       config:{kind:'pilot',model:S.config.model,effort:S.config.effort,count:S.config.count,maxBudgetUsd:budgetNumber(S.config.budget),concurrency:atOnceOf(S.config)}};
+    const versions=projectVersions();
+    if(versions)body.versions=versions;
     /* A round frozen from the form after "Start next round" still names the round it came from. */
     if(S.carry&&idOk(S.carry.from))body.carriedFrom=S.carry.from;
     return body;
@@ -687,7 +796,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   /* 5. Round: the settings the selected round was frozen with, the statements, and the approval gate. */
   function roundHtml(){
     const r=S.round;
-    return html`<div class="card-title"><div><div class="eyebrow">5 Round</div><h2>Approve and launch</h2></div>${r?pill('Round '+r.id+' · '+(r.status||'draft'),r.status==='frozen'?'green':''):pill('No round yet')}</div>
+    return html`<div class="card-title"><div><div class="eyebrow">5 Round</div><h2>Approve and launch</h2></div>${r?pill('Round '+r.id+' · '+(r.status||'draft'),statusKind(r.status)):pill('No round yet')}</div>
       ${r&&r.config?roundFactsHtml(r):html`<p class="muted">Freezing the gold creates a round with the settings above.</p>`}
       <div class="notice"><strong>Read this before you launch</strong><ul class="plain-list"><li>${SHELL_STATEMENT}</li><li>${ISOLATION_STATEMENT}</li><li>${NETWORK_STATEMENT}</li><li>Each pilot works in its own folder holding only the files you ticked, an empty outputs folder and an empty scratch folder.</li></ul></div>
       <div id="ag-gate">${gateHtml()}</div>`;
@@ -715,7 +824,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const check=gate.ok&&S.round?S.preflights[S.round.id]:null;
     return html`<p class="${gate.ok?'muted':'ag-why'}">${gate.ok?(gate.resume?'Round '+S.round.id+' is approved but not launched.':'Round '+S.round.id+' is frozen and ready for your approval. Nothing runs until you approve it in the next step.'):gate.why}</p>
       ${check&&!check.ok?html`<div class="notice" role="alert" id="ag-preflight-gate"><strong>Claude Code is not ready for this round.</strong> ${check.message}</div>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="open-approve" data-ag-key="open-approve" data-ag-lock ${gate.ok&&!locked()?'':'disabled'}>${gate.resume?'Review and launch':'Review and approve'}</button></div>
+      <div class="actions"><button type="button" class="${primaryClass('open-approve')}" data-ag="open-approve" data-ag-key="open-approve" data-ag-lock ${gate.ok&&!locked()?'':'disabled'}>${gate.resume?'Review and launch':'Review and approve'}</button></div>
       <p class="footnote">Before the approval dialog opens, the companion checks that Claude Code lists every option the Studio passes and that it is signed in (claude --help and claude auth status). No model is started by that check.</p>`;
   }
 
@@ -745,10 +854,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     });
     return t;
   }
-  function stateBadge(run){
-    const kind=run.state==='completed'?'green':run.state==='failed'||run.state==='cancelled'?'amber':'';
-    return pill(run.state||'unknown',kind);
-  }
+  const stateBadge=run=>pill(run.state||'unknown',statusKind(run.state));
   function auditBadge(run){
     const status=auditStatus(run);
     if(status==='CLEAN')return pill('CLEAN','green');
@@ -762,7 +868,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const r=S.round,runs=runsOf(r),t=tally(runs),n=t.clean;
     const options=S.rounds.length>1||(S.rounds.length===1&&!r);
     const running=anyRunning(),carry=canCarry(r);
-    return html`<div class="card-title"><div><div class="eyebrow">6 Runs</div><h2>Pilots and what they did</h2></div>${r?pill((r.status||'draft'),r.status==='finished'?'green':''):''}</div>
+    return html`<div class="card-title"><div><div class="eyebrow">6 Runs</div><h2>Pilots and what they did</h2></div>${r?pill((r.status||'draft'),statusKind(r.status)):''}</div>
       ${options?html`<label class="field">Round<select data-ag-in="select-round" data-ag-key="select-round">${r?'':html`<option value="" selected>Choose a round</option>`}${S.rounds.map(x=>html`<option value="${x.id}" ${r&&x.id===r.id?'selected':''}>${(x.label||'Round')+' · '+x.id+' · '+(x.status||'')+' · '+timeText(x.createdAt)}</option>`)}</select></label>`:''}
       ${r&&r.note?html`<div class="notice" role="status" id="ag-round-note"><strong>Note on this round:</strong> ${r.note}${/companion stopped/.test(r.note)?' Pilots that were interrupted show as failed and were not audited. A pilot process may still be running if the companion was killed without a chance to stop it. Start a new round to run them again.':''}</div>`:''}
       <div class="notice neutral" id="ag-banner"><strong>Directional only, n = ${n}.</strong> No rate or difficulty is computed.
@@ -1011,7 +1117,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const human=run&&run.classification&&run.classification.human;
     return {verdict:human&&human.verdict||'',ids:Array.isArray(human&&human.fingerprintIds)?[...human.fingerprintIds]:[],note:human&&human.note||'',saving:false,error:''};
   }
-  async function openRun(n){
+  async function openRunDrawer(n){
     const base=runsOf(S.round).find(run=>run.n===n);
     if(!base||!S.round)return;
     const roundId=S.round.id;
@@ -1070,6 +1176,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <dt>Turns</dt><dd>${run.numTurns==null?'-':run.numTurns}</dd><dt>Tool calls</dt><dd>${calls.total==null?'-':calls.total+' (bash '+(calls.bash||0)+', file '+(calls.file||0)+')'}</dd>
         <dt>Exit code</dt><dd>${run.exitCode==null?'-':run.exitCode}</dd><dt>Ended because</dt><dd>${run.terminalReason||'-'}</dd><dt>Reported cost</dt><dd>${run.costUsd==null?'-':'USD '+run.costUsd}</dd>
         <dt>Started</dt><dd>${run.startedAt?timeText(run.startedAt):'-'}</dd><dt>Elapsed</dt><dd>${elapsedText(run)}</dd></dl>
+      ${outputLocationHtml(o,run)}
       ${auditSectionHtml(run,audit,violations)}
       ${run.state==='failed'?failureHtml(run):''}
       <h3>${run.state==='failed'?"Runtime message (the run failed)":'Final answer'}</h3>
@@ -1077,6 +1184,48 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       <h3>Outputs</h3>
       ${outputs.length?html`<div class="table-wrap"><table class="ag-table"><caption class="sr-only">Files the pilot wrote to its outputs folder</caption><thead><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">SHA-256</th></tr></thead><tbody>${outputs.map(f=>html`<tr><td data-label="Name"><code class="ag-path">${f.name}</code></td><td data-label="Size">${bytesText(f.bytes)}</td><td data-label="SHA-256"><span class="hash">${f.sha256}</span></td></tr>`)}</tbody></table></div>`:html`<p class="muted">No files in the outputs folder.</p>`}
       ${classifyHtml(o,run)}`,'drawer');
+  }
+  /* Where the pilot's files are: the working folder it wrote them in, the evidence folder they are copied to when the run ends,
+     and how many there are. Nothing here is served by the companion, so the path is for the writer's own file manager. */
+  function outputLocationHtml(o,run){
+    const active=isActiveRun(run),folder=typeof run.folder==='string'?run.folder:'';
+    /* Until the run ends the companion's count is 0 because nothing is collected yet; the markup says so instead of showing 0. */
+    const count=Number.isInteger(run.outputCount)?run.outputCount:Array.isArray(run.outputs)?run.outputs.length:null;
+    const noCopy=!active&&(!auditStatus(run)||run.failureReason==='setup-error');
+    return html`<h3>Where the output is</h3>
+      <dl class="history-details" id="ag-output-location"><dt>Working folder</dt><dd>${folder?html`<code class="ag-path">${folder}</code> <small>in the system temporary folder of this computer; the pilot wrote its files here</small>`:'-'}</dd>
+        <dt>Evidence folder</dt><dd><code class="ag-path" id="ag-evidence-path">${evidencePath(o.roundId,o.n)}</code> <button type="button" class="small" data-ag="copy-path" data-ag-key="copy-path" aria-label="Copy the evidence folder path">Copy path</button> <small>relative to the project folder</small></dd>
+        <dt>Output files</dt><dd>${active?'Counted when the run ends':count==null?'-':count}</dd></dl>
+      ${active?html`<p class="footnote" id="ag-output-note">Copied to the working copy when the run ends</p>`:''}
+      ${noCopy?html`<p class="footnote" id="ag-output-missing">${run.failureReason==='setup-error'?'The pilot folder could not be built, so no files were written.':'This pilot ended before the audit ran, so its files may not have been copied: that folder may not exist.'}</p>`:''}
+      ${o.copyNote?html`<p class="footnote" id="ag-copy-note" role="status">${o.copyNote}</p>`:''}`;
+  }
+  /* Copy text with the clipboard API where the page may use it, else with a hidden text area and the older copy command.
+     Every piece is checked first, because neither exists in every browser or every test page. Resolves to true only when it copied. */
+  async function copyText(text){
+    try{
+      if(typeof navigator!=='undefined'&&navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){await navigator.clipboard.writeText(text);return true;}
+    }catch{/* refused or not allowed here: try the older way */}
+    try{
+      if(typeof document.createElement!=='function'||!document.body||typeof document.execCommand!=='function')return false;
+      const area=document.createElement('textarea'),before=document.activeElement;
+      area.value=text;area.setAttribute('readonly','');area.setAttribute('aria-hidden','true');area.className='sr-only';
+      document.body.appendChild(area);
+      let ok=false;
+      try{area.focus({preventScroll:true});area.select();ok=document.execCommand('copy')===true;}
+      finally{if(area.parentNode)area.parentNode.removeChild(area);}
+      if(before&&typeof before.focus==='function'){try{before.focus({preventScroll:true});}catch{/* focus stays where it is */}}
+      return ok;
+    }catch{return false;}
+  }
+  async function copyEvidencePath(){
+    const o=S.overlay;
+    if(!o||o.type!=='drawer')return;
+    const path=evidencePath(o.roundId,o.n),ok=await copyText(path);
+    if(S.overlay!==o)return;
+    o.copyNote=ok?'Copied the evidence folder path to the clipboard.':'The browser did not allow copying. Select the path above and copy it yourself.';
+    paintOverlay();
+    say(o.copyNote,!ok);
   }
   function auditSectionHtml(run,audit,violations){
     const discarded=audit.status==='DISCARDED';
@@ -1349,7 +1498,9 @@ ${o.guideline}</textarea></label>
     if(errors.length){S.fz.errors=errors;gates();say('Fix '+errors.length+(errors.length===1?' item':' items')+' before freezing.',true);return;}
     S.fz.errors=[];
     await work('freeze',async()=>{
-      let round=S.round&&S.round.status==='draft'&&S.sigs[S.round.id]===inputSig()?S.round:null;
+      /* A draft round made by "Start next round" is frozen as it is, unless the Task field names another task than the one the round
+         holds: the companion cannot change a round's task afterwards, so a round with the task the writer typed is made instead. */
+      let round=S.round&&S.round.status==='draft'&&S.sigs[S.round.id]===inputSig()&&taskText(S.round.task)===taskText(S.task)?S.round:null;
       if(!round){
         round=normalizeRound(await api('POST','/api/agents/rounds',roundBody()));
         S.sigs[round.id]=inputSig();
@@ -1391,6 +1542,7 @@ ${o.guideline}</textarea></label>
     S.packet={dir:String(p.sourceDir||''),inspectedDir:'',files:null,gafVisible:p.gafVisible!==false,error:''};
     S.prompt=String(p.promptText||'');
     S.label=String(round.label||'');
+    S.task=taskText(round.task);
     const count=Math.min(Math.max(1,Number(cfg.count)||1),S.status.max),atOnce=atOnceOf({count,concurrency:cfg.concurrency});
     S.config={model:ids(S.status.models).includes(cfg.model)?cfg.model:S.status.defaultModel,effort:ids(S.status.efforts).includes(cfg.effort)?cfg.effort:S.status.defaultEffort,
       count,atOnce:atOnce<count?atOnce:0,budget:Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd).toFixed(2)};
@@ -1449,7 +1601,7 @@ ${o.guideline}</textarea></label>
     const files=S.packet.files;
     return {v:1,savedAt:new Date().toISOString(),dir:S.packet.dir,
       include:files&&S.packet.inspectedDir?{dir:S.packet.inspectedDir,paths:files.filter(effectiveInclude).map(f=>f.path)}:S.draftInclude,
-      prompt:S.prompt,label:S.label,gafVisible:S.packet.gafVisible,
+      prompt:S.prompt,label:S.label,task:S.task,gafVisible:S.packet.gafVisible,
       config:{model:S.config.model,effort:S.config.effort,count:S.config.count,atOnce:S.config.atOnce,budget:S.config.budget},
       fz:{decision:S.fz.decision,notes:S.fz.notes,figures:S.fz.figures,fingerprints:S.fz.fingerprints},
       carry:S.carry,sigs:waitingSigs()};
@@ -1502,6 +1654,7 @@ ${o.guideline}</textarea></label>
     S.packet.gafVisible=d.gafVisible!==false;
     S.prompt=textOf(d.prompt,20000);
     S.label=textOf(d.label,120);
+    S.task=taskText(textOf(d.task,TASK_MAX));
     const inc=d.include;
     S.draftInclude=inc&&typeof inc==='object'&&typeof inc.dir==='string'&&Array.isArray(inc.paths)?{dir:inc.dir.slice(0,1024),paths:inc.paths.filter(x=>typeof x==='string').slice(0,500)}:null;
     const c=d.config&&typeof d.config==='object'?d.config:{};
@@ -1521,7 +1674,7 @@ ${o.guideline}</textarea></label>
   function clearDraft(){
     clearStoredDraft();
     S.packet={dir:'',inspectedDir:'',files:null,gafVisible:true,error:''};
-    S.prompt='';S.label='';S.fz=blankFreezeForm();
+    S.prompt='';S.label='';S.task='';S.fz=blankFreezeForm();
     S.config=blankConfig(S.status.defaultModel,S.status.defaultEffort);
     S.config.count=Math.min(S.config.count,S.status.max);
     S.carry=null;S.draftInclude=null;
@@ -1558,6 +1711,82 @@ ${o.guideline}</textarea></label>
     finally{schedulePoll();}
   }
 
+  /* ---------- Requests from other views: openRun and openRound ---------- */
+  /* A view that wants the writer to land on a round or a pilot records the request here and then navigates to Agents; this module
+     never navigates. The request waits until this view is mounted and ready, then selects the round and opens the pilot's drawer
+     or scrolls to the step. One that is not applied within two minutes is dropped, so a request nobody followed up cannot open a
+     drawer much later. A round or pilot the companion does not have is reported in the status line, not thrown. */
+  const PENDING_TTL_MS=120000;
+  const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  /* The answer is {recorded, applied}: applied is true only when the view showed what was asked for. A request that is only recorded
+     (no view yet) answers at once with applied: false; one made while the view shows answers when it has been applied. */
+  function request(roundId,n,step){
+    if(!isLocal())return Promise.resolve({recorded:false,applied:false});
+    const bad=!idOk(roundId)?'That round id is not valid.':n!==null&&!(Number.isInteger(n)&&n>=1&&n<=99)?'That pilot number is not valid.':'';
+    return new Promise(resolve=>{
+      const entry={roundId:bad?'':roundId,n:bad?null:n,step:STEPS.some(([id])=>id===step)?step:'',at:Date.now(),bad,settle:applied=>resolve({recorded:true,applied})};
+      if(S.pending)S.pending.settle(false);    /* replaced before it was applied */
+      S.pending=entry;
+      if(S.mounted&&S.phase==='ready')applyPending();
+      else entry.settle(false);
+    });
+  }
+  const openRun=(roundId,n)=>request(roundId,Number(n),'');
+  const openRound=(roundId,step)=>request(roundId,null,step);
+  /* Applies the recorded request when this view can show it. Runs one request at a time; a newer request replaces an older one
+     that has not started. Never rejects. */
+  async function applyPending(){
+    if(S.applying)return;
+    S.applying=true;
+    try{
+      while(S.pending&&S.mounted&&S.phase==='ready'){
+        const wanted=S.pending;
+        S.pending=null;
+        let applied=false;
+        try{applied=await applyRequest(wanted);}
+        catch(error){if(S.mounted)say(error.message||String(error),true);}
+        wanted.settle(applied);
+      }
+    }finally{
+      S.applying=false;
+      /* left the view meanwhile: the request stays recorded for the next mount, and its caller is answered now */
+      if(S.pending)S.pending.settle(false);
+    }
+  }
+  async function applyRequest(req){
+    if(Date.now()-req.at>PENDING_TTL_MS)return false;
+    if(req.bad){say(req.bad,true);return false;}
+    const id=req.roundId;
+    /* An action in progress (a freeze, an approval) owns the selected round until it ends. */
+    for(let i=0;S.working&&i<100;i++)await pause(100);
+    let round;
+    try{round=normalizeRound(await api('GET',roundPath(id)));}
+    catch(error){
+      if(S.mounted)say(error.status===404?'Round '+id+' was not found on this companion. It may belong to another project folder, or it was removed.':error.message,true);
+      return false;
+    }
+    /* The view may have been left while the round was read: then nothing is painted, and no drawer opens over another view. */
+    if(!S.mounted||S.phase!=='ready')return false;
+    S.roundId=id;S.round=round;
+    if(S.overlay)closeOverlay();
+    try{await loadRounds();}catch{/* the next poll reads the list again */}
+    if(!S.mounted)return false;
+    paintAll();gates();schedulePoll();
+    if(req.n!==null){
+      const runs=runsOf(S.round);
+      goStep('runs');
+      if(!runs.some(run=>run.n===req.n)){
+        say('Round '+id+(runs.length?' has no pilot '+req.n+'. Its pilots are '+runs.map(run=>run.n).join(', ')+'.':' has not started any pilots, so there is no pilot '+req.n+' to open.'),true);
+        return false;
+      }
+      focusKey('run-'+req.n);
+      await openRunDrawer(req.n);
+      return true;
+    }
+    if(req.step)goStep(req.step);
+    return true;
+  }
+
   /* ---------- Lifecycle ---------- */
   async function boot(){
     if(!isLocal()){S.phase='offline';paintRoot();return;}
@@ -1579,6 +1808,7 @@ ${o.guideline}</textarea></label>
       if(draft)say('Restored the form you were working on from this browser'+(S.draftSavedAt?' (saved '+timeText(S.draftSavedAt)+')':'')+'.'+(S.packet.dir?' Inspect the folder again to see its files.':'')+' Clear draft empties it.');
     }catch(error){say(error.message,true);}
     schedulePoll();
+    applyPending();
   }
   function render(ctx){
     S.ctx={...S.ctx,...(ctx||{})};
@@ -1600,12 +1830,13 @@ ${o.guideline}</textarea></label>
       loadStatus().then(()=>{paintSection('runtime');}).catch(()=>{});
       updateTitle();
       schedulePoll();
+      applyPending();
     }
   }
 
   /* ---------- Events ---------- */
   /* Inputs and clicks that change the form: each one saves the draft a moment later. */
-  const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','model','effort','count','label','budget','atonce']);
+  const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','model','effort','count','label','task','budget','atonce']);
   const DRAFT_CLICKS=new Set(['use-project-prompt','add-gfig','add-pfig','remove-fig','add-fp','remove-fp','count-dec','count-inc']);
   const CLICK={
     'goto-step':t=>goStep(t.dataset.step),
@@ -1635,7 +1866,8 @@ ${o.guideline}</textarea></label>
     'cancel-round':()=>cancelRound(),
     'next-round':()=>startNext(),
     'clear-draft':()=>clearDraft(),
-    'open-run':t=>openRun(Number(t.dataset.n)),
+    'open-run':t=>openRunDrawer(Number(t.dataset.n)),
+    'copy-path':()=>copyEvidencePath(),
     'close-overlay':()=>closeOverlay(),
     chip:t=>{
       const o=S.overlay;
@@ -1676,6 +1908,7 @@ ${o.guideline}</textarea></label>
     atonce:t=>{const n=Number(t.value);S.config.atOnce=Number.isInteger(n)&&n>0&&n<S.config.count?n:0;paintSection('settings');gates();},
     budget:t=>{S.config.budget=String(t.value==null?'':t.value).trim().slice(0,6);updateSpend();gates();},
     label:t=>{S.label=t.value;},
+    task:t=>{S.task=String(t.value==null?'':t.value).slice(0,TASK_MAX);},
     'select-round':t=>{if(t.value&&(t.value!==S.roundId||!S.round))return selectRound(t.value);},
     ack:t=>{
       const o=S.overlay;
@@ -1722,5 +1955,5 @@ ${o.guideline}</textarea></label>
   }
   ['click','input','change','keydown'].forEach(type=>document.addEventListener(type,handleEvent));
 
-  window.FinanceAgents={render,afterRender,handleEvent,offlineMessage:OFFLINE_MESSAGE};
+  window.FinanceAgents={render,afterRender,handleEvent,offlineMessage:OFFLINE_MESSAGE,link,get,post,openRun,openRound};
 })();

@@ -1897,7 +1897,14 @@ class RoundStore {
     }
     const before = (a, b) => (a < b ? 1 : a > b ? -1 : 0);
     entries.sort((a, b) => (b.ms - a.ms) || before(a.at, b.at) || before(a.round.id, b.round.id) || b.run.n - a.run.n);
-    return entries.slice(0, limit).map(({ round, run }) => feedRow(round, run));
+    /* One feed reads every round, so a run record that was damaged on disk (a missing field) is left out, as a damaged round
+       is not offered at all, instead of failing the feed of everyone else's runs. */
+    const rows = [];
+    for (const { round, run } of entries) {
+      if (rows.length >= limit) break;
+      try { rows.push(feedRow(round, run)); } catch { /* not offered */ }
+    }
+    return rows;
   }
 
   /* A page of a run's transcript (see the run log section above): { lines, next, done, withheld }.

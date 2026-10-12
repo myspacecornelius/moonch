@@ -113,15 +113,18 @@ function makeStorage({ broken = false } = {}) {
 }
 const DRAFT_KEY = 'finance-studio.agents.draft.v1';
 
-function makePage(t, world, { location, storage, pkg, engine } = {}) {
+function makePage(t, world, { location, storage, pkg, engine, navigator, authoring, documentExtras } = {}) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, makeElement(id));
     return elements.get(id);
   };
   let inflight = 0;
+  /* every request the page makes, in order: the proof that an offline call made none and that a post carried the nonce */
+  const requests = [];
   const pageFetch = async (url, init = {}) => {
     inflight++;
+    requests.push({ url, method: init.method || 'GET', nonce: init.headers && init.headers['x-finance-local'] });
     try {
       const headers = { ...(init.headers || {}) };
       if (init.method && init.method !== 'GET') headers.Origin = world.origin;
@@ -137,13 +140,17 @@ function makePage(t, world, { location, storage, pkg, engine } = {}) {
       return match ? element(match[1]) : null;
     },
     addEventListener() {},
+    ...(documentExtras || {}),
   };
   const context = vm.createContext({
     document, fetch: pageFetch, setTimeout, clearTimeout, console, URL, Blob,
     location: location || { protocol: 'http:', hostname: '127.0.0.1' }, CSS: { escape: value => String(value) },
     ...(storage ? { localStorage: storage } : {}),
+    ...(navigator ? { navigator } : {}),
   });
   context.window = context;
+  /* authoring: a stand-in for the task editor's FinanceAuthoring, which agents.js reads for the project (prompt limit, versions). */
+  if (authoring) context.FinanceAuthoring = authoring;
   /* engine: the page as index.html loads it, with package-engine.js (window.FinancePackageEngine) before agents.js. */
   if (engine) {
     Object.assign(context, { TextDecoder, TextEncoder });
@@ -165,6 +172,9 @@ function makePage(t, world, { location, storage, pkg, engine } = {}) {
   };
   const page = {
     elements,
+    element,
+    requests,
+    context,
     agents,
     document,
     html: all,
@@ -480,6 +490,8 @@ test('a run interrupted by a companion restart is shown as not audited, with the
   await page.click('open-run', { n: 1 });
   assert.match(page.modal(), /ended before the audit ran, so it was not audited/);
   assert.match(page.modal(), /The companion stopped while this pilot was running\./);
+  assert.match(page.modal(), /its files may not have been copied: that folder may not exist/, 'the evidence folder is named, with the reason it may be missing');
+  assert.ok(page.modal().includes(`private/agent-rounds/${id}/runs/1/outputs/`));
 });
 
 test('the audit section states what the audit cannot see, and says what a note is', async t => {
@@ -732,6 +744,9 @@ test('while another round runs, a finished run keeps its answer hidden and canno
   await page.click('open-run', { n: 1 });
   assert.match(page.modal(), /Hidden while a round is running/);
   assert.ok(!page.modal().includes(GOLD_ANSWER), 'the answer is not shown');
+  assert.match(page.modal(), /Where the output is/, 'where the files are is not secret: the folders and the count stay');
+  assert.ok(page.modal().includes(`private/agent-rounds/${finished}/runs/1/outputs/`));
+  assert.match(page.modal(), /Output files<\/dt><dd>0<\/dd>/);
   assert.equal(page.enabled('save-class'), false);
   assert.match(page.modal(), /Classification waits until no round is running/);
   await w.service.cancelRound(running);
@@ -871,4 +886,783 @@ test('blocked or damaged storage never breaks the page', async t => {
   const third = makePage(t, w, { storage: notJson });
   await third.boot();
   assert.doesNotMatch(third.status(), /Restored/);
+});
+
+/* ====================================================================== the Task field (metadata for Mission Control) */
+
+const taskRows = async w => (await w.service.listRounds()).map(row => row.task);
+const FILE_EDITION = { protocol: 'file:', hostname: '' };
+
+test('the Task field: label, placeholder and suggestions; the task is sent with the round, kept in the draft, and carried forward', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  /* two earlier rounds name tasks (one only differs in case and spacing) and one names none */
+  await w.service.createRound(roundBody(w, { task: 'Meridian' }));
+  await w.service.createRound(roundBody(w, { task: 'Atlas' }));
+  await w.service.createRound(roundBody(w, { task: ' atlas ' }));
+  await w.service.createRound(roundBody(w));
+  const storage = makeStorage();
+  const page = makePage(t, w, { storage });
+  await page.boot();
+  const settings = page.section('settings');
+  assert.match(settings, /<label class="field">Task<input type="text" id="ag-task" data-ag-in="task"[^>]*list="ag-task-list"[^>]*maxlength="120"[^>]*placeholder="Task name, for example Atlas"/);
+  const options = [...settings.matchAll(/<option value="([^"]*)"><\/option>/g)].map(match => match[1]).filter(value => !/^claude-|^(low|medium|high|max|xhigh)$/.test(value) && !/^\d+$/.test(value));
+  /* which spelling is offered depends on which round came last; there is one per name, in alphabetical order */
+  assert.deepEqual(options.map(name => name.toLowerCase()), ['atlas', 'meridian'], 'one suggestion per task name, ignoring case and spaces, in order');
+  assert.ok(options.every(name => name === name.trim()), 'no stray spaces in a suggestion');
+  assert.match(settings, /id="ag-task-list"/);
+  assert.match(settings, /Changing it later does not make the freeze stale/);
+
+  /* typed text, a control character and a very long name are cleaned like the companion cleans them */
+  await page.type('task', { value: 'Cobalt' });
+  await page.fillAndFreeze();
+  const [row] = (await w.service.listRounds()).filter(r => r.task === 'Cobalt');
+  assert.ok(row, 'the round was created with the task that was typed');
+  assert.equal((await w.service.getRound(row.id)).task, 'Cobalt');
+  assert.match(page.section('settings'), /id="ag-task"[^>]*value="Cobalt"/);
+  assert.ok(page.section('settings').includes('<option value="Cobalt"></option>'), 'the new task is suggested after the freeze');
+
+  /* the draft keeps the task, and a reload restores it; Clear draft removes it */
+  await waitFor(() => storage.map.has(DRAFT_KEY) && JSON.parse(storage.map.get(DRAFT_KEY)).task === 'Cobalt', { label: 'the task in the saved draft' });
+  const again = makePage(t, w, { storage });
+  await again.boot();
+  assert.match(again.section('settings'), /id="ag-task"[^>]*value="Cobalt"/);
+  await again.click('clear-draft');
+  assert.match(again.section('settings'), /id="ag-task"[^>]*value=""/);
+  assert.equal(storage.map.has(DRAFT_KEY), false);
+
+  /* a damaged draft cannot put anything but text there */
+  const damaged = makeStorage();
+  damaged.map.set(DRAFT_KEY, JSON.stringify({ v: 1, task: { evil: 1 } }));
+  const third = makePage(t, w, { storage: damaged });
+  await third.boot();
+  assert.match(third.section('settings'), /id="ag-task"[^>]*value=""/);
+  damaged.map.set(DRAFT_KEY, JSON.stringify({ v: 1, task: 'x'.repeat(500) + '\n' }));
+  const fourth = makePage(t, w, { storage: damaged });
+  await fourth.boot();
+  assert.equal((fourth.section('settings').match(/id="ag-task"[^>]*value="(x*)"/) || [])[1].length, 120, 'a stored task is cut to 120 characters');
+});
+
+test('a task with a NUL byte or control characters, or a very long one, is cleaned by the page so the freeze is not refused', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('task', { value: '  Atlas\u0000 two\u0007  ' });
+  await page.fillAndFreeze();
+  assert.match(page.status(), /Gold frozen/, 'a NUL byte would be refused by the companion, so the page cleans it first');
+  const [row] = await w.service.listRounds();
+  assert.equal(row.task, 'Atlas  two');
+
+  const long = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const second = makePage(t, long);
+  await second.boot();
+  await second.type('task', { value: 'é'.repeat(119) + '\ud83d\ude00\ud83d\ude00' });
+  await second.fillAndFreeze();
+  assert.match(second.status(), /Gold frozen/);
+  const [longRow] = await long.service.listRounds();
+  assert.equal(longRow.task, 'é'.repeat(119), 'cut at 120 UTF-16 units without leaving half of an emoji');
+  assert.equal([...longRow.task].every(ch => ch.charCodeAt(0) < 0xd800 || ch.charCodeAt(0) > 0xdfff), true);
+});
+
+test('the task is metadata: changing it never makes a freeze stale and never reaches the approval; a carried-forward draft keeps it unless it is edited', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('task', { value: 'Cobalt' });
+  await page.fillAndFreeze();
+  const [first] = await w.service.listRounds();
+  const hashBefore = (await w.service.approvalSummary(first.id)).summarySha256;
+  assert.equal(page.enabled('open-approve'), true);
+
+  await page.type('task', { value: 'Borealis' });
+  await page.type('task', { value: '' });
+  await page.type('task', { value: 'Meridian\u0007 two' });
+  assert.equal(page.enabled('open-approve'), true, 'a task edit does not disable the launch');
+  assert.doesNotMatch(page.html(), /changed after the freeze|no longer match the freeze/);
+  assert.match(page.section('gate'), /frozen and ready for your approval/);
+  assert.equal((await w.service.approvalSummary(first.id)).summarySha256, hashBefore, 'the approval summary does not hold the task');
+  assert.deepEqual(await taskRows(w), ['Cobalt'], 'the round keeps the task it was frozen with');
+  await page.click('open-approve');
+  assert.ok(!page.modal().includes('Meridian') && !page.modal().includes('Cobalt') && !page.modal().includes('Borealis'), 'the approval dialog does not show the task');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  const id = first.id;
+  await w.service.whenSettled(id);
+  await waitFor(() => page.enabled('next-round'), { label: 'the next-round button', timeout: 10000 });
+
+  /* Start next round: the form takes the round's task. Freezing the draft as it is keeps that round; an edited task makes a new one. */
+  await page.click('next-round');
+  assert.match(page.section('settings'), /id="ag-task"[^>]*value="Cobalt"/, 'the carried round has the same task');
+  const afterNext = await w.service.listRounds();
+  assert.equal(afterNext.length, 2);
+  const draft = afterNext.find(row => row.id !== id);
+  assert.equal(draft.task, 'Cobalt');
+  await page.click('freeze');
+  assert.equal((await w.service.listRounds()).length, 2, 'the carried draft itself was frozen');
+
+  /* the draft that was just frozen is not stale after a task edit either */
+  await page.type('task', { value: 'Borealis' });
+  assert.equal(page.enabled('open-approve'), true, 'still no staleness');
+  assert.doesNotMatch(page.html(), /changed after the freeze|no longer match the freeze/);
+});
+
+test('a carried-forward draft with an edited task is not frozen as it is: a round with the typed task is made, carried from the same round; a cleared field means no task', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('task', { value: 'Cobalt' });
+  await page.type('count', { value: '1', event: 'change' });
+  await page.fillAndFreeze();
+  await page.click('open-approve');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  const first = (await w.service.listRounds())[0].id;
+  await w.service.whenSettled(first);
+  await waitFor(() => page.enabled('next-round'), { label: 'the next-round button', timeout: 10000 });
+  await page.click('next-round');
+  const draft = (await w.service.listRounds()).find(row => row.id !== first);
+  assert.equal(draft.task, 'Cobalt');
+
+  await page.type('task', { value: 'Borealis' });
+  await page.click('freeze');
+  const rows = await w.service.listRounds();
+  assert.equal(rows.length, 3, 'a new round, because the draft holds another task');
+  const made = rows.find(row => ![first, draft.id].includes(row.id));
+  assert.equal(made.task, 'Borealis');
+  assert.equal(made.carriedFrom, first);
+  assert.equal(made.status, 'frozen');
+  assert.equal(rows.find(row => row.id === draft.id).status, 'draft', 'the earlier draft is left alone');
+
+  /* an empty field is an explicit "no task": the companion does not fill it in from the round it was carried from */
+  await page.type('task', { value: '   ' });
+  await page.type('prompt', { value: PROMPT + ' Another reading.' });
+  await page.click('freeze');
+  const latest = (await w.service.listRounds()).find(row => ![first, draft.id, made.id].includes(row.id));
+  assert.ok(latest, 'a fourth round');
+  assert.equal(latest.task, '');
+  assert.equal(latest.carriedFrom, first);
+});
+
+test('versions from the project in the task editor reach the round; labels the companion would refuse are left out instead of failing the freeze', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const good = { getProject: () => ({ versions: { prompt: 'p-2', workbook: ' w-3 ', evaluator: 'e-1' } }) };
+  const withLabels = makePage(t, w, { authoring: good });
+  await withLabels.boot();
+  await withLabels.fillAndFreeze();
+  const [row] = await w.service.listRounds();
+  assert.deepEqual((await w.service.getRound(row.id)).versions, { prompt: 'p-2', workbook: 'w-3', evaluator: 'e-1' });
+  assert.ok(withLabels.requests.some(request => request.method === 'POST' && request.url === '/api/agents/rounds'));
+
+  for (const versions of [{ prompt: 'p', workbook: '', evaluator: 'e' }, { prompt: 'p', workbook: 'w' }, { prompt: 'p', workbook: 'w', evaluator: 'x'.repeat(201) }, { prompt: 'p', workbook: 'w', evaluator: 'bad\u0000' }, { prompt: 'p', workbook: 'w', evaluator: 5 }, null]) {
+    const w2 = await makeWorld(t, { resultText: GOLD_ANSWER });
+    const page = makePage(t, w2, { authoring: { getProject: () => ({ versions }) } });
+    await page.boot();
+    await page.fillAndFreeze();
+    assert.match(page.status(), /Gold frozen/, 'the freeze went through: ' + JSON.stringify(versions));
+    const [only] = await w2.service.listRounds();
+    assert.equal((await w2.service.getRound(only.id)).versions, null);
+  }
+  /* a task editor that throws is the same as none */
+  const w3 = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const broken = makePage(t, w3, { authoring: { getProject: () => { throw new Error('synthetic'); } } });
+  await broken.boot();
+  await broken.fillAndFreeze();
+  assert.match(broken.status(), /Gold frozen/);
+});
+
+/* ====================================================================== what other views may call: link, get, post */
+
+/* The page's Error class belongs to its own vm context, so errors are checked by shape, not by instanceof. */
+const failsWith = (status, pattern) => error => {
+  assert.equal(typeof error.message, 'string');
+  assert.equal(error.status, status, `status of: ${error.message}`);
+  if (pattern) assert.match(error.message, pattern);
+  return true;
+};
+
+test('the file edition makes no request at all: link says local false, and get, post, openRun and openRound do nothing on the network', async t => {
+  const w = await makeWorld(t);
+  const page = makePage(t, w, { location: FILE_EDITION });
+  const { agents } = page;
+  assert.deepEqual(Object.keys(agents).sort(), ['afterRender', 'get', 'handleEvent', 'link', 'offlineMessage', 'openRound', 'openRun', 'post', 'render']);
+  assert.deepEqual({ ...(await agents.link()) }, { local: false, ok: false, offlineMessage: 'Local agents need the companion: run npm start.', error: '' });
+  assert.equal(agents.offlineMessage, 'Local agents need the companion: run npm start.');
+  await assert.rejects(agents.get('/api/status'), failsWith(0, /Local agents need the companion: run npm start\./));
+  await assert.rejects(agents.post('/api/agents/rounds', {}), failsWith(0, /run npm start/));
+  assert.deepEqual({ ...(await agents.openRun('rnd-aaaaaaaaaaaa', 1)) }, { recorded: false, applied: false });
+  assert.deepEqual({ ...(await agents.openRound('rnd-aaaaaaaaaaaa', 'freeze')) }, { recorded: false, applied: false });
+  /* the view itself still shows only the offline message, and a later mount applies nothing */
+  const markup = agents.render({ package: null, notify() {}, download() {} });
+  agents.afterRender(true);
+  await page.settle();
+  assert.equal(page.requests.length, 0, 'not one request from the file edition');
+  assert.match(markup, /Local agents need the companion: run <code>npm start<\/code>/);
+  assert.doesNotMatch(markup, /<button|<input/, 'no controls');
+});
+
+test('link loads /api/status once for the nonce; two callers share one request; an unreachable companion is reported, not thrown', async t => {
+  const w = await makeWorld(t);
+  const page = makePage(t, w);
+  const [a, b] = await Promise.all([page.agents.link(), page.agents.link()]);
+  assert.deepEqual({ ...a }, { local: true, ok: true, offlineMessage: 'Local agents need the companion: run npm start.', error: '' });
+  assert.deepEqual({ ...b }, { ...a });
+  assert.deepEqual(page.requests.map(r => `${r.method} ${r.url}`), ['GET /api/status'], 'one request for two callers');
+  await page.agents.link();
+  assert.equal(page.requests.length, 1, 'nothing more once the nonce is held');
+
+  const down = makePage(t, { ...w, origin: 'http://127.0.0.1:1' });
+  const result = await down.agents.link();
+  assert.equal(result.local, true);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /could not be reached/);
+  await down.agents.link();
+  assert.equal(down.requests.length, 2, 'a failure is not remembered: the next call asks again');
+  await assert.rejects(down.agents.get('/api/status'), failsWith(0, /could not be reached/));
+});
+
+test('get and post use the shared nonce and fail with an Error that carries status and message', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  const { agents } = page;
+  const status = await agents.get('/api/status');
+  assert.ok(status.agents && typeof status.nonce === 'string' && status.nonce);
+  assert.equal(page.requests[0].nonce, undefined, 'a read carries no nonce');
+
+  const listing = await agents.post('/api/agents/packet/inspect', { sourceDir: w.source });
+  assert.ok(Array.isArray(listing.files) && listing.files.length === 2);
+  const posted = page.requests.find(r => r.method === 'POST');
+  assert.equal(posted.nonce, status.nonce, 'a post carries the nonce');
+  /* the explicit read above is one request for /api/status; the post loaded the nonce with one more, and no later call asks again */
+  assert.equal(page.requests.filter(r => r.url === '/api/status').length, 2);
+
+  await assert.rejects(agents.post('/api/agents/packet/inspect', { sourceDir: path.join(w.base, 'nowhere') }), error => {
+    assert.ok(error.status >= 400 && error.status < 500, 'a status from the companion: ' + error.status);
+    assert.ok(error.message.length > 0 && !/refused the request/.test(error.message), 'the companion\'s own message: ' + error.message);
+    return true;
+  });
+  await assert.rejects(agents.get('/api/agents/rounds/rnd-000000000000'), error => error.status === 404 && typeof error.message === 'string' && error.message.length > 0);
+  await assert.rejects(agents.post('/api/agents/rounds/rnd-000000000000/freeze'), error => error.status === 404);
+  const rounds = await agents.get('/api/agents/rounds?limit=1');
+  assert.ok(Array.isArray(rounds.rounds));
+
+  /* a post with no body sends an empty object, and a repeated read never needs the nonce again */
+  const before = page.requests.length;
+  await assert.rejects(agents.post('/api/agents/rounds'), error => error.status === 400);
+  assert.equal(page.requests.length, before + 1);
+
+  /* the new feed and log routes are reachable with a query string */
+  const id = await finishedRoundViaService(w, { task: 'Atlas' });
+  const feed = await agents.get('/api/agents/runs?limit=5&task=' + encodeURIComponent('Atlas'));
+  assert.equal(feed.runs.length, 1);
+  assert.equal(feed.runs[0].roundId, id);
+  const log = await agents.get(`/api/agents/rounds/${id}/runs/1/log?after=0&limit=50`);
+  assert.ok(Array.isArray(log.lines) && log.done === true);
+});
+
+test('get and post refuse anything that is not a plain path under /api/, before any request is made', async t => {
+  const w = await makeWorld(t);
+  const page = makePage(t, w);
+  const bad = ['http://127.0.0.1/api/status', '//evil.example/api/status', 'https://evil.example/api/x', '/status', '/api', 'api/status', '/api/../status', '/api/rounds/../../x',
+    '/api/%2e%2e/x', '/api/a/%2E%2E', '/api/a%2f..%2fb', '/api/a%5c..', '/api/x#fragment', '/api/x y', '/api/x\u0000', '/api/é', '/api/x\\y', '/api/%zz', '/API/status', '/api/' + 'a'.repeat(3000),
+    '', 42, null, undefined, {}, ['/api/status'], 'javascript:alert(1)', 'data:text/plain,x'];
+  for (const path of bad) {
+    await assert.rejects(page.agents.get(path), failsWith(400, /Only paths under \/api\//), 'get ' + String(path).slice(0, 40));
+    await assert.rejects(page.agents.post(path, {}), failsWith(400, /Only paths under \/api\//), 'post ' + String(path).slice(0, 40));
+  }
+  assert.equal(page.requests.length, 0, 'nothing was requested');
+  /* a query with a slash, equals signs and escapes passes the guard: the companion, not the page, judges its values */
+  const refused = await page.agents.get('/api/agents/runs?limit=3&task=a%20b&round=x/y').catch(error => error);
+  assert.equal(refused.status, 400);
+  assert.match(refused.message, /round id/);
+  assert.equal(page.requests.length, 1, 'that one went out');
+});
+
+/* ====================================================================== openRun and openRound: a request that waits for the view */
+
+const STEP_IDS = ['runtime', 'packet', 'settings', 'freeze', 'round', 'runs'];
+const twoRounds = async w => {
+  const older = await finishedRoundViaService(w, { label: 'older round', config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  await sleep(20);
+  const newer = await finishedRoundViaService(w, { label: 'newer round' });
+  return { older, newer };
+};
+const selectedRound = page => (page.section('strip').match(/Round (rnd-[0-9a-f]+)/) || [])[1];
+
+test('openRun before the Agents view is mounted selects that round and opens that pilot once the view is ready', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  assert.deepEqual({ ...(await page.agents.openRun(older, 2)) }, { recorded: true, applied: false });
+  assert.equal(page.requests.length, 0, 'recording a request asks the companion nothing');
+  await page.boot();
+  await waitFor(() => /Pilot 2 · completed/.test(page.modal()), { label: 'the drawer of pilot 2' });
+  assert.equal(selectedRound(page), older, 'the older round is selected, not the newest one');
+  assert.notEqual(older, newer);
+  assert.match(page.section('runs'), new RegExp(`<option value="${older}" selected>`));
+  assert.match(page.modal(), /Where the output is/);
+  assert.match(page.modal(), /<h2 id="ag-dialog-title">Pilot 2 · completed<\/h2>/);
+  /* it is applied once: a later mount does not open it again */
+  await page.click('close-overlay');
+  page.agents.afterRender(false);
+  page.agents.afterRender(true);
+  await page.settle();
+  assert.equal(page.modal().trim(), '');
+});
+
+test('openRun while the view is still starting, and while it is showing, applies the request', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  page.agents.render({ package: null, notify() {}, download() {} });
+  page.agents.afterRender(true);
+  assert.deepEqual({ ...(await page.agents.openRun(older, 1)) }, { recorded: true, applied: false }, 'the page is still checking for the companion');
+  await waitFor(() => /Pilot 1 · completed/.test(page.modal()), { label: 'the drawer after the start' });
+  assert.equal(selectedRound(page), older);
+
+  /* showing now: the answer says it was applied, and the drawer for another round replaces the one that was open */
+  assert.deepEqual({ ...(await page.agents.openRun(newer, 1)) }, { recorded: true, applied: true });
+  await page.settle();
+  assert.equal(selectedRound(page), newer);
+  assert.match(page.modal(), /Pilot 1 · completed/);
+  assert.ok(page.modal().includes(evidenceOf(newer, 1)), 'the drawer shows the newer round\'s evidence folder');
+  assert.ok(!page.modal().includes(evidenceOf(older, 1)));
+
+  /* openRound selects without opening a drawer, and closes the one that is open */
+  assert.deepEqual({ ...(await page.agents.openRound(older)) }, { recorded: true, applied: true });
+  assert.equal(selectedRound(page), older);
+  assert.equal(page.modal().trim(), '');
+});
+
+const evidenceOf = (id, n) => `private/agent-rounds/${id}/runs/${n}/outputs/`;
+
+test('openRound scrolls to the step it names, and ignores a step it does not know', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older } = await twoRounds(w);
+  const page = makePage(t, w);
+  const hits = [];
+  for (const step of STEP_IDS) page.element('ag-' + step).scrollIntoView = () => hits.push(step);
+  await page.boot();
+  hits.length = 0;
+  for (const step of STEP_IDS) {
+    assert.deepEqual({ ...(await page.agents.openRound(older, step)) }, { recorded: true, applied: true }, step);
+    assert.equal(selectedRound(page), older);
+  }
+  assert.deepEqual(hits, STEP_IDS, 'one scroll per step, to that step');
+  hits.length = 0;
+  await page.agents.openRound(older, 'nonsense');
+  await page.agents.openRound(older);
+  await page.agents.openRound(older, '__proto__');
+  assert.deepEqual(hits, [], 'an unknown or missing step scrolls nowhere');
+  assert.equal(page.status().includes('not valid'), false);
+
+  /* recorded before the mount, applied at the mount */
+  const fresh = makePage(t, w);
+  const mounted = [];
+  fresh.element('ag-freeze').scrollIntoView = () => mounted.push('freeze');
+  await fresh.agents.openRound(older, 'freeze');
+  await fresh.boot();
+  await waitFor(() => mounted.length > 0, { label: 'the scroll after the mount' });
+  assert.equal(selectedRound(fresh), older);
+  assert.equal(fresh.modal().trim(), '');
+});
+
+test('a round or pilot that is not there is reported in the status line, never thrown; a bad argument is too', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  await page.boot();
+  assert.equal(selectedRound(page), newer);
+
+  /* the round exists, the pilot does not: the round is shown with its runs, and the notice names the pilots it has */
+  assert.deepEqual({ ...(await page.agents.openRun(older, 7)) }, { recorded: true, applied: false });
+  assert.match(page.status(), /Round rnd-[0-9a-f]+ has no pilot 7\. Its pilots are 1, 2\./);
+  assert.ok(page.status().includes(older));
+  assert.equal(selectedRound(page), older);
+  assert.equal(page.modal().trim(), '');
+
+  /* a drawer that is open is closed by a request that cannot be honoured, so the notice is not hidden behind it */
+  await page.click('open-run', { n: 1 });
+  assert.match(page.modal(), /Pilot 1/);
+  await page.agents.openRun(older, 9);
+  assert.equal(page.modal().trim(), '');
+  assert.match(page.status(), /no pilot 9/);
+
+  /* the round does not exist: the selection stays where it was */
+  const ghost = 'rnd-000000000000';
+  assert.deepEqual({ ...(await page.agents.openRun(ghost, 1)) }, { recorded: true, applied: false });
+  assert.match(page.status(), /was not found on this companion/);
+  assert.ok(page.status().includes(ghost));
+  assert.equal(selectedRound(page), older, 'the earlier selection is kept');
+  assert.deepEqual({ ...(await page.agents.openRound(ghost, 'freeze')) }, { recorded: true, applied: false });
+  assert.match(page.status(), /was not found/);
+
+  /* a round that has no pilots yet */
+  const draft = await w.service.createRound(roundBody(w));
+  await page.agents.openRun(draft.id, 1);
+  assert.match(page.status(), /has not started any pilots, so there is no pilot 1 to open/);
+
+  for (const [args, pattern] of [[['bad id', 1], /round id is not valid/], [[null, 1], /round id is not valid/], [[older, 0], /pilot number is not valid/], [[older, 100], /pilot number is not valid/],
+    [[older, 1.5], /pilot number is not valid/], [[older, 'x'], /pilot number is not valid/], [[older, undefined], /pilot number is not valid/], [[older, '2; drop'], /pilot number is not valid/]]) {
+    const result = await page.agents.openRun(...args);
+    assert.deepEqual({ ...result }, { recorded: true, applied: false }, JSON.stringify(args));
+    assert.match(page.status(), pattern, JSON.stringify(args));
+    assert.equal(page.modal().trim(), '');
+  }
+  assert.deepEqual({ ...(await page.agents.openRound('../../x', 'freeze')) }, { recorded: true, applied: false });
+  assert.match(page.status(), /round id is not valid/);
+  /* nothing but GETs of rounds went out for all of that */
+  assert.ok(page.requests.every(r => r.method === 'GET'), 'a request from another view never changes anything');
+});
+
+test('a newer request replaces an older one that has not been applied, and one nobody followed up is dropped after two minutes', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  const froze = [];
+  page.element('ag-freeze').scrollIntoView = () => froze.push(1);
+  await page.agents.openRun(older, 1);
+  await page.agents.openRound(newer, 'freeze');
+  await page.boot();
+  await waitFor(() => froze.length > 0, { label: 'the second request' });
+  assert.equal(selectedRound(page), newer);
+  assert.equal(page.modal().trim(), '', 'the first request was replaced, so no drawer');
+
+  const late = makePage(t, w);
+  await late.agents.openRun(older, 1);
+  const ContextDate = vm.runInContext('Date', late.context);
+  const real = ContextDate.now;
+  ContextDate.now = () => real() + 3 * 60 * 1000;
+  await late.boot();
+  await sleep(300);
+  assert.equal(late.modal().trim(), '', 'a request three minutes old is not applied');
+  assert.equal(selectedRound(late), newer, 'the page chose its usual round');
+  assert.doesNotMatch(late.status(), /no pilot|not found|not valid/, 'and says nothing about it');
+});
+
+test('leaving the view while a request is being read opens nothing, and a drawer opened by a request is closed by leaving', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  await page.boot();
+  const pending = page.agents.openRun(older, 2);
+  page.agents.afterRender(false);
+  assert.deepEqual({ ...(await pending) }, { recorded: true, applied: false });
+  await page.settle();
+  assert.equal(page.modal().trim(), '', 'no drawer over another view');
+  /* and the selection did not move while the view was away: the pilot opened now is the newer round's */
+  page.agents.afterRender(true);
+  await page.click('open-run', { n: 1 });
+  assert.ok(page.modal().includes(evidenceOf(newer, 1)) && !page.modal().includes(evidenceOf(older, 1)), 'the selected round is still the newer one');
+  await page.click('close-overlay');
+
+  await page.agents.openRun(older, 2);
+  await page.settle();
+  assert.match(page.modal(), /Pilot 2/);
+  page.agents.afterRender(false);
+  assert.equal(page.modal().trim(), '');
+  assert.equal(page.document.title, 'Finance Task Studio');
+});
+
+/* ====================================================================== the run drawer: where is the output */
+
+const WRITES = [{ path: 'outputs/answer.txt', content: 'hold 1,250\n' }, { path: 'outputs/notes.txt', content: 'second file\n' }];
+
+/* A stand-in for the browser's clipboard and for the older text-area route. */
+function makeCopyFakes({ clipboard = 'works', legacy = 'works' } = {}) {
+  const copied = [], legacyCopies = [], created = [];
+  const fakes = { copied, legacyCopies, created };
+  if (clipboard !== 'absent') {
+    fakes.navigator = { clipboard: { writeText: async text => { if (clipboard === 'denied') throw new Error('synthetic: permission denied'); copied.push(text); } } };
+  }
+  if (legacy !== 'absent') {
+    fakes.documentExtras = {
+      createElement: tag => {
+        const area = { tag, value: '', className: '', parentNode: null, selectedValue: null, setAttribute() {}, focus() {}, select() { area.selectedValue = area.value; } };
+        created.push(area);
+        return area;
+      },
+      body: { appendChild: el => { el.parentNode = { removeChild: child => { child.parentNode = null; } }; }, ...makeElement('body') },
+      execCommand: command => {
+        if (legacy === 'throws') throw new Error('synthetic: not allowed');
+        legacyCopies.push([command, created[created.length - 1].selectedValue, created[created.length - 1].parentNode !== null]);
+        return legacy === 'works';
+      },
+    };
+  }
+  return fakes;
+}
+
+test('the run drawer says where the output is: the working folder, the evidence folder with a Copy button, and how many files', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, writeFiles: WRITES });
+  const id = await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /<h3>Where the output is<\/h3>/);
+  assert.ok(drawer.includes(`<dt>Working folder</dt><dd><code class="ag-path">finance-studio-pilots/${id}-1</code>`), 'the relative working folder the run row holds');
+  assert.ok(drawer.includes(`<code class="ag-path" id="ag-evidence-path">private/agent-rounds/${id}/runs/1/outputs/</code>`));
+  assert.match(drawer, /<button type="button" class="small" data-ag="copy-path"[^>]*>Copy path<\/button>/);
+  assert.match(drawer, /<dt>Output files<\/dt><dd>2<\/dd>/);
+  assert.doesNotMatch(drawer, /Copied to the working copy when the run ends/, 'that line is for a run that has not ended');
+  assert.doesNotMatch(drawer, /may not exist/);
+  assert.ok(drawer.indexOf('Where the output is') < drawer.indexOf('<h3>Audit</h3>') && drawer.indexOf('Where the output is') < drawer.indexOf('<h3>Outputs</h3>'));
+  assert.match(drawer, /<code class="ag-path">answer\.txt<\/code>/, 'the outputs table is still there');
+  /* no absolute path anywhere in it: the page is never told one */
+  assert.doesNotMatch(drawer, new RegExp(w.tmpRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(drawer, new RegExp(w.projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(page.has('copy-path'), true);
+});
+
+test('while a pilot runs, the drawer shows the folders and the line that the files are copied when the run ends', async t => {
+  const w = await makeWorld(t, { hang: true }, { limits: { killGraceMs: 200 } });
+  const id = await approvedRoundViaService(w);
+  await w.service.launchRound(id);
+  await waitFor(async () => (await w.service.getRound(id)).runs[0].state === 'running', { label: 'the pilot to run' });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /<p class="footnote" id="ag-output-note">Copied to the working copy when the run ends<\/p>/);
+  assert.match(drawer, /<dt>Output files<\/dt><dd>Counted when the run ends<\/dd>/);
+  assert.ok(drawer.includes(`finance-studio-pilots/${id}-1`) && drawer.includes(`private/agent-rounds/${id}/runs/1/outputs/`));
+  assert.equal(page.has('copy-path'), true, 'the path can be copied before the run ends');
+  await w.service.cancelRound(id);
+  await w.service.whenSettled(id);
+  await waitFor(() => !/Copied to the working copy when the run ends/.test(page.modal()), { label: 'the line to go once the run has ended', timeout: 10000 });
+  assert.match(page.modal(), /<dt>Output files<\/dt><dd>(0|-)<\/dd>/);
+});
+
+test('Copy path uses the clipboard; when that is refused or absent it uses a text area; when nothing works it says so and the path stays selectable', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, writeFiles: WRITES });
+  const id = await finishedRoundViaService(w);
+  const wanted = `private/agent-rounds/${id}/runs/1/outputs/`;
+
+  const direct = makeCopyFakes();
+  const first = makePage(t, w, direct);
+  await first.boot();
+  await first.click('open-run', { n: 1 });
+  await first.click('copy-path');
+  assert.deepEqual(direct.copied, [wanted]);
+  assert.equal(direct.created.length, 0, 'the text area is not touched when the clipboard works');
+  assert.match(first.modal(), /<p class="footnote" id="ag-copy-note" role="status">Copied the evidence folder path to the clipboard\.<\/p>/);
+  assert.equal(first.status(), 'Copied the evidence folder path to the clipboard.');
+
+  const denied = makeCopyFakes({ clipboard: 'denied' });
+  const second = makePage(t, w, denied);
+  await second.boot();
+  await second.click('open-run', { n: 1 });
+  await second.click('copy-path');
+  assert.deepEqual(denied.legacyCopies, [['copy', wanted, true]], 'the fallback selected exactly the path, inside the page');
+  assert.equal(denied.created[0].parentNode, null, 'and removed its text area afterwards');
+  assert.match(second.modal(), /Copied the evidence folder path/);
+
+  const absent = makeCopyFakes({ clipboard: 'absent' });
+  const third = makePage(t, w, absent);
+  await third.boot();
+  await third.click('open-run', { n: 1 });
+  await third.click('copy-path');
+  assert.deepEqual(absent.legacyCopies.map(entry => entry[1]), [wanted]);
+  assert.match(third.modal(), /Copied the evidence folder path/);
+
+  for (const options of [{ clipboard: 'absent', legacy: 'refuses' }, { clipboard: 'denied', legacy: 'throws' }, { clipboard: 'absent', legacy: 'absent' }, { clipboard: 'denied', legacy: 'absent' }]) {
+    const fakes = makeCopyFakes(options);
+    const page = makePage(t, w, fakes);
+    await page.boot();
+    await page.click('open-run', { n: 1 });
+    await page.click('copy-path');
+    assert.match(page.modal(), /The browser did not allow copying\. Select the path above and copy it yourself\./, JSON.stringify(options));
+    assert.ok(page.modal().includes(wanted), 'the path is on screen to be selected');
+    assert.doesNotMatch(page.modal(), /Copied the evidence folder path/);
+    assert.deepEqual(fakes.copied, []);
+    assert.equal(fakes.created.filter(area => area.parentNode).length, 0, 'no text area is left behind');
+  }
+
+  /* a page with neither (the test pages of this file) does not throw either */
+  const bare = makePage(t, w);
+  await bare.boot();
+  await bare.click('open-run', { n: 1 });
+  await bare.click('copy-path');
+  assert.match(bare.modal(), /did not allow copying/);
+});
+
+test('closing the drawer while a copy is under way, or opening another pilot, leaves no stale note', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER }, {});
+  const id = await finishedRoundViaService(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  let release;
+  const slow = { navigator: { clipboard: { writeText: () => new Promise(resolve => { release = resolve; }) } } };
+  const page = makePage(t, w, slow);
+  await page.boot();
+  await page.click('open-run', { n: 1 });
+  await page.click('copy-path');
+  await page.click('close-overlay');
+  release();
+  await page.settle();
+  assert.equal(page.modal().trim(), '', 'the drawer stays closed');
+  await page.click('open-run', { n: 2 });
+  assert.doesNotMatch(page.modal(), /ag-copy-note/, 'a new drawer starts without a note');
+  assert.ok(page.modal().includes(`private/agent-rounds/${id}/runs/2/outputs/`));
+});
+
+/* ====================================================================== pill kinds and the single yellow button */
+
+/* Every pill in the markup as [kind, text]: class="pill <kind>">text</span>. */
+const pillsIn = markup => [...markup.matchAll(/<span class="pill ([a-z]*)">([^<]*)<\/span>/g)].map(match => [match[1], match[2]]);
+const kindsOf = (markup, wanted) => pillsIn(markup).filter(([, text]) => text === wanted).map(([kind]) => kind);
+
+test('pill kinds: one kind per state everywhere; a count of included files and a frozen round are not green', async t => {
+  const w = await makeWorld(t, [{ hang: true }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('count', { value: '2', event: 'change' });
+  await page.type('atonce', { value: '1' });
+  await page.fillAndFreeze();
+
+  /* a frozen round and the files selected for it are labels of a step, not a pass */
+  assert.match(page.section('packet'), /<span class="pill violet">2 of 2 files included<\/span>/);
+  assert.doesNotMatch(page.section('packet'), /pill green/);
+  assert.match(page.section('round'), /<span class="pill violet">Round rnd-[0-9a-f]+ · frozen<\/span>/);
+  assert.match(page.section('strip'), /<span class="pill violet">frozen<\/span>/);
+  assert.match(page.section('runs'), /<span class="pill violet">frozen<\/span>/);
+  assert.match(page.section('packet'), /<span class="pill ">Not inspected<\/span>|<span class="pill violet">/);
+
+  await page.click('open-approve');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  const id = (await w.service.listRounds())[0].id;
+  await waitFor(() => /<td data-label="State"><span class="pill violet">running<\/span>/.test(page.section('runs')), { label: 'the pilot to show as running', timeout: 10000 });
+  assert.match(page.section('runs'), /<td data-label="State"><span class="pill ">queued<\/span>/, 'a pilot that waits is a plain label');
+  assert.deepEqual(kindsOf(page.section('strip'), 'running'), ['violet'], 'the strip and the table agree about running');
+  assert.deepEqual(kindsOf(page.section('round'), 'Round ' + id + ' · running'), ['violet']);
+
+  await w.service.cancelRound(id);
+  await w.service.whenSettled(id);
+  await waitFor(() => /<span class="pill amber">cancelled<\/span>/.test(page.section('strip')) && /<td data-label="State"><span class="pill amber">cancelled<\/span>/.test(page.section('runs')), { label: 'cancelled to show', timeout: 10000 });
+  assert.deepEqual(kindsOf(page.section('strip'), 'cancelled'), ['amber']);
+  assert.ok(kindsOf(page.section('runs'), 'cancelled').length >= 2 && kindsOf(page.section('runs'), 'cancelled').every(kind => kind === 'amber'), 'the same kind in the card title and in the table');
+  await page.click('open-run', { n: 2 });
+  assert.deepEqual(kindsOf(page.modal(), 'cancelled'), ['amber'], 'and in the drawer');
+});
+
+test('pill kinds: a failed state is red in the strip, the table and the drawer; a finished round and a completed pilot stay green; CLEAN stays green', async t => {
+  const w = await makeWorld(t, [{ resultText: '', exitCode: 3, stderr: 'synthetic runtime complaint' }, { resultText: GOLD_ANSWER }]);
+  const failedRound = await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  assert.equal((await w.service.getRound(failedRound)).status, 'failed');
+  assert.deepEqual(kindsOf(page.section('strip'), 'failed'), ['red']);
+  assert.deepEqual(kindsOf(page.section('runs'), 'failed'), ['red', 'red'], 'the card title and the table');
+  await page.click('open-run', { n: 1 });
+  assert.deepEqual(kindsOf(page.modal(), 'failed'), ['red']);
+  await page.click('close-overlay');
+
+  /* pilot 1 fails again and pilot 2 completes, so this round is finished, not failed */
+  const ok = await finishedRoundViaService(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  await page.type('select-round', { value: ok, event: 'change' });
+  assert.equal((await w.service.getRound(ok)).status, 'finished');
+  assert.deepEqual(kindsOf(page.section('strip'), 'finished'), ['green']);
+  assert.deepEqual(kindsOf(page.section('runs'), 'finished'), ['green']);
+  assert.deepEqual(kindsOf(page.section('runs'), 'failed'), ['red'], 'the failed pilot in the same round');
+  assert.match(page.section('runs'), /<td data-label="State"><span class="pill green">completed<\/span>/);
+  assert.match(page.section('runs'), /<td data-label="Audit"><span class="pill green">CLEAN<\/span>/);
+  assert.equal(pillsIn(page.html()).filter(([kind, text]) => kind === 'amber' && /failed|cancelled/.test(text)).length, 0, 'no failed state is amber');
+
+  /* the one place the page kept its plain label: a file held back by the gaf setting */
+  const gaf = await makeWorld(t, { resultText: GOLD_ANSWER });
+  gaf.put('gaf-hedge.csv', 'a,b\n1,2\n');
+  const gafPage = makePage(t, gaf);
+  await gafPage.boot();
+  await gafPage.type('dir', { value: gaf.source });
+  await gafPage.click('inspect');
+  await gafPage.type('gaf', { checked: false });
+  assert.match(gafPage.section('packet'), /<span class="pill ">Hidden: gaf\/ is off<\/span>/);
+});
+
+/* The yellow buttons the page shows at once: the rail, the cards and the status line. The two cards that nest the gate and the
+   freeze state hold older copies of them, so they are left out; the dialog is a different layer and has its own. */
+const primaries = page => ['ag-rail', 'ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze-state', 'ag-gate', 'ag-runs']
+  .flatMap(id => [...page.element(id).innerHTML.matchAll(/<button\b[^>]*class="([^"]*)"[^>]*data-ag="([\w-]+)"/g)].filter(match => /(^|\s)primary(\s|$)/.test(match[1])).map(match => match[2]));
+
+test('at most one yellow button is on screen at a time, and it is the one that moves the current step forward', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, delayMs: 800 });
+  const page = makePage(t, w);
+  await page.boot();
+  assert.deepEqual(primaries(page), ['inspect'], 'a new page: list the folder');
+
+  await page.type('dir', { value: w.source });
+  assert.deepEqual(primaries(page), ['inspect']);
+  await page.click('inspect');
+  assert.deepEqual(primaries(page), ['goto-step'], 'files listed, no prompt yet: the rail points at the packet');
+  assert.match(page.section('rail'), /data-step="packet"/);
+  await page.type('prompt', { value: PROMPT });
+  assert.deepEqual(primaries(page), ['freeze'], 'the packet is done: freeze is next');
+  await page.type('decision', { value: 'hold' });
+  await page.type('fig', { value: 'Usable cash', dataset: { kind: 'gfig', i: 0, j: 0, f: 'label' } });
+  await page.type('fig', { value: '1,250', dataset: { kind: 'gfig', i: 0, j: 0, f: 'value' } });
+  await page.click('freeze');
+  assert.deepEqual(primaries(page), ['open-approve'], 'frozen: review and approve');
+  assert.match(page.section('gate'), /class="primary" data-ag="open-approve"/);
+  assert.match(page.section('freeze-state'), /class="" data-ag="freeze"/, 'the freeze button is a plain button now');
+
+  /* a changed prompt makes the freeze stale: freeze again becomes the one */
+  await page.type('prompt', { value: PROMPT + ' More.' });
+  assert.deepEqual(primaries(page), ['freeze']);
+  await page.type('prompt', { value: PROMPT });
+  assert.deepEqual(primaries(page), ['open-approve']);
+
+  await page.click('open-approve');
+  assert.match(page.modal(), /class="primary" data-ag="approve-launch"/, 'the dialog keeps its own primary');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  assert.deepEqual(primaries(page), ['goto-step'], 'running: the rail');
+  await w.service.whenSettled((await w.service.listRounds())[0].id);
+  await waitFor(() => primaries(page).length === 0 || primaries(page)[0] !== 'goto-step', { label: 'the runs to finish on the page', timeout: 10000 });
+  assert.ok(primaries(page).length <= 1);
+
+  /* the same holds across a reload with a draft, a task and an offline companion note */
+  const states = [];
+  const again = makePage(t, w, { storage: makeStorage() });
+  await again.boot();
+  states.push(primaries(again));
+  await again.type('task', { value: 'Atlas' });
+  states.push(primaries(again));
+  await again.click('check-runtime');
+  states.push(primaries(again));
+  for (const state of states) assert.ok(state.length <= 1, JSON.stringify(state));
+});
+
+test('with Claude Code missing the rail, not a card, holds the yellow button', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-page-bin-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER }, { claudeBin: path.join(dir, 'claude-wrapper') });
+  const page = makePage(t, w);
+  await page.boot();
+  assert.match(page.section('runtime'), /Claude Code was not found/);
+  assert.deepEqual(primaries(page), ['goto-step']);
+  assert.match(page.section('rail'), /data-step="runtime"/);
+  await page.fillAndFreeze();
+  assert.deepEqual(primaries(page), ['goto-step'], 'still the runtime step: nothing else is yellow');
+});
+
+test('requests made while the view shows are answered one by one; one replaced before it starts answers applied false; the last one wins', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const { older, newer } = await twoRounds(w);
+  const page = makePage(t, w);
+  await page.boot();
+  const a = page.agents.openRun(older, 1);
+  const b = page.agents.openRun(newer, 1);
+  const c = page.agents.openRun(older, 2);
+  assert.deepEqual([{ ...(await a) }, { ...(await b) }, { ...(await c) }], [{ recorded: true, applied: true }, { recorded: true, applied: false }, { recorded: true, applied: true }]);
+  await page.settle();
+  assert.equal(selectedRound(page), older);
+  assert.match(page.modal(), /Pilot 2 · completed/);
+
+  /* leaving while one waits behind another: both callers get an answer, and nothing opens over the other view */
+  const first = page.agents.openRound(newer, 'freeze');
+  const second = page.agents.openRun(newer, 1);
+  page.agents.afterRender(false);
+  const answers = await Promise.all([first, second]);
+  assert.deepEqual(answers.map(answer => ({ ...answer })).map(answer => answer.recorded), [true, true]);
+  assert.equal(answers[1].applied, false);
+  await page.settle();
+  assert.equal(page.modal().trim(), '');
 });

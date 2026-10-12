@@ -9,6 +9,11 @@
    stub's violation scenario: a reload restores the form kept in the browser, and a second round produces a DISCARDED run, which
    must not be classifiable or exported.
 
+   It also checks what the other views rely on: the Task field (typed, sent with the round, restored, never makes a freeze stale), the
+   drawer's "where the output is" block with its Copy button, at most one yellow button on the page at each step, the pill kinds,
+   FinanceAgents.link / get / post (and that the file edition makes no request for them), and openRun / openRound recorded while
+   another view shows and applied when Agents mounts.
+
    The companion runs from a private copy of the files it serves, made in the system temporary folder, so round state is written
    there and the project's own private/ folder is never read or written.
 
@@ -43,6 +48,10 @@ async function waitFor(expression,label,timeout=45000){const end=Date.now()+time
 async function focusClick(selector){const found=await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)return false;el.focus();el.click();return true;})()`);assert.equal(found,true,'missing control '+selector);await delay(60);}
 async function setValue(selector,value){const done=await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)return false;el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true;})()`);assert.equal(done,true,'missing field '+selector);await delay(40);}
 const text=selector=>evaluate(`(document.querySelector(${JSON.stringify(selector)})||{}).textContent||''`);
+/* The yellow buttons of the page itself (the dialogs are a different layer, and the sidebar's own button is not the Agents page's). */
+const primaries=()=>evaluate('[...document.querySelectorAll("#ag-root button.primary")].map(b=>b.dataset.ag)');
+/* A click that counts as a user gesture, which the clipboard and the older copy command may need. */
+async function gestureClick(selector){const r=await call('Runtime.evaluate',{expression:`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)return false;el.focus();el.click();return true;})()`,returnByValue:true,userGesture:true});assert.equal(r.result.value,true,'missing control '+selector);await delay(150);}
 async function screenshot(name,width,height){await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<700});await delay(150);const r=await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});fs.writeFileSync(path.join(out,name+'.png'),Buffer.from(r.data,'base64'));const overflow=await evaluate('document.documentElement.scrollWidth>window.innerWidth');assert.equal(overflow,false,name+' horizontal overflow');checks.push(name+' fits viewport');}
 function freePort(){return new Promise((resolve,reject)=>{const s=net.createServer();s.once('error',reject);s.listen(0,'127.0.0.1',()=>{const port=s.address().port;s.close(()=>resolve(port));});});}
 /* The files the companion serves plus backend/, copied to a temporary folder. It has no private/ folder, so the companion runs viewer only and writes its rounds there. */
@@ -74,6 +83,8 @@ function makePacket(){
   return dir;
 }
 const PROMPT='Review the Atlas and Meridian schedule in the folder and state your decision with the units owed.';
+const TASK='Borealis';
+const OTHER_TASK='Cobalt';
 async function openAgents(url){
   await call('Page.navigate',{url});await waitFor('document.readyState==="complete"&&!!window.FinanceDashboard','page load',15000);
   await click('[data-dash-tab="agents"]');
@@ -89,6 +100,7 @@ async function fillPacketAndFreeze(options){
   await setValue('[data-ag-key="fp-1-id"]','fp-beta');await setValue('[data-ag-key="fp-1-label"]','Beta reading');await setValue('[data-ag-key="fp-1-tokens"]','1,100');
   await setValue('[data-ag-in="model"]','claude-sonnet-5-5');await setValue('[data-ag-in="effort"]','low');
   await setValue('#ag-count',String(options.pilots));
+  await setValue('#ag-task',TASK);
 }
 (async()=>{try{
   proc=spawn(binary,[...(process.getuid&&process.getuid()===0?['--no-sandbox']:[]),'--headless=new','--no-first-run','--no-default-browser-check','--disable-extensions','--disable-background-networking','--disable-component-update','--disable-default-apps','--disable-sync','--metrics-recording-only','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1','--user-data-dir='+profile,'about:blank'],{stdio:['ignore','ignore','pipe']});
@@ -96,7 +108,7 @@ async function fillPacketAndFreeze(options){
   const origin=browserURL.replace(/^ws:/,'http:').split('/devtools/')[0];const targets=await(await fetch(origin+'/json/list')).json();const target=targets.find(x=>x.type==='page');
   ws=new WebSocket(target.webSocketDebuggerUrl);await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
   ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);clearTimeout(p.timeout);pending.delete(m.id);m.error?p.reject(new Error(JSON.stringify(m.error))):p.resolve(m.result);}if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails);if(m.method==='Log.entryAdded'&&m.params.entry.level==='error')errors.push(m.params.entry);if(m.method==='Runtime.consoleAPICalled'&&m.params.type==='error')errors.push({console:m.params.args.map(a=>a.value||a.description)});if(m.method==='Network.requestWillBeSent')requests.push(m.params.request.url);if(m.method==='Page.javascriptDialogOpening'){dialogs.push(m.params.message);call('Page.handleJavaScriptDialog',{accept:true}).catch(()=>{});}});
-  const browserVersion=await call('Browser.getVersion');await call('Page.enable');await call('Runtime.enable');await call('Log.enable');await call('Network.enable');await call('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});
+  const browserVersion=await call('Browser.getVersion');await call('Page.enable');await call('Runtime.enable');await call('Log.enable');await call('Network.enable');await call('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await call('Emulation.setFocusEmulationEnabled',{enabled:true});
   await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
 
   /* 1. The offline edition opened from disk shows only the offline message and makes no request. */
@@ -105,7 +117,12 @@ async function fillPacketAndFreeze(options){
   assert.equal((await text('#ag-root')).trim(),OFFLINE_TEXT);
   assert.equal(await evaluate('document.querySelectorAll("#ag-root button, #ag-root input, #ag-root textarea").length'),0,'offline edition must offer no controls');
   assert.equal(requests.filter(u=>/^https?:/.test(u)).length,0,'offline edition must make no HTTP request');
-  checks.push('file edition shows only the offline message, with no controls and no HTTP request');
+  assert.deepEqual(JSON.parse(await evaluate('FinanceAgents.link().then(r=>JSON.stringify(r))')),{local:false,ok:false,offlineMessage:OFFLINE_TEXT,error:''},'link() in the file edition');
+  assert.equal(await evaluate(`FinanceAgents.get('/api/status').then(()=>'resolved',e=>e.status+':'+e.message)`),'0:'+OFFLINE_TEXT,'get() in the file edition rejects');
+  assert.equal(await evaluate(`FinanceAgents.post('/api/agents/rounds',{}).then(()=>'resolved',e=>e.status+':'+e.message)`),'0:'+OFFLINE_TEXT,'post() in the file edition rejects');
+  assert.equal(await evaluate(`FinanceAgents.openRun('rnd-aaaaaaaaaaaa',1).then(r=>JSON.stringify(r))`),'{"recorded":false,"applied":false}','openRun() in the file edition records nothing');
+  assert.equal(requests.filter(u=>/^https?:/.test(u)).length,0,'link, get, post and openRun make no HTTP request in the file edition');
+  checks.push('file edition shows only the offline message, with no controls and no HTTP request; link() says local false and get, post and openRun make no request');
 
   /* 2. Start the companion with the clean stub scenario and open the page. */
   packetDir=makePacket();companionRoot=makeCompanionRoot();
@@ -124,6 +141,13 @@ async function fillPacketAndFreeze(options){
   assert.match(await text('#ag-settings'),/All 5 at once/);
   assert.match(await text('#ag-strip'),/No round selected/);
   checks.push('model, effort, pilots (five by default), pilots at a time and the spending cap sit above the freeze, with the round maximum spend');
+  assert.equal(await evaluate('document.querySelector("label.field:has(#ag-task)").firstChild.textContent.trim()'),'Task','the Task field has the label Task');
+  assert.equal(await evaluate('document.querySelector("#ag-task").placeholder'),'Task name, for example Atlas');
+  assert.equal(await evaluate('document.querySelector("#ag-task").getAttribute("list")'),'ag-task-list');
+  assert.equal(await evaluate('document.querySelector("#ag-task").maxLength'),120);
+  assert.equal(await evaluate('document.querySelector("#ag-task").closest("#ag-settings")!==null'),true,'it is in the Settings card');
+  assert.deepEqual(await primaries(),['inspect'],'a new page has one yellow button: list the folder');
+  checks.push('the Settings card has a Task field (label Task, placeholder, suggestions list, 120 characters); a new page shows exactly one yellow button');
 
   /* 3. Packet: inspect, hostile name renders as text, defaults, overrides and the gaf toggle. */
   await fillPacketAndFreeze({pilots:5});
@@ -143,6 +167,7 @@ async function fillPacketAndFreeze(options){
   await click(`[data-ag-key="inc-${await evaluate(`[...document.querySelectorAll('#ag-packet tbody tr')].findIndex(tr=>tr.querySelector('.ag-path').textContent==='evaluator-notes.txt')`)}"]`);
   assert.match(await evaluate(`${row('evaluator-notes.txt')}.textContent`),/Override/,'ticking an excluded file is shown as an override');
   assert.match(await text('#ag-wordcount'),/\d+ words\. Project limit \d+/);
+  assert.deepEqual(await primaries(),['freeze'],'folder listed, prompt and gold typed: freeze is the one yellow button');
   checks.push('packet panel: defaults exclude evaluator-looking files, gaf toggle with the production sentence, override is labelled, word count against the project limit');
 
   /* 4. Launch is disabled before the freeze. Pilots are capped by the status allowlist. */
@@ -161,12 +186,23 @@ async function fillPacketAndFreeze(options){
   const frozenText=await text('#ag-freeze-state');assert.match(frozenText,/Frozen at/);assert.match(frozenText,/rnd-[a-z0-9-]+/);
   assert.equal(await evaluate('document.querySelector("#ag-status").getAttribute("aria-live")'),'polite');await waitFor('/Gold frozen/.test(document.querySelector("#ag-status").textContent)','frozen status message');
   await waitFor('document.querySelector("[data-ag=open-approve]").disabled===false','launch enabled after freeze');
+  assert.deepEqual(await primaries(),['open-approve'],'frozen: review and approve is the one yellow button');
   await setValue('#ag-prompt',PROMPT+' Extra words.');
   assert.equal(await evaluate('document.querySelector("[data-ag=open-approve]").disabled'),true,'changing the prompt after the freeze disables launch');
   assert.match(await text('#ag-gate'),/changed after the freeze/);
+  assert.deepEqual(await primaries(),['freeze'],'a stale freeze: freeze again is the one yellow button');
   await setValue('#ag-prompt',PROMPT);
   assert.equal(await evaluate('document.querySelector("[data-ag=open-approve]").disabled'),false,'restoring the prompt restores the freeze match');
-  checks.push('freeze shows hash and time; a changed prompt marks the freeze stale and disables launch; restoring it re-enables');
+  assert.deepEqual(await primaries(),['open-approve']);
+  checks.push('freeze shows hash and time; a changed prompt marks the freeze stale and disables launch; restoring it re-enables; one yellow button at each of those steps');
+  /* the task was sent with the round; editing it afterwards is not a change to the freeze */
+  const taskOf=async()=>evaluate(`fetch('/api/agents/rounds',{cache:'no-store'}).then(r=>r.json()).then(d=>JSON.stringify(d.rounds.map(x=>x.task)))`);
+  assert.equal(await taskOf(),JSON.stringify([TASK]),'the round holds the task that was typed');
+  await setValue('#ag-task',OTHER_TASK);
+  assert.equal(await evaluate('document.querySelector("[data-ag=open-approve]").disabled'),false,'a task edit does not disable launch');
+  assert.doesNotMatch(await text('#ag-gate'),/changed after the freeze/);
+  assert.equal(await taskOf(),JSON.stringify([TASK]),'and does not change the round that exists');
+  checks.push('the typed task is stored with the round; editing the Task field after the freeze neither marks it stale nor changes the round');
 
   /* 6. Approve and launch: three acknowledgements, command line with the prompt elided. */
   await click('[data-ag="open-approve"]');
@@ -175,6 +211,8 @@ async function fillPacketAndFreeze(options){
   assert.match(dialog,/Claude Code is ready\./,'the pre-flight ran before the dialog opened');assert.match(dialog,/Round maximum spend\s*USD 15\.00/);assert.match(dialog,/all 5 at once, one wave/);assert.match(dialog,/USD 3\.00 \(--max-budget-usd 3\.00\)/);
   const command=await text('#agents-modal .ag-command');assert.match(command,/claude/i);assert.match(command,/--model/);assert.ok(!command.includes('Atlas'),'the command summary elides the prompt');
   assert.equal(await evaluate('document.querySelectorAll("#agents-modal input[type=checkbox]").length'),3);
+  assert.equal(await evaluate('document.querySelectorAll("#agents-modal button.primary").length'),1,'the dialog has its own single yellow button');
+  assert.ok(!dialog.includes(OTHER_TASK)&&!dialog.includes(TASK),'the approval dialog does not show the task');
   assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=approve-launch]").disabled'),true);
   for(const id of ['shell-access','network','isolation-by-audit']){assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=approve-launch]").disabled'),true);await click(`#agents-modal [data-id="${id}"]`);}
   assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=approve-launch]").disabled'),false);
@@ -186,6 +224,9 @@ async function fillPacketAndFreeze(options){
   await waitFor('[...document.querySelectorAll("#ag-runs tbody tr")].filter(tr=>tr.children[1].textContent.trim()==="running").length===5','all five pilots running at the same time',20000);
   assert.match(await text('#ag-strip'),/Pilots 5: done 0 · running 5 · failed 0/);
   assert.equal(await evaluate('document.title'),'(0/5) Agents · Finance Task Studio','the tab title counts the pilots');
+  assert.deepEqual(await primaries(),['goto-step'],'while the pilots run, the rail is the one yellow button');
+  assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[1].querySelector(".pill.violet"))'),true,'a running pilot is violet');
+  assert.equal(await evaluate('!!document.querySelector("#ag-strip .pill.violet")'),true,'and so is the running round in the strip');
   await screenshot('desktop-one-wave',1440,1000);
   checks.push('all five pilots run at once (one wave): the status strip shows 5 running and the tab title reads (0/5) Agents');
 
@@ -196,12 +237,30 @@ async function fillPacketAndFreeze(options){
   checks.push('the status strip and the tab title update as the pilots end: (5/5) Agents, done 5, elapsed time');
   const runsText=await text('#ag-runs');assert.match(runsText,/Directional only, n = 5\. No rate or difficulty is computed\./);assert.ok(!runsText.includes('%'),'no percentage anywhere in the runs card');assert.ok(!/pass rate|success rate|failure rate/i.test(runsText),'no rate wording');
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[1].textContent.trim()==="completed")'),true,'both pilots completed');
+  assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[1].querySelector(".pill.green"))'),true,'a completed pilot is green');
+  assert.equal(await evaluate('!!document.querySelector("#ag-strip .pill.green")&&/finished/.test(document.querySelector("#ag-strip .pill.green").textContent)'),true,'and so is the finished round');
+  assert.ok((await primaries()).length<=1,'at most one yellow button once the pilots have ended');
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[5].textContent.trim()==="CLEAN")'),true,'both pilots audited CLEAN');
   checks.push('all five pilots finish; the banner reads directional only, n = 5; no percentage or pass rate is shown');
   await focusClick('#ag-runs [data-ag-key="run-1"]');
   await waitFor('!!document.querySelector("#agents-modal .ag-drawer")&&!!document.querySelector("#agents-modal .ag-final")','drawer with final answer');
   assert.ok((await text('#agents-modal .ag-final')).trim().length>0,'final answer is shown');
   const drawer=await text('#agents-modal');assert.match(drawer,/Audit/);assert.match(drawer,/Outputs/);
+  /* where the output is: both folders, the count, and a Copy button that really puts the evidence path on the clipboard */
+  const roundOfDrawer=(await text('#ag-strip strong')).replace(/^Round /,'').trim();
+  assert.match(drawer,/Where the output is/);
+  assert.equal((await text('#ag-evidence-path')).trim(),`private/agent-rounds/${roundOfDrawer}/runs/1/outputs/`);
+  assert.match(await text('#ag-output-location'),new RegExp(`Working folder\\s*finance-studio-pilots/${roundOfDrawer}-1`));
+  assert.match(await text('#ag-output-location'),/Output files\s*1(?!\d)/,'the stub wrote one file');
+  assert.doesNotMatch(drawer,/Copied to the working copy when the run ends/,'the run has ended');
+  await call('Browser.grantPermissions',{permissions:['clipboardReadWrite','clipboardSanitizedWrite'],origin:new URL(server.url).origin});
+  /* record what the page hands to the clipboard API, and pass the call through so that a refusal reaches the page as it would */
+  await evaluate(`(()=>{window.__copied=[];const real=navigator.clipboard.writeText.bind(navigator.clipboard);navigator.clipboard.writeText=text=>{window.__copied.push(text);return real(text);};})()`);
+  await gestureClick('#agents-modal [data-ag="copy-path"]');
+  await waitFor('/Copied the evidence folder path|did not allow copying/.test(document.querySelector("#agents-modal").textContent)','the copy answer');
+  assert.match(await text('#ag-copy-note'),/Copied the evidence folder path to the clipboard\./,'the copy worked in the browser');
+  assert.deepEqual(await evaluate('window.__copied'),[`private/agent-rounds/${roundOfDrawer}/runs/1/outputs/`],'the page handed the evidence path, and only that, to the clipboard');
+  checks.push('the drawer says where the output is (working folder, evidence folder, file count) and Copy path hands the evidence path to the clipboard and the browser accepts it');
   assert.match(drawer,/Suggested verdict, heuristic: Matches the frozen gold/);assert.match(drawer,/Units owed 2480: found in the final/);
   await screenshot('desktop-drawer',1440,1000);
   await click('#agents-modal [data-ag="apply-suggestion"]');
@@ -269,6 +328,7 @@ async function fillPacketAndFreeze(options){
   assert.equal(await evaluate('document.querySelector("#ag-prompt").value'),PROMPT,'the prompt came back from the companion');
   assert.equal(await evaluate('document.querySelector("[data-ag-in=decision]").value'),'approve');
   assert.equal(await evaluate('document.querySelector("#ag-count").value'),'5');
+  assert.equal(await evaluate('document.querySelector("#ag-task").value'),TASK,'the task came back from the round, not from what was typed after the freeze');
   assert.match(await text('#ag-freeze-state'),/Not frozen yet/);
   assert.equal(await evaluate('document.querySelector("[data-ag=open-approve]").disabled'),true,'carrying forward approves nothing');
   await click('[data-ag="freeze"]');
@@ -278,7 +338,31 @@ async function fillPacketAndFreeze(options){
   assert.match(await text('#ag-round'),new RegExp('Carried forward from\\s*'+firstId),'the round card names its origin');
   await screenshot('desktop-carried',1440,1000);await screenshot('mobile-carried',390,844);
   await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
-  checks.push('Start next round from this round makes a new draft with carriedFrom, refills the form from the companion, approves nothing, and freezing it shows the same content hash (unchanged)');
+  checks.push('Start next round from this round makes a new draft with carriedFrom, refills the form from the companion (task included), approves nothing, and freezing it shows the same content hash (unchanged)');
+
+  /* 9c. What other views rely on: link, get and post against the companion, and a request recorded while another view shows. */
+  assert.deepEqual(JSON.parse(await evaluate('FinanceAgents.link().then(r=>JSON.stringify(r))')),{local:true,ok:true,offlineMessage:OFFLINE_TEXT,error:''});
+  assert.equal(await evaluate(`FinanceAgents.get('/api/agents/runs?limit=3&task=${TASK}').then(d=>d.runs.length+':'+d.runs[0].task+':'+d.runs[0].roundId)`),'3:'+TASK+':'+firstId,'the run feed through get()');
+  assert.equal(await evaluate(`FinanceAgents.post('/api/agents/rounds/rnd-000000000000/freeze',{}).then(()=>'resolved',e=>e.status+':'+(typeof e.message))`),'404:string','post() errors carry status and message');
+  assert.equal(await evaluate(`FinanceAgents.get('https://example.invalid/api/status').then(()=>'resolved',e=>e.status+':'+e.message)`),'400:Only paths under /api/ can be requested.');
+  await click('[data-dash-tab="overview"]');
+  assert.equal(await evaluate('!!document.querySelector("#ag-root")'),false,'the Agents view is not showing');
+  assert.equal(await evaluate(`FinanceAgents.openRun(${JSON.stringify(firstId)},2).then(r=>JSON.stringify(r))`),'{"recorded":true,"applied":false}','recorded, not applied: no view to show it');
+  assert.equal(await evaluate('!!document.querySelector("#agents-modal [role=dialog]")'),false,'a request alone opens nothing');
+  await click('[data-dash-tab="agents"]');
+  await waitFor('!!document.querySelector("#agents-modal .ag-drawer")&&/Pilot 2/.test(document.querySelector("#agents-modal").textContent)','the drawer for the recorded request');
+  assert.equal((await text('#ag-strip strong')).trim(),'Round '+firstId,'the round of the request is selected, not the carried draft');
+  assert.match(await text('#ag-evidence-path'),new RegExp(firstId+'/runs/2/outputs/'));
+  await click('#agents-modal [data-ag="close-overlay"]');
+  assert.equal(await evaluate(`FinanceAgents.openRun('rnd-000000000000',1).then(r=>JSON.stringify(r))`),'{"recorded":true,"applied":false}');
+  assert.match(await text('#ag-status'),/Round rnd-000000000000 was not found on this companion/,'a round that is not there is reported');
+  assert.equal(await evaluate(`FinanceAgents.openRun(${JSON.stringify(firstId)},9).then(r=>JSON.stringify(r))`),'{"recorded":true,"applied":false}');
+  assert.match(await text('#ag-status'),/has no pilot 9\. Its pilots are 1, 2, 3, 4, 5\./);
+  assert.equal(await evaluate('!!document.querySelector("#agents-modal [role=dialog]")'),false,'no drawer for a pilot that is not there');
+  assert.equal(await evaluate(`FinanceAgents.openRound(${JSON.stringify(nextId)},'freeze').then(r=>JSON.stringify(r))`),'{"recorded":true,"applied":true}');
+  assert.equal((await text('#ag-strip strong')).trim(),'Round '+nextId);
+  assert.equal(await evaluate('!!document.activeElement&&!!document.activeElement.closest("#ag-freeze")'),true,'openRound with a step moves the keyboard into that step');
+  checks.push('link, get and post work against the companion and fail with status and message; openRun recorded while another view shows opens that pilot of that round when Agents mounts; a missing round or pilot is reported in the status line');
 
   /* 10. Second server run with the violation scenario: a DISCARDED pilot is kept, shown, and not classifiable or exportable. */
   await stopServer();
@@ -316,8 +400,13 @@ async function fillPacketAndFreeze(options){
   for(const url of web){const u=new URL(url);assert.equal(u.hostname,'127.0.0.1','request left the machine: '+url);assert.ok(allowedPorts.has(u.port),'request to an unknown port: '+url);}
   const api=web.filter(u=>new URL(u).pathname.startsWith('/api/'));assert.ok(api.length>0);
   assert.deepEqual(dialogs,[],'no alert, confirm or prompt dialog may open');
+  /* The browser logs a refused request as a console error. Step 9c asked twice for a round that does not exist, on purpose: those two
+     and nothing else are expected. */
+  const expected404=errors.filter(e=>e.source==='network'&&/404/.test(e.text||'')&&/\/api\/agents\/rounds\/rnd-000000000000/.test(e.url||''));
+  assert.equal(expected404.length,2,'the two deliberate requests for a round that does not exist: '+JSON.stringify(errors));
+  errors=errors.filter(e=>!expected404.includes(e));
   assert.equal(errors.length,0,'Browser console/runtime errors: '+JSON.stringify(errors));
-  checks.push('every request went to 127.0.0.1; zero console errors and zero dialogs');
+  checks.push('every request went to 127.0.0.1; zero console errors (apart from the two deliberate requests for a missing round) and zero dialogs');
   fs.writeFileSync(path.join(out,'browser-report.json'),JSON.stringify({passed:true,checks,requestCount:web.length,apiRequestCount:api.length,hosts:[...new Set(web.map(u=>new URL(u).hostname))],consoleErrors:errors,dialogs,browser:'Isolated headless Chromium',browserVersion,node:process.version,viewports:[{width:1440,height:1000},{width:390,height:844}],server:'backend/server.cjs with the stub agent runtime; no model was started',qaData:'Synthetic packet only.'},null,2));
   console.log(JSON.stringify({passed:true,checks},null,2));
 }catch(error){console.error(error);fs.writeFileSync(path.join(out,'browser-report.json'),JSON.stringify({passed:false,checks,error:String(error),errors,dialogs,requests:requests.filter(u=>/^https?:/.test(u)).slice(-40)},null,2));process.exitCode=1;}finally{await stopServer().catch(()=>{});if(ws){try{await call('Browser.close');}catch{}ws.close();}if(proc){const gone=proc.exitCode!==null?Promise.resolve():new Promise(r=>{proc.once('exit',r);setTimeout(r,4000);});proc.kill();await gone;}if(packetDir)fs.rmSync(packetDir,{recursive:true,force:true});if(companionRoot)fs.rmSync(companionRoot,{recursive:true,force:true});try{fs.rmSync(profile,{recursive:true,force:true,maxRetries:20,retryDelay:150});}catch{/* a leftover temporary profile is harmless and must not fail a passing suite */}}})();

@@ -1706,6 +1706,7 @@ test('while a round runs, the run feed and the run log withhold the prompt, the 
     const round = await w.service.getRound(running.id);
     return round.runs[0].state === 'completed' && round.runs[1].state === 'running';
   }, { label: 'run 1 to finish while run 2 is still running' });
+  await waitFor(async () => (await w.get(`/api/agents/rounds/${running.id}/runs/2/log`)).json.lines.length > 0, { label: 'the running pilot to write its first line' });
 
   const reads = {
     feed: await w.get('/api/agents/runs'),

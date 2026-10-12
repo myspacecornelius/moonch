@@ -5,8 +5,10 @@
    - Nothing touches document, navigator, localStorage or timers when the file loads. Every DOM, clipboard, storage and timer use is
      feature-checked or in try/catch, so the kit loads and degrades quietly inside the minimal fake documents of the page tests.
    - Markup goes through html`` (interpolations are escaped unless they are the result of html or raw). A plain string given to setHtml
-     or returned by a render callback is trusted markup. Attributes are written with setAttribute only; the kit never writes an inline
-     style attribute or an event-handler attribute, and it never changes the tab title.
+     or returned by a render callback is trusted markup. Always put an interpolation inside a QUOTED attribute value (title="${x}"):
+     escaping keeps text inside its quotes, it cannot protect an unquoted value, and it does not vet URLs for href or src.
+     Attributes are written with setAttribute only; the kit never writes an inline style attribute or an event-handler attribute,
+     and it never changes the tab title.
    - Expando properties on elements: vkHtml (last markup written), vkAttrs (attributes keyedPatch set), vkListbox (the bound listbox). */
 (function(scope){
   'use strict';
@@ -382,7 +384,8 @@
   const delAttr=(n,name)=>{try{if(n&&isFn(n.removeAttribute))n.removeAttribute(name);}catch{/* not an element */}};
   const hasIn=(root,n)=>safe(()=>{if(!root||!n)return false;if(isFn(root.contains))return root.contains(n);return n.parentNode===root;},false);
   const queryAll=(root,selector)=>safe(()=>root&&isFn(root.querySelectorAll)?Array.prototype.slice.call(root.querySelectorAll(selector)):[],[]);
-  const attrSelector=(name,value)=>'['+name+'="'+str(value).replace(/["\\]/g,'\\$&')+'"]';
+  /* [name="value"] with the value escaped as a CSS string: quotes and backslashes, and control characters (a raw newline is invalid in a CSS string). */
+  const attrSelector=(name,value)=>'['+name+'="'+str(value).replace(/["\\]/g,'\\$&').replace(/[\u0000-\u001f\u007f]/g,c=>'\\'+c.charCodeAt(0).toString(16)+' ')+'"]';
   const detach=n=>{try{if(!n)return;if(isFn(n.remove))n.remove();else if(n.parentNode)n.parentNode.removeChild(n);}catch{/* already gone */}};
   const prevent=e=>{try{if(e&&isFn(e.preventDefault))e.preventDefault();}catch{/* synthetic event */}};
   const INTERACTIVE=new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','SUMMARY']);
@@ -518,6 +521,13 @@
       }catch{anchor=null;}
     }
     const active=doc.activeElement,hadFocus=!!active&&active!==container&&hasIn(container,active);
+    let held=null;
+    if(hadFocus){
+      let row=active;
+      while(row&&row.parentNode!==container)row=row.parentNode;
+      const key=getAttr(active,'data-key'),id=key?null:getAttr(active,'id');
+      held={row,selector:key?attrSelector('data-key',key):id?attrSelector('id',id):'',caret:safe(()=>typeof active.selectionStart==='number'?[active.selectionStart,active.selectionEnd]:null,null)};
+    }
     /* Remove, then update content, then place. */
     const removed=[],moved=[],inserted=[],updated=new Set();
     for(const op of ops)if(op.op==='remove'){detach(nodes.get(op.key));removed.push(op.key);}
@@ -555,7 +565,19 @@
         if(Math.abs(delta)>=1)scroller.scrollTop=(Number(scroller.scrollTop)||0)+delta;
       }catch{/* leave the scroll position */}
     }
-    if(hadFocus&&doc.activeElement!==active&&hasIn(container,active)&&isFn(active.focus))safe(()=>active.focus({preventScroll:true}));
+    /* A moved node loses focus in a browser, and a row that was rewritten AND moved lost the focus its rewrite had just restored:
+       put focus back on the same node, or on its successor in the rewritten row (found by data-key or id), without scrolling. */
+    if(hadFocus){
+      const now=doc.activeElement;
+      if(!now||now===doc.body){
+        let target=hasIn(container,active)?active:null;
+        if(!target&&held.row&&held.selector&&hasIn(container,held.row))target=safe(()=>held.row.querySelector(held.selector),null);
+        if(target&&!target.disabled&&isFn(target.focus)){
+          safe(()=>target.focus({preventScroll:true}));
+          if(held.caret&&isFn(target.setSelectionRange))safe(()=>target.setSelectionRange(held.caret[0],held.caret[1]));
+        }
+      }
+    }
     const listbox=container.vkListbox;
     if(listbox&&isFn(listbox.refresh))safe(()=>listbox.refresh());
     const order=list=>{const set=new Set(list);return keys.filter(k=>set.has(k));};
