@@ -10,7 +10,8 @@ import hashlib, json, sys, zipfile, stat
 
 VERSION = '3.0.0'
 root = Path(__file__).resolve().parent.parent
-explicit = ['Finance_Task_Studio.html', 'index.html', 'styles.css', 'core.js', 'app.js', 'agents.js', 'dashboard.js', 'package-engine.js',
+explicit = ['Finance_Task_Studio.html', 'index.html', 'styles.css', 'mission.css', 'workbench.css', 'core.js', 'app.js', 'agents.js', 'dashboard.js',
+            'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'package-engine.js',
             'candidate-engine.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'research-catalog.json',
             'README.md', 'VERIFICATION.md', 'package.json', '.gitignore', 'Start Finance Task Studio.command']
 files = [root / f for f in explicit]

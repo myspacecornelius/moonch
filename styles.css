@@ -193,3 +193,55 @@ tr.is-selected>td:first-child,tr[aria-selected="true"]>td:first-child{box-shadow
 .drop-zone.is-dragover{border-style:solid;border-color:var(--accent-hi);background:var(--accent-tint);color:var(--text)}
 /* Print: the dark page would print as pale text on white paper, so neutral and ink tokens switch to light-page values. */
 @media print{:root{color-scheme:light;--bg:#fff;--surface:#fff;--surface-2:#f4f3f7;--surface-3:#ebe9f0;--text:#15131a;--muted:#4a4656;--muted-strong:#2f2c3a;--line:#c9c5d3;--control-border:#6f6a80;--accent-hi:#4a2fc4;--pass-ink:#0a6b3d;--fail-ink:#a31d1d;--warn-ink:#8a4600}}
+
+/* Shell (WIRING): small wordmark, grouped icon navigation, edition chip, pages that draw their own header, a full-bleed main for the workbench. Tokens only. */
+.dash-layout{grid-template-columns:232px minmax(0,1fr)}
+.dash-sidebar{padding:28px 12px 24px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}
+.dash-sidebar::-webkit-scrollbar{display:none}
+.dash-wordmark{display:flex;align-items:flex-start;gap:12px;margin:2px 0 36px 12px}
+.dash-wordmark-dot{flex:none;width:12px;height:12px;margin-top:3px;border-radius:50%;background:var(--accent)}
+.dash-wordmark .brand{margin:0;font-size:.8rem;line-height:1.5;font-weight:650;letter-spacing:.14em;text-transform:uppercase;color:var(--text)}
+.dash-sidebar nav{gap:2px}
+.dash-sidebar .nav-group{margin:28px 12px 8px;font-size:.8rem;line-height:1.4;font-weight:650;letter-spacing:.14em}
+.dash-sidebar .nav-group:first-child{margin-top:0}
+.dash-sidebar .nav-btn{justify-content:flex-start;gap:12px;min-height:40px;padding:9px 12px;white-space:nowrap;border:1px solid transparent;border-radius:10px;font-size:.9375rem;font-weight:500}
+.dash-sidebar .nav-btn>span{margin-left:auto;font-size:.8125rem}
+.nav-icon{flex:none;width:18px;height:18px}
+.dash-sidebar .nav-btn.active,.dash-sidebar .nav-btn[aria-current]{border-color:var(--accent);font-weight:600}
+.dash-sidebar .nav-btn.active::before,.dash-sidebar .nav-btn[aria-current]::before{display:none}
+.dash-sidebar .nav-btn.active .nav-icon,.dash-sidebar .nav-btn[aria-current] .nav-icon{color:var(--accent-hi)}
+.dash-side-bottom{margin-top:auto;padding:32px 0 0;display:grid;gap:20px}
+.dash-side-bottom .actions{display:grid;gap:4px}
+.dash-side-bottom .actions button{width:100%;padding:8px 12px;border-color:transparent;background:transparent;color:var(--muted-strong);text-align:left;font-size:.8125rem;font-weight:500}
+.dash-side-bottom .actions button:hover{background:var(--surface-2);color:var(--text)}
+.dash-side-meta{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dash-edition{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;padding:5px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted-strong);font-size:.8rem}
+.dash-edition-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted-strong)}
+.dash-edition[data-edition=offline] .dash-edition-dot,.dash-edition[data-edition=checking] .dash-edition-dot{background:transparent;border:1.5px solid var(--muted-strong)}
+.dash-version{font-size:.8rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.dash-topbar .muted{font-size:.8rem}
+.dash-topbar button{padding:9px 13px;font-size:.875rem}
+.dash-footer{font-size:.8rem}
+/* Mission Control draws its own header: a centered column, 40px of page padding (24px on a phone). */
+.dash-main.is-mission{width:100%;max-width:1360px;margin-inline:auto;padding:40px 40px 32px}
+/* The Evidence Workbench is full-bleed. From 1024px the content column is exactly one viewport tall (main grows, the footer stays a thin line) so the panes scroll inside themselves. */
+.dash-main.is-bleed{width:100%;max-width:none;margin:0;padding:0}
+@media(min-width:1024px){
+  .dash-layout.is-bleed .dash-content{display:flex;flex-direction:column;height:100vh}
+  .dash-main.is-bleed{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:auto}
+  .dash-main.is-bleed>.wb-root{flex:1 1 auto;min-height:0}
+  .dash-layout.is-bleed .dash-footer{flex:none;padding:8px 24px;border-top:1px solid var(--line)}
+}
+@media(max-width:1100px){
+  .dash-layout{grid-template-columns:208px minmax(0,1fr)}
+  .dash-sidebar .nav-btn{gap:10px;padding-inline:10px;font-size:.875rem}
+}
+@media(max-width:700px){
+  .dash-sidebar{position:relative;padding:16px 16px 10px;overflow:visible}
+  .dash-wordmark{margin:0 0 14px}
+  .dash-side-bottom{display:block;position:absolute;top:12px;right:16px;padding:0}
+  .dash-side-bottom .actions,.dash-version{display:none}
+  .dash-sidebar nav{gap:6px}
+  .dash-sidebar .nav-btn{min-height:44px;padding:8px 14px;font-size:.9375rem}
+  .dash-main.is-mission{padding:24px 24px 24px}
+}

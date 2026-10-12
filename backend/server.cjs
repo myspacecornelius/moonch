@@ -52,7 +52,7 @@ const C = require('./agents/constants.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const HOST = '127.0.0.1';
-const ASSETS = new Set(['index.html', 'styles.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'dashboard.js']);
+const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'dashboard.js']);
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
 const JSON_TYPE_RE = /^application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
 const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415]);

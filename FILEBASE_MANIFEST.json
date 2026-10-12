@@ -4,13 +4,13 @@
   "files": [
     {
       "file": ".gitignore",
-      "bytes": 992,
-      "sha256": "5e73ab119d96d8b368cac094b6976b6dc48dbd326488c8d7c6c7bff2aad526f9"
+      "bytes": 1126,
+      "sha256": "44557be6d9195d2289c623b80a4294888f4bc909fcb2cc4d8066c82a9304f0fe"
     },
     {
       "file": "Finance_Task_Studio.html",
-      "bytes": 500488,
-      "sha256": "808d8672657e9ef8c3d8250694d891176906ec0750764611e6349238cb858885"
+      "bytes": 651001,
+      "sha256": "d7af693f68b31ff9d964b324f8ba962803e9829a23c2899113c0918d01f8ce8a"
     },
     {
       "file": "README.md",
@@ -89,8 +89,8 @@
     },
     {
       "file": "backend/server.cjs",
-      "bytes": 43452,
-      "sha256": "c812ae0a2775fa9c4fc9df55330d9f2121e3e74b35f81173b6cc8a9894bbab98"
+      "bytes": 43572,
+      "sha256": "153d46907c997bd94ed6031f046d9ad5446d5fcb4d9c32756d118dc4d2b1b053"
     },
     {
       "file": "candidate-engine.js",
@@ -109,8 +109,8 @@
     },
     {
       "file": "dashboard.js",
-      "bytes": 50079,
-      "sha256": "37341284fe30ecd3838cef2d852595178d57221fd331fc90273954a8f1a2c5cb"
+      "bytes": 55936,
+      "sha256": "34b2d3b9f5acf98111ea2e9a83108324601b0eeadafa2ad3220a9e8c5fb5198b"
     },
     {
       "file": "docs/local-agents.md",
@@ -124,8 +124,23 @@
     },
     {
       "file": "index.html",
-      "bytes": 2497,
-      "sha256": "c7d9b940d21d41736f370eb673a55226c64d2c174df21a9909ba9e1fe6130fdf"
+      "bytes": 2912,
+      "sha256": "fdc2960311c9d87de09097a5c41e8a257cfdf973641bcd782e9dcc3d259cd1a6"
+    },
+    {
+      "file": "mission-model.js",
+      "bytes": 46067,
+      "sha256": "6c4b5936efac5af3e7e1c89993938a9ee9738c792f039ae0c841f79e8580f301"
+    },
+    {
+      "file": "mission.css",
+      "bytes": 101,
+      "sha256": "d71503fe6c38e3a9465a9c0e7a10a35f1a8873fd7a251f3d491a4d5b715588d2"
+    },
+    {
+      "file": "mission.js",
+      "bytes": 338,
+      "sha256": "c42259a5dab283dc0da98fbf7f490df4c5d974baeecfd092ea4f55d0afcc78cd"
     },
     {
       "file": "package-engine.js",
@@ -134,8 +149,8 @@
     },
     {
       "file": "package.json",
-      "bytes": 1082,
-      "sha256": "14cad76aa535a4b75fca937d0ba5cc06f68a5abc327b478c689412b5840266a3"
+      "bytes": 1194,
+      "sha256": "59f1ac15668a1ecf3dbe765cb95b80f85a6ddd3f26359ac225fe30573bb370f6"
     },
     {
       "file": "playbook.js",
@@ -514,8 +529,8 @@
     },
     {
       "file": "scripts/build-standalone.cjs",
-      "bytes": 2120,
-      "sha256": "0a761de523934f8685245086fc0a3fe2db6c86c50c4ad246942631100219b804"
+      "bytes": 2856,
+      "sha256": "f2d6223a349255c2e1f631f0b5bbd3161d9b062046a8d91b32d638d2c5d2d6f4"
     },
     {
       "file": "scripts/live-smoke.cjs",
@@ -524,8 +539,8 @@
     },
     {
       "file": "scripts/package-filebase.py",
-      "bytes": 3484,
-      "sha256": "85e82b2a77c4f13c2ef40addd8070126d5e7e761b5c9b25f8c0ee6b4ed1d901e"
+      "bytes": 3616,
+      "sha256": "c63fefd9d821a435c07e26ce1042dd793fb1bff430ac46ffcd448be830a2775b"
     },
     {
       "file": "scripts/pre-push.cjs",
@@ -539,8 +554,8 @@
     },
     {
       "file": "styles.css",
-      "bytes": 42364,
-      "sha256": "da5a04022088e4bc83e821287a9ecd42bae9098e687a413c7a193d5fd3e914b3"
+      "bytes": 46476,
+      "sha256": "abef679926d0064ab36c37605fb0ca8c18326c93f44523e0baa15080ec018be7"
     },
     {
       "file": "tests/agents-audit.test.cjs",
@@ -594,8 +609,8 @@
     },
     {
       "file": "tests/agents-server.test.cjs",
-      "bytes": 122599,
-      "sha256": "547fe9525bc17cc16b2ed5856ccec136ce614044b0f7b6ea93100f881030c26b"
+      "bytes": 122888,
+      "sha256": "8e847f8f5da090399bc2c418b9fbb4943688a8f09ced68388ae4c32e4a9064f0"
     },
     {
       "file": "tests/browser.cjs",
@@ -604,8 +619,8 @@
     },
     {
       "file": "tests/bundle.test.cjs",
-      "bytes": 2242,
-      "sha256": "f14f4041e7d11ae1f4fadaf4a6e30951d176c7af1f17bf561dda5e5f6de8d8ab"
+      "bytes": 7659,
+      "sha256": "739cc42c5f00a457e2cfc761fa8fd2a24c987b8516e4ede9f14575e02dc66ca4"
     },
     {
       "file": "tests/candidates-browser.cjs",
@@ -686,6 +701,26 @@
       "file": "tests/workbench-model.test.cjs",
       "bytes": 104279,
       "sha256": "f9116c52317c545873dd7757a2af9bce3234177b0756c9c5769e4b7d4b3d81da"
+    },
+    {
+      "file": "views-kit.js",
+      "bytes": 47345,
+      "sha256": "fec6c263c0dc832b44cc3f696e84539452c1d1caf4baa49e424aba200c593ab9"
+    },
+    {
+      "file": "workbench-model.js",
+      "bytes": 45649,
+      "sha256": "5c6367d7016c2cc2d8c6fe883ede1cd7129c4c6a456265ecde00aaa96ab6c363"
+    },
+    {
+      "file": "workbench.css",
+      "bytes": 104,
+      "sha256": "1539f2545972058377ddd4c715a494beeba7de1c32206e77b523e092d8c5ed1c"
+    },
+    {
+      "file": "workbench.js",
+      "bytes": 346,
+      "sha256": "5bb6a99eb7da9ed017ba2f9fa2dd808add97c257157a9bcaaca23a1d5952ea3d"
     }
   ],
   "excluded": [

@@ -22,6 +22,10 @@ qa/**/*.png
 !qa/candidates/mobile-new-dividend-candidates.png
 !qa/agents/desktop-agents.png
 !qa/agents/mobile-agents.png
+!qa/mission/desktop-mission.png
+!qa/mission/mobile-mission.png
+!qa/workbench/desktop-workbench.png
+!qa/workbench/mobile-workbench.png
 
 __pycache__/
 .DS_Store
