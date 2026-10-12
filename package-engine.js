@@ -137,5 +137,142 @@
   }
   const adapters=new Map();
   const adapterBoundary={status:()=>adapters.size?{connected:true,names:[...adapters.keys()]}:{connected:false,message:'No model or harness adapter is connected.'},register:adapter=>{if(!adapter||typeof adapter.name!=='string'||typeof adapter.analyze!=='function'||adapter.credentials)fail('Adapters must provide an analysis function without browser-side credentials.');adapters.set(adapter.name,adapter);},run:async(name,pkg)=>{const adapter=adapters.get(name);if(!adapter)fail('No connected analysis adapter. No model run has started.');return adapter.analyze(validatePackage(pkg));}};
-  const api={ENGINE_VERSION,LIMITS,readZip,crc32,sha256,parseCsv,parseDocument,ingestFiles,inferRole,classifyPath,WITHHELD_ROLES,GAF_PATTERN,detectedFacts,analyzePackage,validatePackage,validateAnalysisRuns,citation,adapterBoundary};if(typeof module!=='undefined'&&module.exports)module.exports=api;else scope.FinancePackageEngine=api;
+  /* Package diff and exact clause lookup. Pure, no DOM. Saved values only: nothing is recalculated and nothing guesses a match.
+     Documents pair by exact name, then by a tail name that is unique in both packages; an ambiguous name is never paired.
+     xlsx compares by locator (numbers numerically), csv by Row N plus a derived column letter, every other kind by line alignment. */
+  const LINE_CAP=5000,DECIMAL=/^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+  const DIFF_LIMITS=['Formulas are not recalculated: values are the saved workbook caches, so a cell with no saved value is unknown, not zero.','Styles, number formats, comments, merged cells and charts are not compared.','Renamed sheets and renamed files appear as a removal plus an addition.'];
+  const hasText=s=>typeof s==='string'&&s!=='',recs=d=>Array.isArray(d?.records)?d.records:[],tailOf=n=>String(n??'').split('/').pop().trim(),plural=(n,w)=>n+' '+w+(n===1?'':'s');
+  function decimal(s,digits=Infinity){s=String(s).trim();if(!DECIMAL.test(s))return null;if(digits<Infinity&&s.replace(/[eE].*$/,'').replace(/\D/g,'').replace(/^0+/,'').length>digits)return null;const n=Number(s);return Number.isFinite(n)?n:null;}
+  function minus(a,b){const used=new Map();for(const v of b)used.set(v,(used.get(v)||0)+1);return a.filter(v=>{const n=used.get(v)||0;if(n>0){used.set(v,n-1);return false;}return true;});}
+  function indexRecords(list){const map=new Map();let dup=0;for(const r of list){const k=String(r.locator);if(map.has(k))dup++;else map.set(k,r);}return {map,dup};}
+  function cellSnap(r){const hasFormula=!!r.hasFormula,value=r.value!==undefined&&r.value!==null?String(r.value):hasFormula?'':String(r.text??'');return {value,type:r.type||'n',formula:String(r.formula??''),hasFormula,cachePresent:typeof r.cachePresent==='boolean'?r.cachePresent:value!==''};}
+  const typeClass=t=>t==='inlineStr'?'s':t;
+  function sameValue(a,b){if(a.value===b.value)return true;if(typeClass(a.type)==='n'&&typeClass(b.type)==='n'){const x=decimal(a.value),y=decimal(b.value);return x!==null&&y!==null&&x===y;}return false;}
+  /* One label per changed cell. Order: an edited formula first (it must stand out among cells that merely lost their cache), then a lost cache, then type, then value. */
+  function classifyCell(a,b){
+    if(a.hasFormula!==b.hasFormula||a.formula!==b.formula)return 'formula';
+    if(a.cachePresent!==b.cachePresent)return a.cachePresent?'cache-lost':'value';
+    if(!a.cachePresent)return a.value===b.value?null:'value';
+    if(typeClass(a.type)!==typeClass(b.type))return 'type';
+    return sameValue(a,b)?null:'value';
+  }
+  function xlsxChange(locator,change,b,c){const r=c||b,i=locator.lastIndexOf('!'),sheet=r.sheet??(i>=0?locator.slice(0,i):undefined),cell=r.cell??(i>=0?locator.slice(i+1):undefined),out={locator};if(sheet!==undefined)out.sheet=sheet;if(cell!==undefined)out.cell=cell;return Object.assign(out,{change,before:b?cellSnap(b):null,after:c?cellSnap(c):null,hidden:!!(b?.hidden||c?.hidden)});}
+  function diffCells(bd,cd){
+    const bi=indexRecords(recs(bd)),ci=indexRecords(recs(cd)),cells=[];
+    for(const [k,b] of bi.map){const c=ci.map.get(k);if(!c){cells.push(xlsxChange(k,'removed',b,null));continue;}
+      if(b.value===c.value&&b.text===c.text&&b.type===c.type&&b.formula===c.formula&&!b.hasFormula===!c.hasFormula&&b.cachePresent===c.cachePresent)continue;
+      const change=classifyCell(cellSnap(b),cellSnap(c));if(change)cells.push(xlsxChange(k,change,b,c));}
+    for(const [k,c] of ci.map)if(!bi.map.has(k))cells.push(xlsxChange(k,'added',null,c));
+    return {cells,dup:bi.dup+ci.dup};
+  }
+  const colLetter=i=>{let s='';for(i++;i>0;i=Math.floor((i-1)/26))s=String.fromCharCode(65+(i-1)%26)+s;return s;};
+  const csvValues=r=>Array.isArray(r.values)?r.values.map(v=>String(v??'')):String(r.text??'').split(' | ');
+  const csvSnap=v=>({value:v,type:decimal(v,15)===null?'s':'n',formula:'',hasFormula:false,cachePresent:true});
+  function diffCsv(bd,cd){
+    const bi=indexRecords(recs(bd)),ci=indexRecords(recs(cd)),cells=[];
+    const row=(k,bv,cv)=>{for(let col=0,w=Math.max(bv.length,cv.length);col<w;col++){const x=bv[col]??'',y=cv[col]??'';if(x===y)continue;const nx=decimal(x,15),ny=decimal(y,15),change=x===''?'added':y===''?'removed':nx!==null&&nx===ny?null:'value';
+      if(change)cells.push({locator:k,change,before:x===''?null:csvSnap(x),after:y===''?null:csvSnap(y),hidden:false,derivedColumn:colLetter(col)});}};
+    for(const [k,b] of bi.map){const c=ci.map.get(k);row(k,csvValues(b),c?csvValues(c):[]);}
+    for(const [k,c] of ci.map)if(!bi.map.has(k))row(k,[],csvValues(c));
+    return {cells,dup:bi.dup+ci.dup,rows:[bi.map.size,ci.map.size]};
+  }
+  /* Line alignment. The equal head and tail are trimmed first, so one edit in a long file is exact. The differing middle is aligned
+     (longest common subsequence over line ids) only when it is at most LINE_CAP lines on each side; a longer middle is reported as removed
+     then added, unmatched. The ops always rebuild both sides: base = equal+del, candidate = equal+add. */
+  function diffLines(bd,cd){
+    const a=recs(bd),b=recs(cd),at=a.map(r=>String(r.text??'')),bt=b.map(r=>String(r.text??'')),n=a.length,m=b.length,lines=[];
+    const loc=(list,i)=>i<0?null:String(list[i].locator??''),op=(o,i,j)=>lines.push({op:o,baseLocator:loc(a,i),candLocator:loc(b,j),before:i<0?null:at[i],after:j<0?null:bt[j]});
+    let p=0,s=0;while(p<n&&p<m&&at[p]===bt[p])p++;while(s<n-p&&s<m-p&&at[n-1-s]===bt[m-1-s])s++;
+    for(let i=0;i<p;i++)op('equal',i,i);
+    const x=n-p-s,y=m-p-s,capped=x>0&&y>0&&(x>LINE_CAP||y>LINE_CAP);
+    if(x===0||y===0||capped){for(let i=0;i<x;i++)op('del',p+i,-1);for(let j=0;j<y;j++)op('add',-1,p+j);}
+    else{
+      const ids=new Map(),id=t=>{let v=ids.get(t);if(v===undefined){v=ids.size;ids.set(t,v);}return v;},A=Int32Array.from(at.slice(p,p+x),id),B=Int32Array.from(bt.slice(p,p+y),id),w=y+1,dp=new Uint16Array((x+1)*w);
+      for(let i=x-1;i>=0;i--)for(let j=y-1;j>=0;j--)dp[i*w+j]=A[i]===B[j]?dp[(i+1)*w+j+1]+1:Math.max(dp[(i+1)*w+j],dp[i*w+j+1]);
+      for(let i=0,j=0;i<x||j<y;){if(i<x&&j<y&&A[i]===B[j]){op('equal',p+i,p+j);i++;j++;}else if(j>=y||(i<x&&dp[(i+1)*w+j]>=dp[i*w+j+1])){op('del',p+i,-1);i++;}else{op('add',-1,p+j);j++;}}
+    }
+    for(let k=0;k<s;k++)op('equal',n-s+k,m-s+k);
+    return {lines,capped,x,y};
+  }
+  function diffMeta(bd,cd){
+    const index=(list,key)=>{const map=new Map();for(const x of Array.isArray(list)?list:[])if(x&&typeof x[key]==='string'&&!map.has(x[key]))map.set(x[key],x);return map;};
+    const info=x=>({state:x.state||'visible',populatedCells:Number.isFinite(x.populatedCells)?x.populatedCells:null}),bs=index(bd.metadata?.sheets,'name'),cs=index(cd.metadata?.sheets,'name'),sheets=[],definedNames=[];
+    for(const [name,b] of bs){const c=cs.get(name);if(!c)sheets.push({name,change:'removed',before:info(b),after:null});else if(info(b).state!==info(c).state)sheets.push({name,change:'state',before:info(b),after:info(c)});}
+    for(const [name,c] of cs)if(!bs.has(name))sheets.push({name,change:'added',before:null,after:info(c)});
+    const names=list=>{const map=new Map();for(const x of Array.isArray(list)?list:[]){if(!x||typeof x.name!=='string')continue;if(!map.has(x.name))map.set(x.name,[]);map.get(x.name).push(String(x.ref??''));}return map;},bn=names(bd.metadata?.definedNames),cn=names(cd.metadata?.definedNames);
+    for(const name of new Set([...bn.keys(),...cn.keys()])){const x=bn.get(name)||[],y=cn.get(name)||[],gone=minus(x,y),made=minus(y,x);
+      if(gone.length===1&&made.length===1)definedNames.push({name,change:'ref',before:gone[0],after:made[0]});
+      else{for(const ref of gone)definedNames.push({name,change:'removed',before:ref,after:null});for(const ref of made)definedNames.push({name,change:'added',before:null,after:ref});}}
+    return {sheets,definedNames};
+  }
+  function matchDocuments(bl,cl){
+    const pair=new Map(),cUsed=new Set(),held=new Set(),heldC=new Set(),bNotes=new Map(),cNotes=new Map(),pkgNotes=[];
+    const link=(i,j,by)=>{pair.set(i,{j,by});cUsed.add(j);},note=(map,i,text)=>{if(!map.has(i))map.set(i,[]);map.get(i).push(text);};
+    const group=(list,key)=>{const map=new Map();list.forEach((d,i)=>{const k=key(d);if(!map.has(k))map.set(k,[]);map.get(k).push(i);});return map;};
+    const bn=group(bl,d=>d.name),cn=group(cl,d=>d.name);
+    for(const [name,B] of bn){const C=cn.get(name);if(!C)continue;const restB=[],restC=[...C];
+      for(const i of B){const k=hasText(bl[i].sha256)?restC.findIndex(j=>cl[j].sha256===bl[i].sha256):-1;if(k>=0)link(i,restC.splice(k,1)[0],'name');else restB.push(i);}
+      if(restB.length===1&&restC.length===1)link(restB[0],restC[0],'name');
+      else if(restB.length&&restC.length){const text='File name "'+name+'" appears '+plural(B.length,'time')+' in the base package and '+C.length+' in the candidate package and cannot be paired, so those files are reported as removed and added.';pkgNotes.push(text);restB.forEach(i=>{note(bNotes,i,text);held.add(i);});restC.forEach(j=>{note(cNotes,j,text);heldC.add(j);});}}
+    const bt=group(bl,d=>tailOf(d.name)),ct=group(cl,d=>tailOf(d.name)),said=new Set();
+    bl.forEach((b,i)=>{if(pair.has(i)||held.has(i))return;const k=tailOf(b.name),js=(ct.get(k)||[]).filter(j=>!cUsed.has(j)&&!heldC.has(j));if(!js.length)return;
+      if(bt.get(k).length===1&&ct.get(k).length===1){link(i,js[0],'tail');return;}
+      const text='File name "'+k+'" appears '+plural(bt.get(k).length,'time')+' in the base package and '+ct.get(k).length+' in the candidate package under different folders, so files with this name are reported as removed and added, not compared.';
+      if(!said.has(k)){said.add(k);pkgNotes.push(text);js.forEach(j=>note(cNotes,j,text));}note(bNotes,i,text);});
+    const items=bl.map((d,i)=>({i,j:pair.has(i)?pair.get(i).j:-1,by:pair.has(i)?pair.get(i).by:null}));cl.forEach((d,j)=>{if(!cUsed.has(j))items.push({i:-1,j,by:null});});
+    return {items,bNotes,cNotes,pkgNotes};
+  }
+  function diffDocument(b,c,by,notes,agg){
+    const d=c||b,out={name:d.name,status:'unchanged',kind:String(c?.kind||b?.kind||''),baseId:b?b.id:null,candId:c?c.id:null,baseSha256:b&&hasText(b.sha256)?b.sha256:null,candSha256:c&&hasText(c.sha256)?c.sha256:null,cells:[],lines:[],metaChanges:{sheets:[],definedNames:[]},limits:[...notes]};
+    if(!b||!c){out.status=b?'removed':'added';return out;}
+    if(by==='tail'){agg.moved++;out.limits.push('Matched by file name only: base path "'+b.name+'", candidate path "'+c.name+'".');}
+    const known=!!(out.baseSha256&&out.candSha256);if(known&&out.baseSha256===out.candSha256)return out;
+    const usable=x=>x.status!=='error'&&x.status!=='unsupported',kb=String(b.kind||''),kc=String(c.kind||'');let compared=true;
+    if(!usable(b)||!usable(c)){compared=false;agg.hashOnly++;out.limits.push('No text could be extracted from '+(usable(b)?'the candidate':usable(c)?'the base':'either version')+' of this file, so only its hash is compared.');}
+    else if(kb!==kc){compared=false;agg.hashOnly++;out.limits.push('The file type differs (base '+(kb||'unknown')+', candidate '+(kc||'unknown')+'), so contents are not compared.');}
+    if(compared){
+      if(kc==='xlsx'){const r=diffCells(b,c);out.cells=r.cells;out.metaChanges=diffMeta(b,c);out.limits.push(DIFF_LIMITS[0]);
+        if(r.dup)out.limits.push('Records sharing a locator with an earlier record were ignored: '+r.dup+'.');
+        const lost=r.cells.filter(x=>x.after&&x.after.hasFormula&&!x.after.cachePresent).length;
+        if(lost)out.limits.push('Changed formula cells with no saved value in the candidate: '+lost+'. Their values are unknown, not zero.');}
+      else if(kc==='csv'){const r=diffCsv(b,c);out.cells=r.cells;
+        if(r.dup)out.limits.push('Records sharing a locator with an earlier record were ignored: '+r.dup+'.');
+        out.limits.push('Rows compare by row number and columns by position; column letters are derived, not stored in the file.'+(r.rows[0]!==r.rows[1]?' The row counts differ ('+r.rows[0]+' in the base, '+r.rows[1]+' in the candidate), so an inserted or deleted row shifts every later row.':''));}
+      else{const r=diffLines(b,c);out.lines=r.lines;
+        if(r.capped){const text='Line alignment is limited to '+LINE_CAP+' lines per side: the changed region ('+plural(r.x,'base line')+', '+plural(r.y,'candidate line')+') is shown as removed then added, without matching lines inside it.';out.limits.push(text);agg.capped.push(d.name+': '+text);}}
+    }
+    const found=out.cells.length>0||out.lines.some(x=>x.op!=='equal')||out.metaChanges.sheets.length>0||out.metaChanges.definedNames.length>0;
+    out.status=known||!compared||found?'changed':'unchanged';
+    if(out.status==='unchanged')out.lines=[];
+    else if(compared&&!found)out.limits.push('The file bytes differ but no extracted text or cell differs; formatting or other content that is not extracted may have changed.');
+    return out;
+  }
+  function diffPackages(base,cand){
+    for(const p of [base,cand])if(!p||!Array.isArray(p.documents)||p.documents.some(d=>!d||typeof d.name!=='string'))fail('A package diff needs two task packages whose documents have names.');
+    const bl=base.documents,cl=cand.documents,match=matchDocuments(bl,cl),agg={moved:0,hashOnly:0,capped:[]},documents=[],summary={changedDocuments:0,addedDocuments:0,removedDocuments:0,changedCells:0};
+    for(const it of match.items){const d=diffDocument(it.i>=0?bl[it.i]:null,it.j>=0?cl[it.j]:null,it.by,[...(match.bNotes.get(it.i)||[]),...(match.cNotes.get(it.j)||[])],agg);documents.push(d);
+      if(d.status==='changed')summary.changedDocuments++;else if(d.status==='added')summary.addedDocuments++;else if(d.status==='removed')summary.removedDocuments++;summary.changedCells+=d.cells.length;}
+    const limits=[...DIFF_LIMITS,...match.pkgNotes];
+    if(agg.moved)limits.push('Files matched by file name only (the folder differs): '+agg.moved+'.');
+    if(agg.hashOnly)limits.push('Changed files with no extracted text to compare, or of a different type: '+agg.hashOnly+'. They are compared by hash only.');
+    limits.push(...agg.capped);
+    return {baseFingerprint:hasText(base.fingerprint)?base.fingerprint:null,candFingerprint:hasText(cand.fingerprint)?cand.fingerprint:null,documents,summary,limits};
+  }
+  const foldText=s=>String(s??'').normalize('NFKC').replace(/[\u2018\u2019\u201B]/g,"'").replace(/[\u201C\u201D\u201F]/g,'"').replace(/[\u2010-\u2015\u2212]/g,'-').replace(/\s+/g,' ').trim().toLowerCase();
+  /* ref = {documentId?|name?, sha256?, locator, excerpt?|quote?}. Every identifier given must match; the locator must be equal, not a prefix. Exactly one
+     record may answer: no match, or a locator found in two documents (or twice in one) that the identifiers cannot tell apart, is null. */
+  function resolveClause(pkg,ref){
+    if(!pkg||!Array.isArray(pkg.documents)||!ref||typeof ref!=='object'||typeof ref.locator!=='string'||ref.locator==='')return null;
+    const given=v=>v!==undefined&&v!==null&&v!=='';for(const k of ['documentId','name','sha256'])if(given(ref[k])&&typeof ref[k]!=='string')return null;
+    if(!given(ref.documentId)&&!given(ref.name))return null;
+    let hit=null,count=0;
+    for(const d of pkg.documents){if(!d||(given(ref.documentId)&&d.id!==ref.documentId)||(given(ref.name)&&d.name!==ref.name)||(given(ref.sha256)&&d.sha256!==ref.sha256))continue;
+      for(const r of recs(d))if(r&&r.locator===ref.locator){count++;hit={document:d,record:r};}}
+    if(count!==1)return null;
+    const out={document:hit.document,record:hit.record,quote:String(hit.record.text??'').slice(0,1200)},excerpt=given(ref.excerpt)?ref.excerpt:ref.quote;
+    const want=given(excerpt)?foldText(excerpt):'';if(want!=='')out.excerptVerified=foldText(hit.record.text).includes(want);
+    return out;
+  }
+  const api={ENGINE_VERSION,LIMITS,readZip,crc32,sha256,parseCsv,parseDocument,ingestFiles,inferRole,classifyPath,WITHHELD_ROLES,GAF_PATTERN,detectedFacts,analyzePackage,validatePackage,validateAnalysisRuns,citation,adapterBoundary,diffPackages,resolveClause};if(typeof module!=='undefined'&&module.exports)module.exports=api;else scope.FinancePackageEngine=api;
 })(typeof window!=='undefined'?window:globalThis);

@@ -23,11 +23,19 @@
    The audit (agents/path-audit.cjs, kind loopback) discards a run whose tool calls reach for this machine at all. After
    listen() the server hands its port to the service (service.setCompanionPort, when the service has it) for that audit.
 
+   Two read routes carry round data and follow the same rule (both are flagged roundData):
+     GET /api/agents/runs                         the run feed: one row per run, newest first (service.listRuns). Redacted like
+                                                  a round: it holds states, counts and verdict names, never text.
+     GET /api/agents/rounds/:id/runs/:n/log       a page of the run's transcript (service.readRunLog). While ANY round runs a
+                                                  line is { seq, at, kind, tool, chars } and nothing else; otherwise its text
+                                                  has passed the path redactor (scrubLogText) and is cut to 2000 characters.
+
    Module API (used by the tests):
      createServer({ root, service, port, runner?, state?, log? }) -> { server, nonce, runner, listen(), close(), shutdown() }
        listen() resolves { port, url }. close() stops the listener and drops connections. shutdown() also cancels the
        archived adapter and every running round (service.shutdown()) before it closes.
      redactRoundData(value, { keepApproval? }) -> a copy of round data with what a running pilot must not read left out
+     scrubLogText(text, redact?) -> the text of a log line with every absolute path replaced, cut to 2000 characters
      installSignalHandlers(app, { proc?, exit?, log?, forceAfterMs? })
      localServerRecord({ url, pid, startedAt, runApprovedOnce }) -> the LOCAL_SERVER.json content
      usableClaudeBin(value) -> value when it names an executable file, otherwise undefined */
@@ -188,9 +196,12 @@ function redactNode(value, key, depth) {
   if (key === 'human') return keepVerdict(value, ['at', 'freezeVersion', 'freezeSha256']);
   if (key === 'final') return { chars: Number.isFinite(value.chars) ? value.chars : null };
   const out = {};
+  /* A row of the round list names the content hash of its latest freeze. The round itself withholds it (its freeze shrinks to
+     { sha256, frozenAt }), so the row says null while a round runs. The hash the next round carried forward (carried) stays. */
+  const isRow = 'runCount' in value && 'counts' in value;
   for (const [name, child] of Object.entries(value)) {
     if (WITHHELD_KEYS.has(name)) continue;
-    out[name] = redactNode(child, name, depth + 1);
+    out[name] = isRow && name === 'contentSha256' ? null : redactNode(child, name, depth + 1);
   }
   return out;
 }
@@ -208,9 +219,119 @@ function redactRoundData(value, options = {}) {
   return { ...out, ...kept, redacted: true };
 }
 
+/* ------------------------------------------------------------------ the run log: what a line may carry */
+
+const LOG_KINDS = new Set(['init', 'tool', 'text', 'result', 'error', 'system']);
+const LOG_TEXT_CHARS = 2000;
+const LOG_PAGE_LINES = 200;
+const LOG_PATH_CHARS = 300;
+const LOG_TOKEN_RE = /^[A-Za-z0-9_.:\-[\]]{1,100}$/;
+const LOG_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const LOG_NO_PATH = '[^\\s"\'`<>|;,&()[\\]{}]';
+/* Absolute paths in free text: a file:// address, a quoted path (spaces allowed), a Windows or UNC path, ~/..., and a path
+   that starts with / where no path character comes before it (so a/b and https://host/x stay), also right after a flag (-I/x). */
+const FILE_URL_RE = /file:\/\/[^\s"'`<>]*/gi;
+const QUOTED_PATH_RE = /(["'`])((?:\/(?!\/)|~\/|[A-Za-z]:[\\/]|\\\\)[^"'`\r\n]*?)\1/g;
+const WINDOWS_PATH_RE = new RegExp(`(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\\\/]|\\\\\\\\)${LOG_NO_PATH}*`, 'g');
+const HOME_PATH_RE = new RegExp(`(?<![A-Za-z0-9_.~/\\\\])~/${LOG_NO_PATH}*`, 'g');
+const POSIX_PATH_RE = new RegExp(`(?:(?<![A-Za-z0-9_.~/\\\\])|(?<=(?:^|\\s)-[A-Za-z]))/(?!/)${LOG_NO_PATH}+`, 'g');
+
+/* The text of a log line as the browser may have it: the server's own folders and the home folder written as <server path>
+   (the redactor every error message goes through), every other absolute path as <path>, at most 2000 characters. */
+function scrubLogText(text, redact = value => value) {
+  const bounded = String(text).slice(0, LOG_TEXT_CHARS * 2);
+  const out = redact(bounded)
+    .replace(FILE_URL_RE, '<path>')
+    .replace(QUOTED_PATH_RE, (match, quote) => `${quote}<path>${quote}`)
+    .replace(WINDOWS_PATH_RE, '<path>')
+    .replace(HOME_PATH_RE, '<path>')
+    .replace(POSIX_PATH_RE, '<path>');
+  if (out.length <= LOG_TEXT_CHARS) return out;
+  const code = out.charCodeAt(LOG_TEXT_CHARS - 1);
+  return out.slice(0, code >= 0xd800 && code <= 0xdbff ? LOG_TEXT_CHARS - 1 : LOG_TEXT_CHARS);
+}
+
+/* A path from a log line, only if it is relative and stays inside the folder it is relative to. */
+function safeRelPath(value) {
+  if (typeof value !== 'string' || !value || value.length > LOG_PATH_CHARS || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  if (/^[\\/~]/.test(value) || /^[A-Za-z]:/.test(value)) return null;
+  const steps = value.split(/[\\/]+/);
+  if (steps.includes('..')) return null;
+  const clean = steps.filter(step => step && step !== '.').join('/');
+  return clean && clean.length <= LOG_PATH_CHARS ? clean : null;
+}
+
+const wholeNumber = value => (Number.isInteger(value) && value >= 0 ? value : null);
+
+/* The fields every line may have, rebuilt from the service's answer one by one: a field nobody listed here is not passed on. */
+function logLineBase(line) {
+  if (!isPlainObject(line) || !Number.isInteger(line.seq) || line.seq < 1) return null;
+  const out = { seq: line.seq, at: typeof line.at === 'string' && LOG_TIME_RE.test(line.at) ? line.at : null, kind: LOG_KINDS.has(line.kind) ? line.kind : 'system' };
+  return out;
+}
+
+function logEnvelope(value, lines, withheld) {
+  const next = isPlainObject(value) ? wholeNumber(value.next) : null;
+  const out = { lines, next: next === null ? 0 : next, done: isPlainObject(value) && value.done === true, withheld };
+  if (withheld) out.redacted = true;
+  return out;
+}
+
+/* A log page while any round runs: kind, the name of the tool (one of the fixed six, else "other"), the length and the time
+   stamp of each line. Whatever else the service put on a line, text, command, path, tool input, is left out here. */
+function withholdLog(value) {
+  const source = isPlainObject(value) && Array.isArray(value.lines) ? value.lines.slice(0, LOG_PAGE_LINES) : [];
+  const lines = [];
+  for (const line of source) {
+    const out = logLineBase(line);
+    if (!out) continue;
+    if (typeof line.tool === 'string') out.tool = C.TOOLS.includes(line.tool) ? line.tool : 'other';
+    const chars = wholeNumber(line.chars);
+    if (chars !== null) out.chars = chars;
+    lines.push(out);
+  }
+  return logEnvelope(value, lines, true);
+}
+
+/* A log page when no round runs: text through the path redactor and cut, a path only if it is relative. */
+function shapeLog(value, redact) {
+  const source = isPlainObject(value) && Array.isArray(value.lines) ? value.lines.slice(0, LOG_PAGE_LINES) : [];
+  const lines = [];
+  for (const line of source) {
+    const out = logLineBase(line);
+    if (!out) continue;
+    if (typeof line.tool === 'string' && LOG_TOKEN_RE.test(line.tool)) out.tool = line.tool;
+    const chars = wholeNumber(line.chars);
+    if (chars !== null) out.chars = chars;
+    const relPath = safeRelPath(line.relPath);
+    if (relPath) out.relPath = relPath;
+    if (typeof line.text === 'string' && line.text) out.text = scrubLogText(line.text, redact);
+    lines.push(out);
+  }
+  return logEnvelope(value, lines, false);
+}
+
+/* ------------------------------------------------------------------ query strings */
+
+function oneParam(query, name) {
+  const all = query.getAll(name);
+  if (all.length > 1) throw new HttpError(400, `${name} was given more than once`);
+  return all.length ? all[0] : undefined;
+}
+
+/* A whole number from min to max written in plain digits; fallback when the name is absent. */
+function wholeParam(query, name, fallback, min, max) {
+  const raw = oneParam(query, name);
+  if (raw === undefined) return fallback;
+  const value = /^(?:0|[1-9][0-9]{0,9})$/.test(raw) ? Number(raw) : NaN;
+  if (!(value >= min && value <= max)) throw new HttpError(400, `${name} must be a whole number from ${min} to ${max}`);
+  return value;
+}
+
 /* ------------------------------------------------------------------ route table */
 
-/* pattern: path with :id (a round id) and :n (a run number). Handlers get { params, body } and return the JSON to send.
+/* pattern: path with :id (a round id) and :n (a run number). Handlers get { params, body, query } (query: the URLSearchParams) and
+   return the JSON to send. whileRunning: what replaces the generic redaction of a roundData answer while a round runs.
    limit: 'packet' selects the smaller body cap. legacy: the archived cancel route keeps its original, header only checks. */
 function pathParts(pattern) {
   return pattern.split('/').slice(1);
@@ -351,6 +472,21 @@ function createServer(options = {}) {
     { method: 'POST', pattern: '/api/cancel', legacy: true, handler: async () => { runner.cancel(); return { cancelRequested: true, state: currentState() }; } },
     { method: 'POST', pattern: '/api/agents/packet/inspect', limit: 'packet', handler: ({ body }) => service.inspectPacket(body) },
     { method: 'GET', pattern: '/api/agents/rounds', roundData: true, handler: async () => ({ rounds: await service.listRounds() }) },
+    /* The run feed: every run of every round, newest first. limit 1..200 (60), task (a task name), round (a round id). */
+    {
+      method: 'GET',
+      pattern: '/api/agents/runs',
+      roundData: true,
+      handler: async ({ query }) => {
+        const limit = wholeParam(query, 'limit', 60, 1, 200);
+        const task = oneParam(query, 'task');
+        const roundId = oneParam(query, 'round');
+        if (task !== undefined && task.length > 120) throw new HttpError(400, 'task is longer than 120 characters');
+        if (roundId !== undefined && !C.ID_RE.test(roundId)) throw new HttpError(400, 'That is not a valid round id');
+        if (typeof service.listRuns !== 'function') throw new AgentError(404, 'The run feed is not available in this version of the companion');
+        return { runs: await service.listRuns({ limit, task, round: roundId }) };
+      },
+    },
     { method: 'POST', pattern: '/api/agents/rounds', limit: 'packet', roundData: true, handler: ({ body }) => round(service.createRound(body)) },
     { method: 'GET', pattern: '/api/agents/rounds/:id', roundData: true, handler: ({ params }) => round(service.getRound(params.id)) },
     { method: 'POST', pattern: '/api/agents/rounds/:id/freeze', roundData: true, keepApproval: true, handler: ({ params, body }) => round(service.freezeRound(params.id, body)) },
@@ -374,6 +510,23 @@ function createServer(options = {}) {
     { method: 'POST', pattern: '/api/agents/rounds/:id/cancel', roundData: true, handler: ({ params }) => round(service.cancelRound(params.id)) },
     { method: 'POST', pattern: '/api/agents/rounds/:id/export', handler: ({ params }) => service.exportRound(params.id) },
     { method: 'GET', pattern: '/api/agents/rounds/:id/runs/:n', roundData: true, handler: ({ params }) => service.getRun(params.id, params.n) },
+    /* A page of a run's transcript. after (the last line seen, 0), limit 1..200 (100). While any round runs, a line is only
+       { seq, at, kind, tool, chars }: the service is told to withhold, and withholdLog enforces it on whatever comes back, also
+       when a round starts while the file is being read (whileRunning). */
+    {
+      method: 'GET',
+      pattern: '/api/agents/rounds/:id/runs/:n/log',
+      roundData: true,
+      whileRunning: withholdLog,
+      handler: async ({ params, query }) => {
+        const after = wholeParam(query, 'after', 0, 0, 2000000000);
+        const limit = wholeParam(query, 'limit', 100, 1, 200);
+        if (typeof service.readRunLog !== 'function') throw new AgentError(404, 'The run log is not available in this version of the companion');
+        const running = await anyRoundRunning();
+        const page = await service.readRunLog(params.id, params.n, { after, limit, withheld: running });
+        return running || (isPlainObject(page) && page.withheld === true) ? withholdLog(page) : shapeLog(page, redact);
+      },
+    },
     { method: 'POST', pattern: '/api/agents/rounds/:id/runs/:n/classify', roundData: true, handler: ({ params, body }) => service.classifyRun(params.id, params.n, body) },
     { method: 'POST', pattern: '/api/agents/grader-sim', handler: ({ body }) => toolLess(() => service.graderSim(body)) },
     {
@@ -458,9 +611,9 @@ function createServer(options = {}) {
     if (route.method !== 'GET' && !route.legacy) {
       body = parseJsonObject(await readBody(req, route.limit === 'packet' ? C.LIMITS.packetBodyBytes : C.LIMITS.bodyBytes));
     }
-    let value = await route.handler({ params, body });
+    let value = await route.handler({ params, body, query: url.searchParams });
     /* Asked after the data was read: a round that started meanwhile is running now, and the answer is redacted. */
-    if (route.roundData && await anyRoundRunning()) value = redactRoundData(value, { keepApproval: route.keepApproval === true });
+    if (route.roundData && await anyRoundRunning()) value = route.whileRunning ? route.whileRunning(value) : redactRoundData(value, { keepApproval: route.keepApproval === true });
     return sendJson(res, 200, value);
   }
 
@@ -668,4 +821,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, describePilotSignIn, HttpError, ASSETS };
+module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, HttpError, ASSETS };

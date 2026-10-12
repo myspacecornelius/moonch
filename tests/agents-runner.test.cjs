@@ -1554,7 +1554,7 @@ test('AgentError carries a status and the service exports it', () => {
 
 test('every service method named in the contract exists and is async', async t => {
   const w = makeWorld(t);
-  for (const name of ['status', 'inspectPacket', 'createRound', 'approvalSummary', 'freezeRound', 'refreezeRound', 'approveRound', 'launchRound', 'listRounds', 'getRound', 'getRun', 'classifyRun', 'cancelRound', 'exportRound', 'graderSim', 'authorReview']) {
+  for (const name of ['status', 'inspectPacket', 'createRound', 'approvalSummary', 'freezeRound', 'refreezeRound', 'approveRound', 'launchRound', 'listRounds', 'listRuns', 'getRound', 'getRun', 'readRunLog', 'classifyRun', 'cancelRound', 'exportRound', 'graderSim', 'authorReview']) {
     assert.equal(typeof w.service[name], 'function', name);
     const result = w.service[name]();
     assert.ok(result instanceof Promise, name + ' returns a promise');
@@ -2005,4 +2005,124 @@ test('the service keeps its own copy of the overlap rule: no grader or review wh
   await w.service.launchRound(waiting);
   await w.service.cancelRound(waiting);
   await w.service.whenSettled(waiting);
+});
+
+
+/* ====================================================================== the task of a round */
+
+test('a round has a task: one line of at most 120 characters, empty when none is given, shown by the round and its row, kept out of the approval and the export', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const row = async id => (await w.service.listRounds()).find(item => item.id === id);
+
+  const given = await newRound(w, { label: 'Atlas round 1', task: '  Atlas\tbridge\n  ' });
+  assert.equal(given.task, 'Atlas bridge', 'control characters become spaces, the ends are trimmed');
+  assert.equal(given.label, 'Atlas round 1', 'the label is its own field');
+  assert.equal((await w.service.getRound(given.id)).task, 'Atlas bridge');
+  assert.equal((await row(given.id)).task, 'Atlas bridge');
+  const file = path.join(w.projectRoot, 'private', 'agent-rounds', given.id, 'round.json');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).task, 'Atlas bridge', 'stored with the round');
+
+  for (const task of [undefined, null, '', '   ']) {
+    const none = await newRound(w, { task });
+    assert.equal(none.task, '', `no task: ${JSON.stringify(task)}`);
+    assert.equal((await row(none.id)).task, '');
+  }
+  assert.equal((await newRound(w, { task: 'x'.repeat(120) })).task, 'x'.repeat(120));
+  await rejects(newRound(w, { task: 'x'.repeat(121) }), 413, /task is longer than 120 characters/);
+  await rejects(newRound(w, { task: 7 }), 400, /task must be text/);
+  await rejects(newRound(w, { task: ['Atlas'] }), 400, /task must be text/);
+  await rejects(newRound(w, { task: { name: 'Atlas' } }), 400, /task must be text/);
+  await rejects(newRound(w, { task: 'Atlas\0' }), 400, /NUL byte/);
+  const before = (await w.service.listRounds()).length;
+  await rejects(newRound(w, { task: 'x'.repeat(121) }), 413);
+  assert.equal((await w.service.listRounds()).length, before, 'a refused task creates nothing');
+
+  /* the task is metadata: the approval summary, its hash and the freeze do not depend on it */
+  const january = w.make({ clock: () => new Date('2026-01-01T00:00:00.000Z') });
+  const a = await january.createRound(roundBody(w, { task: 'Atlas' }));
+  const b = await january.createRound(roundBody(w, { task: 'Borealis' }));
+  const c = await january.createRound(roundBody(w, {}));
+  const freezes = [];
+  const summaries = [];
+  for (const created of [a, b, c]) {
+    freezes.push((await january.freezeRound(created.id, GOLD)).freeze);
+    summaries.push((await january.approvalSummary(created.id)).summary.split(created.id).join('<round id>'));
+  }
+  assert.equal(summaries[0], summaries[1]);
+  assert.equal(summaries[0], summaries[2]);
+  assert.ok(!summaries[0].includes('Borealis') && !summaries[1].includes('Borealis'), 'the task is not in the approval text');
+  assert.equal(freezes[0].sha256, freezes[1].sha256, 'the freeze does not know the task, so no task can make it stale');
+  assert.equal(freezes[0].sha256, freezes[2].sha256);
+  assert.equal(freezes[0].contentSha256, freezes[1].contentSha256);
+
+  /* and not in the export: the record format is unchanged */
+  const id = await finishedRound(w, { task: 'Atlas' });
+  await w.service.classifyRun(id, 1, { verdict: 'matches-frozen-gold', fingerprintIds: [], note: '' });
+  const exported = await w.service.exportRound(id);
+  assert.deepEqual(Object.keys(exported).sort(), ['directional', 'discarded', 'excluded', 'exportedAt', 'freeze', 'gafVisible', 'label', 'notes', 'records', 'roundId', 'schema', 'schemaVersion']);
+  assert.ok(!JSON.stringify(exported).includes('Atlas bridge') && !('task' in exported));
+  for (const record of exported.records) assert.ok(!('task' in record));
+});
+
+test('the next round keeps the task; a round made from the form with an origin takes the origin\'s task only when it names none', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const first = await finishedRound(w, { label: 'Atlas round 1', task: 'Atlas' });
+  const previous = await w.service.getRound(first);
+  assert.equal(previous.task, 'Atlas');
+
+  const next = await w.service.nextRound(first);
+  assert.equal(next.task, 'Atlas');
+  assert.equal((await w.service.listRounds()).find(item => item.id === next.id).task, 'Atlas');
+  assert.deepEqual(Object.keys(next.carried).sort(), ['config', 'content', 'contentSha256', 'freezeSha256', 'freezeVersion', 'gafVisible', 'packetSha256', 'postHoc', 'promptSha256', 'roundId', 'status'], 'the carried record is what the approval compares: no task in it');
+  const nextOfNext = await (async () => {
+    await w.service.freezeRound(next.id, next.carried.content);
+    return w.service.nextRound(next.id);
+  })();
+  assert.equal(nextOfNext.task, 'Atlas', 'down a lineage');
+
+  const omitted = await newRound(w, { carriedFrom: first });
+  assert.equal(omitted.task, 'Atlas', 'a task the request leaves out is the origin\'s');
+  assert.equal((await newRound(w, { carriedFrom: first, task: null })).task, 'Atlas');
+  assert.equal((await newRound(w, { carriedFrom: first, task: 'Meridian' })).task, 'Meridian', 'a task that is named wins');
+  assert.equal((await newRound(w, { carriedFrom: first, task: '' })).task, '', 'and so does an empty one: the writer cleared it');
+  assert.equal((await newRound(w, { carriedFrom: first, task: '   ' })).task, '');
+  assert.equal((await newRound(w, {})).task, '', 'no origin, no task');
+
+  /* a round with no task carries nothing forward */
+  const bare = await finishedRound(w, {});
+  assert.equal((await w.service.nextRound(bare)).task, '');
+  /* the earlier round is not touched */
+  assert.deepEqual(await w.service.getRound(first), previous);
+});
+
+test('a round stored before tasks existed loads with an empty task; a stored task that is not one line of text is made one', async t => {
+  const w = makeWorld(t, { resultText: GOLD_ANSWER });
+  const legacy = await finishedRound(w, { label: 'old round', task: 'Atlas' });
+  const damaged = (await newRound(w, { label: 'damaged' })).id;
+  const long = (await newRound(w, { label: 'long' })).id;
+  const edit = (id, change) => {
+    const file = path.join(w.projectRoot, 'private', 'agent-rounds', id, 'round.json');
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    change(stored);
+    fs.writeFileSync(file, JSON.stringify(stored));
+  };
+  edit(legacy, stored => { delete stored.task; });
+  edit(damaged, stored => { stored.task = 42; });
+  edit(long, stored => { stored.task = '  A\nvery long task name  ' + 'y'.repeat(300); });
+  const again = w.make();
+  const rows = Object.fromEntries((await again.listRounds()).map(row => [row.id, row]));
+  assert.equal(rows[legacy].task, '');
+  assert.equal((await again.getRound(legacy)).task, '');
+  assert.equal(rows[damaged].task, '');
+  assert.equal(rows[long].task.length, 120);
+  assert.ok(rows[long].task.startsWith('A very long task name'));
+  assert.ok(!rows[long].task.includes('\n'));
+  /* a legacy round is a round like any other: it can carry on, and its next round has no task either */
+  assert.equal((await again.nextRound(legacy)).task, '');
+  /* it keeps what it had: the same views otherwise */
+  const view = await again.getRound(legacy);
+  assert.equal(view.label, 'old round');
+  assert.equal(view.status, 'finished');
+  assert.equal(view.runs.length, 1);
+  assert.equal(view.directional, 'Directional only, n = 1. No rate or difficulty is computed.');
 });

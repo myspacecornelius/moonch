@@ -484,7 +484,7 @@ test('ids must match ^[a-z0-9-]{4,64}$ on every route that takes one', async t =
 test('the server rejects a bad id or run number itself, before the service is called', async t => {
   const real = createAgentService({ root: path.join(os.tmpdir(), 'unused-root-for-trap'), claudeBin: STUB });
   const trap = {};
-  for (const name of ['inspectPacket', 'createRound', 'approvalSummary', 'freezeRound', 'refreezeRound', 'approveRound', 'launchRound', 'listRounds', 'getRound', 'getRun', 'classifyRun', 'cancelRound', 'exportRound', 'graderSim']) {
+  for (const name of ['inspectPacket', 'createRound', 'approvalSummary', 'freezeRound', 'refreezeRound', 'approveRound', 'launchRound', 'listRounds', 'listRuns', 'getRound', 'getRun', 'readRunLog', 'classifyRun', 'cancelRound', 'exportRound', 'graderSim']) {
     trap[name] = async () => { throw new Error('the service was reached'); };
   }
   const w = await makeWorld(t, {}, { service: patchedService(real, trap) });
@@ -492,11 +492,20 @@ test('the server rejects a bad id or run number itself, before the service is ca
   for (const id of ['BAD_ID', 'abc', 'a'.repeat(65), 'rnd_000000000000', 'rnd-0000%2F00000000', '%']) {
     assert.equal((await w.get('/api/agents/rounds/' + id)).status, 400, id);
     assert.equal((await w.get(`/api/agents/rounds/${id}/runs/1`)).status, 400, id);
+    assert.equal((await w.get(`/api/agents/rounds/${id}/runs/1/log`)).status, 400, id + ' log');
     for (const tail of tails) assert.equal((await w.post(`/api/agents/rounds/${id}${tail}`, {})).status, 400, id + tail);
   }
   for (const n of ['0', '01', 'abc', '1000']) {
     assert.equal((await w.get(`/api/agents/rounds/rnd-000000000000/runs/${n}`)).status, 400, 'run ' + n);
     assert.equal((await w.post(`/api/agents/rounds/rnd-000000000000/runs/${n}/classify`, {})).status, 400, 'run ' + n);
+    assert.equal((await w.get(`/api/agents/rounds/rnd-000000000000/runs/${n}/log`)).status, 400, 'log of run ' + n);
+  }
+  /* the query strings of the two new read routes are checked by the server too */
+  for (const query of ['?after=-1', '?after=x', '?after=1&after=2', '?limit=0', '?limit=201', '?limit=1.5']) {
+    assert.equal((await w.get(`/api/agents/rounds/rnd-000000000000/runs/1/log${query}`)).status, 400, query);
+  }
+  for (const query of ['?limit=0', '?limit=201', '?round=BAD_ID', '?round=', '?task=' + 'x'.repeat(121), '?limit=1&limit=2']) {
+    assert.equal((await w.get(`/api/agents/runs${query}`)).status, 400, query);
   }
   assert.equal(w.logs.length, 0, 'no bad id reached the service');
   /* the trap works: a well formed id does reach the service, and the failure is a generic 500 */
@@ -1647,6 +1656,118 @@ test('redactRoundData keeps hashes, times and verdicts, and leaves out what come
   const loop = { a: {} };
   loop.a.loop = loop;
   assert.doesNotThrow(() => JSON.stringify(redactRoundData(loop)), 'a loop is cut off, not followed forever');
+});
+
+/* ====================================================================== tasks, the run feed and the run log */
+
+test('a round\'s task goes in with the round and comes out of every view; a task that is too long or not text is refused', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const created = await createRound(w, { task: '  Atlas  ', label: 'Atlas round 1' });
+  assert.equal(created.task, 'Atlas');
+  assert.equal(created.label, 'Atlas round 1');
+  assert.equal((await w.get(`/api/agents/rounds/${created.id}`)).json.task, 'Atlas');
+  const row = (await w.get('/api/agents/rounds')).json.rounds[0];
+  assert.equal(row.task, 'Atlas');
+  assert.equal((await createRound(w)).task, '');
+  for (const [task, status] of [['x'.repeat(121), 413], [5, 400], [['a'], 400], [{ a: 1 }, 400], ['a\u0000b', 400], [true, 400]]) {
+    const refused = await w.post('/api/agents/rounds', roundBody(w, { task }));
+    assert.equal(refused.status, status, JSON.stringify(task).slice(0, 40));
+    assert.match(refused.json.error, /task/);
+  }
+  /* freezing, approving and carrying on keep it, and it is not a part of the approval */
+  const frozen = await w.post(`/api/agents/rounds/${created.id}/freeze`, GOLD);
+  assert.equal(frozen.json.task, 'Atlas');
+  assert.ok(!frozen.json.approvalSummary.text.includes('Atlas round 1\nAtlas') && !/^Task:/m.test(frozen.json.approvalSummary.text));
+  const next = await w.post(`/api/agents/rounds/${created.id}/next`);
+  assert.equal(next.json.task, 'Atlas');
+  assert.equal(next.json.carried.task, undefined);
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
+});
+
+test('while a round runs, the run feed and the run log withhold the prompt, the answers and every pilot\'s own text; the full view returns when it ends', async t => {
+  const w = await makeWorld(t, [
+    { echoPrompt: true, toolUses: [{ name: 'Bash', input: { command: `echo "${GOLD_ANSWER}"` }, result: GOLD_ANSWER }, { name: 'Read', input: { file_path: '/etc/hosts' }, result: WRONG_ANSWER }] },
+    { hang: true },
+  ], { limits: { killGraceMs: 200 } });
+  const earlier = await finishedRound(w, { task: 'Atlas' });
+
+  /* nothing runs: the log has the text, so the later absence is the redaction's doing */
+  const open = (await w.get(`/api/agents/rounds/${earlier}/runs/1/log`)).json;
+  assert.equal(open.withheld, false);
+  const openText = JSON.stringify(open);
+  assert.ok(openText.includes('Usable cash is 1,250') && openText.includes(PROMPT.slice(0, 40)), 'the secret text is in the transcript the route reads');
+  const openFeed = (await w.get('/api/agents/runs')).json;
+  assert.equal(openFeed.redacted, undefined);
+  assert.equal(openFeed.runs[0].task, 'Atlas');
+
+  const running = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 }, task: 'Atlas' });
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/launch`)).status, 200);
+  await waitFor(async () => {
+    const round = await w.service.getRound(running.id);
+    return round.runs[0].state === 'completed' && round.runs[1].state === 'running';
+  }, { label: 'run 1 to finish while run 2 is still running' });
+
+  const reads = {
+    feed: await w.get('/api/agents/runs'),
+    feedOfRound: await w.get(`/api/agents/runs?round=${running.id}&limit=5`),
+    feedOfTask: await w.get('/api/agents/runs?task=Atlas'),
+    earlierLog: await w.get(`/api/agents/rounds/${earlier}/runs/1/log`),
+    finishedPilotLog: await w.get(`/api/agents/rounds/${running.id}/runs/1/log`),
+    runningPilotLog: await w.get(`/api/agents/rounds/${running.id}/runs/2/log`),
+    pagedLog: await w.get(`/api/agents/rounds/${earlier}/runs/1/log?after=2&limit=2`),
+  };
+  for (const [name, response] of Object.entries(reads)) {
+    assert.equal(response.status, 200, `${name}: ${response.text}`);
+    assert.equal(response.json.redacted, true, name);
+    for (const secret of SECRET_TEXT.concat([WRONG_ANSWER, '/etc/hosts'])) assert.ok(!response.text.includes(secret), `${name} leaks ${secret}`);
+    for (const key of SECRET_KEYS.map(item => item + ':').concat(['"relPath":', '"command":', '"file_path":', '"input":'])) assert.ok(!response.text.includes(key), `${name} carries ${key}`);
+  }
+  /* the feed keeps states and counts */
+  assert.deepEqual(reads.feedOfRound.json.runs.map(row => row.state).sort(), ['completed', 'running']);
+  assert.equal(reads.feed.json.runs.length, 3);
+  assert.deepEqual(reads.feedOfRound.json.runs.find(row => row.state === 'completed').final, { chars: (PILOT_PREFIX + PROMPT).length });
+  assert.equal(reads.feedOfTask.json.runs.length, 3);
+  /* the log keeps what a running pilot may know */
+  for (const name of ['earlierLog', 'finishedPilotLog']) {
+    assert.equal(reads[name].json.withheld, true, name);
+    assert.deepEqual(reads[name].json.lines.map(line => line.kind), ['init', 'tool', 'tool', 'tool', 'tool', 'result'], name);
+    for (const line of reads[name].json.lines) assert.deepEqual(Object.keys(line).filter(key => !['seq', 'at', 'kind', 'tool', 'chars'].includes(key)), [], name);
+  }
+  assert.equal(reads.earlierLog.json.lines[5].chars, (PILOT_PREFIX + PROMPT).length, 'how long the answer was');
+  assert.deepEqual(reads.pagedLog.json.lines.map(line => line.seq), [3, 4]);
+  assert.deepEqual(reads.runningPilotLog.json.lines.map(line => line.kind), ['init']);
+
+  /* the round ends: the text comes back */
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/cancel`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).status === 'cancelled', { label: 'the round to end' });
+  const after = (await w.get(`/api/agents/rounds/${earlier}/runs/1/log`)).json;
+  assert.equal(after.withheld, false);
+  assert.equal(after.redacted, undefined);
+  assert.deepEqual(after.lines.map(line => line.text !== undefined), [true, true, true, true, true, true]);
+  assert.equal(after.lines[5].text, PILOT_PREFIX + PROMPT);
+  assert.equal((await w.get('/api/agents/runs')).json.redacted, undefined);
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
+});
+
+test('the run feed and the run log answer with the repo\'s error shape: 400 for a bad id or query, 404 for an unknown round or run, 405 for another method', async t => {
+  const w = await makeWorld(t);
+  const created = await createRound(w);
+  const shape = async (response, status) => {
+    assert.equal(response.status, status, response.text);
+    assert.deepEqual(Object.keys(response.json), ['error']);
+    assert.equal(typeof response.json.error, 'string');
+    assert.ok(!response.text.includes(w.base), 'no path of this machine');
+  };
+  await shape(await w.get('/api/agents/runs?limit=0'), 400);
+  await shape(await w.get('/api/agents/runs?round=rnd-ffffffffffff'), 404);
+  await shape(await w.get('/api/agents/rounds/rnd-ffffffffffff/runs/1/log'), 404);
+  await shape(await w.get(`/api/agents/rounds/${created.id}/runs/1/log`), 404);
+  await shape(await w.get(`/api/agents/rounds/${created.id}/runs/1/log?after=-1`), 400);
+  await shape(await w.get('/api/agents/rounds/BAD_ID/runs/1/log'), 400);
+  await shape(await w.post(`/api/agents/rounds/${created.id}/runs/1/log`, {}), 405);
+  await shape(await w.post('/api/agents/runs', {}), 405);
+  assert.deepEqual((await w.get('/api/agents/runs')).json, { runs: [] }, 'a round that has not been launched has no runs');
+  assert.equal(w.logs.length, 0, w.logs.join('\n'));
 });
 
 /* ====================================================================== the script entry */

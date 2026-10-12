@@ -49,6 +49,7 @@ const MISMATCH_NEXT = 'Nothing was started. Cancel this round, then freeze again
 
 const WORKING_FOLDER_TEXT = 'finance-studio-pilots/<run id> in the operating system temporary folder, outside the Studio project. These folders hold copies of the packet files and the pilot\'s work, and they stay there until you delete them';
 const MAX_LABEL = 120;
+const MAX_TASK = 120;
 const MAX_PROMPT_CHARS = 20000;
 const MAX_FREEZE_TEXT = 1000;
 const MAX_NOTE = 2000;
@@ -104,6 +105,19 @@ function cleanText(value, field, max, required = false) {
   if (value.length > max) throw new AgentError(413, `${field} is longer than ${max} characters`);
   if (required && !value.trim()) throw bad(`${field} is required`);
   return value;
+}
+
+/* The task a round belongs to is writer-typed display metadata, like the label: one line, at most MAX_TASK characters. It
+   is not part of the approval summary and does not touch a freeze, so editing it never makes a round stale. */
+const ONE_LINE = /[\u0000-\u001f\u007f]/g;
+const cleanTaskText = value => String(value).replace(ONE_LINE, ' ').trim();
+const taskOf = round => (typeof round.task === 'string' ? round.task : '');
+/* The comparison key of a task name (the feed filter and mission-model.js use the same one): whitespace collapsed, NFC, lower case. */
+function taskKey(value) {
+  const text = typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
+  let key = text;
+  try { key = text.normalize('NFC'); } catch { key = text; }
+  return key.toLowerCase();
 }
 
 function stringList(value, field, maxItems, maxLength) {
@@ -368,6 +382,7 @@ function roundView(round) {
     id: round.id,
     createdAt: round.createdAt,
     label: round.label,
+    task: taskOf(round),
     status: round.status,
     launchedAt: round.launchedAt,
     endedAt: round.endedAt,
@@ -388,11 +403,37 @@ function roundView(round) {
   });
 }
 
-function roundRow(round) {
+/* The latest time anything happened to a round: its creation, a freeze (the original or a post-hoc version), the approval,
+   the launch, a cancel request, the end, each run's start and end and each human verdict. A time that is not a date is ignored. */
+function lastActivityOf(round) {
+  const stamps = [round.createdAt, round.launchedAt, round.endedAt, round.cancelRequestedAt, round.approval ? round.approval.approvedAt : null];
+  for (const freeze of allFreezes(round)) stamps.push(freeze.frozenAt);
+  for (const run of round.runs) {
+    stamps.push(run.startedAt, run.endedAt);
+    if (run.classification && run.classification.human) stamps.push(run.classification.human.at);
+  }
+  let best = null;
+  let bestMs = -Infinity;
+  for (const stamp of stamps) {
+    if (typeof stamp !== 'string') continue;
+    const ms = Date.parse(stamp);
+    if (Number.isFinite(ms) && ms > bestMs) { best = stamp; bestMs = ms; }
+  }
+  return best === null ? (typeof round.createdAt === 'string' ? round.createdAt : null) : best;
+}
+
+function freezeContentOrNull(freeze) {
+  try { return contentShaOf(freeze); } catch { return null; }
+}
+
+/* depth: how many carriedFrom steps lead back from this round (a round that was not carried forward is 0). */
+function roundRow(round, depth = 0) {
+  const freeze = latestFreeze(round);
   return clone({
     id: round.id,
     createdAt: round.createdAt,
     label: round.label,
+    task: taskOf(round),
     status: round.status,
     carriedFrom: round.carriedFrom || null,
     config: round.config,
@@ -401,7 +442,357 @@ function roundRow(round) {
     gafVisible: round.packet.gafVisible,
     runCount: round.runs.length,
     counts: countRuns(round.runs),
+    launchedAt: round.launchedAt || null,
+    endedAt: round.endedAt || null,
+    freezeVersion: freeze && Number.isInteger(freeze.version) ? freeze.version : null,
+    freezePostHoc: Boolean(freeze) && freeze.postHoc === true,
+    contentSha256: freeze ? freezeContentOrNull(freeze) : null,
+    carriedDepth: depth,
+    lastActivityAt: lastActivityOf(round),
   });
+}
+
+/* ------------------------------------------------------------------ the run feed (GET /api/agents/runs) */
+
+const RUN_ENDED_STATES = new Set(['completed', 'failed', 'cancelled']);
+const FEED_LIMIT = Object.freeze({ default: 60, max: 200 });
+
+/* When a run last changed: its end, else its start, else the launch of its round, else the round's creation. */
+const arrivedAtOf = (round, run) => run.endedAt || run.startedAt || round.launchedAt || round.createdAt;
+const timeOf = stamp => { const ms = Date.parse(stamp); return Number.isFinite(ms) ? ms : -Infinity; };
+
+/* One run of one round as the feed shows it. It reads only what is in memory and carries nothing the run row does not (no
+   text, no gold, no folder on disk): the redaction of backend/server.cjs treats it like any other round data. */
+function feedRow(round, run) {
+  const row = runRow(run);
+  const human = row.classification ? row.classification.humanVerdict : null;
+  /* The evidence copy exists once the store has finished the run; a run that never started, was interrupted, or failed at
+     setup has none. */
+  const copied = run.audit && run.failureReason !== 'setup-error' && RUN_ENDED_STATES.has(run.state);
+  return {
+    key: `${round.id}:${run.n}`,
+    roundId: round.id,
+    n: run.n,
+    runId: run.id,
+    roundLabel: round.label,
+    task: taskOf(round),
+    roundStatus: round.status,
+    state: run.state,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    arrivedAt: arrivedAtOf(round, run),
+    exitCode: run.exitCode,
+    requestedModel: run.requestedModel,
+    resolvedModel: run.resolvedModel,
+    numTurns: run.numTurns,
+    costUsd: run.costUsd,
+    terminalReason: run.terminalReason,
+    failureReason: run.failureReason,
+    toolCalls: { total: run.toolCalls.total, bash: run.toolCalls.bash, file: run.toolCalls.file },
+    audit: run.audit ? { status: run.audit.status, violationCount: run.audit.violations.length } : null,
+    final: run.audit ? { chars: run.final.chars } : null,
+    outputCount: run.outputs.length,
+    workingFolder: row.folder,
+    evidencePath: copied ? `private/agent-rounds/${round.id}/runs/${run.n}/outputs/` : null,
+    classification: row.classification,
+    needsVerdict: run.state === 'completed' && Boolean(run.audit) && run.audit.status === 'CLEAN' && !human,
+  };
+}
+
+/* ------------------------------------------------------------------ the run log (GET /api/agents/rounds/:id/runs/:n/log) */
+
+/* The runner appends every stdout line of a pilot to <rounds>/<round>/runs/<n>/transcript.jsonl while the pilot runs
+   (claude-runner.cjs; the file is capped at 256 MB and a line at 16 MB). This reads that file by byte range, a page of
+   complete lines at a time, and never the whole of it:
+     - a line is numbered by its place in the file (seq 1, 2, 3, ...), so a cursor is the number of the last line seen;
+     - a per-run, in-memory index keeps the byte offset of the line where the last scan ended and of a few earlier ones, so a
+       follow-up page starts where the last one ended (a new line is found by reading only what was appended);
+     - only a line ended by a newline is a line: the bytes of a line that is still being written are never parsed;
+     - a request reads at most LOG.scanBytes from the file, holds at most LOG.pageBytes of line text, and a line longer than
+       LOG.parseBytes is counted but neither kept nor parsed. */
+const LOG = Object.freeze({
+  defaultLimit: 100,
+  maxLimit: 200,
+  maxAfter: 2000000000,
+  textChars: 2000, /* the text of a line, in characters */
+  pathChars: 300, /* a relative path */
+  chunk: 64 * 1024,
+  parseBytes: 256 * 1024,
+  pageBytes: 4 * 1024 * 1024,
+  scanBytes: 64 * 1024 * 1024,
+  checkpointBytes: 256 * 1024,
+  checkpointLines: 64,
+  maxPoints: 4096, /* recorded places per run; past that every second one is dropped and the spacing doubles */
+  indexedRuns: 100,
+});
+const LOG_TOOLS = new Set(C.TOOLS);
+const LOG_TOKEN_RE = /^[A-Za-z0-9_.:\-\[\]]{1,100}$/;
+const LOG_MALFORMED_TEXT = 'This line is not a readable event.';
+const LOG_UNREADABLE_TEXT = 'No transcript is available for this run';
+const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+
+const logToken = value => (typeof value === 'string' && LOG_TOKEN_RE.test(value) ? value : null);
+
+/* A time stamp the event itself carries, normalised; the runtime does not time stamp most events, and then it is null. */
+function logTime(value) {
+  if (typeof value !== 'string' || value.length > 40 || !/^\d{4}-\d{2}-\d{2}/.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/* At most `max` characters, without cutting a surrogate pair in two. */
+function capText(text, max = LOG.textChars) {
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
+function jsonLength(value) {
+  try { return JSON.stringify(value).length; } catch { return 0; }
+}
+
+/* The text of a tool_result: a string, or the text parts of a list. */
+function resultBody(block) {
+  const body = block.content;
+  if (typeof body === 'string') return body;
+  if (!Array.isArray(body)) return '';
+  return body.filter(part => isObject(part) && typeof part.text === 'string').map(part => part.text).join('\n');
+}
+
+/* One line of a tool call that says what it did: the command, or the path and the pattern it was given. */
+function toolSummary(input) {
+  if (typeof input.command === 'string') return input.command;
+  const parts = [];
+  for (const key of ['file_path', 'path', 'notebook_path', 'pattern', 'glob', 'query', 'url']) {
+    const value = input[key];
+    if (typeof value === 'string' && value) parts.push(key === 'file_path' || key === 'path' || key === 'notebook_path' ? value : `${key}: ${value}`);
+  }
+  return parts.join(' · ');
+}
+
+/* What kind of step an event is, the tool it names, how long its text is, and the text and path it carries (not yet
+   capped or cleaned). One record per transcript line: an assistant event with a tool call is reported as that call. */
+function classifyEvent(event) {
+  const type = event.type;
+  if (type === 'system') {
+    if (event.subtype === 'init') {
+      const model = logToken(event.model);
+      return { kind: 'init', text: `Session started${model ? ` with model ${model}` : ''}.` };
+    }
+    const subtype = logToken(event.subtype);
+    return { kind: 'system', text: subtype ? `System event: ${subtype}.` : 'System event.' };
+  }
+  if (type === 'assistant' && isObject(event.message) && Array.isArray(event.message.content)) {
+    const blocks = event.message.content.filter(isObject);
+    const use = blocks.find(block => block.type === 'tool_use');
+    if (use) {
+      const input = isObject(use.input) ? use.input : {};
+      return { kind: 'tool', tool: use.name, chars: jsonLength(input), text: toolSummary(input), path: [input.file_path, input.path, input.notebook_path].find(value => typeof value === 'string') };
+    }
+    const texts = blocks.filter(block => block.type === 'text' && typeof block.text === 'string').map(block => block.text);
+    if (texts.length) {
+      const joined = texts.join('\n');
+      return { kind: 'text', chars: joined.length, text: joined };
+    }
+    return { kind: 'system', text: 'The model took a step that is not shown.' };
+  }
+  if (type === 'user' && isObject(event.message)) {
+    const results = Array.isArray(event.message.content) ? event.message.content.filter(block => isObject(block) && block.type === 'tool_result') : [];
+    if (results.length) {
+      const body = results.map(resultBody).join('\n');
+      return { kind: 'tool', chars: body.length, text: body };
+    }
+    return { kind: 'system', text: 'A message was sent to the model.' };
+  }
+  if (type === 'result') {
+    const body = typeof event.result === 'string' ? event.result : '';
+    const subtype = logToken(event.subtype);
+    if (event.is_error === true || (subtype && subtype.startsWith('error'))) {
+      const reasons = Array.isArray(event.errors) ? event.errors.filter(item => typeof item === 'string').join('; ') : '';
+      const reason = body || reasons;
+      return { kind: 'error', chars: reason.length, text: reason || `The run ended with ${subtype || 'an error'}.` };
+    }
+    return { kind: 'result', chars: body.length, text: body };
+  }
+  const name = logToken(type);
+  return { kind: 'system', text: name ? `Event: ${name}.` : 'Event.' };
+}
+
+/* A path from a tool call as a path inside the pilot's folder, or null. Only a relative path comes out: the pilot folder
+   itself is dropped from the front, and an absolute path elsewhere, a ~ path and any .. step give null. */
+function relativeInFolder(value, folders) {
+  if (typeof value !== 'string' || !value || value.length > 1000 || CONTROL_RE.test(value)) return null;
+  let rel = value;
+  for (const folder of folders) {
+    if (rel === folder) { rel = ''; break; }
+    if (rel.startsWith(folder + '/')) { rel = rel.slice(folder.length + 1); break; }
+  }
+  if (rel.startsWith('/') || rel.startsWith('\\') || rel.startsWith('~') || /^[A-Za-z]:/.test(rel)) return null;
+  const steps = rel.split(/[\\/]+/);
+  if (steps.includes('..')) return null;
+  const clean = steps.filter(step => step && step !== '.').join('/');
+  return clean && clean.length <= LOG.pathChars ? clean : null;
+}
+
+/* Text with the pilot's own folder written as ".": the pilot ran in it, so ./filesystem/x names the same file. Every other
+   absolute path is left for the server's redaction (backend/server.cjs). */
+function folderWriter(folders) {
+  const list = [...new Set(folders.filter(folder => typeof folder === 'string' && folder.length > 1))].sort((a, b) => b.length - a.length);
+  if (!list.length) return text => text;
+  const escaped = list.map(folder => folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(?<![A-Za-z0-9_.~\\-/\\\\])(?:${escaped.join('|')})(?=$|[\\\\/\\s"'\`)\\]},;:|&<>])`, 'g');
+  return text => text.replace(pattern, '.');
+}
+
+/* One transcript line as a log line. head is the whole line (null when it was too long to keep), length its size in bytes.
+   withheld: only what a running pilot may read (kind, the name of the tool, the length, the time stamp); the text and the
+   path are not even built. */
+function describeLogLine(seq, length, head, { withheld, folders, write }) {
+  const line = { seq, at: null, kind: 'system' };
+  if (!head) {
+    line.chars = length;
+    if (!withheld) line.text = `This line is ${length} bytes long, too long to show.`;
+    return line;
+  }
+  const raw = head.toString('utf8');
+  let event = null;
+  const trimmed = raw.trim();
+  if (trimmed[0] === '{') { try { event = JSON.parse(trimmed); } catch { event = null; } }
+  if (!isObject(event) || typeof event.type !== 'string') {
+    line.chars = raw.length;
+    if (!withheld) line.text = LOG_MALFORMED_TEXT;
+    return line;
+  }
+  const info = classifyEvent(event);
+  line.at = logTime(event.timestamp);
+  line.kind = info.kind;
+  if (info.tool !== undefined) {
+    const name = logToken(info.tool);
+    if (withheld) line.tool = name && LOG_TOOLS.has(name) ? name : 'other';
+    else if (name) line.tool = name;
+  }
+  if (Number.isInteger(info.chars)) line.chars = info.chars;
+  if (withheld) return line;
+  const relPath = info.path === undefined ? null : relativeInFolder(info.path, folders);
+  if (relPath) line.relPath = relPath;
+  if (info.text) line.text = capText(write(capText(info.text, LOG.textChars * 2)));
+  return line;
+}
+
+/* Read the transcript from the line after `after`: up to `take` complete lines, or until the end of the file, or until a
+   limit of this request is reached. Lines are { seq, length, head }. index is updated as the scan goes, so the next request
+   starts where this one ended. stop says why it ended: 'take' | 'page' (enough text held) | 'eof' | 'budget'. */
+function scanTranscript(fd, index, after, take) {
+  let seq;
+  let pos;
+  if (after >= index.lines) {
+    seq = index.lines;
+    pos = index.bytes;
+  } else {
+    let low = 0;
+    let high = index.points.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (index.points[mid].seq <= after) low = mid; else high = mid - 1;
+    }
+    seq = index.points[low].seq;
+    pos = index.points[low].pos;
+  }
+  const lines = [];
+  const buffer = Buffer.allocUnsafe(LOG.chunk);
+  let readBytes = 0;
+  let held = 0;
+  let parts = [];
+  let partBytes = 0;
+  let lineBytes = 0;
+  let keep = seq + 1 > after;
+  const begin = () => { parts = []; partBytes = 0; lineBytes = 0; keep = seq + 1 > after; };
+  let stop = 'eof';
+  scan:
+  for (;;) {
+    if (readBytes >= LOG.scanBytes) { stop = 'budget'; break; }
+    const got = fs.readSync(fd, buffer, 0, buffer.length, pos);
+    if (got <= 0) break;
+    readBytes += got;
+    const view = buffer.subarray(0, got);
+    let at = 0;
+    while (at < got) {
+      const newline = view.indexOf(10, at);
+      const end = newline < 0 ? got : newline;
+      if (keep && partBytes <= LOG.parseBytes) {
+        const piece = Buffer.from(view.subarray(at, at + Math.min(end - at, LOG.parseBytes + 1 - partBytes)));
+        parts.push(piece);
+        partBytes += piece.length;
+      }
+      lineBytes += end - at;
+      if (newline < 0) break;
+      seq++;
+      const lineEnd = pos + newline + 1;
+      if (seq > index.lines) {
+        index.lines = seq;
+        index.bytes = lineEnd;
+        const last = index.points[index.points.length - 1];
+        if (lineEnd - last.pos >= index.stepBytes || seq - last.seq >= index.stepLines) {
+          index.points.push({ seq, pos: lineEnd });
+          if (index.points.length > LOG.maxPoints) {
+            index.points = index.points.filter((point, place) => place % 2 === 0);
+            index.stepBytes *= 2;
+            index.stepLines *= 2;
+          }
+        }
+      }
+      if (keep) {
+        const head = lineBytes <= LOG.parseBytes ? Buffer.concat(parts, partBytes) : null;
+        lines.push({ seq, length: lineBytes, head });
+        if (head) held += head.length;
+      }
+      at = newline + 1;
+      begin();
+      if (seq >= after && lines.length >= take) { stop = 'take'; break scan; }
+      if (held >= LOG.pageBytes) { stop = 'page'; break scan; }
+    }
+    pos += got;
+  }
+  return { lines, endSeq: seq, stop };
+}
+
+/* Open the transcript of a run for reading, or say there is none (null). A symbolic link anywhere on the way, or anything
+   that is not a regular file, is refused (404): the answer must never be the contents of a file elsewhere. */
+function openTranscript(store, round, run) {
+  const unsafe = () => new AgentError(404, LOG_UNREADABLE_TEXT);
+  const dir = store._runDir(round, run);
+  const file = path.join(dir, 'transcript.jsonl');
+  let realDir;
+  try {
+    realDir = fs.realpathSync(dir);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return null;
+    throw unsafe();
+  }
+  let realRounds;
+  try { realRounds = fs.realpathSync(store.roundsDir); } catch { throw unsafe(); }
+  if (realDir !== path.join(realRounds, round.id, 'runs', String(run.n))) throw unsafe();
+  let before;
+  try {
+    before = fs.lstatSync(file);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw unsafe();
+  }
+  if (!before.isFile()) throw unsafe();
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw unsafe();
+  }
+  const opened = fs.fstatSync(fd);
+  if (!opened.isFile() || opened.ino !== before.ino || opened.dev !== before.dev) {
+    fs.closeSync(fd);
+    throw unsafe();
+  }
+  return { fd, dev: opened.dev, ino: opened.ino, size: opened.size };
 }
 
 /* ------------------------------------------------------------------ the simulated grader prompt */
@@ -496,6 +887,7 @@ class RoundStore {
     this.graderBusy = false;
     this.reviewBusy = false;
     this.graderRunners = new Set(); /* every tool-less runner (simulated grader and author review) */
+    this._logIndex = new Map(); /* run log byte offsets per run (readRunLog); memory only, rebuilt from the file on demand */
     this._detected = null;
     this._detecting = null;
     this._helpFlags = new Map(); /* `claude --help` options per binary path and version (pre-flight) */
@@ -518,6 +910,8 @@ class RoundStore {
         const round = readJson(path.join(this.roundsDir, name, 'round.json'));
         if (!isObject(round) || round.id !== name || round.schema !== SCHEMA || !isObject(round.packet) || !Array.isArray(round.packet.files) || !isObject(round.config) || !Array.isArray(round.runs)) continue;
         round.postHocFreezes = Array.isArray(round.postHocFreezes) ? round.postHocFreezes : [];
+        /* A round stored before tasks existed has none. A stored task is one line of at most MAX_TASK characters. */
+        round.task = typeof round.task === 'string' ? cleanTaskText(round.task).slice(0, MAX_TASK) : '';
         this.rounds.set(round.id, round);
         const completed = completeConfig(round);
         if (this._recover(round) || completed) this._persistRound(round);
@@ -608,6 +1002,21 @@ class RoundStore {
     const run = round.runs[Number(digits) - 1];
     if (!run) throw new AgentError(404, 'No such run');
     return run;
+  }
+
+  /* How many carriedFrom steps lead back from a round: 0 for a round that was not carried forward. A round whose origin is
+     not stored still counts that step, and a loop in hand-edited records ends the walk instead of repeating it. */
+  _carriedDepth(round) {
+    const seen = new Set([round.id]);
+    let depth = 0;
+    let at = round;
+    while (at && typeof at.carriedFrom === 'string' && at.carriedFrom && depth < 10000) {
+      depth++;
+      if (seen.has(at.carriedFrom)) break;
+      seen.add(at.carriedFrom);
+      at = this.rounds.get(at.carriedFrom);
+    }
+    return depth;
   }
 
   /* -------------------------------------------------------------- runtime */
@@ -752,12 +1161,17 @@ class RoundStore {
   createRound(body) {
     const input = needObject(body, 'The request body');
     const label = cleanText(input.label, 'label', MAX_LABEL).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    const taskInput = input.task === undefined || input.task === null ? null : cleanTaskText(cleanText(input.task, 'task', MAX_TASK));
     const promptText = cleanText(input.promptText, 'promptText', MAX_PROMPT_CHARS, true);
     if (typeof input.gafVisible !== 'boolean') throw bad('gafVisible must be true or false');
     const config = parseConfig(input.config);
     const versions = parseVersions(input.versions);
     const sourceDir = cleanText(input.sourceDir, 'sourceDir', 4096, true);
-    const carried = input.carriedFrom === undefined || input.carriedFrom === null ? null : this._carrySnapshot(input.carriedFrom);
+    const snapshot = input.carriedFrom === undefined || input.carriedFrom === null ? null : this._carrySnapshot(input.carriedFrom);
+    /* `task` is not part of the stored `carried` record (that is what the approval compares); it only fills in a task the
+       request left out, so a round carried forward stays with its task. An explicit task, even empty, wins. */
+    const { task: carriedTask = '', ...carried } = snapshot || {};
+    const task = taskInput === null ? carriedTask : taskInput;
 
     this._refuseOwnFolders(sourceDir);
     let listing;
@@ -803,6 +1217,7 @@ class RoundStore {
       id,
       createdAt: this.now(),
       label,
+      task,
       packet: {
         sourceDir: path.resolve(sourceDir),
         files,
@@ -823,7 +1238,7 @@ class RoundStore {
       cancelRequestedAt: null,
       note: '',
     };
-    if (carried) {
+    if (snapshot) {
       round.carriedFrom = carried.roundId;
       round.carried = carried;
     }
@@ -844,6 +1259,7 @@ class RoundStore {
     const freeze = latestFreeze(previous);
     if (!freeze) throw new AgentError(409, `Round ${previous.id} has no freeze, so there is no gold to carry forward. Freeze it first, or start a round from the form`);
     return {
+      task: taskOf(previous), /* read by createRound, which does not store it in `carried` */
       roundId: previous.id,
       status: previous.status,
       freezeVersion: freeze.version,
@@ -870,6 +1286,7 @@ class RoundStore {
     if (concurrency !== undefined) config.concurrency = concurrency;
     const body = {
       label: previous.label,
+      task: taskOf(previous),
       sourceDir: previous.packet.sourceDir,
       include: included.map(file => file.path),
       overrides: included.filter(file => file.overridden).map(file => file.path),
@@ -1449,7 +1866,86 @@ class RoundStore {
   /* -------------------------------------------------------------- reading */
 
   listRounds() {
-    return [...this.rounds.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1)).map(roundRow);
+    return [...this.rounds.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1)).map(round => roundRow(round, this._carriedDepth(round)));
+  }
+
+  /* Every run of every round, newest first by when it last changed (arrivedAt), as one feed. options: limit (1..200, default
+     60), task (rounds whose task is this one, compared without case and extra spaces; '' is the rounds with no task), round
+     (one round's runs; an unknown round is a 404). In memory only: no file is read. */
+  listRuns(options = {}) {
+    const opts = isObject(options) ? options : {};
+    const limit = opts.limit === undefined || opts.limit === null ? FEED_LIMIT.default : opts.limit;
+    if (!Number.isInteger(limit) || limit < 1 || limit > FEED_LIMIT.max) throw bad(`limit must be a whole number from 1 to ${FEED_LIMIT.max}`);
+    let task = null;
+    if (opts.task !== undefined && opts.task !== null) {
+      if (typeof opts.task !== 'string') throw bad('task must be text');
+      if (opts.task.length > MAX_TASK) throw bad(`task is longer than ${MAX_TASK} characters`);
+      task = taskKey(opts.task);
+    }
+    let rounds = [...this.rounds.values()];
+    if (opts.round !== undefined && opts.round !== null) {
+      if (typeof opts.round !== 'string' || !ROUND_ID_RE.test(opts.round)) throw bad('That is not a valid round id');
+      rounds = [this._get(opts.round)];
+    }
+    const entries = [];
+    for (const round of rounds) {
+      if (task !== null && taskKey(taskOf(round)) !== task) continue;
+      for (const run of round.runs) {
+        const at = arrivedAtOf(round, run);
+        entries.push({ round, run, at, ms: timeOf(at) });
+      }
+    }
+    const before = (a, b) => (a < b ? 1 : a > b ? -1 : 0);
+    entries.sort((a, b) => (b.ms - a.ms) || before(a.at, b.at) || before(a.round.id, b.round.id) || b.run.n - a.run.n);
+    return entries.slice(0, limit).map(({ round, run }) => feedRow(round, run));
+  }
+
+  /* A page of a run's transcript (see the run log section above): { lines, next, done, withheld }.
+       after  the number of the last line already seen (0: from the first); limit 1..200 lines.
+       next   the number to ask for after this page: the last line of the file that was read (the number of lines in the file
+              when after was past its end);
+       done   the run has ended and the end of the file was reached (a half written last line is not a line);
+       withheld  while ANY round runs, a line is only { seq, at, kind, tool, chars }: no text, no command, no path. The store
+              decides this itself, at the moment it reads, from the rounds it holds; withheld: true in the options forces it.
+     A run that has no transcript yet has no lines. A transcript that is a link, or sits behind one, is a 404. */
+  readRunLog(id, n, options = {}) {
+    const round = this._get(id);
+    const run = this._getRun(round, n);
+    const opts = isObject(options) ? options : {};
+    const after = opts.after === undefined || opts.after === null ? 0 : opts.after;
+    const limit = opts.limit === undefined || opts.limit === null ? LOG.defaultLimit : opts.limit;
+    if (!Number.isInteger(after) || after < 0 || after > LOG.maxAfter) throw bad(`after must be a whole number from 0 to ${LOG.maxAfter}`);
+    if (!Number.isInteger(limit) || limit < 1 || limit > LOG.maxLimit) throw bad(`limit must be a whole number from 1 to ${LOG.maxLimit}`);
+    /* Both are read before the file is, in this synchronous block: a run that has ended has written its last line, and a
+       round that starts after this point is covered by the redaction of the answer (backend/server.cjs). */
+    const ended = RUN_ENDED_STATES.has(run.state);
+    const withheld = opts.withheld === true || [...this.rounds.values()].some(other => other.status === 'running');
+    const handle = openTranscript(this, round, run);
+    if (!handle) return { lines: [], next: 0, done: ended, withheld };
+    const key = `${round.id}:${run.n}`;
+    try {
+      let index = this._logIndex.get(key);
+      if (index && (index.dev !== handle.dev || index.ino !== handle.ino || handle.size < index.bytes)) index = undefined;
+      if (!index) index = { dev: handle.dev, ino: handle.ino, lines: 0, bytes: 0, points: [{ seq: 0, pos: 0 }], stepBytes: LOG.checkpointBytes, stepLines: LOG.checkpointLines };
+      this._logIndex.delete(key);
+      this._logIndex.set(key, index);
+      while (this._logIndex.size > LOG.indexedRuns) this._logIndex.delete(this._logIndex.keys().next().value);
+      const page = scanTranscript(handle.fd, index, after, limit);
+      const folders = [];
+      if (!withheld && typeof run.folder === 'string' && path.isAbsolute(run.folder)) {
+        folders.push(run.folder);
+        try { const real = fs.realpathSync(run.folder); if (real !== run.folder) folders.push(real); } catch { /* the folder was deleted */ }
+        folders.sort((a, b) => b.length - a.length);
+      }
+      const context = { withheld, folders, write: folderWriter(folders) };
+      const lines = page.lines.map(item => describeLogLine(item.seq, item.length, item.head, context));
+      /* a scan that ran out of its budget before it reached `after` leaves the cursor where it is, and goes on from the
+         index next time */
+      const next = page.stop === 'budget' ? Math.max(page.endSeq, after) : page.endSeq;
+      return { lines, next, done: ended && page.stop === 'eof', withheld };
+    } finally {
+      fs.closeSync(handle.fd);
+    }
   }
 
   getRound(id) { return roundView(this._get(id)); }
@@ -1696,4 +2192,6 @@ module.exports = {
   buildReviewPrompt,
   sourceFingerprintOf,
   freezeContentSha256,
+  taskKey,
+  LOG_LIMITS: LOG,
 };
