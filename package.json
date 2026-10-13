@@ -13,6 +13,7 @@
     "test:agents": "node tests/agents-browser.cjs",
     "test:mission": "node tests/mission-browser.cjs",
     "test:workbench": "node tests/workbench-browser.cjs",
+    "test:ideas": "node tests/ideas-browser.cjs",
     "smoke": "node scripts/live-smoke.cjs",
     "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs && python3 scripts/package-filebase.py --manifest-only"
   },

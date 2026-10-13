@@ -586,7 +586,7 @@ test('static files: the allowlist, agents.js, the connect-src rewrite, and nothi
     assert.equal(page.headers['x-frame-options'], 'DENY');
   }
   const wanted = [...ASSETS].filter(name => name !== 'index.html');
-  for (const name of ['styles.css', 'mission.css', 'workbench.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'dashboard.js']) {
+  for (const name of ['styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js']) {
     assert.ok(wanted.includes(name), name + ' is on the allowlist');
     const response = await w.get('/' + name);
     assert.equal(response.status, 200, name);

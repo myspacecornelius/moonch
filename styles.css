@@ -202,15 +202,15 @@ tr.is-selected>td:first-child,tr[aria-selected="true"]>td:first-child{box-shadow
 .dash-wordmark-dot{flex:none;width:12px;height:12px;margin-top:3px;border-radius:50%;background:var(--accent)}
 .dash-wordmark .brand{margin:0;font-size:.8rem;line-height:1.5;font-weight:650;letter-spacing:.14em;text-transform:uppercase;color:var(--text)}
 .dash-sidebar nav{gap:2px}
-.dash-sidebar .nav-group{margin:28px 12px 8px;font-size:.8rem;line-height:1.4;font-weight:650;letter-spacing:.14em}
+.dash-sidebar .nav-group{margin:16px 12px 8px;font-size:.8rem;line-height:1.4;font-weight:650;letter-spacing:.14em}
 .dash-sidebar .nav-group:first-child{margin-top:0}
-.dash-sidebar .nav-btn{justify-content:flex-start;gap:12px;min-height:40px;padding:9px 12px;white-space:nowrap;border:1px solid transparent;border-radius:10px;font-size:.9375rem;font-weight:500}
+.dash-sidebar .nav-btn{justify-content:flex-start;gap:12px;min-height:38px;padding:8px 12px;white-space:nowrap;border:1px solid transparent;border-radius:10px;font-size:.9375rem;font-weight:500}
 .dash-sidebar .nav-btn>span{margin-left:auto;font-size:.8125rem}
 .nav-icon{flex:none;width:18px;height:18px}
 .dash-sidebar .nav-btn.active,.dash-sidebar .nav-btn[aria-current]{border-color:var(--accent);font-weight:600}
 .dash-sidebar .nav-btn.active::before,.dash-sidebar .nav-btn[aria-current]::before{display:none}
 .dash-sidebar .nav-btn.active .nav-icon,.dash-sidebar .nav-btn[aria-current] .nav-icon{color:var(--accent-hi)}
-.dash-side-bottom{margin-top:auto;padding:32px 0 0;display:grid;gap:20px}
+.dash-side-bottom{margin-top:auto;padding:16px 0 0;display:grid;gap:16px}
 .dash-side-bottom .actions{display:grid;gap:4px}
 .dash-side-bottom .actions button{width:100%;padding:8px 12px;border-color:transparent;background:transparent;color:var(--muted-strong);text-align:left;font-size:.8125rem;font-weight:500}
 .dash-side-bottom .actions button:hover{background:var(--surface-2);color:var(--text)}
