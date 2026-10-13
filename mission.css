@@ -1,1 +1,307 @@
-/* Mission Control styles: placeholder, replaced by the view. Tokens only (see styles.css :root). */
+/* Mission Control. Tokens from styles.css :root only: no colour literal, no url(), no @import. Calm and spread out (SPEC 9.3):
+   spacing in multiples of 8 (page padding 40px, 32px between regions, 24px card padding, 24px between cards, feed rows at least 48px),
+   body 15px, secondary text 13px, nothing under 12px. Panels are --surface with a 1px --line border; inside a panel, groups are
+   separated by space and type weight, not by more borders or fills. Violet: the selected card, the active stage, the current row and
+   three link-like buttons. Yellow: the one primary button. Red and green only on status words that also carry a glyph. Motion only
+   when the reader allows it.
+   Layout: the run feed is the large central panel. Wide (the root is 900px or more): feed on the left, the live run and the recent
+   outputs in a 320px column on the right; opening the inspector swaps that column for the inspector. Narrow: one column in the order
+   header, cards, live run, feed, inspector, outputs. */
+.mc-root{display:grid;gap:32px;min-width:0;container:mcroot/inline-size;color:var(--text);font-size:15px;line-height:1.6}
+.mc-root>*{min-width:0}
+.mc-root p{margin:0;line-height:1.6}
+.mc-root h1,.mc-root h2,.mc-root h3{margin:0}
+.mc-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:13px}
+.mc-muted{color:var(--muted)}
+.mc-hint{font-size:13px;color:var(--muted-strong)}
+.mc-caption{font-size:12px;line-height:1.4;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.mc-h2{display:flex;align-items:center;gap:12px;font-size:18px;line-height:1.3;font-weight:650;letter-spacing:-.01em}
+.mc-h3{font-size:15px;line-height:1.4;font-weight:650}
+
+/* Header */
+.mc-top{display:grid;gap:24px}
+#mc-note:empty,#mc-import:empty,#mc-empty:empty{display:none}
+.mc-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px 32px;flex-wrap:wrap}
+.mc-heading{flex:0 1 auto;min-width:0}
+.mc-index{margin:0 0 8px;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.24em;color:var(--muted)}
+.mc-title{font-size:40px;line-height:1.05;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.mc-tagline{margin:12px 0 0;font-size:15px;color:var(--muted-strong)}
+.mc-tools{display:flex;flex:1 1 auto;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:16px}
+.mc-tools button{height:44px;padding:0 20px;font-size:15px;white-space:nowrap}
+.mc-search{position:relative;display:flex;flex:1 1 335px;align-items:center;width:335px;max-width:380px;min-width:0}
+.mc-search .mc-icon{position:absolute;left:14px;color:var(--muted);pointer-events:none}
+.mc-search input{width:100%;height:44px;padding:0 64px 0 42px;border:1px solid var(--control-border);border-radius:10px;background:var(--surface);color:var(--text);font-size:15px;text-overflow:ellipsis}
+.mc-search input::placeholder{color:var(--muted)}
+.mc-search input::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none}
+.mc-kbd{position:absolute;right:8px;padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--muted-strong);font:500 12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;pointer-events:none}
+.mc-search:focus-within .mc-kbd{display:none}
+@container mcroot (max-width:1000px){
+  .mc-title{font-size:36px}
+}
+/* The title (387px), a 335px search that shows its whole placeholder and the button (178px) fit one line from 948px; below that the tools
+   take their own line. */
+@container mcroot (max-width:947px){
+  .mc-tools{flex-basis:100%;justify-content:flex-start}
+}
+
+/* Summary strip and notes */
+.mc-strip{display:flex;align-items:center;justify-content:space-between;gap:8px 24px;flex-wrap:wrap}
+.mc-strip-text{display:flex;flex-wrap:wrap;gap:8px 24px;font-size:13px;color:var(--muted-strong)}
+.mc-strip-text strong{color:var(--text);font-weight:650}
+.mc-strip>.mc-link{margin-right:-10px}
+.mc-link-state{display:inline-flex;align-items:center;gap:8px}
+.mc-link-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted-strong)}
+.mc-link-state[data-link=offline] .mc-link-dot,.mc-link-state[data-link=checking] .mc-link-dot{background:transparent;border:1.5px solid var(--muted-strong)}
+.mc-link-state[data-link=lost]{color:var(--warn-ink)}
+.mc-link-state[data-link=lost] .mc-link-dot{background:transparent;border:1.5px solid var(--warn-ink)}
+.mc-note{display:flex;align-items:center;justify-content:space-between;gap:16px 24px;flex-wrap:wrap;padding:16px 24px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--muted-strong)}
+.mc-note p{margin:0}
+.mc-note.is-stale{border-color:var(--control-border)}
+.mc-note button{padding:8px 16px;font-size:14px}
+.mc-quiet-panel{display:grid;gap:16px;max-width:680px}
+.mc-quiet-panel p{color:var(--muted-strong)}
+
+/* Panels and buttons */
+.mc-panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:24px}
+.mc-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mc-root button.mc-quiet,.mc-root button.mc-link{padding:6px 10px;border-color:transparent;background:transparent;font-size:13px;font-weight:600;white-space:nowrap}
+.mc-root button.mc-quiet{color:var(--muted-strong)}
+.mc-root button.mc-link{color:var(--accent-hi)}
+.mc-root button.mc-quiet:hover,.mc-root button.mc-link:hover{background:var(--surface-2);color:var(--text)}
+.mc-root button.small{padding:6px 12px;font-size:13px}
+.mc-error{display:flex;gap:8px;color:var(--fail-ink);font-size:14px}
+.mc-error::before{content:"\2715";content:"\2715" / "";flex:none;font-weight:700}
+.mc-import{display:grid;gap:16px;max-width:680px}
+.mc-field{display:grid;gap:8px;font-size:14px;color:var(--muted-strong)}
+.mc-field input{height:44px;padding:0 12px;border:1px solid var(--control-border);border-radius:8px;background:var(--bg);color:var(--text);font-size:15px}
+.mc-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 24px;margin:0;font-size:14px}
+.mc-facts dt{color:var(--muted)}
+.mc-facts dd{margin:0;overflow-wrap:anywhere}
+.mc-path{overflow-wrap:anywhere}
+.mc-copy{display:block;margin:4px 0 0 -10px}
+
+/* Task cards: the whole card is the button (the name button stretches over it); the next-action button sits above that.
+   A card never changes height when it is selected: what a selection adds is shown in the live run, not in the card. */
+.mc-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;margin:0;padding:0;list-style:none}
+.mc-card{position:relative;display:flex;flex-direction:column;gap:16px;padding:24px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.mc-card:hover{border-color:var(--control-border)}
+.mc-card.is-selected{border-color:var(--accent);background:linear-gradient(var(--accent-tint),var(--accent-tint)),var(--surface);box-shadow:inset 3px 0 0 var(--accent)}
+.mc-root button.mc-card-main{display:grid;grid-template-columns:40px minmax(0,1fr) auto;grid-template-areas:"tile name active" "tile version version";align-items:start;gap:0 16px;width:100%;padding:0;border:0;border-radius:var(--radius);background:none;color:inherit;font:inherit;text-align:left}
+.mc-root button.mc-card-main:hover{background:none}
+.mc-card-main::after{content:"";position:absolute;inset:0;border-radius:var(--radius)}
+.mc-root button.mc-card-main:focus-visible{outline:none}
+.mc-card-main:focus-visible::after{outline:2px solid var(--focus);outline-offset:2px}
+.mc-tile{grid-area:tile;display:grid;flex:none;place-items:center;align-self:center;width:40px;height:40px;border-radius:10px;background:var(--surface-2);color:var(--muted-strong)}
+.mc-card.is-selected .mc-tile{color:var(--accent-hi)}
+.mc-card-id{display:contents}
+.mc-card-name{grid-area:name;min-width:0;font-size:18px;line-height:1.3;font-weight:650;letter-spacing:-.01em;overflow-wrap:anywhere}
+.mc-version{grid-area:version;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:400 13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted)}
+.mc-active{grid-area:active;display:inline-flex;align-items:center;gap:8px;padding-top:2px;font-size:13px;line-height:1.5;font-weight:400;white-space:nowrap;color:var(--muted-strong)}
+.mc-active.is-on{color:var(--text)}
+.mc-active.is-na{grid-area:auto;grid-column:1/-1;grid-row:3;margin-top:8px;white-space:normal}
+.mc-dots{display:inline-flex;gap:4px}
+.mc-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--text)}
+.mc-dot:not(.is-live){background:transparent;border:1.5px solid var(--muted-strong)}
+.mc-score{font-size:13px;line-height:1.55;color:var(--muted-strong)}
+.mc-score strong{color:var(--text);font-size:15px;font-weight:650}
+.mc-badge{display:inline-block;padding:0 8px;border:1px solid var(--control-border);border-radius:999px;color:var(--text);font-size:12px;line-height:1.6}
+.mc-next{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:8px 16px;margin-top:auto}
+.mc-next-text{display:grid;gap:2px}
+.mc-next-label{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+.mc-root button.mc-next-btn{min-height:40px;padding:8px 14px;font-size:14px}
+.mc-why{grid-column:1/-1;font-size:13px;color:var(--muted)}
+/* A card's width follows from the root's (3 columns from 880px, 2 from 560px, one below; a 280px snap row on a phone). A container query
+   on the card itself would stop the cards sharing bands (layout containment ends a subgrid), so the narrow cases are listed here:
+   the next-action button goes under its label when the card is narrower than 298px, and the running dots go when it is narrower than 318px. */
+@container mcroot (min-width:880px) and (max-width:1001px){
+  .mc-dots{display:none}
+}
+@container mcroot (min-width:880px) and (max-width:938px){
+  .mc-next{grid-template-columns:minmax(0,1fr);justify-items:start}
+}
+@container mcroot (min-width:560px) and (max-width:659px){
+  .mc-dots{display:none}
+}
+@container mcroot (min-width:560px) and (max-width:619px){
+  .mc-next{grid-template-columns:minmax(0,1fr);justify-items:start}
+}
+.mc-none,.mc-more{grid-column:1/-1}
+.mc-none p{color:var(--muted-strong)}
+/* Cards in a row share their three bands (head, score, next action), so the captions and the buttons line up across the row. */
+@supports (grid-template-rows:subgrid){
+  .mc-card{display:grid;grid-row:span 3;grid-template-rows:subgrid;row-gap:16px}
+  .mc-card .mc-next{margin-top:0;align-self:start}
+}
+
+/* Stage: the run feed is the large central panel. One column first, shown as live run, feed, inspector, outputs (the feed comes first
+   in the document, so that the keyboard reaches the wide layout left to right; `order` lifts the live run above it here). From 900px the
+   feed sits on the left and a 320px column on the right holds the live run and the recent outputs; the inspector takes that column (360px). */
+.mc-stage{display:grid;grid-template-columns:minmax(0,1fr);gap:32px;align-items:start}
+.mc-live{order:-1}
+@container mcroot (min-width:900px){
+  .mc-stage{grid-template-columns:minmax(0,1fr) 320px;grid-template-rows:auto 1fr}
+  .mc-feedpanel{grid-column:1;grid-row:1/3}
+  .mc-live{order:0;grid-column:2;grid-row:1}
+  .mc-outputs{grid-column:2;grid-row:2}
+  .mc-stage[data-live=false] .mc-outputs{grid-row:1}
+  .mc-inspector{grid-column:2;grid-row:1/3;position:sticky;top:24px;max-height:calc(100vh - 48px);overflow:auto}
+  .mc-stage[data-inspector=true]{grid-template-columns:minmax(0,1fr) 360px}
+  .mc-stage[data-inspector=true] .mc-live,.mc-stage[data-inspector=true] .mc-outputs{display:none}
+}
+
+/* The live run: what round it is, where it stands (four stages), and the details behind a disclosure. */
+.mc-live{display:grid;gap:24px;align-content:start;container:mclive/inline-size}
+#mc-live-head{display:grid;gap:4px}
+.mc-live-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.mc-live-sub{font-size:16px;line-height:1.4;font-weight:600;overflow-wrap:anywhere}
+.mc-live-meta{font-size:13px;color:var(--muted-strong)}
+@keyframes mc-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:no-preference){.mc-dot.is-live{animation:mc-pulse 1.6s ease-in-out infinite}}
+
+/* The four-stage stepper: a vertical list in the narrow column, four columns when the panel is wide. */
+.mc-steps{display:grid;margin:0;padding:0;list-style:none}
+.mc-step{position:relative;display:grid;grid-template-columns:28px minmax(0,1fr);grid-template-rows:auto auto;column-gap:16px;align-items:start;padding-bottom:20px}
+.mc-step:last-child{padding-bottom:0}
+.mc-step::before{content:"";position:absolute;left:13px;top:32px;bottom:4px;width:2px;background:var(--line)}
+.mc-step:last-child::before{display:none}
+.mc-step.is-done::before{background:var(--muted)}
+.mc-mark{grid-row:1/3;display:grid;place-items:center;width:28px;height:28px;border:2px solid var(--control-border);border-radius:50%;background:var(--surface);color:var(--muted-strong);font-size:14px;line-height:1}
+.mc-step.is-done .mc-mark{border-color:var(--muted-strong)}
+.mc-step.is-current .mc-mark{border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-tint-strong)}
+.mc-step.is-current .mc-mark::after{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent)}
+.mc-step-name{grid-column:2;font-size:15px;line-height:1.4;font-weight:600}
+.mc-step.is-todo .mc-step-name{color:var(--muted-strong);font-weight:500}
+.mc-step.is-current .mc-step-name{color:var(--accent-hi)}
+.mc-step-count{grid-column:2;font-size:13px;line-height:1.5;color:var(--muted-strong)}
+@container mclive (min-width:560px){
+  .mc-steps{grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+  .mc-step{grid-template-columns:minmax(0,1fr);grid-template-rows:none;padding:40px 0 0}
+  .mc-step:last-child{padding-bottom:0}
+  .mc-step::before{top:13px;left:36px;right:-12px;bottom:auto;width:auto;height:2px}
+  .mc-mark{position:absolute;top:0;left:0;grid-row:auto;z-index:1}
+  .mc-step-name,.mc-step-count{grid-column:1}
+}
+
+/* Details disclosure */
+.mc-details summary,.mc-more-details summary{display:inline-flex;align-items:center;gap:8px;padding:6px 0;color:var(--muted-strong);font-size:13px;font-weight:600;list-style:none;cursor:pointer}
+.mc-details summary::-webkit-details-marker,.mc-more-details summary::-webkit-details-marker{display:none}
+.mc-details summary::before,.mc-more-details summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg)}
+.mc-details[open]>summary::before,.mc-more-details[open]>summary::before{transform:rotate(45deg)}
+.mc-details-body{display:grid;gap:24px;padding-top:16px}
+.mc-chips{display:flex;flex-wrap:wrap;font-size:13px;color:var(--muted-strong)}
+.mc-chip{overflow-wrap:anywhere}
+.mc-chip+.mc-chip::before{content:"\00b7";margin:0 8px}
+.mc-prog-line{display:flex;justify-content:space-between;gap:16px;margin:0 0 8px;font-size:13px;color:var(--muted-strong)}
+.mc-prog-line strong{color:var(--text);font-weight:650}
+.mc-prog progress{display:block;width:100%;height:6px;border:0;border-radius:3px;background:var(--surface-3);appearance:none;-webkit-appearance:none}
+.mc-prog progress::-webkit-progress-bar{border-radius:3px;background:var(--surface-3)}
+.mc-prog progress::-webkit-progress-value{border-radius:3px;background:var(--muted-strong)}
+.mc-prog progress::-moz-progress-bar{border-radius:3px;background:var(--muted-strong)}
+.mc-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 24px;margin:0}
+.mc-tile-count{display:flex;flex-direction:column-reverse;gap:4px}
+.mc-tile-count dt{font-size:13px;line-height:1.4;color:var(--muted-strong)}
+.mc-tile-count dd{margin:0;font-size:24px;line-height:1.2;font-weight:650}
+@container mclive (min-width:560px){
+  .mc-counts{grid-template-columns:repeat(4,minmax(0,1fr))}
+}
+
+/* The run feed */
+.mc-feedpanel{display:grid;gap:16px;padding:32px;container:mcfeed/inline-size}
+.mc-feedbar{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap}
+.mc-stream{font-size:13px;color:var(--muted)}
+.mc-stream.is-live{color:var(--text)}
+.mc-feedbar select{height:36px;margin-left:auto;padding:0 12px;border-radius:8px;font-size:13px}
+.mc-feedwrap{position:relative}
+#mc-newslot{position:absolute;top:8px;left:0;right:0;z-index:2;display:flex;justify-content:center;pointer-events:none}
+.mc-root button.mc-new{pointer-events:auto;padding:6px 16px;border-color:var(--control-border);border-radius:999px;background:var(--surface-3);box-shadow:var(--shadow-pop);font-size:13px}
+.mc-feed{max-height:min(560px,calc(100vh - 160px));margin:0 -12px;padding:0 12px;overflow:auto}
+.mc-feed:focus-visible{outline:none}
+.mc-feed-empty{padding:8px 0;color:var(--muted-strong)}
+.mc-row{display:grid;grid-template-columns:112px minmax(0,1fr) auto;gap:2px 20px;align-items:start;min-height:48px;padding:16px 12px;border-radius:10px;cursor:pointer}
+.mc-row:hover{background:var(--surface-2)}
+.mc-row.is-selected{background:var(--accent-tint);box-shadow:inset 3px 0 0 var(--accent)}
+.mc-row[data-active="true"]{box-shadow:inset 0 0 0 1px var(--control-border)}
+.mc-row.is-selected[data-active="true"]{box-shadow:inset 3px 0 0 var(--accent),inset 0 0 0 1px var(--control-border)}
+.mc-feed:focus-visible .mc-row[data-active="true"]{outline:2px solid var(--focus);outline-offset:-2px}
+.mc-row-state,.mc-state{display:flex;align-items:center;gap:8px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.mc-row-state{font-size:12px;line-height:24px}
+.mc-glyph{display:inline-block;width:16px;text-align:center}
+.mc-row-main{display:block;min-width:0}
+.mc-row-what{display:block;font-size:15px;line-height:1.5;font-weight:550;overflow-wrap:anywhere}
+.mc-row-happened{display:block;margin-top:2px;font-size:13px;line-height:1.5;color:var(--muted-strong);overflow-wrap:anywhere}
+.mc-row-side{display:grid;justify-items:end;gap:2px;white-space:nowrap}
+.mc-row-time{font:400 13px/24px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted)}
+.mc-row-out{font-size:13px;line-height:1.5;color:var(--muted-strong)}
+.st-completed .mc-glyph,.st-completed.mc-state,.st-completed .mc-row-state{color:var(--pass-ink)}
+.st-failed .mc-glyph,.st-failed.mc-state,.st-failed .mc-row-state{color:var(--fail-ink)}
+.st-discarded .mc-glyph,.st-discarded.mc-state,.st-discarded .mc-row-state{color:var(--warn-ink)}
+.st-cancelled .mc-row-state,.st-cancelled .mc-state{color:var(--muted-strong)}
+.mc-state.st-completed{color:var(--pass-ink)}
+.mc-state.st-failed{color:var(--fail-ink)}
+.mc-state.st-discarded{color:var(--warn-ink)}
+@container mcfeed (max-width:600px){
+  .mc-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"state side" "main main"}
+  .mc-row-state{grid-area:state}
+  .mc-row-side{grid-area:side;grid-auto-flow:column;gap:12px;align-items:baseline}
+  .mc-row-main{grid-area:main}
+  .mc-row-time{line-height:24px}
+}
+
+/* The docked inspector */
+.mc-inspector{display:grid;gap:20px;align-content:start;padding:24px}
+.mc-ins-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.mc-ins-id{display:grid;gap:4px;min-width:0}
+.mc-ins-top h2:focus-visible{outline:none}
+.mc-ins-id .mc-h2{display:block}
+.mc-state{font-size:13px}
+.mc-ins-sec{display:grid;gap:10px}
+.mc-ins-sec .mc-facts{gap:6px 20px}
+.mc-happened{font-size:15px}
+.mc-answer{max-height:240px;margin:12px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text)}
+.mc-names{display:grid;gap:4px;margin:8px 0 0;padding:0;list-style:none;font-size:13px}
+.mc-log{display:grid;gap:6px;max-height:220px;margin:12px 0 0;padding:0;overflow:auto;list-style:none;font-size:13px}
+.mc-log li{display:grid;grid-template-columns:3em minmax(0,1fr);gap:0 8px}
+.mc-log-seq{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted)}
+.mc-log-kind{color:var(--muted-strong)}
+.mc-log-text{grid-column:2;overflow-wrap:anywhere}
+
+/* Recent outputs */
+.mc-sec-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
+.mc-out-list{display:grid;gap:16px;margin:0;padding:0;list-style:none}
+.mc-out{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.mc-out>button{flex:none}
+.mc-out-main{display:grid;min-width:0}
+.mc-out-name{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.mc-out-meta{font-size:13px;color:var(--muted)}
+
+@container mcroot (max-width:879px){
+  .mc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@container mcroot (max-width:559px){
+  .mc-cards{grid-template-columns:minmax(0,1fr)}
+}
+/* Windows high contrast and other forced colours drop backgrounds and shadows: the selected card, the selected row and the current stage then
+   say so with an outline and a system colour. */
+@media(forced-colors:active){
+  .mc-card.is-selected,.mc-row.is-selected{outline:2px solid Highlight;outline-offset:-2px}
+  .mc-step.is-current .mc-mark{border-color:Highlight}
+  .mc-step.is-current .mc-mark::after{background:Highlight}
+  .mc-mark,.mc-card,.mc-panel{border-color:CanvasText}
+}
+@media(max-width:699px){
+  .mc-root{gap:24px}
+  .mc-card{display:flex;grid-row:auto}
+  .mc-card .mc-next{margin-top:auto;grid-template-columns:minmax(0,1fr);justify-items:start}
+  .mc-dots{display:none}
+  .mc-title{font-size:28px;letter-spacing:.06em}
+  .mc-head,.mc-tools,.mc-search{width:100%}
+  .mc-search{flex-basis:auto;max-width:none}
+  .mc-tools{flex-direction:column;align-items:stretch}
+  .mc-kbd{display:none}
+  .mc-cards{display:flex;gap:16px;margin-inline:-24px;padding:0 24px 8px;overflow-x:auto;overscroll-behavior-x:contain;scroll-snap-type:x mandatory;scroll-padding-inline:24px;scrollbar-width:thin;scrollbar-color:var(--control-border) transparent}
+  .mc-card{flex:0 0 280px;scroll-snap-align:start}
+  .mc-none,.mc-more{flex:0 0 auto;align-self:center}
+  .mc-search input{padding-right:16px}
+  .mc-feedpanel,.mc-panel{padding:24px 20px}
+  .mc-strip{align-items:flex-start}
+}
