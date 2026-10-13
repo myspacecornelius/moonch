@@ -9,8 +9,8 @@
     },
     {
       "file": "Finance_Task_Studio.html",
-      "bytes": 651001,
-      "sha256": "d7af693f68b31ff9d964b324f8ba962803e9829a23c2899113c0918d01f8ce8a"
+      "bytes": 849309,
+      "sha256": "eb5950287a8e1d80decfb1046da120e013b7c2eeda98a241754e8a2b8ba700d3"
     },
     {
       "file": "README.md",
@@ -134,13 +134,13 @@
     },
     {
       "file": "mission.css",
-      "bytes": 101,
-      "sha256": "d71503fe6c38e3a9465a9c0e7a10a35f1a8873fd7a251f3d491a4d5b715588d2"
+      "bytes": 22087,
+      "sha256": "222d4d4bfc58133e91fc4e6455fd6910eac432cc3d94cdd72b48d2544ecfedae"
     },
     {
       "file": "mission.js",
-      "bytes": 338,
-      "sha256": "c42259a5dab283dc0da98fbf7f490df4c5d974baeecfd092ea4f55d0afcc78cd"
+      "bytes": 60271,
+      "sha256": "1693f518897fa5b8df64052ab07c53fcafc65319bf8f66d7874be641ca99df3d"
     },
     {
       "file": "package-engine.js",
@@ -658,9 +658,19 @@
       "sha256": "5efea97a88946025b45ad8aedaa6dad0510b25e2b838aa0b852383ae5cc582dd"
     },
     {
+      "file": "tests/mission-browser.cjs",
+      "bytes": 48735,
+      "sha256": "afb542dd2731a7d6157783838495ad0bda342d6b1daf0783b840cf07a079ca3d"
+    },
+    {
       "file": "tests/mission-model.test.cjs",
       "bytes": 104025,
       "sha256": "204877d5b6378858ecd6b52f3970bbec9d002d0ef165242b521936b51e6d0c6c"
+    },
+    {
+      "file": "tests/mission-page.test.cjs",
+      "bytes": 66232,
+      "sha256": "6c4376f425a695f067be0ff50a9f9b16191dac58d980c3a13f6e23288876e2a6"
     },
     {
       "file": "tests/model-browser.cjs",
@@ -703,6 +713,11 @@
       "sha256": "f9116c52317c545873dd7757a2af9bce3234177b0756c9c5769e4b7d4b3d81da"
     },
     {
+      "file": "tests/workbench-page.test.cjs",
+      "bytes": 104927,
+      "sha256": "d04eef81a27a7847d241110105c9605339787ac237a230027605e74e6b0b02a3"
+    },
+    {
       "file": "views-kit.js",
       "bytes": 47345,
       "sha256": "fec6c263c0dc832b44cc3f696e84539452c1d1caf4baa49e424aba200c593ab9"
@@ -714,13 +729,13 @@
     },
     {
       "file": "workbench.css",
-      "bytes": 104,
-      "sha256": "1539f2545972058377ddd4c715a494beeba7de1c32206e77b523e092d8c5ed1c"
+      "bytes": 21550,
+      "sha256": "d05d7567840214f76ec838423b78818df453597170867c8e5c76d062bfabb92b"
     },
     {
       "file": "workbench.js",
-      "bytes": 346,
-      "sha256": "5bb6a99eb7da9ed017ba2f9fa2dd808add97c257157a9bcaaca23a1d5952ea3d"
+      "bytes": 95289,
+      "sha256": "667667c490753b915bfa6e4ca0750e2099201740f927df58ab926cedf86f4c2f"
     }
   ],
   "excluded": [
