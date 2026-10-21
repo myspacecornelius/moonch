@@ -7,6 +7,7 @@
    The browser only ever supplies a folder to read from, file names, text, numbers and choices from allowlists. It never
    supplies a command, a binary, an argument, or the folder a pilot runs in. */
 
+const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -18,7 +19,7 @@ const {
 } = require('./claude-runner.cjs');
 const { auditToolCalls } = require('./path-audit.cjs');
 const { readPilotToken, gatewayFindings, describeFindings, redactFilesUnder, makeRedactor, sourceText, validToken } = require('./pilot-token.cjs');
-const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, GAF_RE } = require('./pilot-folder.cjs');
+const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, cleanSourcePath, GAF_RE } = require('./pilot-folder.cjs');
 const { suggest, hashFreeze, parseFigure } = require('./classify.cjs');
 
 const SCHEMA = 'finance-agent-round';
@@ -27,7 +28,7 @@ const ROUND_ID_RE = /^rnd-[0-9a-f]{12}$/;
 const FINGERPRINT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
 
-const PILOT_PROMPT_PREFIX = 'The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message.\n\n';
+const PILOT_PROMPT_PREFIX = 'The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message. If a file you need is not in ./filesystem, say so in your answer; do not search elsewhere on this computer.\n\n';
 const ACKNOWLEDGEMENTS = ['shell-access', 'network', 'isolation-by-audit'];
 const HUMAN_VERDICTS = ['matches-frozen-gold', 'fingerprint', 'unclear'];
 const GRADER_VERDICTS = ['meets-guidance', 'does-not-meet-guidance', 'unclear'];
@@ -366,7 +367,7 @@ function runRow(run) {
 }
 
 function runDetail(run) {
-  const { manifest, ...rest } = run;
+  const { manifest, pilot, ...rest } = run; /* pilot: the pid of a running process, kept on disk only (_recordPilot) */
   return { ...clone(rest), folder: publicFolder(run), solverFiles: Array.isArray(manifest) ? manifest.map(entry => entry.path) : [] };
 }
 
@@ -861,6 +862,9 @@ function buildReviewPrompt(promptText, packageText) {
 
 /* ------------------------------------------------------------------ the store */
 
+/* Added to a run's stderr tail when the start of the companion stopped a pilot that an earlier companion left running. */
+const LEFTOVER_PILOT_NOTE = 'A pilot process left over from the previous companion was stopped at startup.';
+
 class RoundStore {
   constructor(options = {}) {
     this.root = path.resolve(options.root || path.join(__dirname, '..', '..'));
@@ -921,16 +925,25 @@ class RoundStore {
     }
   }
 
-  /* A round that was running when the companion stopped has no process behind it any more. */
+  /* A round that was running when the companion stopped has no companion behind it any more; a pilot it left running is
+     stopped first (_stopLeftoverPilot). run.json is rewritten too, so it no longer says "running" with a pid. */
   _recover(round) {
     const unfinished = round.runs.filter(run => run.state === 'queued' || run.state === 'running');
     if (round.status !== 'running' && !unfinished.length) return false;
     const at = this.now();
     for (const run of unfinished) {
+      const stopped = run.state === 'running' && this._stopLeftoverPilot(run.pilot);
+      delete run.pilot;
       run.state = 'failed';
       run.failureReason = 'interrupted';
       run.endedAt = run.endedAt || at;
-      run.stderrTail = (run.stderrTail ? run.stderrTail + '\n' : '') + 'The companion stopped before this run finished.';
+      run.stderrTail = (run.stderrTail ? run.stderrTail + '\n' : '') + 'The companion stopped before this run finished.' + (stopped ? '\n' + LEFTOVER_PILOT_NOTE : '');
+      try {
+        fs.mkdirSync(this._runDir(round, run), { recursive: true, mode: 0o700 });
+        writeJson(path.join(this._runDir(round, run), 'run.json'), run);
+      } catch {
+        /* round.json, which the caller writes, is what is read back. */
+      }
     }
     if (round.status === 'running') {
       round.status = round.runs.some(run => run.state === 'completed') ? 'finished' : 'failed';
@@ -938,6 +951,65 @@ class RoundStore {
       round.note = 'The companion stopped while this round was running.';
     }
     return true;
+  }
+
+  /* A pilot is spawned detached, so the pid recorded for a running run (run.pilot, see _recordPilot) is also its process
+     group id. If the companion died without stopping it (a crash, a kill), the pilot can still be running; it is stopped
+     here, before the round is closed. A pid is trusted only while the process is alive and its command line names the
+     runtime binary recorded with the pid (and, for a group, the process leads that group), because the number can be handed
+     to an unrelated program once the pilot has ended. Returns true when a process was stopped. */
+  _stopLeftoverPilot(pilot) {
+    if (!isObject(pilot) || !Number.isInteger(pilot.pid) || pilot.pid <= 1 || pilot.pid === process.pid) return false;
+    const name = typeof pilot.bin === 'string' ? path.basename(pilot.bin) : '';
+    if (!name || name === '.' || name === path.sep) return false;
+    const found = this._processInfo(pilot.pid);
+    if (!found || !found.command.includes(name) || (pilot.group === true && found.pgid !== pilot.pid)) return false;
+    try {
+      process.kill(pilot.group === true ? -pilot.pid : pilot.pid, 'SIGKILL');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /* { pgid, command } of a running process, from ps (the same on macOS and Linux), or null: not running, or ps is not there. */
+  _processInfo(pid) {
+    try {
+      const out = childProcess.execFileSync('ps', ['-ww', '-o', 'pgid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const match = /^\s*(\d+)\s+([^\n]*)/.exec(out);
+      return match ? { pgid: Number(match[1]), command: match[2] } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /* Written to run.pilot as soon as the process exists, and gone again when the run ends: the pid, whether it leads its own
+     process group, when it was spawned and the runtime binary it runs. It is also kept out of runDetail. */
+  _recordPilot(round, run, runner, bin) {
+    const pid = runner.pid;
+    if (!Number.isInteger(pid) || pid <= 1) return;
+    run.pilot = { pid, group: runner.useGroup === true, spawnedAt: this.now(), bin };
+    try {
+      this._persistRun(round, run);
+    } catch {
+      /* The record is written again when the run ends. */
+    }
+  }
+
+  /* Last resort, synchronous (the companion calls it when its own process is exiting): SIGKILL the process group of every
+     pilot, simulated grader and author review that is still running, so a crash of the companion leaves none behind. */
+  killPilotsNow() {
+    const runners = [...this.graderRunners];
+    for (const live of this.live.values()) runners.push(...live.runners.values());
+    for (const runner of runners) {
+      const pid = runner && runner.pid;
+      if (!Number.isInteger(pid) || pid <= 1) continue;
+      try {
+        process.kill(runner.useGroup ? -pid : pid, 'SIGKILL');
+      } catch {
+        /* Already gone. */
+      }
+    }
   }
 
   /* The environment of every agent process (docs/local-agents.md section 3.2): this process's environment plus TMPDIR and
@@ -1149,7 +1221,7 @@ class RoundStore {
 
   inspectPacket(body) {
     const input = needObject(body, 'The request body');
-    const sourceDir = cleanText(input.sourceDir, 'sourceDir', 4096, true);
+    const sourceDir = cleanSourcePath(cleanText(input.sourceDir, 'sourceDir', 4096, true));
     this._refuseOwnFolders(sourceDir);
     try {
       return clone(inspectSource(sourceDir, { projectRoot: this.root }));
@@ -1166,7 +1238,7 @@ class RoundStore {
     if (typeof input.gafVisible !== 'boolean') throw bad('gafVisible must be true or false');
     const config = parseConfig(input.config);
     const versions = parseVersions(input.versions);
-    const sourceDir = cleanText(input.sourceDir, 'sourceDir', 4096, true);
+    const sourceDir = cleanSourcePath(cleanText(input.sourceDir, 'sourceDir', 4096, true));
     const snapshot = input.carriedFrom === undefined || input.carriedFrom === null ? null : this._carrySnapshot(input.carriedFrom);
     /* `task` is not part of the stored `carried` record (that is what the approval compares); it only fills in a task the
        request left out, so a round carried forward stays with its task. An explicit task, even empty, wins. */
@@ -1388,6 +1460,7 @@ class RoundStore {
       `GAF folder visible to pilots: ${round.packet.gafVisible ? 'yes' : 'no'}`,
       STATEMENTS.gaf,
       `Prompt sha256: ${round.packet.promptSha256}`,
+      `Fixed prompt prefix sha256: ${sha256Text(PILOT_PROMPT_PREFIX)} (the companion's fixed text in front of the prompt for every pilot)`,
       `Freeze sha256: ${round.freeze.sha256}`,
       `Freeze content sha256 (gold and fingerprints, without the time stamp): ${contentShaOf(round.freeze)}`,
       ...this._carryLines(round),
@@ -1424,7 +1497,8 @@ class RoundStore {
     if (!round.freeze) throw new AgentError(409, 'Freeze the gold before approval');
     const summary = this._summaryText(round);
     /* The command line and the folder are returned as their own fields, so nothing has to be read back out of the text. */
-    return { summary, summarySha256: sha256Text(summary), commandLine: this._commandLine(round), workingFolder: WORKING_FOLDER_TEXT };
+    /* promptPrefix: the fixed text every pilot sees before the writer's prompt (_pilotArgs), for the approval dialog to show word for word. */
+    return { summary, summarySha256: sha256Text(summary), commandLine: this._commandLine(round), workingFolder: WORKING_FOLDER_TEXT, promptPrefix: PILOT_PROMPT_PREFIX };
   }
 
   approveRound(id, body) {
@@ -1659,11 +1733,14 @@ class RoundStore {
       live.runners.set(run.n, runner);
       runner.on('event', event => this._countLive(run, event, seenTools));
       if (live.cancelRequested) runner.cancel();
-      summary = await runner.start();
+      const started = runner.start();
+      this._recordPilot(round, run, runner, live.bin); /* start() spawns the process at once, so its pid is known */
+      summary = await started;
     } catch (error) {
       setupError = asAgentError(error);
     }
     live.runners.delete(run.n);
+    delete run.pilot; /* the process has ended; _finishRun writes the run record without it */
     try {
       this._finishRun(round, run, summary, setupError, live.bin, live.token);
     } catch (error) {

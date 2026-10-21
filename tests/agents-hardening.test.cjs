@@ -567,6 +567,9 @@ test('the approval summary lists what is delivered and what is withheld, for gaf
   assert.ok(hidden.includes('The gaf/ folder matches production only if the production solver sees this file.'));
   assert.equal(lineOf(hidden, 'Time limit per pilot: '), 'Time limit per pilot: 50 minutes');
   assert.match(lineOf(hidden, 'Prompt sha256: '), /^Prompt sha256: [0-9a-f]{64}$/);
+  const { PILOT_PROMPT_PREFIX } = require('../backend/agents/rounds.cjs');
+  const prefixSha = crypto.createHash('sha256').update(PILOT_PROMPT_PREFIX, 'utf8').digest('hex');
+  assert.equal(lineOf(hidden, 'Fixed prompt prefix sha256: '), `Fixed prompt prefix sha256: ${prefixSha} (the companion's fixed text in front of the prompt for every pilot)`);
 
   const visibleId = await frozenRound(w, { gafVisible: true });
   const visible = (await w.service.approvalSummary(visibleId)).summary;
@@ -647,18 +650,37 @@ test('a solver file that disappeared and junk output lines are noted exactly', a
   ]);
 });
 
-test('an answer kept in a text-like output file is found for every text extension, and not for other files', async t => {
+test('an answer kept only in a text-like output file is reported as found in the outputs for every text extension, and does not count; other files are not read', async t => {
   const answer = 'Usable cash is 1,250. Hold the borrowing.';
   const groups = [['txt', 'csv', 'tsv', 'json', 'html'], ['htm', 'xml', 'log', 'yaml', 'yml'], ['sql', 'py', 'md', 'bin', 'xlsx']];
-  const verdicts = {};
+  const suggested = {};
   for (const group of groups) {
     const w = makeWorld(t, group.map(ext => ({ resultText: 'See the attached file.', writeFiles: [{ path: `outputs/answer.${ext}`, content: answer }] })));
     const id = await finishedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 5 } });
     const round = await w.service.getRound(id);
-    group.forEach((ext, index) => { verdicts[ext] = round.runs[index].classification.suggestedVerdict; });
+    for (const [index, ext] of group.entries()) {
+      assert.equal(round.runs[index].classification.suggestedVerdict, 'unclear', `${ext}: only the final answer decides`);
+      suggested[ext] = (await w.service.getRun(id, index + 1)).classification.suggested;
+    }
   }
-  for (const ext of ['txt', 'csv', 'tsv', 'json', 'html', 'htm', 'xml', 'log', 'yaml', 'yml', 'sql', 'py', 'md']) assert.equal(verdicts[ext], 'matches-frozen-gold', ext);
-  for (const ext of ['bin', 'xlsx']) assert.equal(verdicts[ext], 'unclear', ext);
+  for (const ext of ['txt', 'csv', 'tsv', 'json', 'html', 'htm', 'xml', 'log', 'yaml', 'yml', 'sql', 'py', 'md']) {
+    assert.equal(suggested[ext].verdict, 'unclear', ext);
+    assert.deepEqual(suggested[ext].matches.map(match => [match.label, match.found, match.where]), [['Usable cash', true, 'outputs']], `${ext}: the figure is found, in the outputs`);
+    assert.deepEqual(suggested[ext].decision.found, [], `${ext}: the keyword in the outputs does not count`);
+    assert.match(suggested[ext].reason, /^The gold figure Usable cash \(1,250\) appears only in the output files, not in the final answer, so it is not counted\./, ext);
+  }
+  for (const ext of ['bin', 'xlsx']) {
+    assert.equal(suggested[ext].verdict, 'unclear', ext);
+    assert.deepEqual(suggested[ext].matches.map(match => [match.found, match.where]), [[false, null]], `${ext}: the file is not read`);
+    assert.ok(!('reason' in suggested[ext]), ext);
+  }
+  /* the same answer in the final message is a match */
+  const inFinal = makeWorld(t, { resultText: answer, writeFiles: [{ path: 'outputs/answer.txt', content: answer }] });
+  const finalId = await finishedRound(inFinal);
+  const run = await inFinal.service.getRun(finalId, 1);
+  assert.equal(run.classification.suggested.verdict, 'matches-frozen-gold');
+  assert.deepEqual(run.classification.suggested.matches.map(match => match.where), ['final']);
+  assert.ok(!('reason' in run.classification.suggested));
 });
 
 test('the data markers around grader and review inputs are exact, and the service sends them', async t => {

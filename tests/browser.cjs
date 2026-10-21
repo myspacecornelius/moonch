@@ -1,7 +1,7 @@
 /* Optional developer QA for the task editor. Uses an isolated headless Chromium profile; never attaches to an existing browser. */
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process'),assert=require('node:assert/strict');
 const seed=require('../examples.js');
-const root=path.resolve(__dirname,'..'),out=path.join(root,process.env.QA_OUTPUT||'qa/legacy'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));
+const root=path.resolve(__dirname,'..'),out=process.env.QA_OUTPUT?path.resolve(root,process.env.QA_OUTPUT):fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-qa-')),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));console.log('QA output folder: '+out);
 const binary=process.env.CHROME_BIN||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 fs.mkdirSync(out,{recursive:true});const downloads=path.join(out,'downloads');fs.rmSync(downloads,{recursive:true,force:true});fs.mkdirSync(downloads,{recursive:true});
 let proc,ws,nextId=0,pending=new Map(),errors=[],network=[],resources=[],checks=[];

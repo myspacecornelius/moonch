@@ -69,6 +69,13 @@ function commitAll(dir, message) {
   return git(dir, ['rev-parse', 'HEAD']);
 }
 
+/* Writes scripts/binary-allowlist.txt (the file a clone tracks) with one exact repo path per line. */
+function allowBinaries(dir, ...paths) {
+  put(dir, 'scripts/binary-allowlist.txt', `# synthetic allowlist\n\n${paths.join('\n')}\n`);
+}
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+
 function writeTerms(content) {
   const file = path.join(freshDir('terms'), 'terms.txt');
   fs.writeFileSync(file, content);
@@ -106,7 +113,8 @@ test('a clean repository passes with exit 0 and a one line summary', () => {
   const run = scan(dir, ['--terms', writeTerms(TERMS)]);
   assert.equal(run.status, 0, run.all);
   assert.equal(count(run.stdout, 'files scanned'), 2);
-  assert.equal(count(run.stdout, 'binary skipped'), 0);
+  assert.equal(count(run.stdout, 'binary allowed'), 0);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
   assert.equal(count(run.stdout, 'hits'), 0);
   const summary = run.stdout.trim().split('\n').filter(line => line.startsWith('privacy-scan:'));
   assert.equal(summary.length, 1);
@@ -354,14 +362,140 @@ test('GIT_DIR and GIT_WORK_TREE from the environment do not redirect the scan', 
 
 /* ---------- file kinds ---------- */
 
-test('a binary file is skipped, its path is listed, and its content is not scanned', () => {
+test('a tracked binary file that is not on the allowlist blocks the scan, names its path and says how to allow it', () => {
   const dir = cleanRepo();
   put(dir, 'assets/blob.bin', Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(`${SECRET} ${SECRET_REGEX_TEXT}`)]));
   commitAll(dir, 'binary');
   const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^BINARY assets\/blob\.bin \(tracked\) is not on scripts\/binary-allowlist\.txt$/m);
+  assert.match(run.stdout, /^binary: 1 binary file\(s\) are blocked\. /m);
+  assert.match(run.stdout, /^binary: to allow one deliberately, add its exact repo path on a line of its own in scripts\/binary-allowlist\.txt /m);
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
+  assert.equal(count(run.stdout, 'binary allowed'), 0);
+  assert.equal(count(run.stdout, 'hits'), 0, 'the content of a binary file is never scanned');
+  assert.match(run.stdout, /^privacy-scan: BLOCKED - /m);
+  assert.doesNotMatch(run.stdout, /clean/);
+});
+
+test('an untracked binary file that git does not ignore blocks the scan, and an ignored one does not', () => {
+  const dir = createRepo();
+  put(dir, '.gitignore', 'scratch/\n');
+  put(dir, 'readme.txt', 'Atlas Foods.\n');
+  commitAll(dir, 'initial');
+  put(dir, 'scratch/package.xlsx', PNG_BYTES);
+  const ignored = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(ignored.status, 0, ignored.all);
+  assert.equal(count(ignored.stdout, 'binary blocked'), 0);
+
+  put(dir, 'task package.xlsx', PNG_BYTES);
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^BINARY task package\.xlsx \(untracked, not ignored\) is not on scripts\/binary-allowlist\.txt$/m);
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
+});
+
+test('a binary file whose exact path is on the allowlist passes, is counted, and is still not scanned', () => {
+  const dir = cleanRepo();
+  put(dir, 'qa/shot.png', Buffer.concat([PNG_BYTES, Buffer.from(SECRET)]));
+  put(dir, 'qa/other.png', PNG_BYTES);
+  allowBinaries(dir, 'qa/shot.png');
+  commitAll(dir, 'allowed shot');
+  const blocked = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(blocked.status, 1, 'only an exact path counts: qa/other.png is not listed');
+  assert.match(blocked.stdout, /^BINARY qa\/other\.png \(tracked\) is not on /m);
+  assert.doesNotMatch(blocked.stdout, /^BINARY qa\/shot\.png/m);
+
+  allowBinaries(dir, 'qa/shot.png', 'qa/other.png');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
   assert.equal(run.status, 0, run.all);
-  assert.equal(count(run.stdout, 'binary skipped'), 1);
-  assert.match(run.stdout, /^skipped-binary \(not scanned\): 1\n {2}assets\/blob\.bin$/m);
+  assert.equal(count(run.stdout, 'binary allowed'), 2);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
+  assert.equal(count(run.stdout, 'hits'), 0);
+  assert.match(run.stdout, /^allowed-binary \(on scripts\/binary-allowlist\.txt, content not scanned\): 2\n {2}qa\/other\.png\n {2}qa\/shot\.png$/m);
+  assert.doesNotMatch(run.stdout, /^BINARY /m);
+});
+
+test('the allowlist ignores comments, blank lines and CRLF, and matches whole paths in the case git reports them', () => {
+  const dir = cleanRepo();
+  put(dir, 'qa/shot.png', PNG_BYTES);
+  put(dir, 'qa/shot.png.bak', PNG_BYTES);
+  put(dir, 'qa/Upper.png', PNG_BYTES);
+  put(dir, 'scripts/binary-allowlist.txt', '﻿# comment\r\n\r\n   \r\n# qa/shot.png.bak\r\n  qa/shot.png  \r\nqa/upper.png\r\n');
+  commitAll(dir, 'allowlist with noise');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.equal(count(run.stdout, 'binary allowed'), 1);
+  assert.match(run.stdout, /^BINARY qa\/shot\.png\.bak \(tracked\)/m, 'a commented-out line allows nothing and a prefix is not a match');
+  assert.match(run.stdout, /^BINARY qa\/Upper\.png \(tracked\)/m, 'the path is compared exactly, case included');
+  assert.doesNotMatch(run.stdout, /^BINARY qa\/shot\.png /m);
+});
+
+test('an allowlist line that is a pattern or a ./ path is an error, and so is an allowlist that is not UTF-8 text', { skip: process.platform === 'win32' }, () => {
+  const dir = cleanRepo();
+  put(dir, 'qa/shot.png', PNG_BYTES);
+  for (const [line, number] of [['qa/*.png', 3], ['./qa/shot.png', 3], ['/qa/shot.png', 3], ['qa\\shot.png', 3], ['qa/shot?.png', 3]]) {
+    put(dir, 'scripts/binary-allowlist.txt', `# comment\n\n${line}\n`);
+    const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+    assert.equal(run.status, 2, `${line}: ${run.all}`);
+    assert.match(run.stderr, new RegExp(`scripts/binary-allowlist\\.txt line ${number}: write one exact repo path`));
+    assert.doesNotMatch(run.stdout, /clean/);
+  }
+  put(dir, 'scripts/binary-allowlist.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('qa/shot.png\n', 'utf16le')]));
+  const utf16 = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(utf16.status, 2, utf16.all);
+  assert.match(utf16.stderr, /scripts\/binary-allowlist\.txt must be UTF-8 text/);
+
+  fs.rmSync(path.join(dir, 'scripts', 'binary-allowlist.txt'));
+  fs.mkdirSync(path.join(dir, 'scripts', 'binary-allowlist.txt'));
+  const folder = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(folder.status, 2, folder.all);
+  assert.match(folder.stderr, /must be a regular file/);
+
+  fs.rmdirSync(path.join(dir, 'scripts', 'binary-allowlist.txt'));
+  fs.symlinkSync(path.join(scratch, 'elsewhere.txt'), path.join(dir, 'scripts', 'binary-allowlist.txt'));
+  const link = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(link.status, 2, 'a link to an allowlist somewhere else is not followed: ' + link.all);
+});
+
+test('a file over 5 MB with a NUL byte near its start is a binary file, not a skipped-size file', () => {
+  const dir = cleanRepo();
+  const limit = 5 * 1024 * 1024;
+  put(dir, 'big.dat', Buffer.concat([PNG_BYTES, Buffer.alloc(limit + 10, 0x61)]));
+  put(dir, 'big.txt', Buffer.alloc(limit + 10, 0x61));
+  commitAll(dir, 'big files');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^BINARY big\.dat \(tracked\) is not on /m);
+  assert.doesNotMatch(run.stdout, /big\.txt \(tracked\)/);
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
+  assert.equal(count(run.stdout, 'size skipped'), 1, 'a large text file is still only reported as skipped-size');
+
+  allowBinaries(dir, 'big.dat');
+  const allowed = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(allowed.status, 0, allowed.all);
+  assert.equal(count(allowed.stdout, 'binary allowed'), 1);
+  assert.equal(count(allowed.stdout, 'size skipped'), 1);
+});
+
+test('a blocked binary path is redacted and cannot forge output lines, and long lists are capped', { skip: process.platform === 'win32' }, () => {
+  const dir = cleanRepo();
+  put(dir, `${SECRET}-package.zip`, PNG_BYTES);
+  put(dir, 'x\nBINARY forged.bin (tracked) is not on y', PNG_BYTES);
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^BINARY \[redacted\]-package\.zip \(untracked, not ignored\) is not on /m);
+  const lines = run.stdout.split('\n');
+  assert.ok(!lines.some(line => line.startsWith('BINARY forged')), run.stdout);
+  assert.ok(lines.some(line => line.startsWith('BINARY x?BINARY forged.bin (tracked) is not on y (untracked, not ignored)')), run.stdout);
+  assert.ok(!run.all.toLowerCase().includes(SECRET), 'the term is never printed');
+
+  for (let n = 0; n < 502; n += 1) put(dir, `many/${String(n).padStart(3, '0')}.bin`, PNG_BYTES);
+  const many = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(many.status, 1);
+  assert.equal(count(many.stdout, 'binary blocked'), 504);
+  assert.equal(many.stdout.split('\n').filter(line => line.startsWith('BINARY ')).length, 500);
+  assert.match(many.stdout, /^\.\.\. 4 more blocked binary file\(s\) not shown$/m);
 });
 
 test('only the first 8 KB decide whether a file is binary', () => {
@@ -371,7 +505,7 @@ test('only the first 8 KB decide whether a file is binary', () => {
   const run = scan(dir, ['--terms', writeTerms(TERMS)]);
   assert.equal(run.status, 1, run.all);
   assert.match(run.stdout, /^HIT late-nul\.txt:1 term 3$/m);
-  assert.equal(count(run.stdout, 'binary skipped'), 0);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
 });
 
 test('UTF-16 text with a byte order mark is scanned as text, not skipped as binary', () => {
@@ -384,7 +518,7 @@ test('UTF-16 text with a byte order mark is scanned as text, not skipped as bina
   assert.equal(run.status, 1, run.all);
   assert.match(run.stdout, /^HIT le\.txt:2 term 3$/m);
   assert.match(run.stdout, /^HIT be\.txt:2 term 3$/m);
-  assert.equal(count(run.stdout, 'binary skipped'), 0);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
 });
 
 test('files over 5 MB are skipped and reported, and a file of exactly 5 MB is scanned', () => {
@@ -483,6 +617,8 @@ test('output never contains the matched text or the term, in any scenario', () =
     assert.ok(!lower.includes(SECRET), run.all);
     assert.ok(!lower.includes(SECRET_REGEX_TEXT.toLowerCase()), run.all);
   }
+  assert.match(outputs[0].stdout, /^BINARY \[redacted\]\.bin \(tracked\) is not on /m, 'a blocked binary path is redacted too');
+  assert.match(outputs[1].stdout, /^BINARY \[redacted\]\.bin \(tracked; added or changed in /m);
   assert.equal(outputs[0].status, 1);
   assert.equal(outputs[1].status, 1);
   assert.equal(outputs[2].status, 2);
@@ -628,15 +764,97 @@ test('paths with spaces and quotes are read correctly from the diff', () => {
   assert.match(run.stdout, /^HIT with space\/odd "name"\.txt:2 term 3 \(added in /m);
 });
 
-test('binary changes inside the range are counted but cannot be scanned', () => {
+test('a binary file added in the range that is not on the allowlist blocks, naming the path, the range and the commit', () => {
   const dir = createRepo();
   put(dir, 'a.txt', 'header\n');
   const base = commitAll(dir, 'base');
-  put(dir, 'blob.bin', Buffer.from([0, 1, 2, 3, 0]));
-  commitAll(dir, 'adds a binary');
+  put(dir, 'with space/odd "name".xlsx', Buffer.from([0, 1, 2, 3, 0]));
+  const added = commitAll(dir, 'adds a binary');
+  const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 1, run.all);
+  assert.ok(
+    run.stdout.includes(`BINARY with space/odd "name".xlsx (tracked; added or changed in ${base}..HEAD by ${shortOf(added)}) is not on scripts/binary-allowlist.txt`),
+    run.stdout,
+  );
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
+  assert.match(run.stdout, /^binary: to allow one deliberately, /m);
+});
+
+test('a binary file added and deleted again inside the range still blocks, because history is what gets pushed', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  put(dir, 'package.zip', PNG_BYTES);
+  const added = commitAll(dir, 'adds a package');
+  git(dir, ['rm', '-q', 'package.zip']);
+  commitAll(dir, 'removes it again');
+  const terms = writeTerms(TERMS);
+  assert.equal(scan(dir, ['--terms', terms]).status, 0, 'the work tree itself holds no binary file');
+  const run = scan(dir, ['--terms', terms, '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 1, run.all);
+  assert.ok(run.stdout.includes(`BINARY package.zip (added or changed in ${base}..HEAD by ${shortOf(added)}) is not on `), run.stdout);
+});
+
+test('deleting a binary file in the range is not a hit, and a binary file on the allowlist is allowed to change', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  put(dir, 'old.bin', PNG_BYTES);
+  put(dir, 'kept.png', PNG_BYTES);
+  allowBinaries(dir, 'kept.png');
+  const base = commitAll(dir, 'base already carries a binary file');
+  git(dir, ['rm', '-q', 'old.bin']);
+  put(dir, 'kept.png', Buffer.concat([PNG_BYTES, Buffer.from([9, 9])]));
+  commitAll(dir, 'deletes one binary and changes the allowed one');
   const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
   assert.equal(run.status, 0, run.all);
-  assert.match(run.stdout, /^range: 1 binary file change\(s\) not scanned$/m);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
+  assert.match(run.stdout, /^range: 1 allowed binary file change\(s\) not scanned$/m);
+});
+
+test('the range reads the allowlist from the head commit: an allowlist added in the range counts, one only in the work tree does not', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  const terms = writeTerms(TERMS);
+
+  put(dir, 'shot.png', PNG_BYTES);
+  commitAll(dir, 'adds a binary first');
+  allowBinaries(dir, 'shot.png');
+  commitAll(dir, 'allows it in a later commit of the same push');
+  const allowed = scan(dir, ['--terms', terms, '--range', `${base}..HEAD`]);
+  assert.equal(allowed.status, 0, allowed.all);
+  assert.match(allowed.stdout, /^range: 1 allowed binary file change\(s\) not scanned$/m);
+
+  put(dir, 'second.png', PNG_BYTES);
+  commitAll(dir, 'adds another binary');
+  allowBinaries(dir, 'shot.png', 'second.png');
+  const workTreeOnly = scan(dir, ['--terms', terms, '--range', `${base}..HEAD`]);
+  assert.equal(scan(dir, ['--terms', terms]).status, 0, 'the work tree scan reads the edited allowlist');
+  assert.equal(workTreeOnly.status, 1, workTreeOnly.all);
+  assert.match(workTreeOnly.stdout, /^BINARY second\.png \(added or changed in /m);
+  assert.doesNotMatch(workTreeOnly.stdout, /^BINARY shot\.png/m);
+
+  const earlier = git(dir, ['rev-parse', 'HEAD~1']);
+  const olderHead = scan(dir, ['--terms', terms, '--range', `${base}..${earlier}`]);
+  assert.equal(olderHead.status, 0, 'a range ends at its own head commit, whatever is checked out: ' + olderHead.all);
+});
+
+test('a binary file introduced only on a merged branch is found through the merge', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  const mainBranch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  git(dir, ['checkout', '-q', '-b', 'side']);
+  put(dir, 'side.docx', PNG_BYTES);
+  const sideCommit = commitAll(dir, 'side adds a binary');
+  git(dir, ['checkout', '-q', mainBranch]);
+  put(dir, 'a.txt', 'header\nmore\n');
+  commitAll(dir, 'main moves on');
+  git(dir, ['merge', '-q', '--no-ff', '-m', 'merge side', 'side']);
+  const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, new RegExp(`^BINARY side\\.docx \\(tracked; added or changed in ${base}\\.\\.HEAD by ${shortOf(sideCommit)}\\)`, 'm'));
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
 });
 
 test('private/ paths added by commits in the range are an error', () => {
@@ -678,6 +896,16 @@ test('parseTerms and validateRange behave as documented', () => {
   assert.throws(() => scanner.parseTerms('/(/\n'), /line 1: invalid regular expression/);
   assert.equal(scanner.validateRange('origin/main..HEAD~2'), 'origin/main..HEAD~2');
   assert.throws(() => scanner.validateRange('a..b;rm'), /--range must look like/);
+});
+
+test('parseAllowlist keeps exact paths, skips comments and blanks, and rejects patterns', () => {
+  const allowed = scanner.parseAllowlist('\ufeff# c\r\n\r\n qa/a.png \r\ntests/fixtures/package.zip\n');
+  assert.deepEqual([...allowed], ['qa/a.png', 'tests/fixtures/package.zip']);
+  assert.equal(allowed.has('qa/a.png'), true);
+  assert.equal(allowed.has('QA/a.png'), false);
+  assert.equal(scanner.parseAllowlist('').size, 0);
+  assert.throws(() => scanner.parseAllowlist('ok.bin\nqa/*.png\n'), /line 2: write one exact repo path/);
+  assert.equal(scanner.BINARY_ALLOWLIST, 'scripts/binary-allowlist.txt');
 });
 
 test('decodeText treats NUL bytes in the first 8 KB as binary and honours byte order marks', () => {

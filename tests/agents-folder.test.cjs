@@ -5,12 +5,14 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, isGafPath, PacketError } = require('../backend/agents/pilot-folder.cjs');
+const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, isGafPath, cleanSourcePath, PacketError } = require('../backend/agents/pilot-folder.cjs');
 const { inferRole, classifyPath, WITHHELD_ROLES } = require('../package-engine.js');
 const constants = require('../backend/agents/constants.cjs');
 
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
 const REPO_ROOT = path.resolve(__dirname, '..');
+/* The two refusals a person reads first. The wording is part of the product, so it is pinned word for word. */
+const RELATIVE_MESSAGE = 'Paste the full path of the unzipped task\'s filesystem folder, for example /Users/you/Downloads/task/filesystem (in Finder, select the folder and press Option-Command-C).';
 
 /* A synthetic world: <base>/project (with private/), <base>/source (the packet), <base>/pilots (destination). */
 function world(t) {
@@ -662,10 +664,178 @@ test('a relative source folder is refused even when it exists, and hashFile name
   t.after(() => process.chdir(saved));
   for (const relative of ['source', './source', 'source/']) {
     assert.ok(fs.statSync(relative).isDirectory(), 'the relative folder exists');
-    assert.throws(() => inspectSource(relative, { projectRoot: w.projectRoot }), error => error instanceof PacketError && /absolute path/.test(error.message), relative);
-    assert.throws(() => buildPilotFolder({ sourceDir: relative, files: [{ path: 'a.csv', sha256: sha('x') }], promptText: '', destRoot: w.destRoot, runId: 'rnd-relative-1', gafVisible: true, projectRoot: w.projectRoot }), /absolute path/, relative);
+    assert.throws(() => inspectSource(relative, { projectRoot: w.projectRoot }), error => error instanceof PacketError && error.status === 400 && error.message === RELATIVE_MESSAGE, relative);
+    assert.throws(() => buildPilotFolder({ sourceDir: relative, files: [{ path: 'a.csv', sha256: sha('x') }], promptText: '', destRoot: w.destRoot, runId: 'rnd-relative-1', gafVisible: true, projectRoot: w.projectRoot }), error => error instanceof PacketError && error.message === RELATIVE_MESSAGE, relative);
   }
   assert.throws(() => hashFile(w.source), error => error instanceof PacketError && /Not a regular file/.test(error.message));
+});
+
+/* ------------------------------------------------------------------ a folder path as a person pastes it */
+
+/* What Terminal writes when a folder is dragged into it: every character the shell would act on gets a backslash. */
+const terminalEscape = text => text.replace(/[ ()&'"!;#$\[\]{}<>*?~|`\\^]/g, '\\$&');
+const AWKWARD = "Task v2 (final) & 'Q3' [x]";
+
+/* A packet folder with an awkward name, <base>/<AWKWARD>/filesystem, holding one solver file. */
+function awkwardWorld(t) {
+  const w = world(t);
+  const dir = path.join(w.base, AWKWARD, 'filesystem');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Cash_Facts.csv'), 'Label,Value\nOpening usable cash,100\n');
+  return { ...w, awkward: dir };
+}
+
+/* os.homedir() follows HOME on POSIX: point it at a synthetic folder for one test. */
+const ORIGINAL_HOME = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+function withHome(t, home) {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  /* always back to the values the process started with, even when a test calls this twice */
+  t.after(() => {
+    for (const [key, value] of Object.entries(ORIGINAL_HOME)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  });
+  assert.equal(os.homedir(), home, 'the synthetic home folder is in effect');
+}
+
+test('cleanSourcePath: whitespace, one pair of quotes, backslash escapes and a leading tilde, each on its own and together', t => {
+  withHome(t, '/home/pat');
+  const table = [
+    ['/data/task/filesystem', '/data/task/filesystem'],
+    ['  /data/task/filesystem  ', '/data/task/filesystem'],
+    ['\t/data/task/filesystem\r\n', '/data/task/filesystem'],
+    ["'/data/My Task/filesystem'", '/data/My Task/filesystem'],
+    ['"/data/My Task/filesystem"', '/data/My Task/filesystem'],
+    ["  '/data/My Task/filesystem'\n", '/data/My Task/filesystem'],
+    /* only one pair comes off, and only a pair: the same quote at both ends */
+    ["''/data/task''", "'/data/task'"],
+    ['"\'/data/task\'"', "'/data/task'"],
+    ["'/data/task", "'/data/task"],
+    ['/data/task\'', '/data/task\''],
+    ['"/data/task\'', '"/data/task\''],
+    ["'", "'"],
+    ['""', ''],
+    /* backslash escapes, as Terminal writes them */
+    ['/data/My\\ Task/filesystem', '/data/My Task/filesystem'],
+    ['/data/Task\\ \\(v2\\)\\ \\&\\ Q3/filesystem', '/data/Task (v2) & Q3/filesystem'],
+    ["/data/Bob\\'s\\ Task", "/data/Bob's Task"],
+    ['/data/a\\\\b', '/data/a\\b'],
+    ['/data/a\\!b\\#c\\$d\;e\\[f\\]g', '/data/a!b#c$d;e[f]g'],
+    ['/data/trailing\\', '/data/trailing\\'],
+    /* a leading tilde */
+    ['~', '/home/pat'],
+    ['~/Downloads/task/filesystem', '/home/pat/Downloads/task/filesystem'],
+    ['~/My\\ Task', '/home/pat/My Task'],
+    ["'~/My Task/filesystem'", '/home/pat/My Task/filesystem'],
+    ['  "~/task"  ', '/home/pat/task'],
+    /* not a tilde of the home folder: left as it is, so it is refused as a relative path */
+    ['~root/task', '~root/task'],
+    ['\\~/task', '~/task'],
+    ['/data/~/task', '/data/~/task'],
+    ['./task', './task'],
+    ['task', 'task'],
+    ['', ''],
+  ];
+  for (const [given, expected] of table) assert.equal(cleanSourcePath(given), expected, JSON.stringify(given));
+  for (const value of [undefined, null, 5, {}]) assert.equal(cleanSourcePath(value), value, 'a value that is not text is left for the caller to refuse');
+});
+
+test('cleanSourcePath leaves a path that is already a folder as it is, so a stored path comes back unchanged', { skip: process.platform === 'win32' }, t => {
+  const w = awkwardWorld(t);
+  assert.equal(cleanSourcePath(w.awkward), w.awkward, 'a real folder whose name has spaces, quotes and brackets');
+  assert.equal(cleanSourcePath(cleanSourcePath(terminalEscape(w.awkward))), w.awkward, 'cleaning twice gives the same path');
+  assert.equal(cleanSourcePath(w.source), w.source);
+  /* a folder whose real name holds a backslash is not mangled; its escaped form (as Terminal writes it) still reaches it */
+  const odd = path.join(w.base, 'back\\slash');
+  fs.mkdirSync(odd);
+  assert.equal(cleanSourcePath(odd), odd);
+  assert.equal(cleanSourcePath(terminalEscape(odd)), odd);
+});
+
+test('inspectSource accepts a folder path as pasted: quoted, padded, dragged into Terminal, or starting with ~', { skip: process.platform === 'win32' }, t => {
+  const w = awkwardWorld(t);
+  const plain = inspectSource(w.awkward, { projectRoot: w.projectRoot });
+  assert.deepEqual(plain.files.map(f => f.path), ['Cash_Facts.csv']);
+  const pasted = [
+    `'${w.awkward}'`,
+    `"${w.awkward}"`,
+    `  ${w.awkward}  `,
+    `${w.awkward}\n`,
+    ` "${w.awkward}" \n`,
+    terminalEscape(w.awkward),
+    `${terminalEscape(w.awkward)} `,
+    `'${w.awkward}/'`,
+  ];
+  for (const text of pasted) {
+    assert.deepEqual(inspectSource(text, { projectRoot: w.projectRoot }), plain, JSON.stringify(text));
+  }
+  withHome(t, w.base);
+  for (const text of [`~/${AWKWARD}/filesystem`, `'~/${AWKWARD}/filesystem'`, `~/${terminalEscape(AWKWARD)}/filesystem`, `"~/${AWKWARD}/filesystem/"`]) {
+    assert.deepEqual(inspectSource(text, { projectRoot: w.projectRoot }), plain, JSON.stringify(text));
+  }
+  /* the pilot folder is built from the same pasted text */
+  const listing = plain.files.map(f => ({ path: f.path, sha256: f.sha256 }));
+  const built = buildPilotFolder({ sourceDir: terminalEscape(w.awkward), files: listing, promptText: 'Synthetic prompt', destRoot: w.destRoot, runId: 'rnd-pasted-1', gafVisible: true, projectRoot: w.projectRoot });
+  assert.deepEqual(built.manifest.map(m => m.path), ['Cash_Facts.csv']);
+});
+
+test('a folder that does not exist is named as such, whatever the quoting, and the message says how to copy a path', t => {
+  const w = world(t);
+  for (const text of [path.join(w.base, 'missing'), `'${path.join(w.base, 'missing')}'`, path.join(w.base, 'No\\ Such\\ Task')]) {
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && error.status === 400 && /does not exist/.test(error.message) && /Option-Command-C/.test(error.message), text);
+  }
+  const file = w.put('a.csv');
+  assert.throws(() => inspectSource(`'${file}'`, { projectRoot: w.projectRoot }), error => error instanceof PacketError && /not a folder/.test(error.message));
+});
+
+test('a path that is not absolute after cleaning gets the one message that says what to paste', t => {
+  const w = world(t);
+  for (const text of ['source', './source', '../source', "'source'", '"./source"', 'Downloads/task/filesystem', '~root/task', '~task', '\\~/task', '/ok'.slice(1), "' '"]) {
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && error.status === 400 && error.message === RELATIVE_MESSAGE && /Option-Command-C/.test(error.message) && /\/Users\/you\/Downloads\/task\/filesystem/.test(error.message), JSON.stringify(text));
+  }
+  /* nothing at all is a different refusal: there is no path to explain */
+  for (const text of ['', '   ', '\n']) assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && /path is required/.test(error.message), JSON.stringify(text));
+  assert.throws(() => inspectSource(w.source + '\0', { projectRoot: w.projectRoot }), error => error instanceof PacketError && /path is required/.test(error.message));
+});
+
+test('a folder inside the project is refused with the reason, however the path is written, and the old wording about an absolute path is gone', t => {
+  const w = world(t);
+  const inside = path.join(w.projectRoot, 'private', 'task name');
+  fs.mkdirSync(inside, { recursive: true });
+  fs.writeFileSync(path.join(inside, 'solver.csv'), 'x');
+  const forms = [inside, `'${inside}'`, `"${inside}"`, ` ${inside}\n`, inside.replace(/ /g, '\\ '), path.join(w.projectRoot, 'private'), w.projectRoot];
+  for (const text of forms) {
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => {
+      assert.ok(error instanceof PacketError && error.status === 400, text);
+      assert.match(error.message, /inside the Studio project/);
+      assert.match(error.message, /Pilots must not run beside the Studio's private files/);
+      assert.match(error.message, /unzip or copy the task outside this folder/i);
+      assert.doesNotMatch(error.message, /absolute path/);
+      return true;
+    }, JSON.stringify(text));
+  }
+  /* a folder that holds the project is a different mistake and keeps its own message */
+  assert.throws(() => inspectSource(`'${w.base}'`, { projectRoot: w.projectRoot }), /contains the Studio project/);
+});
+
+test('the home folder itself is not a packet: ~ is refused with a pointer to a folder inside it, ~/folder works', { skip: process.platform === 'win32' }, t => {
+  const w = world(t);
+  w.put('a.csv');
+  withHome(t, w.base);
+  for (const text of ['~', '~/', `'~'`, w.base, `'${w.base}/'`]) {
+    /* the project is inside the synthetic home, so the folder that holds it is refused first; the point is that none of them is listed */
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && error.status === 400, JSON.stringify(text));
+  }
+  /* a home folder that does not hold the project: refused for being the home folder */
+  const elsewhere = path.join(w.base, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  fs.writeFileSync(path.join(elsewhere, 'b.csv'), 'x');
+  withHome(t, elsewhere);
+  for (const text of ['~', '~/', "'~'", elsewhere]) {
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && error.status === 400 && /whole home folder/.test(error.message) && /~\/Downloads\/task\/filesystem/.test(error.message), JSON.stringify(text));
+  }
+  fs.mkdirSync(path.join(elsewhere, 'task'));
+  fs.writeFileSync(path.join(elsewhere, 'task', 'c.csv'), 'x');
+  assert.deepEqual(inspectSource('~/task', { projectRoot: w.projectRoot }).files.map(f => f.path), ['c.csv']);
 });
 
 /* ------------------------------------------------------------------ names with control characters */

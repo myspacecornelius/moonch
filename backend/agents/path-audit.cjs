@@ -79,7 +79,43 @@
    read of a credential store: `security find-generic-password`, `find-internet-password`, `dump-keychain`, `export` or
    `find-key`, and the names finance-studio-pilot-token, Claude Code-credentials and .credentials.json in any text. A
    tool result is seen as the runner kept it (its first 2000 characters); the runner's own count of redactions covers
-   the rest (rounds.cjs). */
+   the rest (rounds.cjs).
+
+   Searches of the whole machine (violation kind `machine-search`, and `bare-root` or `dotdot` for code). A pilot that is
+   missing a file can go looking for it elsewhere, so any tool input that searches the computer discards the run:
+     - in a shell command, mdfind, locate, plocate, slocate or mlocate as a command: at the top level, behind a wrapper
+       (sudo, time, nohup, env), after xargs, watch or find -exec, inside $( ) or backticks, in bash -c, eval and here
+       documents. `command -v locate`, `which locate`, `grep locate x.txt` and `echo mdfind` only name the program and are
+       not flagged;
+     - in code, the same names as a program (a quoted 'locate', a quoted command that starts with one and an option, the
+       command given to system, popen, subprocess, exec or spawn, $(locate ...), xargs locate), and find written as a command
+       with / as its starting point (find / -name x, 'find /');
+     - in code, a quoted glob that starts at the root with a wildcard (a quoted slash followed by stars or question marks,
+       such as the pattern for every .xlsx file anywhere), and os.walk, os.listdir, os.scandir, glob, Path and the like given
+       os.sep, os.path.sep or '/' (bare-root);
+     - in code, the parent folder written without a path: a quoted '..' or "..", os.pardir, Path.cwd().parent and
+       dirname(os.getcwd()) are read as `..` from the tracked working directory, and Path.cwd().parents is a dotdot;
+     - in a shell command, $(dirname $PWD) and $(dirname "$PWD") are the parent of the tracked working directory, and
+       $PWD/.. or "$PWD"/.. with a working directory that is not known is a dotdot (with a known one, the path is resolved
+       and judged like any other).
+   "In code" means text that is a program: a Bash code string (python -c, node -e, Rscript -e), a here document fed to an
+   interpreter or written to a file with a code extension, and what a file tool writes to a file with a code extension
+   (.py .sh .bash .zsh .R .js .ts .rb .pl .ps1 and the like) or that starts with a #! line. What is written to any other
+   file (.csv .json .txt .md and the like) is data and keeps only the checks it had before these rules: a statistical table
+   can hold a quoted ".." for "not available", and that is not the parent folder.
+   Not flagged: the word locate in a sentence, a quoted "locate the totals", find / replace, and a '..' that resolves to a
+   folder inside the pilot folder (after cd filesystem).
+
+   Programs (see classifyAbsolute). The directories of the system's and Homebrew's programs (/usr/bin, /bin, /usr/local/bin,
+   /usr/sbin, /sbin, /opt/homebrew/bin, /opt/homebrew/sbin) may be read and run, never written. A program inside a macOS
+   application bundle, /Applications/<Name>.app/Contents/MacOS/<program>, may be run as the command of a shell command
+   (soffice from LibreOffice); any other use of a path in a bundle is an access like any other.
+
+   Paths the text cannot show (note `unverifiable-path`). An argument or a redirect target of a command that is built
+   wholly from a variable the command did not set, or from command output, names a path the audit cannot check. It is
+   noted and never discards a run. Not noted: the arguments of echo, printf and the other commands that only print their
+   words, grep, sed and awk patterns, the loop variable of for, a process substitution, the special parameters $? $# $$ $!
+   and an arithmetic expansion, and the arguments of [, test, sleep, exit and the like. */
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -103,7 +139,9 @@ const DEFAULT_BUDGET_MS = 5000;
 const MAX_LOOPBACK_HITS = 50;
 
 const SAFE_DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
-const SAFE_BIN_DIRS = new Set(['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin']);
+const SAFE_BIN_DIRS = new Set(['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/opt/homebrew/sbin']);
+/* A program inside a macOS application bundle. It may be run as the command of a shell command, nothing else in the bundle. */
+const APP_BINARY_RE = /^\/Applications\/[^/]+\.app\/Contents\/MacOS\/[^/]+$/;
 /* Top level directories that make an absolute path inside free text believable. */
 const TOP_LEVEL = new Set(['etc', 'usr', 'var', 'home', 'Users', 'tmp', 'opt', 'bin', 'sbin', 'root', 'mnt', 'Volumes', 'proc', 'sys',
   'dev', 'Library', 'System', 'Applications', 'private', 'srv', 'run', 'lib', 'lib64', 'boot', 'media', 'snap', 'nix', 'cores']);
@@ -117,6 +155,34 @@ const HOME_RE = /\$(?:HOME|OLDPWD)(?![A-Za-z0-9_])|\$\{(?:HOME|OLDPWD)\b[^}]*\}/
 const HOME_CODE_RE = /expanduser|Path\.home\s*\(|os\.homedir\s*\(|environ\s*\[\s*['"]HOME['"]\s*\]|getenv\s*\(\s*['"]HOME['"]|environ\.get\s*\(\s*['"]HOME['"]/;
 /* Code that lists the filesystem root: os.listdir('/'), glob.glob('/*'), fs.readdirSync('/') and similar. */
 const CODE_ROOT_RE = /\b(?:listdir|walk|scandir|chdir|glob|iglob|iterdir|Path|readdirSync|readdir)\s*\(\s*['"]\/\*?['"]/;
+/* Code that goes looking beyond the folder without an absolute path in it (see `machine-search` at the top). These
+   patterns only run on code (see scanText): a Bash code string, a heredoc fed to an interpreter, a file with a code
+   extension. A data file (csv, json, txt, md) can hold a quoted ".." (statistical tables use it for "not available"). The
+   repeats are bounded, so no text can make the patterns slow. */
+const CODE_ROOT_MORE_RE = /\b(?:listdir|walk|scandir|chdir|glob|iglob|iterdir|Path|readdirSync|readdir)\s*\(\s*(?:[rRbBuUfF]{1,2}['"]\/\*?['"]|(?:os\.(?:path\.)?|path\.(?:posix\.)?)sep\b)/;
+/* The extensions of files that hold a program. What is written to one is scanned as code. */
+const CODE_FILE_RE = /\.(?:py|pyw|ipynb|sh|bash|zsh|ksh|csh|fish|command|r|rmd|js|mjs|cjs|jsx|ts|tsx|mts|cts|rb|pl|pm|php|lua|ps1|psm1|psd1|bat|cmd|vbs|jl|go|rs|java|kt|scala|swift|c|cc|cpp|h|hpp|cs|applescript)$/i;
+const GLOB_ROOT_RE = /(['"`])\/[*?]+(?=[\w.\/-]|\1)/; /* '/**\/*.xlsx', '/*\/*\/*.xlsx', '/?\/x'; not a comment such as "\/* note *\/" */
+const FIND_ROOT_RE = /(?<![\w.-])find\s{1,8}(?:-[HLPD]\w{0,3}\s{1,8}){0,4}\/(?=\s{1,8}-[A-Za-z]|\s{0,8}['"`)\]}]|\s{0,8}$)/m;
+const FIND_ROOT_LIST_RE = /(['"])find\1\s{0,8},\s{0,8}(?:(['"])-[HLPD]\w{0,3}\2\s{0,8},\s{0,8}){0,4}(['"])\/\3/; /* ['find', '/', '-name', 'x'] */
+const MACHINE_SEARCH_NAMES = 'mdfind|locate|plocate|slocate|mlocate';
+const MACHINE_SEARCH_WORD_RE = /mdfind|locate/; /* a cheap test first: the patterns below only run on a text that holds one of the names */
+const MACHINE_SEARCH_TEXT_RES = [
+  /* a quoted string that is only the program, as an item of a list, an argument of a call or a value: ['locate', 'x'],
+     run('/usr/bin/mdfind'), cmd = 'mdfind'. A word in quotes inside a sentence is not this. */
+  new RegExp(`(?:[(\\[,=]|\\breturn)\\s{0,8}(['"])(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})\\1`),
+  /* a quoted command that starts with the program and an option: "mdfind -name x" */
+  new RegExp(`(['"])\\s{0,8}(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})\\s{1,8}-[A-Za-z]`),
+  /* the command string of a call that runs a program: os.system('mdfind x'), subprocess.run('locate x', shell=True) */
+  new RegExp(`\\b(?:system|popen|run|call|check_call|check_output|getoutput|getstatusoutput|Popen|exec\\w{0,12}|spawn\\w{0,12}|shell_exec|passthru)\\s{0,8}\\(\\s{0,8}\\[?\\s{0,8}(['"])\\s{0,8}(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})(?![\\w.-])`),
+  new RegExp(`\\$\\(\\s{0,8}(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})(?![\\w.-])`),
+  new RegExp(`(?<![\\w.-])(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})\\s{1,8}-[A-Za-z]`),
+  new RegExp(`(?<![\\w.-])xargs\\s{1,8}(?:-\\S{1,20}\\s{1,8}){0,6}(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})(?![\\w.-])`),
+];
+const QUOTED_PARENT_RE = /(['"])\.\.\1/;
+const PARDIR_RE = /(?<![\w$])pardir(?!\w)/;
+const CWD_PARENT_RE = /\bPath\s{0,8}\.\s{0,8}cwd\s{0,8}\(\s{0,8}\)(?:\s{0,8}\.\s{0,8}(?:resolve|absolute)\s{0,8}\(\s{0,8}\))?\s{0,8}\.\s{0,8}parent(s?)(?!\w)/;
+const DIRNAME_CWD_RE = /\bdirname\s{0,8}\(\s{0,8}(?:os\.getcwd|process\.cwd|Path\.cwd)\s{0,8}\(\s{0,8}\)\s{0,8}\)/;
 /* A URL in free text. The match stops at $, a backtick and braces, so a substitution inside a URL is still scanned. */
 const URL_RE = /\b(?!file:)[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>)|;&${}]+/gi;
 /* A whole shell word that is a URL: scheme://host... with a real host, so `x://../../y` (a relative path) is not one. */
@@ -418,6 +484,7 @@ function checkExpansion(exp, raw, run, state, write = false) {
     else run.report('home', raw);
     return resolved;
   }
+  if (exp.climbs) run.report('dotdot', raw);
   const target = exp.dynamic ? exp.prefix : exp.text;
   if (!target) return null;
   const violation = target.startsWith('/') ? classifyAbsolute(ctx, target, write) : classifyRelative(ctx, target, state);
@@ -434,16 +501,43 @@ function plausibleTop(segment) {
   return TOP_LEVEL.has(segment) || fs.existsSync('/' + segment);
 }
 
+/* Code that looks beyond the folder without writing an absolute path: a search of the whole machine, a glob that starts at
+   the root, find /, and the parent folder written as '..', os.pardir or Path.cwd().parent (see `machine-search` at the top). */
+function scanBeyondFolder(body, run, state) {
+  if (CODE_ROOT_MORE_RE.test(body)) run.report('bare-root', '/');
+  const root = GLOB_ROOT_RE.exec(body) || FIND_ROOT_RE.exec(body) || FIND_ROOT_LIST_RE.exec(body);
+  if (root) run.report('bare-root', truncate(root[0].trim(), 80));
+  if (MACHINE_SEARCH_WORD_RE.test(body)) {
+    for (const re of MACHINE_SEARCH_TEXT_RES) {
+      const found = re.exec(body);
+      if (!found) continue;
+      run.report('machine-search', truncate(found[0].trim(), 80));
+      break;
+    }
+  }
+  const parents = CWD_PARENT_RE.exec(body);
+  if (parents && parents[1]) run.report('dotdot', truncate(parents[0], 80)); /* .parents lists every ancestor */
+  if (QUOTED_PARENT_RE.test(body) || PARDIR_RE.test(body) || DIRNAME_CWD_RE.test(body) || (parents && !parents[1])) {
+    const violation = classifyRelative(run.ctx, '..', state);
+    if (violation) run.report(violation.kind, violation.path);
+  }
+}
+
 /* Scan prose, code or a script for paths. 'script' mode (sed, awk and grep scripts, find patterns) only believes well
    known top level directories, so address ranges such as /a/,/b/ are never mistaken for paths. 'text' mode also accepts
-   any path with two or more segments, and looks for .. and ~ paths and ways code finds the home directory. */
+   any path with two or more segments, and looks for .. and ~ paths and ways code finds the home directory. 'code' mode is
+   'text' for text that is known to be a program (inline interpreter code, a heredoc fed to an interpreter or written to a
+   file with a code extension, a file tool write to such a file): it also looks for searches of the whole machine and for
+   the root and the parent folder written without a path (scanBeyondFolder). A data file is 'text', never 'code'. */
 function scanText(text, run, state, mode) {
   if (!text) return;
   const body = stripUrls(text);
   const ctx = run.ctx;
+  const prose = mode !== 'script'; /* 'text' and 'code' */
   if (HOME_RE.test(body)) run.report('home', body.match(HOME_RE)[0]);
-  if (mode === 'text' && HOME_CODE_RE.test(body)) run.report('home', body.match(HOME_CODE_RE)[0]);
-  if (mode === 'text' && CODE_ROOT_RE.test(body)) run.report('bare-root', '/');
+  if (prose && HOME_CODE_RE.test(body)) run.report('home', body.match(HOME_CODE_RE)[0]);
+  if (prose && CODE_ROOT_RE.test(body)) run.report('bare-root', '/');
+  if (mode === 'code') scanBeyondFolder(body, run, state);
   for (const match of body.matchAll(mode === 'script' ? SCRIPT_ABS_RE : TEXT_ABS_RE)) {
     const segments = match[2].split('/').filter(Boolean);
     if (!segments.length || /^\.+$/.test(segments[0])) continue;
@@ -453,7 +547,7 @@ function scanText(text, run, state, mode) {
     const violation = classifyAbsolute(ctx, match[2]);
     if (violation) run.report(violation.kind, violation.path);
   }
-  if (mode !== 'text') return;
+  if (!prose) return;
   for (const match of body.matchAll(TEXT_DOTDOT_RE)) {
     const violation = classifyRelative(ctx, match[2], state);
     if (violation) run.report(violation.kind, violation.path);
@@ -792,6 +886,59 @@ function addSecretViolations(events, ctx, violations) {
   }
 }
 
+/* ------------------------------------------------------------------ searches of the whole machine */
+
+/* Programs that search the whole computer for files by name (see `machine-search` at the top). */
+const MACHINE_SEARCH_COMMANDS = new Set(['mdfind', 'locate', 'plocate', 'slocate', 'mlocate']);
+/* Options of xargs and watch whose value is the next word, so that word is not the command that is run. */
+const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-d', '-E', '-a', '-R', '-S', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--arg-file', '--eof']);
+const WATCH_VALUE_OPTS = new Set(['-n', '--interval']);
+const FIND_RUNNERS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+const MAX_RUNNER_HOPS = 4;
+
+/* The command a word list runs, and what that command runs in turn (xargs, watch, find -exec). A search program is a
+   violation only as a command: `which locate`, `command -v locate`, `grep locate x.txt` and `echo mdfind` are not. */
+function checkMachineSearch(list, run, state, hops) {
+  let at = 0;
+  while (at < list.length && parseAssignment(list[at])) at++;
+  const start = at;
+  at = skipPrefix(list, at);
+  if (at >= list.length) return;
+  for (let i = start; i < at; i++) {
+    if (literal(list[i]) === 'command' && /^-[A-Za-z]*[vV]/.test(literal(list[i + 1] || ''))) return; /* a lookup, not a run */
+  }
+  const name = path.posix.basename(expand(list[at], state, run).text);
+  if (MACHINE_SEARCH_COMMANDS.has(name)) {
+    run.report('machine-search', truncate(list.slice(at).map(word => display(word)).join(' '), 300));
+    return;
+  }
+  const rest = list.slice(at + 1);
+  /* a chain of runners longer than any real command cannot be followed, so the call fails closed like any other cap */
+  const follow = items => {
+    if (hops >= MAX_RUNNER_HOPS) throw new RangeError('commands are nested too deeply to audit');
+    checkMachineSearch(items, run, state, hops + 1);
+  };
+  if (name === 'xargs' || name === 'watch') {
+    const valueOptions = name === 'xargs' ? XARGS_VALUE_OPTS : WATCH_VALUE_OPTS;
+    let i = 0;
+    while (i < rest.length) {
+      const text = literal(rest[i]);
+      if (text === '--') { i++; break; }
+      if (!text.startsWith('-') || text === '-') break;
+      i += valueOptions.has(text) ? 2 : 1;
+    }
+    follow(rest.slice(i));
+  } else if (name === 'find') {
+    for (let i = 0; i < rest.length; i++) {
+      if (!FIND_RUNNERS.has(literal(rest[i]))) continue;
+      let end = i + 1;
+      while (end < rest.length && literal(rest[end]) !== ';' && literal(rest[end]) !== '+') end++;
+      follow(rest.slice(i + 1, end));
+      i = end;
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ shell lexer */
 
 /* Quotes and command substitutions nest. Real commands nest a few levels; anything deeper is refused so hostile input
@@ -983,6 +1130,7 @@ function lex(src) {
       if (src[i + 1] === '(') { /* process substitution */
         const close = matchParen(src, i + 2);
         addDynamic(src.slice(i + 2, close), 'n');
+        (word.procs || (word.procs = [])).push(word.subs.length - 1); /* its value is /dev/fd/N, not a path to check */
         i = close + 1;
         continue;
       }
@@ -1032,7 +1180,7 @@ function lookupVariable(name, state, run) {
   if (name === 'TMPDIR' || name === 'CLAUDE_CODE_TMPDIR') return { text: run.ctx.tmp };
   const value = state.vars.get(name);
   if (value && !value.dynamic) return { text: value.text };
-  if (value) return { dynamic: true };
+  if (value) return { dynamic: true, loop: value.loop === true };
   /* Not set by the command itself: use what the pilot inherited, when that is a single absolute path. A list such as
      PATH, a relative value or a missing variable stays unknown. */
   const inherited = run.ctx.env && Object.prototype.hasOwnProperty.call(run.ctx.env, name) ? run.ctx.env[name] : undefined;
@@ -1051,6 +1199,9 @@ function expand(word, state, run) {
   let prefixEnd = 0;
   let home = false;
   let inherited = false;
+  let opaque = false; /* some part is a value this audit cannot know: a variable the command did not set, command output */
+  let climbs = false; /* the word names a parent of a working directory that is not known */
+  let pwdAt = -1; /* where an unknown $PWD stands in the text */
   let subIndex = 0;
   const markDynamic = () => {
     if (!dynamic) { dynamic = true; prefixEnd = text.length; }
@@ -1076,9 +1227,16 @@ function expand(word, state, run) {
     while (k < value.length) {
       const ch = value[k];
       if (ch === DYN) {
-        const sub = word.subs[subIndex++];
-        if (typeof sub === 'string' && /^\s*pwd\s*$/.test(sub) && state.cwd !== null) text += state.cwd;
-        else markDynamic();
+        const subAt = subIndex++;
+        const sub = word.subs[subAt];
+        const directory = typeof sub === 'string' ? substitutedDirectory(sub, state.cwd) : undefined;
+        if (directory && directory.dir !== null) text += directory.dir;
+        else {
+          markDynamic();
+          if (directory && directory.up) climbs = true;
+          /* arithmetic ($(( ))) and a process substitution (/dev/fd/N) are never a path the audit would have to check */
+          else if (sub !== null && !(word.procs && word.procs.includes(subAt))) opaque = true;
+        }
         k++;
         continue;
       }
@@ -1101,17 +1259,50 @@ function expand(word, state, run) {
       if (!name || complex) {
         if (HOME_RE.test(value.slice(k, k + length))) home = true;
         markDynamic();
+        /* $? $# $$ $! and $- are numbers and flags; $1, $@, $* and ${...} can hold a path */
+        if (name || value[k + 1] === '{' || !/[?#$!-]/.test(value[k + 1] || '')) opaque = true;
       } else {
         const found = lookupVariable(name, state, run);
         if (found.home) home = true;
         if (found.inherited) inherited = true;
-        if (found.dynamic) markDynamic();
-        else text += found.text;
+        if (found.dynamic) {
+          if (name === 'PWD' && pwdAt < 0) pwdAt = text.length;
+          markDynamic();
+          /* the list a for loop runs over was checked where it was written, and an unknown $PWD already has the note of the
+             cd that made it unknown */
+          if (!found.loop && name !== 'PWD') opaque = true;
+        } else text += found.text;
       }
       k += length;
     }
   });
-  return { text, dynamic, prefix: dynamic ? text.slice(0, prefixEnd) : text, home, inherited };
+  /* $PWD/.. with a working directory that is not known goes up from somewhere that cannot be shown to be inside */
+  if (pwdAt >= 0 && text.slice(pwdAt + 1).split('/').includes('..')) climbs = true;
+  return { text, dynamic, prefix: dynamic ? text.slice(0, prefixEnd) : text, home, inherited, opaque, climbs };
+}
+
+const MAX_DIRNAME_NESTING = 8; /* dirname of dirname of ...: no real command nests further, and a longer one is not followed */
+
+/* The directory a command substitution names when it is only the working directory or a parent of it: pwd, dirname
+   "$PWD", dirname $(pwd), and dirname of those again. Returns { dir, up } (dir is null while the working directory is not
+   known, up is true once dirname was applied), or undefined for any other command. */
+function substitutedDirectory(sub, cwd, depth = 0) {
+  if (depth > MAX_DIRNAME_NESTING) return undefined;
+  const text = sub.trim();
+  if (text === 'pwd') return { dir: cwd, up: false };
+  const named = /^dirname\s+(?:--\s+)?([^]+)$/.exec(text);
+  if (!named) return undefined;
+  let arg = named[1].trim();
+  const quoted = /^"([^]*)"$/.exec(arg);
+  if (quoted) arg = quoted[1];
+  let inner;
+  if (/^\$(?:PWD|\{PWD\})$/.test(arg)) inner = { dir: cwd, up: false };
+  else {
+    const nested = /^\$\(([^]*)\)$/.exec(arg) || /^`([^`]*)`$/.exec(arg);
+    inner = nested ? substitutedDirectory(nested[1], cwd, depth + 1) : undefined;
+  }
+  if (!inner) return undefined;
+  return { dir: inner.dir === null ? null : path.dirname(inner.dir), up: true };
 }
 
 /* ------------------------------------------------------------------ command knowledge */
@@ -1308,16 +1499,23 @@ function skipPrefix(words, start) {
   return idx;
 }
 
-function checkRedirect(redirect, run, state) {
+function checkRedirect(redirect, run, state, code = false) {
   if (!redirect.target || redirect.op === '<<' || redirect.op === '<<-') return;
   const exp = expand(redirect.target, state, run);
   if (redirect.op === '<<<') {
     if (exp.home) run.report('home', display(redirect.target));
-    else scanText(exp.text, run, state, 'text');
+    else scanText(exp.text, run, state, code ? 'code' : 'text');
     return;
   }
   if ((redirect.op === '>&' || redirect.op === '<&') && /^(?:\d+|-)$/.test(exp.text)) return;
   checkExpansion(exp, display(redirect.target), run, state, redirect.op !== '<');
+  noteUnverifiablePath(exp, run);
+}
+
+/* A path that is built wholly from a value the audit cannot know is not looked at (checkExpansion has nothing to judge),
+   so the run is not provably confined to the folder. This says so; it never discards a run. */
+function noteUnverifiablePath(exp, run) {
+  if (exp.dynamic && !exp.prefix && exp.opaque && !exp.home && !exp.climbs) run.note(UNVERIFIABLE_PATH);
 }
 
 /* The value of --option=value or NAME=value, checked when it looks like a path. */
@@ -1331,8 +1529,9 @@ function checkAssignedValue(exp, eq, shown, run, state) {
   } else if (probe.startsWith('/') || probe.split('/').includes('..')) checkExpansion(value, shown, run, state);
 }
 
-/* One shell word. kind is 'path' or 'text' (see classifyArguments). */
-function checkWord(word, kind, run, state) {
+/* One shell word. kind is 'path' or 'text' (see classifyArguments). `quiet` is true for a command name, which has its own
+   note, and for commands whose arguments are not paths ([, test, sleep, exit and the like). */
+function checkWord(word, kind, run, state, quiet = false) {
   const exp = expand(word, state, run);
   const shown = display(word);
   if (exp.home) { checkExpansion(exp, shown, run, state); return; }
@@ -1358,6 +1557,7 @@ function checkWord(word, kind, run, state) {
      sits in a URL are audited on their own, and `x://../..` (no host) is a relative path like any other. */
   if (!exp.dynamic && isPlainUrl(exp.text)) return;
   checkExpansion(exp, shown, run, state);
+  if (!quiet) noteUnverifiablePath(exp, run);
   if (/\s/.test(exp.text) && !target.startsWith('/')) scanText(exp.text, run, state, 'text');
 }
 
@@ -1366,6 +1566,9 @@ function checkWord(word, kind, run, state) {
 const UNVERIFIABLE_COMMAND = 'unverifiable-command: a command name was built from a variable or command output, so what it ran and which paths it used cannot be checked';
 const UNVERIFIABLE_CODE = 'unverifiable-code: code given to eval or a shell was built at run time, so only its visible part was checked';
 const UNVERIFIABLE_INPUT = 'unverifiable-input: a shell read its commands from its input (for example a pipe), so those commands were not checked';
+const UNVERIFIABLE_PATH = 'unverifiable-path: a path argument or redirect target was built wholly from a variable or command output, so it could not be checked and the run is not provably confined to the folder';
+/* Commands whose arguments are numbers, words or test operators, so a value built at run time in them is not noted. */
+const NO_PATH_OPERANDS = new Set(['[', '[[', 'test', 'sleep', 'exit', 'return', 'kill', 'shift', 'let', 'unset', 'wait']);
 
 function handleCd(name, args, run, state) {
   if (name === 'popd') {
@@ -1449,12 +1652,27 @@ function evaluateWithGrammar(grammar, args, run, state) {
   });
 }
 
-function runHeredocs(redirects, isShell, run, state, depth) {
+/* `code` is true when the here document is a program: it is fed to an interpreter or written to a file with a code extension. */
+function runHeredocs(redirects, isShell, run, state, depth, code = false) {
   for (const redirect of redirects) {
     if (typeof redirect.heredoc !== 'string') continue;
     if (isShell && depth < MAX_SHELL_DEPTH) auditShell(redirect.heredoc, run, cloneState(state), depth + 1);
-    else scanText(redirect.heredoc, run, state, 'text');
+    else scanText(redirect.heredoc, run, state, isShell || code ? 'code' : 'text');
   }
+}
+
+/* Interpreters that read a program from their input or from an option (python3 - <<EOF, node -e, Rscript -e). */
+const INTERPRETERS = new Set([...INLINE_CODE.keys(), 'deno', 'bun', 'tsx', 'ts-node', 'pwsh', 'powershell', 'osascript', 'julia']);
+
+/* Does the text this command is given (a here document or a here string) hold a program? The command is an interpreter,
+   or it writes a file with a code extension (cat > outputs/run.py <<EOF, tee outputs/run.sh <<EOF). */
+function inputIsCode(command, words, state, run) {
+  let idx = 0;
+  while (idx < words.length && parseAssignment(words[idx])) idx++;
+  idx = skipPrefix(words, idx);
+  if (idx < words.length && INTERPRETERS.has(path.posix.basename(literal(words[idx])).replace(/[\d.]+$/, ''))) return true;
+  const targets = command.redirs.filter(redirect => redirect.target && !redirect.op.startsWith('<')).map(redirect => redirect.target).concat(words.slice(idx + 1));
+  return targets.some(word => CODE_FILE_RE.test(expand(word, state, run).text));
 }
 
 /* The code string given with -c (or an interpreter's inline code flag), or -1 when there is none. */
@@ -1474,7 +1692,7 @@ function auditSubstitutions(command, run, state, depth) {
     for (const sub of word.subs) {
       if (typeof sub !== 'string' || !sub.trim()) continue;
       if (depth < MAX_SHELL_DEPTH) auditShell(sub, run, cloneState(state), depth + 1);
-      else scanText(sub, run, state, 'text');
+      else scanText(sub, run, state, 'code');
     }
   }
 }
@@ -1484,10 +1702,17 @@ function evaluateCommand(command, run, state, depth) {
   run.ctx.tick();
   const words = expandCommandWords(command.words);
   auditSubstitutions(command, run, state, depth);
-  command.redirs.forEach(redirect => checkRedirect(redirect, run, state));
+  const codeInput = command.redirs.some(redirect => redirect.op === '<<<' || typeof redirect.heredoc === 'string') && inputIsCode(command, words, state, run);
+  command.redirs.forEach(redirect => checkRedirect(redirect, run, state, codeInput));
   checkLoopbackWords(words, run, state);
   checkRuntimeWords(words, run, state);
   checkEnvironWords(words, run, state);
+  checkMachineSearch(words, run, state, 0);
+  /* `for NAME in LIST` and `select NAME in LIST`: the list is checked where it is written, so what NAME holds is not a
+     path the audit would have to ask about again. */
+  if (words.length >= 3 && (literal(words[0]) === 'for' || literal(words[0]) === 'select') && literal(words[2]) === 'in' && /^[A-Za-z_]\w*$/.test(literal(words[1]))) {
+    state.vars.set(literal(words[1]), { text: '', dynamic: true, loop: true });
+  }
   let idx = 0;
   const assignments = [];
   while (idx < words.length) {
@@ -1508,7 +1733,9 @@ function evaluateCommand(command, run, state, depth) {
   const args = words.slice(idx + 1);
   const plain = !name.includes('/');
   const nameExp = expand(nameWord, state, run);
-  if (!plain || nameExp.dynamic) checkWord(nameWord, 'path', run, state);
+  /* A program inside an application bundle may be run (soffice); naming anything else in the bundle is an access. */
+  const appBinary = !nameExp.dynamic && !nameExp.home && nameExp.text.startsWith('/') && APP_BINARY_RE.test(path.posix.normalize(nameExp.text));
+  if ((!plain || nameExp.dynamic) && !appBinary) checkWord(nameWord, 'path', run, state, true);
   if (nameExp.dynamic && !nameExp.prefix) run.note(UNVERIFIABLE_COMMAND);
 
   if (plain && (name === 'cd' || name === 'chdir' || name === 'pushd' || name === 'popd')) {
@@ -1528,7 +1755,7 @@ function evaluateCommand(command, run, state, depth) {
     if (expansions.some(exp => exp.dynamic)) run.note(UNVERIFIABLE_CODE);
     const joined = expansions.map(exp => exp.text).join(' ');
     if (depth < MAX_SHELL_DEPTH) auditShell(joined, run, state, depth + 1);
-    else scanText(joined, run, state, 'text');
+    else scanText(joined, run, state, 'code');
     return;
   }
   if (SHELLS.has(exe)) {
@@ -1538,7 +1765,7 @@ function evaluateCommand(command, run, state, depth) {
       if (codeExp.dynamic) run.note(UNVERIFIABLE_CODE);
       const code = codeExp.text;
       if (depth < MAX_SHELL_DEPTH) auditShell(code, run, cloneState(state), depth + 1);
-      else scanText(code, run, state, 'text');
+      else scanText(code, run, state, 'code');
       checkOtherArguments(args, flag, flag + 1, run, state);
       return;
     }
@@ -1550,15 +1777,19 @@ function evaluateCommand(command, run, state, depth) {
   const inline = INLINE_CODE.get(exe.replace(/[\d.]+$/, ''));
   const codeFlag = inline ? findCodeFlag(args, inline) : -1;
   if (codeFlag >= 0) {
-    scanText(expand(args[codeFlag + 1], state, run).text, run, state, 'text');
+    scanText(expand(args[codeFlag + 1], state, run).text, run, state, 'code');
     checkOtherArguments(args, codeFlag, codeFlag + 1, run, state);
-    runHeredocs(command.redirs, false, run, state, depth);
+    runHeredocs(command.redirs, false, run, state, depth, true);
     return;
   }
   if (exe === 'find') evaluateFind(args, run, state);
   else if (SPECS.has(exe)) evaluateWithGrammar(SPECS.get(exe), args, run, state);
-  else args.forEach(word => checkWord(word, 'path', run, state));
-  runHeredocs(command.redirs, false, run, state, depth);
+  else {
+    /* the words of a [[ ]] test come after the reserved word [[, which the command lookup stepped over */
+    const quiet = NO_PATH_OPERANDS.has(exe) || words.slice(0, idx).some(word => literal(word) === '[[');
+    args.forEach(word => checkWord(word, 'path', run, state, quiet));
+  }
+  runHeredocs(command.redirs, false, run, state, depth, codeInput);
 }
 
 function auditShell(code, run, state, depth) {
@@ -1591,11 +1822,15 @@ function checkToolPath(value, run, folder, write) {
 function auditFileTool(tool, input, run, folder) {
   const state = freshState(folder);
   const write = WRITING_TOOLS.has(tool);
+  /* What is written to a file with a code extension (or that starts with a #! line) is a program; any other file is data. */
+  const target = [input.file_path, input.notebook_path].find(value => typeof value === 'string') || '';
+  const codeFile = write && CODE_FILE_RE.test(target);
+  const modeOf = (value, key) => (tool === 'Grep' && key === 'pattern' ? 'script' : codeFile || (write && value.startsWith('#!')) ? 'code' : 'text');
   const walk = (value, key, depth) => {
     if (depth > 8) return;
     if (typeof value === 'string') {
       if (isPathKey(tool, key)) checkToolPath(value, run, folder, write);
-      else scanText(value, run, state, tool === 'Grep' && key === 'pattern' ? 'script' : 'text');
+      else scanText(value, run, state, modeOf(value, key));
     } else if (Array.isArray(value)) value.forEach(item => walk(item, key, depth + 1));
     else if (isObject(value)) for (const [childKey, child] of Object.entries(value)) walk(child, childKey, depth + 1);
   };

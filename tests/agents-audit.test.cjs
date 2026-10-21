@@ -1077,3 +1077,365 @@ test('runtime: runtimeBin is validated, no option turns the rule off, and a text
   assert.deepEqual(kinds(many), ['runtime'], 'one reference repeated is one violation');
   assert.ok(Date.now() - started < 3000, `the scan took ${Date.now() - started} ms`);
 });
+
+/* ------------------------------------------------------------------ Homebrew and application bundles */
+
+test('the Homebrew directories and application bundle programs may be run, nothing else under them may be used', t => {
+  const fx = fixture(t);
+  const soffice = '/Applications/LibreOffice.app/Contents/MacOS/soffice';
+  assertClean(fx, bash('/opt/homebrew/bin/python3 x.py'), 'a program from Homebrew');
+  assertClean(fx, bash('/opt/homebrew/sbin/dnsmasq --version; time /opt/homebrew/bin/pdftotext -v'), 'sbin, and behind a wrapper');
+  assertClean(fx, bash(`${soffice} --headless --convert-to xlsx ./filesystem/a.csv --outdir ./outputs`), 'LibreOffice, as the command');
+  assertClean(fx, bash(`nohup ${soffice} --version & env FOO=1 "/Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel" --version`), 'behind wrappers, with a space in the name');
+  assertClean(fx, bash(`cd filesystem && ${soffice} --headless --convert-to csv --outdir ../outputs a.xlsx`), 'after a cd');
+  assertClean(fx, bash('cat /opt/homebrew/bin/python3 | head -1; ls -l /opt/homebrew/bin/brew'), 'the binary directories may be read, like /usr/local/bin');
+  assertClean(fx, tool('Read', { file_path: '/opt/homebrew/bin/brew' }));
+  /* writing */
+  assertFlags(fx, bash('echo x > /opt/homebrew/bin/tool'), 'abs', 'redirect into /opt/homebrew/bin');
+  assertFlags(fx, bash('echo x >> /opt/homebrew/sbin/tool'), 'abs', 'redirect into /opt/homebrew/sbin');
+  assertFlags(fx, tool('Write', { file_path: '/opt/homebrew/bin/tool', content: 'x' }), 'abs');
+  assertFlags(fx, tool('Edit', { file_path: '/opt/homebrew/sbin/tool', old_string: 'a', new_string: 'b' }), 'abs');
+  /* reading other places */
+  assertFlags(fx, bash('cat /opt/homebrew/etc/x'), 'abs', 'only the two binary directories are allowed');
+  assertFlags(fx, bash('ls /opt/homebrew/bin'), 'abs', 'the directory itself');
+  assertFlags(fx, bash('cat /opt/homebrew/Cellar/python/3.12/bin/python3'), 'abs');
+  assertFlags(fx, tool('Read', { file_path: '/opt/homebrew/etc/x' }), 'abs');
+  /* inside a bundle only the program that is run is allowed */
+  assertFlags(fx, bash('cat /Applications/X.app/Contents/Info.plist'), 'abs');
+  assertFlags(fx, bash('cat /Applications/X.app/Contents/MacOS/x'), 'abs', 'reading the program is not running it');
+  assertFlags(fx, bash('cp /Applications/X.app/Contents/MacOS/x outputs/'), 'abs');
+  assertFlags(fx, bash('ls /Applications/X.app/Contents/MacOS/'), 'abs');
+  assertFlags(fx, bash('echo x > /Applications/X.app/Contents/MacOS/x'), 'abs', 'writing');
+  assertFlags(fx, tool('Write', { file_path: '/Applications/X.app/Contents/MacOS/x', content: 'x' }), 'abs');
+  assertFlags(fx, bash('/Applications/X.app/Contents/Info.plist'), 'abs', 'not a program of the bundle');
+  assertFlags(fx, bash('/Applications/X.app/Contents/Resources/x'), 'abs');
+  assertFlags(fx, bash('/Applications/X.app/Contents/MacOS/sub/x'), 'abs', 'only a program directly in MacOS');
+  assertFlags(fx, bash('/Applications/X.app/Contents/MacOS/../Info.plist'), 'abs', 'a .. is resolved first');
+  assertFlags(fx, bash('/Applications/Tools/X.app/Contents/MacOS/x'), 'abs', 'the bundle is directly under /Applications');
+  assertFlags(fx, bash('/Applications/X/Contents/MacOS/x'), 'abs', 'a bundle ends in .app');
+  assertFlags(fx, bash('/Applications/X.app/Contents/MacOS/'), 'abs');
+  /* what the program is given is checked as always */
+  assertFlags(fx, bash(`${soffice} --convert-to csv /etc/hosts`), 'abs', 'an argument outside the folder');
+  assertFlags(fx, bash(`${soffice} --headless --outdir /tmp a.xlsx`), 'abs');
+  assertFlags(fx, bash(`${soffice} ../elsewhere/a.xlsx`), 'dotdot');
+  assertFlags(fx, bash(`${soffice} ~/a.xlsx`), 'home');
+});
+
+test('the pilot prompt prefix tells the pilot to report a missing file instead of searching the computer', () => {
+  const { PILOT_PROMPT_PREFIX } = require('../backend/agents/rounds.cjs');
+  assert.ok(PILOT_PROMPT_PREFIX.startsWith('The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message. '));
+  assert.ok(PILOT_PROMPT_PREFIX.endsWith('If a file you need is not in ./filesystem, say so in your answer; do not search elsewhere on this computer.\n\n'));
+  assert.equal(PILOT_PROMPT_PREFIX.split('\n\n').length, 2, 'one blank line, at the end');
+});
+
+/* ------------------------------------------------------------------ searches of the whole machine */
+
+const exactKinds = (fx, event, expected, message) => assert.deepEqual(kinds(fx.audit(event)), expected, message);
+
+test('machine-search: mdfind, locate, plocate, slocate and mlocate run as a command are a violation of their own kind', t => {
+  const fx = fixture(t);
+  const forms = [
+    'mdfind -name rubric', 'mdfind "kMDItemFSName == \'rubric*\'"', 'locate rubric.docx', 'plocate rubric', 'slocate rubric', 'mlocate -i rubric', 'mdfind', '/usr/bin/mdfind rubric', '/usr/local/bin/plocate rubric',
+    'time locate x', 'sudo mdfind x', 'sudo -u nobody locate x', 'nohup mlocate x &', 'env FOO=1 locate x', 'FOO=1 mdfind x', 'command mdfind x', 'exec locate x',
+    'cat $(mdfind -name rubric)', 'echo `locate rubric`', 'x=$(locate rubric); ls outputs', 'echo "found: $(plocate rubric)"', 'diff <(locate a) <(ls)', 'echo "$(echo "$(mdfind x)")"',
+    'ls | xargs locate', 'xargs mdfind', 'xargs -n1 -I{} mdfind {}', 'printf "a\\n" | xargs -0 -P 4 locate', 'xargs -- slocate', 'find . -exec locate {} \;', 'find filesystem -name x -execdir mdfind {} +', 'watch -n 5 mdfind x', 'xargs time mdfind',
+    "bash -c 'mdfind rubric'", 'sh -c "locate rubric"', 'eval "plocate rubric"', "bash <<'EOF'\nmdfind rubric\nEOF", 'C=mdfind; $C rubric', 'for f in a b; do locate $f; done', 'if mdfind x; then echo y; fi', '(locate x)', '{ mdfind x; }', 'true && mdfind x', 'false || locate x',
+    "python3 -c \"import os; os.system('mdfind rubric')\"", 'python3 - <<\'EOF\'\nimport os\nos.system("locate rubric")\nEOF',
+  ];
+  for (const command of forms) {
+    const result = fx.audit(bash(command));
+    assert.ok(kinds(result).includes('machine-search'), `${command} should be machine-search, got ${JSON.stringify(result.violations)}`);
+    assert.equal(result.status, 'DISCARDED', command);
+  }
+  exactKinds(fx, bash('mdfind -name rubric.xlsx'), ['machine-search']);
+  exactKinds(fx, bash('echo $(locate rubric) | head -1'), ['machine-search'], 'inside $( )');
+  exactKinds(fx, bash('ls | xargs plocate'), ['machine-search'], 'after xargs');
+  const result = fx.audit(bash('cd filesystem && mdfind -name rubric'));
+  assert.deepEqual(result.violations.map(v => [v.tool, v.kind, v.path]), [['Bash', 'machine-search', 'mdfind -name rubric']], 'the report names the command, and a search from inside the folder is still a search of the machine');
+});
+
+test('machine-search: looking a program up, or the word in an argument or a sentence, is not a search', t => {
+  const fx = fixture(t);
+  const clean = [
+    'command -v locate', 'command -v mdfind || echo missing', 'which mdfind', 'type -a locate', 'echo mdfind locate', 'man locate', 'grep -i locate filesystem/a.txt', 'ls filesystem | grep mdfind',
+    'cat locate.txt', 'python3 locate.py', 'cp locate_notes.txt outputs/', 'git log --grep=locate', 'mkdir -p outputs/locate', 'echo "please locate the file" > outputs/n.md', "sed -n '/locate/p' filesystem/a.txt",
+    'find . -name "locate*"', 'find filesystem -name mdfind -exec ls {} \;', 'xargs echo locate', 'watch -n 5 ls', 'printf "%s\\n" mdfind plocate', 'x=locate; echo $x',
+    "python3 -c \"print('locate the totals', 'mdfind is a macOS search tool')\"",
+  ];
+  for (const command of clean) assert.deepEqual(fx.audit(bash(command)).violations, [], command);
+  for (const content of [
+    'We could not locate the schedule; the find / replace tool was used. The verb \'locate\' appears in a sentence.',
+    'Steps:\nlocate the file\nthen open it',
+    'print("locate the totals")\nprint("mdfind is the macOS tool")\n',
+    'See locate(1) and the mdfind manual page.',
+  ]) assert.deepEqual(fx.audit(tool('Write', { file_path: 'outputs/memo.md', content })).violations, [], content);
+});
+
+test('machine-search: code text that runs a search program, in a file, inline code or a here document', t => {
+  const fx = fixture(t);
+  const snippets = [
+    "import os\nos.system('mdfind -name rubric')", 'os.system("locate rubric")', "os.popen('plocate rubric').read()", "subprocess.run(['mdfind', 'rubric'])", "subprocess.run('locate rubric', shell=True)",
+    'subprocess.check_output(["/usr/bin/mdfind", "-name", "rubric"])', "subprocess.Popen('mlocate rubric', shell=True)", "subprocess.getoutput('slocate rubric')", "require('child_process').execSync('mdfind rubric')",
+    "cp.spawn('slocate', ['rubric'])", "cmd = 'plocate'", "files = '$(locate rubric)'", "pipeline = 'ls | xargs locate'", "cmd = ['sudo', 'locate', 'x']", 'os.system("mdfind -onlyin ~/Documents x")',
+  ];
+  for (const code of snippets) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/find.py', content: code + '\n' }))).includes('machine-search'), 'a written file: ' + code);
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('machine-search'), 'a here document: ' + code);
+    assert.ok(kinds(fx.audit(tool('Edit', { file_path: 'outputs/find.py', old_string: 'a', new_string: code }))).includes('machine-search'), 'an edit: ' + code);
+  }
+  assertFlags(fx, bash(`python3 -c "import subprocess; subprocess.run(['locate', 'x'])"`), 'machine-search', 'inline code');
+  assertFlags(fx, bash(`node -e "require('child_process').execSync('mdfind rubric')"`), 'machine-search', 'inline node');
+  assertFlags(fx, bash("cat > outputs/run.sh <<'EOF'\nmdfind -name rubric\nEOF"), 'machine-search', 'a script written by a here document');
+  assertFlags(fx, tool('Write', { file_path: 'outputs/run.sh', content: '#!/bin/sh\nlocate -i rubric\n' }), 'machine-search', 'a script with an option');
+  assertClean(fx, tool('Write', { file_path: 'outputs/model.py', content: "import subprocess\nsubprocess.run(['soffice', '--headless', '--convert-to', 'csv', 'filesystem/a.xlsx'])\nprint('locate the totals')\n" }), 'ordinary subprocess use');
+});
+
+/* ------------------------------------------------------------------ code that reaches the root or the parent without a path */
+
+test('code text: root globs, the root through os.sep, find /, and the parent folder written without a path are violations', t => {
+  const fx = fixture(t);
+  const rootCode = [
+    "glob.glob('/**/*.xlsx', recursive=True)", "glob.glob('/*/*/*.xlsx')", 'glob.glob("/*/*.csv")', "glob.glob('/?/*')", "glob.glob('/*.csv')", "iglob('/**', recursive=True)",
+    "os.walk(os.sep)", "os.walk(os.path.sep)", "os.listdir(os.sep)", "os.scandir(os.path.sep)", "os.walk('/')", 'os.walk("/")', "os.walk(r'/')", "Path('/').rglob('*.xlsx')", "fs.readdirSync(path.sep)", "for r, d, f in os.walk(os.sep): pass",
+    "os.system('find / -name x')", 'os.system("find / -iname rubric*")', "os.system('find /')", "os.system('find -L / -name x')", "subprocess.run(['find', '/', '-name', 'x'])", "subprocess.run(['find', '-L', '/', '-name', 'x'])", "subprocess.run('find / -type f', shell=True)", 'files = $(find / -name x)',
+  ];
+  for (const code of rootCode) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code + '\n' }))).includes('bare-root'), 'a written file: ' + code);
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('bare-root'), 'a here document: ' + code);
+  }
+  assertFlags(fx, bash(`python3 -c "import glob; glob.glob('/**/*.xlsx', recursive=True)"`), 'bare-root');
+  assertFlags(fx, bash(`python3 -c "import glob; print(glob.glob('/*/*/*.xlsx'))"`), 'bare-root');
+  assertFlags(fx, bash(`python3 -c "import os; print(list(os.walk(os.sep)))"`), 'bare-root');
+  assertFlags(fx, bash(`python3 -c "import os; os.system('find / -name rubric.docx')"`), 'bare-root');
+  const parentCode = [
+    "os.chdir('..')", 'os.listdir("..")', "Path('..').resolve()", "os.path.join('..', 'x')", "os.path.abspath('..')", "path.resolve(process.cwd(), '..')", "os.path.join(os.pardir, 'x')", 'from os import pardir',
+    'Path.cwd().parent', 'pathlib.Path.cwd().parent / "x"', 'Path.cwd().resolve().parent', 'Path.cwd().absolute().parent', 'os.path.dirname(os.getcwd())', 'path.dirname(process.cwd())',
+  ];
+  for (const code of parentCode) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code + '\n' }))).includes('dotdot'), 'a written file: ' + code);
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('dotdot'), 'a here document: ' + code);
+  }
+  for (const code of ['Path.cwd().parents[1]', 'list(Path.cwd().parents)', 'for p in pathlib.Path.cwd().parents: print(p)']) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code }))).includes('dotdot'), code);
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('dotdot'), code);
+  }
+  assertFlags(fx, bash(`python3 -c "import os; os.chdir('..')"`), 'dotdot');
+  assertFlags(fx, bash(`python3 -c "from pathlib import Path; print(Path.cwd().parent)"`), 'dotdot');
+  assertFlags(fx, bash(`python3 -c "import os; print(os.pardir)"`), 'dotdot');
+  assertFlags(fx, bash(`python3 -c "import os; print(os.listdir(\\"..\\"))"`), 'dotdot', 'a double quoted .. inside a double quoted command');
+  assert.deepEqual(fx.audit(bash(`python3 -c "import os; os.chdir('..')"`)).violations.map(v => [v.kind, v.path]), [['dotdot', path.dirname(fx.folder)]], 'the parent is resolved from the working directory');
+});
+
+test('code text: the same words are fine where they stay inside the folder or are not a path', t => {
+  const fx = fixture(t);
+  /* with the working directory inside the folder, .. is inside the folder too */
+  assertClean(fx, bash(`cd filesystem && python3 -c "import os; print(os.listdir('..'))"`), 'a quoted .. after cd filesystem');
+  assertClean(fx, bash(`cd filesystem && python3 -c "from pathlib import Path; print(Path.cwd().parent)"`), 'the parent of filesystem is the folder');
+  assertClean(fx, bash(`cd outputs; python3 -c "import os; os.chdir('..'); print(os.pardir, os.path.dirname(os.getcwd()))"`));
+  assertFlags(fx, bash(`cd filesystem && python3 -c "import os; os.chdir('../..')"`), 'dotdot', 'two levels up from filesystem leaves the folder');
+  for (const code of [
+    'x = "/* header */"\ncss = "/* comment */"', 'print("...", "....", \'x..y\')', 'path = "filesystem/a.csv"', "ratio = a / b  # '/' separator", "parts = '/'.join(['a', 'b'])", 'p = pathlib.Path(__file__).parent',
+    'os.path.dirname(os.path.abspath(__file__))', "glob.glob('filesystem/*.csv')", "glob.glob('*/*.csv')", "glob.glob('**/*.xlsx', recursive=True)", "os.listdir('.')", "os.walk('filesystem')", "os.walk(os.curdir)", "'a' + os.sep + 'b'", "x.split(os.sep)",
+    "subprocess.run(['find', '.', '-name', '*.csv'])", "os.system('find filesystem -name x')", 'text = "find / replace is in the Edit menu"', "re.sub(r'/\\*.*?\\*/', '', s)", 'pardir_report = 3',
+  ]) {
+    assert.deepEqual(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code + '\n' })).violations, [], code);
+    assert.deepEqual(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`)).violations, [], 'here document: ' + code);
+  }
+  for (const command of [
+    'ls ./filesystem', `python3 -c "import glob; glob.glob('filesystem/*.csv')"`, 'cat outputs/a.txt', "find . -name '*.csv'", `python3 -c "import glob; print(glob.glob('*/*.csv'))"`, `python3 -c "import os; print(os.listdir('.'))"`,
+  ]) {
+    const result = fx.audit(bash(command));
+    assert.deepEqual([result.status, result.violations, result.notes], ['CLEAN', [], []], command);
+  }
+});
+
+test('shell: the parent of the working directory, written as dirname of $PWD or as $PWD/.., is a violation', t => {
+  const fx = fixture(t);
+  const parent = path.dirname(fx.folder);
+  for (const command of [
+    'ls $(dirname $PWD)', 'ls $(dirname "$PWD")', 'ls "$(dirname "$PWD")"', 'ls `dirname $PWD`', 'ls $(dirname ${PWD})', 'ls $(dirname -- "$PWD")', 'ls $(dirname $(pwd))', 'cd $(dirname $PWD)', 'cd "$(dirname "$PWD")" && ls', 'cat $(dirname $PWD)/secret.txt', 'find $(dirname "$PWD") -name x',
+    'ls $PWD/..', 'ls "$PWD"/..', 'ls "$PWD/.."', 'ls ${PWD}/..', 'cat $PWD/../x', 'cd $PWD/..', 'cd "$PWD"/.. && ls', 'ls $(pwd)/..', 'x=$(dirname "$PWD"); ls $x', 'D=$PWD/..; cat $D/x', 'cp filesystem/a.csv $(dirname $PWD)/',
+    'echo x > $(dirname "$PWD")/out.txt', "python3 -c \"import os; os.system('ls $(dirname $PWD)')\"",
+  ]) {
+    const result = fx.audit(bash(command));
+    assert.ok(result.violations.some(v => ['abs', 'dotdot'].includes(v.kind)), `${command} should be a violation, got ${JSON.stringify(result.violations)}`);
+    assert.equal(result.status, 'DISCARDED', command);
+  }
+  assert.deepEqual(fx.audit(bash('ls $(dirname "$PWD")')).violations.map(v => [v.kind, v.path]), [['abs', parent]], 'the parent is resolved from the tracked working directory');
+  assert.deepEqual(fx.audit(bash('ls "$PWD"/..')).violations.map(v => [v.kind, v.path]), [['abs', parent]]);
+  /* a working directory that is not known: going up from it cannot be shown to stay inside, like any .. path */
+  for (const command of ['cd $SOMEWHERE; ls $PWD/..', 'cd $SOMEWHERE; ls "$PWD"/..', 'cd $SOMEWHERE; ls $(dirname $PWD)', 'cd $SOMEWHERE; ls $(dirname "$PWD")', 'cd $SOMEWHERE; cat ${PWD}/../x']) {
+    const result = fx.audit(bash(command));
+    assert.ok(kinds(result).includes('dotdot'), `${command}: ${JSON.stringify(result.violations)}`);
+    assert.ok(result.notes.some(note => note.startsWith('cwd-unresolved')), command);
+    assert.ok(!result.notes.some(note => note.startsWith('unverifiable-path')), 'the cd already said the directory is unknown: ' + command);
+  }
+  /* the same words from a directory inside the folder stay inside it */
+  assertClean(fx, bash('cd filesystem && ls $PWD/.. && ls "$PWD"/.. && ls $(dirname $PWD) && ls "$(dirname "$PWD")"/outputs'), 'the parent of filesystem is the folder');
+  assertClean(fx, bash('cd outputs && cat $(dirname $PWD)/filesystem/a.csv > a.csv'));
+  assertFlags(fx, bash('cd filesystem && ls $(dirname $(dirname $PWD))'), 'abs', 'two levels up leaves the folder');
+  assertClean(fx, bash('ls $PWD/filesystem "$PWD"/outputs $(pwd)/filesystem'), 'the working directory and paths below it');
+  assert.deepEqual(fx.audit(bash('dirname filesystem/a.csv; basename $PWD; ls $(basename $PWD)')).violations, [], 'dirname and basename of other things');
+  /* a chain of dirname is followed a few levels and then left alone, in bounded time */
+  assert.ok(kinds(fx.audit(bash('ls $(dirname $(dirname $(dirname "$PWD")))'))).includes('abs'), 'three levels up');
+  const started = Date.now();
+  const deep = fx.audit(bash('ls ' + '$(dirname '.repeat(20000) + '$PWD' + ')'.repeat(20000)));
+  assert.ok(Date.now() - started < 3000, `a long chain took ${Date.now() - started} ms`);
+  assert.ok(['CLEAN', 'DISCARDED'].includes(deep.status));
+});
+
+/* ------------------------------------------------------------------ the unverifiable-path note */
+
+const UNVERIFIABLE_PATH_NOTE = /^unverifiable-path: a path argument or redirect target was built wholly from a variable or command output, so it could not be checked and the run is not provably confined to the folder$/;
+
+test('unverifiable-path: a path operand that is wholly a value the audit cannot know is noted, never a violation', t => {
+  const fx = fixture(t);
+  const noted = [
+    'cat $SOMEVAR', 'cat "$SOMEVAR"', 'cat $SOMEVAR/x', 'cat "$SOMEVAR"/x', 'cp "$SRC" outputs/', 'cat $(cat list.txt)', 'cat "$(ls -t outputs/*.txt | head -1)"', 'ls $(echo foo)', 'echo hi > "$OUT"', 'echo hi >> $OUT/x.txt', 'cat filesystem/a.csv > "$OUT"',
+    'ls $1', 'cat "$@"', 'cat ${SOMEVAR:-default}', 'while read f; do wc -l "$f"; done < list.txt', 'for f in $FILES; do cat "$f"; done', 'find $DIR -name x', 'bash "$SCRIPT"', 'python3 "$S" filesystem/a.csv', 'tar -xf outputs/a.tar -C "$DEST"', 'mkdir -p $(mktemp -d)/x',
+    'cat -- $X', 'wc -l $(ls filesystem/*.csv)', 'git commit -m "$MSG"',
+  ];
+  for (const command of noted) {
+    const result = fx.audit(bash(command));
+    assert.equal(result.status, 'CLEAN', `${command}: a note never discards a run, got ${JSON.stringify(result.violations)}`);
+    assert.deepEqual(result.violations, [], command);
+    assert.equal(result.notes.filter(note => note.startsWith('unverifiable-path')).length, 1, `${command}: ${JSON.stringify(result.notes)}`);
+    assert.match(result.notes.find(note => note.startsWith('unverifiable-path')), UNVERIFIABLE_PATH_NOTE);
+  }
+  assert.deepEqual(fx.audit([bash('cat $A'), bash('cat $B'), bash('cat "$C"')]).notes, [fx.audit(bash('cat $A')).notes[0]], 'one line, however many arguments');
+  assert.deepEqual(fx.audit(bash('cat $SOMEVAR')).notes.map(note => note.split(':')[0]), ['unverifiable-path']);
+  /* the violations that are already reported still are, with the note beside them */
+  const both = fx.audit(bash('cat /etc/hosts $SOMEVAR'));
+  assert.deepEqual(kinds(both), ['abs']);
+  assert.equal(both.notes.length, 1);
+});
+
+test('unverifiable-path: ordinary in-folder work, printing a value and the other notes are left alone', t => {
+  const fx = fixture(t);
+  const quiet = [
+    'ls ./filesystem', `python3 -c "import glob; glob.glob('filesystem/*.csv')"`, 'cat outputs/a.txt', "find . -name '*.csv'", 'ls filesystem/*.csv', 'for f in filesystem/*.csv; do echo "== $f"; head -3 "$f"; done', 'cd filesystem && for f in *.csv; do wc -l "$f"; done',
+    'select f in filesystem/*; do cat "$f"; break; done', 'diff <(sort filesystem/a) <(sort filesystem/b)', 'x=outputs/work; mkdir -p $x && cp filesystem/a.csv $x/', 'D=filesystem; cat $D/a.csv', 'cd filesystem && wc -l *.csv', 'mkdir -p outputs/$(date +%F)', 'ls outputs/$((1 + 2))', 'ls $(pwd)/filesystem "$PWD/outputs"',
+    'echo $SOMEVAR "$OTHER/x" $1 $? $$', 'printf "%s\\n" "$X" > outputs/a.txt', 'grep -rn "$PATTERN" filesystem', 'grep -e "$P" filesystem/a.txt', 'sed "s/$A/$B/" filesystem/a.txt > outputs/b.txt', 'head -n $N filesystem/a.csv', 'awk -v x="$V" \'{print x}\' filesystem/a.csv',
+    'if [ -f "$X" ]; then echo y; fi; [[ -n $Y ]]; test -d $Z; sleep $N; kill $PID; exit $?', 'python3 x.py; echo "exit code $?"', 'FOO=$BAR true', 'export P=$Q', 'x=$(ls); echo done', 'tr "$A" "$B" < filesystem/a.txt > outputs/b.txt', 'seq 1 $N',
+    'xargs -I{} cp {} outputs/', 'find filesystem -name "*.csv" -exec head -2 {} \;',
+  ];
+  for (const command of quiet) {
+    const result = fx.audit(bash(command));
+    assert.deepEqual([result.status, result.violations, result.notes], ['CLEAN', [], []], command);
+  }
+  /* the older notes keep their own wording, and the dropped command name and directory do not add this one */
+  assert.deepEqual(fx.audit(bash('$TOOL filesystem/a.csv')).notes.map(note => note.split(':')[0]), ['unverifiable-command']);
+  assert.deepEqual(fx.audit(bash('$(echo ls) filesystem')).notes.map(note => note.split(':')[0]), ['unverifiable-command']);
+  assert.deepEqual(fx.audit(bash('cd "$SOMEWHERE"')).notes.map(note => note.split(':')[0]), ['cwd-unresolved']);
+  assert.deepEqual(fx.audit(bash('eval "$(echo ls)"')).notes.map(note => note.split(':')[0]).sort(), ['unverifiable-code', 'unverifiable-command']);
+  assert.deepEqual(fx.audit(bash('bash -c "$CMD"')).notes.map(note => note.split(':')[0]).sort(), ['unverifiable-code', 'unverifiable-command']);
+  /* a path made of a value that is known is checked, not noted */
+  assert.deepEqual(fx.audit(bash('D=/etc; cat $D/passwd')).notes, []);
+  assertFlags(fx, bash('D=/etc; cat $D/passwd'), 'abs');
+});
+
+/* ------------------------------------------------------------------ the new scans stay cheap */
+
+test('the machine-wide and parent folder scans stay fast on hostile text, and the existing caps still hold', t => {
+  const fx = fixture(t);
+  const started = Date.now();
+  const size = 400000;
+  for (const content of [
+    'a/'.repeat(size / 2), "'/*".repeat(size / 3), "'/" + '*'.repeat(size), 'find '.repeat(size / 5), 'find' + ' '.repeat(size), 'xargs '.repeat(size / 6), 'xargs ' + '-x '.repeat(size / 3), 'system('.repeat(size / 7),
+    'run(' + ' '.repeat(size), 'mdfind '.repeat(size / 7), 'locate '.repeat(size / 7), "'..'".repeat(size / 4), 'Path.cwd()'.repeat(size / 10), 'Path' + ' . '.repeat(size / 3), 'dirname('.repeat(size / 8), 'pardir '.repeat(size / 7),
+    ("'" + 'a'.repeat(300)).repeat(size / 301), ('a/'.repeat(100) + 'locate ').repeat(size / 207), 'find /\n'.repeat(size / 7),
+  ]) fx.audit(tool('Write', { file_path: 'outputs/x.py', content }));
+  assert.ok(Date.now() - started < 5000, `the scans took ${Date.now() - started} ms`);
+  const many = fx.audit(tool('Write', { file_path: 'outputs/x.sh', content: 'mdfind -name x\n'.repeat(60000) }));
+  assert.deepEqual(kinds(many), ['machine-search'], 'one reference repeated is one violation');
+  assert.ok(kinds(fx.audit(bash('xargs xargs xargs mdfind x'))).includes('machine-search'), 'a short chain of runners is followed');
+  for (const command of ['xargs '.repeat(500) + 'echo hi', 'xargs xargs xargs xargs xargs xargs xargs mdfind x', 'find . -exec find . -exec find . -exec find . -exec find . -exec echo {} \\; \\; \\; \\; \\;']) {
+    const chain = fx.audit(bash(command));
+    assert.equal(chain.status, 'DISCARDED', 'a chain of runners longer than any real command fails closed: ' + command.slice(0, 40));
+    assert.ok(chain.notes.some(note => /^audit-error: .*nested too deeply/.test(note)), chain.notes.join(' | '));
+  }
+  assert.equal(fx.audit(bash('xargs -n1 echo | xargs -n1 echo | xargs -n1 echo | xargs -n1 echo | xargs -n1 echo | xargs -n1 echo')).status, 'CLEAN', 'a long pipeline is not a chain of runners');
+  let now = 0;
+  const clock = () => (now += 500);
+  const result = fx.audit([bash('ls filesystem'), bash('mdfind x')], { budgetMs: 1000, clock });
+  assert.equal(result.status, 'DISCARDED');
+  assert.ok(result.notes.some(note => /^audit-error: .*time budget/.test(note)), result.notes.join(' | '));
+});
+
+/* ------------------------------------------------------------------ code and data */
+
+test('code and data: the machine-wide and parent folder rules run on programs, a data file keeps its older checks', t => {
+  const fx = fixture(t);
+  /* a table can hold a quoted ".." for "not available" */
+  assertClean(fx, tool('Write', { file_path: './outputs/t.csv', content: '"..",1\n' }));
+  assertClean(fx, tool('Write', { file_path: './outputs/t.json', content: '{"v":".."}' }));
+  const codeOnly = [
+    '"..",1', '{"v":".."}', "['..', 'x']", "os.listdir('..')", 'os.chdir("..")', 'os.path.join(os.pardir, "x")', 'Path.cwd().parent', 'Path.cwd().parents[1]', 'os.path.dirname(os.getcwd())',
+    "glob.glob('/**/*.xlsx', recursive=True)", "glob.glob('/*/*/*.xlsx')", 'os.walk(os.sep)', 'os.listdir(os.path.sep)', "os.walk(r'/')", "os.system('find / -name x')", "subprocess.run(['find', '/', '-name', 'x'])",
+    "os.system('mdfind -name x')", "subprocess.run(['locate', 'x'])", "x = '$(plocate y)'", 'ls | xargs mlocate',
+  ];
+  for (const ext of ['csv', 'tsv', 'json', 'jsonl', 'txt', 'md', 'html', 'xml', 'yaml', 'yml', 'log', 'sql', 'CSV', 'Notes.TXT']) {
+    for (const content of codeOnly) {
+      const file = ext.includes('.') ? ext : `outputs/t.${ext}`;
+      assert.deepEqual(fx.audit(tool('Write', { file_path: file, content: content + '\n' })).violations, [], `${file}: ${content}`);
+      assert.deepEqual(fx.audit(tool('Edit', { file_path: file, old_string: 'a', new_string: content })).violations, [], `Edit ${file}: ${content}`);
+      assert.deepEqual(fx.audit(tool('MultiEdit', { file_path: file, edits: [{ old_string: 'a', new_string: content }] })).violations, [], `MultiEdit ${file}: ${content}`);
+    }
+  }
+  assertClean(fx, tool('Write', { file_path: 'outputs/notes', content: "os.listdir('..')\n" }), 'a file with no extension and no #! line is data');
+  /* what a data file was checked for before is still checked */
+  assertFlags(fx, tool('Write', { file_path: './outputs/t.csv', content: 'a,../../secret\n' }), 'dotdot');
+  assertFlags(fx, tool('Write', { file_path: './outputs/t.json', content: '{"p":"/etc/hosts"}' }), 'abs');
+  assertFlags(fx, tool('Write', { file_path: './outputs/t.md', content: "os.walk('/')" }), 'bare-root');
+  assertFlags(fx, tool('Write', { file_path: './outputs/t.txt', content: 'see $HOME/x' }), 'home');
+  /* a program written with a code extension is scanned as code */
+  const flagged = tool('Write', { file_path: './outputs/s.py', content: "import os\nprint(os.listdir('..'))\n" });
+  exactKinds(fx, flagged, ['dotdot']);
+  for (const ext of ['py', 'pyw', 'sh', 'bash', 'zsh', 'r', 'R', 'js', 'mjs', 'cjs', 'ts', 'rb', 'pl', 'ps1', 'PY', 'ipynb']) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "x = ls('..')\n" }))).includes('dotdot'), `.${ext}`);
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "glob.glob('/**/*.xlsx')" }))).includes('bare-root'), `.${ext} glob`);
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "os.system('mdfind -name x')" }))).includes('machine-search'), `.${ext} search`);
+  }
+  assertFlags(fx, tool('Edit', { file_path: 'outputs/s.py', old_string: 'a', new_string: "os.listdir('..')" }), 'dotdot');
+  assertFlags(fx, tool('MultiEdit', { file_path: 'outputs/s.sh', edits: [{ old_string: 'a', new_string: 'mdfind -name x' }] }), 'machine-search');
+  assertFlags(fx, tool('NotebookEdit', { notebook_path: 'outputs/n.ipynb', new_source: "os.chdir('..')" }), 'dotdot');
+  assertFlags(fx, tool('Write', { file_path: 'outputs/run', content: "#!/usr/bin/env python3\nimport os\nos.listdir('..')\n" }), 'dotdot', 'a file with a #! line is a program, whatever its name');
+  assertClean(fx, tool('Write', { file_path: 'outputs/s.py', content: "print('...', '....')\nx = a / b\n" }), 'a program with nothing to flag');
+  /* an unexpected tool's strings are not known to be code */
+  assertClean(fx, tool('TodoWrite', { todos: [{ content: "os.listdir('..')" }] }));
+});
+
+test('code and data: in Bash only code strings and heredocs fed to a program are code', t => {
+  const fx = fixture(t);
+  /* data written from the shell */
+  assertClean(fx, bash("cat > outputs/t.csv <<'EOF'\n\"..\",1\nEOF"));
+  assertClean(fx, bash("cat > outputs/t.json <<'EOF'\n{\"v\":\"..\"}\nEOF"));
+  assertClean(fx, bash("cat >> outputs/t.md <<'EOF'\nos.listdir('..')\nglob.glob('/**/*.xlsx')\nos.system('mdfind x')\nEOF"));
+  assertClean(fx, bash("cat <<'EOF'\n\"..\",1\nEOF"), 'a here document that is only printed');
+  assertClean(fx, bash("tee outputs/t.csv <<'EOF'\n\"..\",1\nEOF"));
+  assertClean(fx, bash('cat <<< \'"..",1\' > outputs/t.csv'));
+  assertClean(fx, bash("echo '\"..\",1' > outputs/t.csv; printf '\"..\",2\\n' >> outputs/t.csv"));
+  assertClean(fx, bash('grep -c ".." outputs/t.csv; cut -d, -f1 outputs/t.csv'));
+  assertClean(fx, bash("sed -n '1p' <<'EOF'\n\"..\",1\nEOF"));
+  /* the same text fed to a program or written to a program file */
+  for (const [command, kind] of [
+    ["cat > outputs/s.py <<'EOF'\nimport os\nos.listdir('..')\nEOF", 'dotdot'],
+    ["cat >> outputs/s.R <<'EOF'\nsetwd('..')\nEOF", 'dotdot'],
+    ["tee outputs/s.sh <<'EOF'\nmdfind -name x\nEOF", 'machine-search'],
+    ["cat > outputs/s.js <<'EOF'\nfs.readdirSync(path.sep)\nEOF", 'bare-root'],
+    ["python3 - <<'EOF'\nimport os\nos.listdir('..')\nEOF", 'dotdot'],
+    ["python3.11 <<EOF\nos.chdir('..')\nEOF", 'dotdot'],
+    ["python3 -c \"import os; os.listdir('..')\"", 'dotdot'],
+    ["node - <<'EOF'\nfs.readdirSync(path.sep)\nEOF", 'bare-root'],
+    ["node -e \"const path = require('path'); require('fs').readdirSync(path.sep)\"", 'bare-root'],
+    ["Rscript -e \"setwd('..')\"", 'dotdot'],
+    ["Rscript - <<'EOF'\nsetwd('..')\nEOF", 'dotdot'],
+    ["perl -e 'chdir(\"..\")'", 'dotdot'],
+    ["ruby <<'EOF'\nDir.chdir('..')\nEOF", 'dotdot'],
+    ["env FOO=1 python3 - <<'EOF'\nglob.glob('/**/*.xlsx')\nEOF", 'bare-root'],
+    ["python3 <<< \"import os; os.chdir('..')\"", 'dotdot'],
+    ["python3 -c \"import subprocess; subprocess.run(['locate', 'x'])\"", 'machine-search'],
+  ]) assertFlags(fx, bash(command), kind, command);
+  /* and a program that stays inside the folder is clean */
+  assertClean(fx, bash("python3 - <<'EOF'\nimport glob\nprint(glob.glob('filesystem/*.csv'))\nEOF"));
+});

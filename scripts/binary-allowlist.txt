@@ -1,0 +1,21 @@
+# Binary files git may track or publish. One exact repo path per line; blank lines and lines starting with # are ignored.
+#
+# The privacy scan cannot read inside a binary file, so scripts/privacy-scan.cjs and the pre-push hook BLOCK every binary
+# file (tracked, untracked and not ignored, or added by a commit being pushed) whose path is not listed here. Task packages
+# (xlsx, docx, pdf, zip) and the app's own exports must never be listed: they stay out of git (see .gitignore).
+#
+# To allow one on purpose: add its exact repo path as a line here (no wildcards, no leading ./ or /) and commit this
+# change together with the file. The push check reads this file from the commit being pushed, not from the work tree.
+
+# Retained headless QA screenshots (the browser suites write fresh ones to a temporary folder unless QA_OUTPUT is set).
+qa/agents/desktop-agents.png
+qa/agents/mobile-agents.png
+qa/candidates/desktop-new-cash-candidates.png
+qa/candidates/mobile-new-dividend-candidates.png
+qa/dashboard/desktop-overview.png
+qa/dashboard/mobile-overview.png
+qa/legacy/desktop-failure-modes.png
+qa/legacy/mobile-failure-modes.png
+
+# Synthetic test fixture (a package zip built from invented data).
+tests/fixtures/package.zip

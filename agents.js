@@ -28,13 +28,17 @@
   const RUNNING_NEXT='A round is running. Start the next round when it has ended: while a round runs, the companion withholds the gold and the prompt from this page.';
   const ACKNOWLEDGEMENTS=[
     {id:'shell-access',label:'Shell access as me',text:'Each pilot is a Claude Code agent that can run shell commands as my user account on this computer.'},
-    {id:'network',label:'Network use by the agent runtime',text:'The agent runtime (the claude program) sends the packet files and the prompt to Anthropic over the network. This page itself only talks to the companion on this computer.'},
+    {id:'network',label:'Network use by the agent runtime',text:'The agent runtime (the claude program) sends the packet files, your prompt and the fixed text before it to Anthropic over the network. This page itself only talks to the companion on this computer.'},
     {id:'isolation-by-audit',label:'Isolation by audit only',text:'There is no operating system sandbox. Pilots are told to stay inside their own folder and every tool call is checked afterwards. A call outside the folder discards that run. It is detected, not blocked.'}
   ];
   const ISOLATION_STATEMENT='Isolation is by instruction and audit, not by an operating system sandbox. A pilot is a Claude Code agent with shell access, running as you. Any read or write outside its own folder is detected after the fact and the run is marked DISCARDED. It is not blocked.';
   const SHELL_STATEMENT='Each pilot can run shell commands as your user account on this computer.';
   const NETWORK_STATEMENT='The agent runtime (the claude program) contacts Anthropic over the network. This page only talks to the companion on this computer.';
   const GAF_SENTENCE='Matches production only if the production solver sees this file.';
+  const FIGURE_NOTE='Type a value the way an answer would show it: 12450, 12,450, $12,450, (1,200) for -1,200, 3.2x or 12%. A percentage is kept as 12, not 0.12, and a tolerance is the same kind of number.';
+  const PACKET_PATH_HINT='Unzip the task ZIP outside this project, then paste the full path of its filesystem folder (Finder: select it, Option-Command-C).';
+  /* Said wherever the prompt is shown, because the writer's prompt is not all a pilot reads (PILOT_PROMPT_PREFIX in backend/agents/rounds.cjs). The text itself comes from the companion. */
+  const PREFIX_HEADING='Pilots also see this fixed text before your prompt';
   const VERDICTS=[
     {id:'matches-frozen-gold',label:'Matches the frozen gold'},
     {id:'fingerprint',label:'Lands on a frozen fingerprint'},
@@ -48,7 +52,8 @@
     'harness-spill':'The agent runtime pointed the agent at a file in its own configuration area (for example a large output file). That path is outside the pilot folder, so the run is discarded. This is a known cause and not necessarily misbehaviour. The run is kept for reading; start a new round to run it again.',
     'bare-cd':'cd with no argument moves to the home directory.',
     loopback:'A tool call reached for this computer itself over the network (localhost, a 127.x.x.x address, or the port of this companion). A pilot can read round data from the companion that way, so the run is discarded.',
-    runtime:'A tool call started the agent runtime (the claude program) again, or wrote code that does. That process runs under your sign-in with no spending cap, and its own tool calls are not audited, so the run is discarded.'
+    runtime:'A tool call started the agent runtime (the claude program) again, or wrote code that does. That process runs under your sign-in with no spending cap, and its own tool calls are not audited, so the run is discarded.',
+    'machine-search':'A command searched the whole computer for files (mdfind, locate and similar). Pilots work only with the files in their own folder, so the run is discarded.'
   });
   /* What the spending cap covers, in the settings and the approval dialog (backend/agents/rounds.cjs STATEMENTS.cap). */
   const CAP_STATEMENT='The cap applies to each pilot process the Studio starts. It is not a ceiling on everything a pilot can start: a claude process that a pilot starts from its own shell has no cap and its tool calls are not audited. The audit discards a run whose tool calls start one, after the fact.';
@@ -553,14 +558,16 @@
     const p=S.packet,files=p.files,included=files?files.filter(effectiveInclude).length:0,gafCount=files?files.filter(f=>isGaf(f.path)).length:0;
     const words=wordsOf(S.prompt),limit=promptLimit();
     return html`<div class="card-title"><div><div class="eyebrow">2 Packet</div><h2>Choose the solver files and prompt</h2></div>${files?pill(included+' of '+files.length+' files included','violet'):pill('Not inspected')}</div>
-      <p class="muted">Enter a folder on this computer. The companion lists its regular files (no symlinks). Nothing is copied anywhere until you launch a round, and each pilot gets only the files ticked below. Inside its own folder a pilot finds them under <code>./filesystem/</code>, with the folder structure kept, so choose the folder that is the production <code>filesystem</code> folder itself.</p>
-      <div class="ag-row"><label class="field ag-grow">Folder path<input type="text" id="ag-dir" data-ag-in="dir" data-ag-key="dir" value="${p.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/path/to/solver-packet"></label><button type="button" class="${primaryClass('inspect')}" data-ag="inspect" data-ag-key="inspect" data-ag-lock ${locked()?'disabled':''}>Inspect</button></div>
+      <p class="muted">The companion lists the regular files of the folder you choose (no symlinks). Nothing is copied anywhere until you launch a round, and each pilot gets only the files ticked below. Inside its own folder a pilot finds them under <code>./filesystem/</code>, with the folder structure kept, so choose the folder that is the production <code>filesystem</code> folder itself.</p>
+      <div class="ag-row"><label class="field ag-grow">Folder path<input type="text" id="ag-dir" data-ag-in="dir" data-ag-key="dir" value="${p.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/Users/you/Downloads/task/filesystem" aria-describedby="ag-path-hint"></label><button type="button" class="${primaryClass('inspect')}" data-ag="inspect" data-ag-key="inspect" data-ag-lock ${locked()?'disabled':''}>Inspect</button></div>
+      <p class="footnote" id="ag-path-hint">${PACKET_PATH_HINT}</p>
       ${p.error?html`<div class="notice" role="alert">${p.error}</div>`:''}
       ${files&&files.some(f=>/^filesystem\//.test(f.path))?html`<div class="notice" role="status"><strong>This folder already holds a filesystem/ folder.</strong> Pilots would see ./filesystem/filesystem/..., which is not the production layout. Choose the filesystem folder itself, or go on if this nesting is what you want.</div>`:''}
       ${files?filesTableHtml(files):html`<div class="empty">No folder inspected yet.</div>`}
       <label class="field">Solver prompt<textarea id="ag-prompt" data-ag-in="prompt" data-ag-key="prompt" rows="6" maxlength="20000" spellcheck="true">
 ${S.prompt}</textarea></label>
       <div class="ag-row"><p id="ag-wordcount" class="ag-count ${words>limit?'over':''}">${wordsText(words,limit)}</p><button type="button" class="small" data-ag="use-project-prompt" data-ag-key="use-project-prompt">Use the project prompt</button></div>
+      <p class="footnote" id="ag-prefix-note">${PREFIX_HEADING}. The approval dialog shows it word for word.</p>
       <label class="check"><input type="checkbox" data-ag-in="gaf" data-ag-key="gaf" ${p.gafVisible?'checked':''}><span><strong>The solver can see the gaf/ folder${files?' ('+gafCount+(gafCount===1?' file':' files')+' in this packet)':''}</strong>${GAF_SENTENCE}</span></label>`;
   }
   const wordsText=(words,limit)=>words+' words. Project limit '+limit+(words>limit?'. Over the limit.':'.');
@@ -646,6 +653,7 @@ ${S.prompt}</textarea></label>
       <p class="muted">Write down what a correct answer says and which wrong answers you expect, before you see any output. Freezing stores a hash and a time stamp, and a content hash of the gold and fingerprints alone, which stays the same when the same content is frozen again. It also fixes the packet, prompt and settings for this round: change any of them afterwards and you must freeze again, which creates a new round.</p>
       <label class="field">Gold decision keywords or phrase<input type="text" data-ag-in="decision" data-ag-key="decision" value="${f.decision}" maxlength="500" autocomplete="off" placeholder="What a correct answer must say, as typed"><small>Separate alternatives with a semicolon; any one of them counts. Used only for the heuristic suggestion. You make the final call on every run.</small></label>
       <h3>Gold figures</h3>
+      <p class="footnote" id="ag-figure-note">${FIGURE_NOTE}</p>
       <div class="ag-figlist">${f.figures.map((fig,j)=>figureRowHtml('gfig',0,j,fig,'gold figure'))}</div>
       <div class="actions"><button type="button" class="small" data-ag="add-gfig" data-ag-key="add-gfig">Add a gold figure</button></div>
       <label class="field">Gold notes (optional)<textarea data-ag-in="notes" data-ag-key="notes" rows="3" maxlength="4000">
@@ -660,7 +668,7 @@ ${f.notes}</textarea></label>
     return html`<div class="ag-figrow">
       <label class="field">Label<input type="text" data-ag-in="fig" data-kind="${kind}" data-i="${i}" data-j="${j}" data-f="label" data-ag-key="${base}-label" value="${fig.label}" maxlength="120" autocomplete="off"></label>
       <label class="field">Value<input type="text" inputmode="decimal" data-ag-in="fig" data-kind="${kind}" data-i="${i}" data-j="${j}" data-f="value" data-ag-key="${base}-value" value="${fig.value}" maxlength="40" autocomplete="off"></label>
-      <label class="field">Tolerance<input type="text" inputmode="decimal" data-ag-in="fig" data-kind="${kind}" data-i="${i}" data-j="${j}" data-f="tolerance" data-ag-key="${base}-tolerance" value="${fig.tolerance}" maxlength="40" autocomplete="off" placeholder="0"></label>
+      <label class="field">Tolerance (absolute, same unit as the value)<input type="text" inputmode="decimal" data-ag-in="fig" data-kind="${kind}" data-i="${i}" data-j="${j}" data-f="tolerance" data-ag-key="${base}-tolerance" value="${fig.tolerance}" maxlength="40" autocomplete="off" placeholder="0"></label>
       <button type="button" class="small danger" data-ag="remove-fig" data-kind="${kind}" data-i="${i}" data-j="${j}" data-ag-key="${base}-remove" aria-label="Remove ${word} ${j+1}">Remove</button></div>`;
   }
   function fingerprintHtml(fp,i){
@@ -724,13 +732,27 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <dt>Also changed</dt><dd>${other.length?other.join(', '):'nothing'}</dd></dl>
       <p class="footnote">Carrying a round forward fills the form. It never freezes, approves or launches anything: this round needs its own freeze and its own approval.</p></div>`;
   }
+  /* A figure as the companion reads it: the same steps as parseFigure in backend/agents/classify.cjs (tests/agents-page.test.cjs runs both over a
+     list of inputs and compares them). "$12,450", "(1,200)" (negative), "12%" (12, not 0.12) and "3.2x" are figures; "1e3" and "12 EUR" are not.
+     Returns null if unusable. The one addition: a typed figure is never Infinity (the input holds 40 characters, so it cannot come up). */
+  const FIGURE_RE=/^[-+]?(?:\d+\.?\d*|\.\d+)$/;
+  function parseFigure(value){
+    if(typeof value==='number')return Number.isFinite(value)?value:null;
+    if(typeof value!=='string')return null;
+    let text=value.slice(0,4000000).normalize('NFKC').replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/[\u2010-\u2015\u2212]/g,'-').trim();
+    let negative=false;
+    if(/^\(.*\)$/.test(text)){negative=true;text=text.slice(1,-1).trim();}
+    text=text.replace(/[$\u20ac\u00a3\u00a5,\s]/g,'').replace(/[%x]$/i,'');
+    if(!FIGURE_RE.test(text))return null;
+    const parsed=Number(text);
+    return negative?-parsed:parsed;
+  }
   function cleanFigure(fig,name,errors){
     const label=String(fig.label||'').trim();
-    const value=Number(String(fig.value||'').replace(/[,\s]/g,''));
-    const toleranceText=String(fig.tolerance||'').replace(/[,\s]/g,'');
-    const tolerance=toleranceText===''?0:Number(toleranceText);
+    const typed=parseFigure(String(fig.value||'')),toleranceText=String(fig.tolerance||'').trim();
+    const value=Number.isFinite(typed)?typed:NaN,tolerance=toleranceText===''?0:parseFigure(toleranceText);
     if(!label)errors.push(name+' needs a label.');
-    if(String(fig.value||'').trim()===''||!Number.isFinite(value))errors.push(name+' needs a numeric value.');
+    if(Number.isNaN(value))errors.push(name+' needs a numeric value.');
     if(!Number.isFinite(tolerance)||tolerance<0)errors.push(name+' has a tolerance that is not a number of zero or more.');
     return {label,value,tolerance};
   }
@@ -803,11 +825,12 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   /* What the round itself holds (the companion's copy), so the spend shown is what the approval covers. */
   function roundFactsHtml(r){
-    const cfg=r.config,budget=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd);
+    const cfg=r.config,budget=Number(cfg.maxBudgetUsd==null?BUDGET.pilotDefault:cfg.maxBudgetUsd),prefix=prefixOf(approvalSummary(r).summary);
     return html`<dl class="history-details" id="ag-round-facts"><dt>Model and effort</dt><dd>${cfg.model||'-'} · ${cfg.effort||'-'}</dd>
       <dt>Pilots</dt><dd>${cfg.count} (${pacingText(cfg)})</dd>
       <dt>Spending cap per pilot</dt><dd>${usd(budget)} (--max-budget-usd ${budget.toFixed(2)})</dd>
       <dt>Round maximum spend</dt><dd>${roundMax(cfg.count,budget)}</dd>
+      ${prefix!==null?html`<dt>${PREFIX_HEADING}</dt><dd id="ag-facts-prefix">${prefix}</dd>`:''}
       ${r.carriedFrom?html`<dt>Carried forward from</dt><dd>${r.carriedFrom}</dd>`:''}</dl>`;
   }
   function launchGate(){
@@ -982,6 +1005,9 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     if(!text)return '(the companion did not send the prompt text)';
     return text.length>4000?text.slice(0,4000)+'\n... ('+text.length+' characters in all; the hash covers all of them)':text;
   }
+  /* The fixed text every pilot sees before the writer's prompt, as the companion sent it with the approval summary (promptPrefix). Never typed in this file. */
+  const prefixOf=summary=>summary&&typeof summary.promptPrefix==='string'?summary.promptPrefix:null;
+  const prefixShown=summary=>{const text=prefixOf(summary);return text===null?'(the companion did not send the fixed text, so it cannot be shown here. Update the companion)':text;};
   /* Which of the selected files each pilot gets, and which the gaf setting holds back. */
   function fileListsHtml(packet){
     const files=Array.isArray(packet.files)?packet.files.filter(f=>f&&f.include):[];
@@ -1014,9 +1040,12 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
         <dt>gaf/ visible</dt><dd>${(s.gafVisible!==undefined?s.gafVisible:packet.gafVisible)?'Yes':'No'}</dd>
         <dt>Overridden files</dt><dd>${overrides.length?overrides.map(p=>html`<code class="ag-path">${p}</code> `):'None'}</dd>
         <dt>Summary SHA-256</dt><dd>${o.hash||'not provided by the companion'}</dd></dl>
-      <h3>Prompt</h3>
-      <pre class="ag-final" tabindex="0" aria-label="The prompt every pilot receives">${promptShown(packet,round.redacted===true)}</pre>
-      <p class="footnote">Prompt SHA-256 <span class="hash">${packet.promptSha256||'not reported'}</span>. Every pilot gets this text after a short fixed lead-in that points to ./filesystem and ./outputs.</p>
+      <h3>${PREFIX_HEADING}</h3>
+      <pre class="ag-final" id="ag-prefix" tabindex="0" aria-label="${PREFIX_HEADING}">${prefixShown(s)}</pre>
+      <p class="footnote">The companion adds this text in front of your prompt for every pilot. It is not something you wrote, and it is not part of the prompt hash below.</p>
+      <h3>Your prompt</h3>
+      <pre class="ag-final" tabindex="0" aria-label="Your prompt, which every pilot receives after the fixed text above">${promptShown(packet,round.redacted===true)}</pre>
+      <p class="footnote">Prompt SHA-256 <span class="hash">${packet.promptSha256||'not reported'}</span>. The hash covers your prompt only. Every pilot gets the fixed text above, then this prompt.</p>
       <h3>Files</h3>
       ${fileListsHtml(packet)}
       <h3>Command line</h3>
@@ -1231,7 +1260,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     const discarded=audit.status==='DISCARDED';
     const modified=Array.isArray(audit.inputsModified)?audit.inputsModified:[],notes=Array.isArray(audit.notes)?audit.notes:[];
     return html`<h3>Audit</h3>
-      ${discarded?html`<div class="notice" role="status"><strong>DISCARDED</strong><br>A tool call of this pilot went outside its own folder, reached for this computer over the network, or started the agent runtime again (the causes are listed below). The run is kept on disk and shown here, but it cannot be classified and it is left out of the export counts.</div>`:html`<p class="muted">${audit.status==='CLEAN'?'Every recorded tool call stayed inside the pilot folder, as far as the audit can tell. It reads the commands as text and does not run anything, so a path assembled while a command runs (from a variable or command output it cannot see, or from encoded text) is not seen, and neither is a claude process started under a name built at run time. It does not prove nothing else happened.':endedWithoutAudit(run)?'This pilot ended before the audit ran, so it was not audited. It cannot be classified or exported.':'The audit runs when the pilot finishes.'}</p>`}
+      ${discarded?html`<div class="notice" role="status"><strong>DISCARDED</strong><br>A tool call of this pilot went outside its own folder, searched the whole computer for files, reached for this computer over the network, or started the agent runtime again (the causes are listed below). The run is kept on disk and shown here, but it cannot be classified and it is left out of the export counts.</div>`:html`<p class="muted">${audit.status==='CLEAN'?'Every recorded tool call stayed inside the pilot folder, as far as the audit can tell. It reads the commands as text and does not run anything, so a path assembled while a command runs (from a variable or command output it cannot see, or from encoded text) is not seen, and neither is a claude process started under a name built at run time. It does not prove nothing else happened.':endedWithoutAudit(run)?'This pilot ended before the audit ran, so it was not audited. It cannot be classified or exported.':'The audit runs when the pilot finishes.'}</p>`}
       ${violations.length?html`<div class="table-wrap"><table class="ag-table"><caption class="sr-only">Violations found by the audit</caption><thead><tr><th scope="col">Tool</th><th scope="col">Kind</th><th scope="col">Path</th><th scope="col">Offending call</th></tr></thead><tbody>${violations.map(v=>html`<tr><td data-label="Tool">${v.tool}</td><td data-label="Kind">${v.kind}</td><td data-label="Path"><code class="ag-path">${v.path}</code></td><td data-label="Offending call"><code class="ag-path">${String(v.call==null?'':v.call).slice(0,600)}</code></td></tr>`)}</tbody></table></div>
         <ul class="plain-list">${[...new Set(violations.map(v=>v.kind))].filter(causeOf).map(k=>html`<li><strong>${k}:</strong> ${causeOf(k)}</li>`)}</ul>`:''}
       ${modified.length?html`<p><strong>Solver files changed during the run:</strong> ${modified.map(m=>html`<code class="ag-path">${m}</code> `)}</p>`:''}
@@ -1270,6 +1299,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       ${suggested?html`<div class="notice neutral"><strong>Suggested verdict, heuristic: ${verdictLabel(suggested.verdict)}</strong><br>This is a keyword and number match against the frozen gold and fingerprints. It is not a judgement and it is never stored as your verdict.
         ${suggestedMatches(suggested).length?html`<br>Gold figures: ${suggestedMatches(suggested).map(m=>html`<code class="ag-path">${m}</code> `)}`:''}
         ${suggestedFingerprintIds(suggested).length?html`<br>Fingerprint candidates: ${suggestedFingerprintIds(suggested).join(', ')}`:''}
+        ${typeof suggested.reason==='string'&&suggested.reason?html`<br>Caution: ${suggested.reason}`:''}
         ${enabled?html`<div class="actions"><button type="button" class="small" data-ag="apply-suggestion" data-ag-key="apply-suggestion">Copy suggestion into the controls</button></div>`:''}</div>`:''}
       <fieldset class="ag-classify" ${enabled?'':'disabled'}><legend>Your verdict</legend>
         ${VERDICTS.map(v=>html`<label class="check"><input type="radio" name="ag-verdict" data-ag-in="verdict" data-id="${v.id}" data-ag-key="verdict-${v.id}" ${form.verdict===v.id?'checked':''}>${v.label}</label>`)}
@@ -1346,10 +1376,19 @@ ${o.guideline}</textarea></label>
   }
 
   /* Author review */
-  function packageDigest(leaveOutEvaluator){
+  /* The files "Leave out" holds back: the roles that are not solver material, which package-engine.js lists as WITHHELD_ROLES
+     (tests/agents-page.test.cjs compares the two). The author's own private files must not reach the reviewer by default. */
+  const REVIEW_LEFT_OUT_ROLES=['evaluator','run-evidence','audit'];
+  const reviewLeftOut=doc=>REVIEW_LEFT_OUT_ROLES.includes(doc.role);
+  /* How many files the review holds back and sends, for the dialog and the button: left out only while the box is ticked. */
+  function reviewCounts(o){
+    const docs=packageDocuments(),held=docs.filter(reviewLeftOut),left=o.leaveOut?held:[];
+    return {docs,held,left,sent:docs.length-left.length};
+  }
+  function packageDigest(leaveOut){
     const out=[];let size=0;const cap=PACKAGE_DIGEST_CHARS;
     for(const doc of packageDocuments()){
-      if(leaveOutEvaluator&&doc.role==='evaluator')continue;
+      if(leaveOut&&reviewLeftOut(doc))continue;
       const head='FILE '+doc.name+' [role '+doc.role+'] sha256 '+shortHash(doc.sha256);
       out.push(head);size+=head.length;
       for(const record of (Array.isArray(doc.records)?doc.records:[]).slice(0,80)){
@@ -1361,11 +1400,13 @@ ${o.guideline}</textarea></label>
     return out.join('\n');
   }
   function reviewHtml(o){
-    const docs=packageDocuments(),evaluatorCount=docs.filter(d=>d.role==='evaluator').length,allChecked=o.acks.run&&o.acks.network&&o.acks.notools;
+    const {docs,held,left,sent}=reviewCounts(o),allChecked=o.acks.run&&o.acks.network&&o.acks.notools;
+    const n=(count,one,many)=>count+' '+(count===1?one:many);
     return dialogFrame('Author review',html`
       <p class="muted">One tool-less analysis of the task package loaded on the Overview page. It is an author-side read of the sources, not a blind pilot and not a score.</p>
       <p>${docs.length} ${docs.length===1?'file':'files'} loaded: ${docs.slice(0,12).map(d=>html`<code class="ag-path">${d.name}</code> `)}${docs.length>12?'and more.':''}</p>
-      ${evaluatorCount?html`<label class="check"><input type="checkbox" data-ag-in="review-leave-out" data-ag-key="review-leave-out" ${o.leaveOut?'checked':''} data-ag-initial><span><strong>Leave out the ${evaluatorCount} file${evaluatorCount===1?'':'s'} marked evaluator-only</strong>Otherwise their extracted text is sent too.</span></label>`:''}
+      ${held.length?html`<label class="check"><input type="checkbox" data-ag-in="review-leave-out" data-ag-key="review-leave-out" ${o.leaveOut?'checked':''} data-ag-initial><span><strong>Leave out the ${n(held.length,'file','files')} marked evaluator-only, run evidence or author review</strong>Otherwise their extracted text is sent too.</span></label>`:''}
+      <p id="ag-review-count" class="${sent?'':'ag-why'}" role="status">${left.length} of ${docs.length} ${docs.length===1?'file is':'files are'} left out; ${n(sent,'file is','files are')} sent as extracted text.${left.length?html` Left out: ${left.slice(0,12).map(d=>html`<code class="ag-path">${d.name}</code> `)}${left.length>12?'and more.':''}`:''}${sent?'':' There is nothing to review: untick the box, or load other files.'}</p>
       <label class="field">Model<select data-ag-in="overlay-model" data-ag-key="overlay-model">${S.status.models.map(m=>html`<option value="${m.id}" ${m.id===o.model?'selected':''}>${m.id}</option>`)}</select></label>
       <fieldset class="ag-acks"><legend>Approve this one run</legend>
         <label class="check"><input type="checkbox" data-ag-in="overlay-ack" data-id="run" data-ag-key="r-run" ${o.acks.run?'checked':''}><span><strong>Run one author review</strong>I approve a single run, with the model chosen above.</span></label>
@@ -1373,16 +1414,17 @@ ${o.guideline}</textarea></label>
         <label class="check"><input type="checkbox" data-ag-in="overlay-ack" data-id="notools" data-ag-key="r-notools" ${o.acks.notools?'checked':''}><span><strong>No tools</strong>The reviewer gets no shell, file or web tools. It cannot read your folders.</span></label></fieldset>
       ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
       ${o.result!==null?html`<div class="notice neutral" role="status"><strong>Author review result</strong></div><pre class="ag-final" tabindex="0" aria-label="Author review result">${o.result||'(the companion returned no text)'}</pre>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="run-review" data-ag-key="run-review" ${allChecked&&docs.length&&!o.busy?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-review">Close</button></div>`);
+      <div class="actions"><button type="button" class="primary" data-ag="run-review" data-ag-key="run-review" ${allChecked&&sent&&!o.busy?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-review">Close</button></div>`);
   }
   function openReview(){
     if(anyRunning()){say(RUNNING_TOOL_LESS,true);return;}
     if(!packageDocuments().length){say('Load a task package on the Overview page first.',true);return;}
-    openOverlay({type:'review',model:S.config.model,leaveOut:false,acks:{},busy:false,error:'',result:null});
+    /* Files that are not solver material are left out unless the writer unticks the box: the safe choice is the one that needs no action. */
+    openOverlay({type:'review',model:S.config.model,leaveOut:packageDocuments().some(reviewLeftOut),acks:{},busy:false,error:'',result:null});
   }
   async function runReview(){
     const o=S.overlay;
-    if(!o||o.type!=='review'||o.busy||!(o.acks.run&&o.acks.network&&o.acks.notools))return;
+    if(!o||o.type!=='review'||o.busy||!(o.acks.run&&o.acks.network&&o.acks.notools)||!reviewCounts(o).sent)return;
     o.busy=true;o.error='';o.result=null;paintOverlay();
     try{
       const data=await api('POST','/api/agents/author-review',{model:o.model,promptText:S.prompt,packageText:packageDigest(o.leaveOut)});
@@ -1926,7 +1968,7 @@ ${o.guideline}</textarea></label>
       if(button)button.disabled=!(o.acks.run&&o.acks.network&&o.acks.notools&&o.guideline.trim()&&graderRuns().length&&!o.busy);
     },
     'answer-run':t=>{const o=S.overlay;if(o&&o.type==='grader')o.runN=Number(t.value);},
-    'review-leave-out':t=>{const o=S.overlay;if(o&&o.type==='review')o.leaveOut=t.checked;},
+    'review-leave-out':t=>{const o=S.overlay;if(o&&o.type==='review'){o.leaveOut=t.checked;paintOverlay();}},
     verdict:t=>{const o=S.overlay;if(o&&o.type==='drawer'&&VERDICTS.some(v=>v.id===t.dataset.id)){o.form.verdict=t.dataset.id;if(t.dataset.id!=='fingerprint')o.form.ids=[];paintOverlay();}},
     'class-note':t=>{const o=S.overlay;if(o&&o.type==='drawer')o.form.note=t.value;}
   };

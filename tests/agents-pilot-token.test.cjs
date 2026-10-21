@@ -582,7 +582,7 @@ test('live-smoke: the command line shows the token as <redacted>; S3 has a promp
   assert.ok(!line.includes(TOKEN));
   assert.match(smoke.s3Prompt(), /printenv CLAUDE_CODE_OAUTH_TOKEN/);
   assert.deepEqual(smoke.parseOptions(['--stage', 'S3']).stages, ['S3']);
-  assert.deepEqual(smoke.parseOptions(['--stage', 'all']).stages, ['S0', 'S1', 'S2', 'S3']);
+  assert.deepEqual(smoke.parseOptions(['--stage', 'all']).stages, ['S0', 'S1', 'S2', 'S3', 'S4']);
 });
 
 function runSmoke(t, args, extraEnv) {

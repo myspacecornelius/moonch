@@ -17,6 +17,9 @@ const vm = require('node:vm');
 const { createServer } = require('../backend/server.cjs');
 const { createAgentService } = require('../backend/agents/index.cjs');
 const { GAF_RE } = require('../backend/agents/pilot-folder.cjs');
+const { PILOT_PROMPT_PREFIX } = require('../backend/agents/rounds.cjs');
+const { parseFigure } = require('../backend/agents/classify.cjs');
+const { WITHHELD_ROLES } = require('../package-engine.js');
 
 const REPO = path.resolve(__dirname, '..');
 const STUB = path.join(REPO, 'backend', 'agents', 'stub-claude.cjs');
@@ -124,7 +127,7 @@ function makePage(t, world, { location, storage, pkg, engine, navigator, authori
   const requests = [];
   const pageFetch = async (url, init = {}) => {
     inflight++;
-    requests.push({ url, method: init.method || 'GET', nonce: init.headers && init.headers['x-finance-local'] });
+    requests.push({ url, method: init.method || 'GET', nonce: init.headers && init.headers['x-finance-local'], body: init.body });
     try {
       const headers = { ...(init.headers || {}) };
       if (init.method && init.method !== 'GET') headers.Origin = world.origin;
@@ -219,7 +222,7 @@ function makePage(t, world, { location, storage, pkg, engine, navigator, authori
       await page.settle();
     },
     async fillAndFreeze(extra = {}) {
-      await page.type('dir', { value: world.source });
+      await page.type('dir', { value: extra.dir !== undefined ? extra.dir : world.source });
       await page.click('inspect');
       await page.type('prompt', { value: PROMPT });
       await page.type('decision', { value: 'hold' });
@@ -521,6 +524,52 @@ test('a pilot that starts the agent runtime again is discarded, and the page say
   assert.match(drawer, /<strong>runtime:<\/strong> A tool call started the agent runtime \(the claude program\) again/);
   assert.match(drawer, /no spending cap, and its own tool calls are not audited/);
   assert.match(drawer, /started the agent runtime again \(the causes are listed below\)/);
+});
+
+test('a pilot that searches the whole computer is discarded, and the page names the cause', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER, toolUses: [{ name: 'Bash', input: { command: 'mdfind -name Cash_Facts.csv' } }] });
+  await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  assert.match(page.section('runs'), /DISCARDED/);
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /<td data-label="Kind">machine-search<\/td>/);
+  assert.match(drawer, /<strong>machine-search:<\/strong> A command searched the whole computer for files \(mdfind, locate and similar\)\. Pilots work only with the files in their own folder, so the run is discarded\./);
+  assert.match(drawer, /went outside its own folder, searched the whole computer for files, reached for this computer over the network, or started the agent runtime again \(the causes are listed below\)/);
+  assert.match(drawer, /<code class="ag-path">mdfind -name Cash_Facts\.csv<\/code>/, 'the command is shown');
+});
+
+test('the suggestion says why evidence was not counted, with the text escaped, and says nothing when nothing was left out', async t => {
+  /* the answer is in an output file only: the figure is found in the outputs and does not count */
+  const w = await makeWorld(t, { resultText: 'See the attached file.', writeFiles: [{ path: 'outputs/answer.txt', content: GOLD_ANSWER }] });
+  const round = await w.service.createRound(roundBody(w));
+  const gold = { gold: { decision: 'hold', figures: [{ label: 'Cash <b>&</b>', value: '1,250', tolerance: 1 }], notes: 'Synthetic gold' }, fingerprints: GOLD.fingerprints };
+  await w.service.freezeRound(round.id, gold);
+  const { summarySha256 } = await w.service.approvalSummary(round.id);
+  await w.service.approveRound(round.id, { summarySha256, acknowledgements: ACK });
+  await w.service.launchRound(round.id);
+  await w.service.whenSettled(round.id);
+  const suggested = (await w.service.getRun(round.id, 1)).classification.suggested;
+  assert.equal(suggested.verdict, 'unclear');
+  assert.equal(suggested.reason, 'The gold figure Cash <b>&</b> (1,250) appears only in the output files, not in the final answer, so it is not counted. The decision keyword hold appears only in the output files, so it is not counted.');
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-run', { n: 1 });
+  const drawer = page.modal();
+  assert.match(drawer, /Suggested verdict, heuristic: Unclear, or neither/);
+  assert.match(drawer, /<br>Caution: The gold figure Cash &lt;b&gt;&amp;&lt;\/b&gt; \(1,250\) appears only in the output files, not in the final answer, so it is not counted\. The decision keyword hold appears only in the output files, so it is not counted\./);
+  assert.ok(!drawer.includes('<b>&</b>'), 'the label is escaped wherever it is shown');
+  assert.match(drawer, /Cash &lt;b&gt;&amp;&lt;\/b&gt; 1,250: found in the outputs/, 'the figure is still reported as found, and where');
+
+  /* an answer that states the figure has nothing to explain */
+  const plain = await makeWorld(t, { resultText: GOLD_ANSWER });
+  await finishedRoundViaService(plain);
+  const plainPage = makePage(t, plain);
+  await plainPage.boot();
+  await plainPage.click('open-run', { n: 1 });
+  assert.match(plainPage.modal(), /Suggested verdict, heuristic: Matches the frozen gold/);
+  assert.doesNotMatch(plainPage.modal(), /Caution:/);
 });
 
 /* ====================================================================== smaller wording and layout items */
@@ -1665,4 +1714,335 @@ test('requests made while the view shows are answered one by one; one replaced b
   assert.equal(answers[1].applied, false);
   await page.settle();
   assert.equal(page.modal().trim(), '');
+});
+
+
+/* ====================================================================== the fixed text before the prompt (task 1) */
+
+const unescapeHtml = text => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#96;/g, '`').replace(/&amp;/g, '&');
+/* The text of the element with this id, as a person would read it (the page escapes what it paints). */
+const textOfId = (markup, id) => {
+  const match = new RegExp(`<(pre|dd) [^>]*id="${id}"[^>]*>([\\s\\S]*?)</\\1>`).exec(markup);
+  return match ? unescapeHtml(match[2]) : null;
+};
+const PREFIX_HEADING = 'Pilots also see this fixed text before your prompt';
+
+test('the approval dialog shows the fixed text pilots see before the prompt, word for word, labelled, and it is what the pilot receives', async t => {
+  const w = await makeWorld(t, { echoPrompt: true });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  const id = (await w.service.listRounds())[0].id;
+  /* the companion says it: the approval summary carries the prefix, in the service answer and in the round view over HTTP */
+  assert.equal((await w.service.approvalSummary(id)).promptPrefix, PILOT_PROMPT_PREFIX);
+  const viaHttp = await (await fetch(`${w.origin}/api/agents/rounds/${id}`)).json();
+  assert.equal(viaHttp.approvalSummary.promptPrefix, PILOT_PROMPT_PREFIX);
+  /* the page never holds the text itself: it would drift from the companion's */
+  assert.ok(!AGENTS_SOURCE.includes(PILOT_PROMPT_PREFIX.trim()), 'agents.js does not repeat the companion\'s fixed text');
+
+  /* the round facts show it before the dialog opens */
+  assert.equal(textOfId(page.section('round'), 'ag-facts-prefix'), PILOT_PROMPT_PREFIX, 'the markup holds the text verbatim; a <dd> only collapses its whitespace when painted');
+  assert.match(page.section('round'), new RegExp(`<dt>${PREFIX_HEADING}</dt>`));
+
+  await page.click('open-approve');
+  const dialog = page.modal();
+  assert.ok(dialog.includes(`<h3>${PREFIX_HEADING}</h3>`), 'the heading says what the text is');
+  assert.equal(textOfId(dialog, 'ag-prefix'), PILOT_PROMPT_PREFIX, 'verbatim, including the blank line after it');
+  const at = needle => { const i = dialog.indexOf(needle); assert.ok(i >= 0, needle); return i; };
+  assert.ok(at(`<h3>${PREFIX_HEADING}</h3>`) < at('id="ag-prefix"') && at('id="ag-prefix"') < at('<h3>Your prompt</h3>') && at('<h3>Your prompt</h3>') < at('Assess the Atlas liquidity position'), 'the fixed text comes first, then the writer\'s prompt');
+  assert.match(dialog, /The companion adds this text in front of your prompt for every pilot\. It is not something you wrote, and it is not part of the prompt hash below\./);
+  assert.match(dialog, /The hash covers your prompt only\. Every pilot gets the fixed text above, then this prompt\./);
+  assert.doesNotMatch(dialog, /The prompt every pilot receives|after a short fixed lead-in/, 'the old wording that left the text out is gone');
+  assert.match(dialog, /sends the packet files, your prompt and the fixed text before it to Anthropic/, 'the network acknowledgement names the fixed text too');
+  assert.match(page.section('packet'), /id="ag-prefix-note">Pilots also see this fixed text before your prompt\. The approval dialog shows it word for word\.<\/p>/);
+
+  /* what is shown is what the pilot is given: the stub echoes the prompt it received */
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  await w.service.whenSettled(id);
+  const run = await w.service.getRun(id, 1);
+  assert.equal(run.final.text, textOfId(dialog, 'ag-prefix') + PROMPT, 'the pilot received the fixed text shown, then the prompt');
+});
+
+test('a companion that does not send the fixed text gets a plain note in the dialog and no row in the round facts, and the page still works', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const original = w.service.approvalSummary.bind(w.service);
+  w.service.approvalSummary = async id => { const { promptPrefix, ...older } = await original(id); return older; };
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  assert.equal(textOfId(page.section('round'), 'ag-facts-prefix'), null, 'no row to show');
+  await page.click('open-approve');
+  assert.equal(textOfId(page.modal(), 'ag-prefix'), '(the companion did not send the fixed text, so it cannot be shown here. Update the companion)');
+  await page.acknowledgeAll();
+  assert.equal(page.enabled('approve-launch'), true, 'a missing note does not block the approval; the hash still covers the rest');
+});
+
+/* ====================================================================== the packet folder path (task 2) */
+
+const PATH_HINT = 'Unzip the task ZIP outside this project, then paste the full path of its filesystem folder (Finder: select it, Option-Command-C).';
+const RELATIVE_MESSAGE = 'Paste the full path of the unzipped task\'s filesystem folder, for example /Users/you/Downloads/task/filesystem (in Finder, select the folder and press Option-Command-C).';
+const AWKWARD_NAME = "Task v2 (final) & 'Q3'";
+const terminalEscape = text => text.replace(/[ ()&'"!;#$\[\]{}<>*?~|`\\^]/g, '\\$&');
+const noticeOf = markup => { const match = /<div class="notice" role="alert">([\s\S]*?)<\/div>/.exec(markup); return match ? unescapeHtml(match[1]) : null; };
+
+test('the Packet card says what to paste, and the placeholder is a path that looks like one', async t => {
+  const w = await makeWorld(t);
+  const page = makePage(t, w);
+  await page.boot();
+  const packet = page.section('packet');
+  assert.ok(packet.includes(`<p class="footnote" id="ag-path-hint">${PATH_HINT}</p>`), 'the hint, word for word');
+  assert.match(packet, /aria-describedby="ag-path-hint"/);
+  assert.ok(packet.includes('placeholder="/Users/you/Downloads/task/filesystem"'));
+  assert.ok(!packet.includes('/path/to/solver-packet'));
+  assert.doesNotMatch(packet, /Enter a folder on this computer/);
+});
+
+test('a folder path pasted with quotes, padding, Terminal escapes or ~ lists the folder, and the round it makes launches from the cleaned path', { skip: process.platform === 'win32' }, async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const awkward = path.join(w.base, AWKWARD_NAME, 'filesystem');
+  fs.mkdirSync(awkward, { recursive: true });
+  fs.writeFileSync(path.join(awkward, 'Cash_Facts.csv'), 'Label,Value\nOpening usable cash,100\n');
+  const forms = [`'${awkward}'`, `"${awkward}"`, `  ${awkward}\n`, terminalEscape(awkward)];
+  for (const text of forms) {
+    const page = makePage(t, w);
+    await page.boot();
+    await page.type('dir', { value: text });
+    await page.click('inspect');
+    assert.equal(noticeOf(page.section('packet')), null, `no error for ${JSON.stringify(text)}`);
+    assert.match(page.section('packet'), /Cash_Facts\.csv/, JSON.stringify(text));
+    assert.match(page.status(), /Listed 1 files/);
+  }
+  /* a leading ~ is the home folder of the person running the companion */
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = w.base;
+  process.env.USERPROFILE = w.base;
+  t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  const tilde = makePage(t, w);
+  await tilde.boot();
+  await tilde.type('dir', { value: `~/${terminalEscape(AWKWARD_NAME)}/filesystem` });
+  await tilde.click('inspect');
+  assert.equal(noticeOf(tilde.section('packet')), null);
+  assert.match(tilde.section('packet'), /Cash_Facts\.csv/);
+
+  /* the whole way: the text as typed is frozen, approved and launched; the round keeps the cleaned path */
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze({ dir: terminalEscape(awkward) });
+  const id = (await w.service.listRounds())[0].id;
+  const stored = JSON.parse(fs.readFileSync(path.join(w.roundsDir, id, 'round.json'), 'utf8')).packet.sourceDir;
+  assert.equal(fs.realpathSync(stored), fs.realpathSync(awkward), 'the round holds the real folder, not the pasted text');
+  await page.click('open-approve');
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  await w.service.whenSettled(id);
+  const run = await w.service.getRun(id, 1);
+  assert.equal(run.state, 'completed');
+  assert.equal(run.audit.status, 'CLEAN');
+});
+
+test('quoting a folder does not get past the checks: the pilots folder, the project and a relative path are refused with the reason shown on the page', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const id = await finishedRoundViaService(w);
+  const pilots = path.join(w.tmpRoot, 'finance-studio-pilots');
+  assert.ok(fs.existsSync(pilots), 'an earlier round made the pilots folder');
+  const refuse = async (text, pattern) => {
+    const page = makePage(t, w);
+    await page.boot();
+    await page.type('dir', { value: text });
+    await page.click('inspect');
+    const notice = noticeOf(page.section('packet'));
+    assert.ok(notice, `a refusal for ${JSON.stringify(text)}`);
+    assert.match(notice, pattern, JSON.stringify(text));
+    assert.doesNotMatch(page.section('packet'), /<table/, 'no file list');
+    return notice;
+  };
+  for (const text of [pilots, `'${pilots}'`, `"${pilots}/"`, ` ${pilots}\n`, path.join(pilots, id + '-1')]) await refuse(text, /holds pilot folders from earlier runs/);
+  const inside = path.join(w.projectRoot, 'private');
+  for (const text of [inside, `'${inside}'`, `"${inside}"`]) {
+    const notice = await refuse(text, /inside the Studio project\. Pilots must not run beside the Studio's private files, so unzip or copy the task outside this folder, then paste the full path of its filesystem folder\./);
+    assert.doesNotMatch(notice, /absolute path/);
+  }
+  for (const text of ['source', './source', 'Downloads/task/filesystem', '~root/task', "'source'"]) assert.equal(await refuse(text, /^Paste the full path of the unzipped task's filesystem folder/), RELATIVE_MESSAGE);
+  assert.equal((await w.service.listRounds()).length, 1, 'no round came from any of them');
+});
+
+/* ====================================================================== freeze form figures (task 3) */
+
+const freezePosts = page => page.requests.filter(r => r.method === 'POST' && /\/freeze$/.test(r.url));
+const figureErrors = page => unescapeHtml(page.element('ag-freeze-state').innerHTML.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '));
+
+/* Every input here is typed into the gold figure. The page may refuse it or send a number; the companion's parseFigure decides what is right. */
+const FIGURE_INPUTS = [
+  '12450', '12450.5', '$12,450', '(1,200)', '12%', '3.2x', '3.2X', '-5', '+5', '.5', '5.', '-.5', '(5.5)', '( 5 )', '$ 1 200', '1,2,3', '€1.200,50', '£5', '¥100', '$$5', '$-5', '-$5', '- 5',
+  '\u22125', '\u20105', '\u20135', '(\u22125)', '\uff11\uff12,\uff10\uff10\uff10', '\u00a07\u00a0', '\uff17\uff05', '0', '-0', '(0)', '0.000001', '1,234,567.89',
+  '', 'abc', '1e3', '1E3', '0x10', '1_000', '12 EUR', 'EUR 12', 'Infinity', 'NaN', '--5', '+-5', '1.2.3', '()', '(', ')', '((5))', '5%%', '5x%', '%5', 'x5', '5 x 3', '1,2.3.4', '$', '-', '+', '.', '(.)', '12%x', '\u0661\u0662',
+];
+
+test('the freeze form reads a figure exactly as the companion does: the same inputs are accepted and become the same number (drift test against classify.cjs)', async t => {
+  assert.ok(new Set(FIGURE_INPUTS.map(x => x.trim())).size === FIGURE_INPUTS.length, 'the list has no repeats, which the page would treat as an unchanged form');
+  assert.ok(FIGURE_INPUTS.filter(x => parseFigure(x) === null).length >= 25 && FIGURE_INPUTS.filter(x => parseFigure(x) !== null).length >= 30, 'the list holds both kinds');
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  const disagreements = [];
+  for (const input of FIGURE_INPUTS) {
+    const expected = parseFigure(input);
+    const before = freezePosts(page).length;
+    await page.type('fig', { value: input, dataset: { kind: 'gfig', i: 0, j: 0, f: 'value' } });
+    await page.click('freeze');
+    const posts = freezePosts(page);
+    const refused = /Gold figure 1 needs a numeric value\./.test(figureErrors(page));
+    if (expected === null) {
+      if (!refused || posts.length !== before) disagreements.push(`${JSON.stringify(input)}: the companion refuses it, the page ${refused ? 'refused' : 'accepted'} it`);
+    } else {
+      const sent = posts.length === before + 1 ? JSON.parse(posts[posts.length - 1].body).gold.figures[0].value : undefined;
+      if (refused || !Object.is(sent === 0 ? 0 : sent, expected === 0 ? 0 : expected)) disagreements.push(`${JSON.stringify(input)}: the companion reads ${expected}, the page ${refused ? 'refused it' : 'sent ' + sent}`);
+    }
+  }
+  assert.deepEqual(disagreements, []);
+});
+
+test('the named examples: $12,450, (1,200) and 12% are accepted as 12450, -1200 and 12, and the old refusals are gone', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  for (const [input, number] of [['$12,450', 12450], ['(1,200)', -1200], ['12%', 12], ['3.2x', 3.2]]) {
+    await page.type('fig', { value: input, dataset: { kind: 'gfig', i: 0, j: 0, f: 'value' } });
+    await page.click('freeze');
+    assert.doesNotMatch(figureErrors(page), /needs a numeric value/, input);
+    const body = JSON.parse(freezePosts(page).at(-1).body);
+    assert.deepEqual(body.gold.figures[0], { label: 'Usable cash', value: number, tolerance: 0 }, input);
+  }
+  /* what is still refused says so in the list at the freeze button, and nothing is sent */
+  const before = freezePosts(page).length;
+  await page.type('fig', { value: '1e3', dataset: { kind: 'gfig', i: 0, j: 0, f: 'value' } });
+  await page.click('freeze');
+  assert.match(figureErrors(page), /Gold figure 1 needs a numeric value\./);
+  assert.equal(freezePosts(page).length, before);
+});
+
+/* The form starts with an empty tolerance and the first freeze has it, so an empty one comes after another value; a blank one that is only spaces comes later still. */
+const TOLERANCE_INPUTS = ['0', '', '1', '0.5', '1,000', '$5', '5%', '(0)', '3.2x', '-1', '(5)', '-0.01', 'abc', '1e2', '5 EUR', '--1', '(', '   ', '2'];
+
+test('a tolerance is read the same way: empty is zero, a figure of zero or more is accepted, a negative or unreadable one is refused', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  await page.fillAndFreeze();
+  const disagreements = [];
+  for (const input of TOLERANCE_INPUTS) {
+    const parsed = input.trim() === '' ? 0 : parseFigure(input);
+    const valid = parsed !== null && parsed >= 0;
+    const before = freezePosts(page).length;
+    await page.type('fig', { value: input, dataset: { kind: 'gfig', i: 0, j: 0, f: 'tolerance' } });
+    await page.click('freeze');
+    const refused = /Gold figure 1 has a tolerance that is not a number of zero or more\./.test(figureErrors(page));
+    const posts = freezePosts(page);
+    if (!valid) { if (!refused || posts.length !== before) disagreements.push(`${JSON.stringify(input)}: should be refused`); continue; }
+    const sent = posts.length === before + 1 ? JSON.parse(posts[posts.length - 1].body).gold.figures[0].tolerance : undefined;
+    if (refused || sent !== (parsed === 0 ? 0 : parsed)) disagreements.push(`${JSON.stringify(input)}: should send ${parsed}, ${refused ? 'refused' : 'sent ' + sent}`);
+  }
+  assert.deepEqual(disagreements, []);
+});
+
+test('a fingerprint figure goes through the same reading, and the tolerance field says what it is', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const page = makePage(t, w);
+  await page.boot();
+  assert.ok(page.section('freeze').includes('Tolerance (absolute, same unit as the value)<input'), 'the label says absolute, in the unit of the value');
+  assert.doesNotMatch(page.section('freeze'), /<label class="field">Tolerance<input/);
+  assert.ok(page.section('freeze').includes('id="ag-figure-note">Type a value the way an answer would show it: 12450, 12,450, $12,450, (1,200) for -1,200, 3.2x or 12%. A percentage is kept as 12, not 0.12, and a tolerance is the same kind of number.</p>'));
+  await page.click('add-pfig', { i: 0 });
+  await page.fillAndFreeze();
+  for (const [field, value] of [['label', 'Wrong cash'], ['value', '$3,050'], ['tolerance', '(0)']]) await page.type('fig', { value, dataset: { kind: 'pfig', i: 0, j: 0, f: field } });
+  await page.click('freeze');
+  assert.equal(figureErrors(page).includes('Fingerprint 1 figure 1'), false, figureErrors(page));
+  const body = JSON.parse(freezePosts(page).at(-1).body);
+  assert.deepEqual(body.fingerprints[0].figures, [{ label: 'Wrong cash', value: 3050, tolerance: 0 }]);
+  await page.type('fig', { value: '12 EUR', dataset: { kind: 'pfig', i: 0, j: 0, f: 'value' } });
+  await page.click('freeze');
+  assert.match(figureErrors(page), /Fingerprint 1 figure 1 needs a numeric value\./);
+});
+
+/* ====================================================================== author review privacy (task 5) */
+
+const ROLE_DOCS = ['source', 'template', 'proposal', 'prompt', ...WITHHELD_ROLES].map((role, i) => ({ name: `File_${role}_${i}.txt`, role, sha256: String(i).repeat(64).slice(0, 64), records: [{ locator: 'line 1', text: `synthetic text of the ${role} file` }] }));
+const reviewPosts = page => page.requests.filter(r => r.method === 'POST' && r.url === '/api/agents/author-review');
+const reviewCount = page => unescapeHtml(/<p id="ag-review-count"[^>]*>([\s\S]*?)<\/p>/.exec(page.modal())[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+async function approveReview(page) {
+  for (const id of ['run', 'network', 'notools']) await page.type('overlay-ack', { checked: true, dataset: { id } });
+}
+
+test('the author review leaves out evaluator, run evidence and author review files by default, says how many, and sends nothing of them', async t => {
+  assert.deepEqual([...WITHHELD_ROLES].sort(), ['audit', 'evaluator', 'run-evidence'], 'the roles the engine withholds are the ones this test expects');
+  const w = await makeWorld(t, { echoPrompt: true });
+  const page = makePage(t, w, { pkg: { documents: ROLE_DOCS } });
+  await page.boot();
+  await page.click('open-review');
+  const dialog = page.modal();
+  assert.match(dialog, /data-ag-in="review-leave-out" data-ag-key="review-leave-out" checked/, 'ticked when the dialog opens');
+  assert.match(dialog, /Leave out the 3 files marked evaluator-only, run evidence or author review/);
+  assert.equal(reviewCount(page), '3 of 7 files are left out; 4 files are sent as extracted text. Left out: File_evaluator_4.txt File_run-evidence_5.txt File_audit_6.txt');
+  await approveReview(page);
+  await page.click('run-review');
+  const text = JSON.parse(reviewPosts(page)[0].body).packageText;
+  for (const doc of ROLE_DOCS) assert.equal(text.includes(`FILE ${doc.name} [role ${doc.role}]`), !WITHHELD_ROLES.includes(doc.role), `${doc.role} file: ${doc.name}`);
+  for (const role of WITHHELD_ROLES) assert.ok(!text.includes(`synthetic text of the ${role} file`), `no extracted text of a ${role} file`);
+});
+
+test('unticking Leave out sends everything and the count follows; ticking it again takes the files out again', async t => {
+  const w = await makeWorld(t, { echoPrompt: true });
+  const page = makePage(t, w, { pkg: { documents: ROLE_DOCS } });
+  await page.boot();
+  await page.click('open-review');
+  await page.type('review-leave-out', { checked: false, event: 'change' });
+  assert.equal(reviewCount(page), '0 of 7 files are left out; 7 files are sent as extracted text.');
+  assert.doesNotMatch(page.modal(), /data-ag-key="review-leave-out" checked/);
+  await page.type('review-leave-out', { checked: true, event: 'change' });
+  assert.match(reviewCount(page), /^3 of 7 files are left out; 4 files are sent/);
+  await page.type('review-leave-out', { checked: false, event: 'change' });
+  await approveReview(page);
+  await page.click('run-review');
+  const text = JSON.parse(reviewPosts(page)[0].body).packageText;
+  for (const doc of ROLE_DOCS) assert.ok(text.includes(`FILE ${doc.name} [role ${doc.role}]`), `${doc.name} is sent when the box is off`);
+});
+
+test('a package with no private files shows no tick box and leaves nothing out; a package of only private files has nothing to send', async t => {
+  const w = await makeWorld(t, { echoPrompt: true });
+  const plain = makePage(t, w, { pkg: { documents: ROLE_DOCS.slice(0, 4) } });
+  await plain.boot();
+  await plain.click('open-review');
+  assert.doesNotMatch(plain.modal(), /review-leave-out/);
+  assert.equal(reviewCount(plain), '0 of 4 files are left out; 4 files are sent as extracted text.');
+  await approveReview(plain);
+  assert.equal(plain.enabled('run-review'), true);
+
+  const single = makePage(t, w, { pkg: { documents: [ROLE_DOCS[0]] } });
+  await single.boot();
+  await single.click('open-review');
+  assert.equal(reviewCount(single), '0 of 1 file is left out; 1 file is sent as extracted text.');
+
+  const onlyPrivate = makePage(t, w, { pkg: { documents: ROLE_DOCS.slice(4) } });
+  await onlyPrivate.boot();
+  await onlyPrivate.click('open-review');
+  assert.match(reviewCount(onlyPrivate), /^3 of 3 files are left out; 0 files are sent as extracted text\. Left out: .* There is nothing to review: untick the box, or load other files\.$/);
+  await approveReview(onlyPrivate);
+  assert.equal(onlyPrivate.enabled('run-review'), false, 'nothing to send, so the run stays disabled');
+  await onlyPrivate.click('run-review');
+  assert.equal(reviewPosts(onlyPrivate).length, 0, 'and nothing is posted');
+  await onlyPrivate.type('review-leave-out', { checked: false, event: 'change' });
+  assert.equal(onlyPrivate.enabled('run-review'), true, 'unticking the box makes them sendable again, on purpose');
+});
+
+test('only an evaluator file is enough to turn Leave out on by default', async t => {
+  const w = await makeWorld(t);
+  const page = makePage(t, w, { pkg: { documents: [ROLE_DOCS[0], ROLE_DOCS[4]] } });
+  await page.boot();
+  await page.click('open-review');
+  assert.match(page.modal(), /data-ag-key="review-leave-out" checked/);
+  assert.match(page.modal(), /Leave out the 1 file marked evaluator-only, run evidence or author review/);
+  assert.equal(reviewCount(page), '1 of 2 files are left out; 1 file is sent as extracted text. Left out: File_evaluator_4.txt');
 });

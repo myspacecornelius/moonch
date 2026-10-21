@@ -19,11 +19,19 @@
  *   - with --range, the lines ADDED by the commits in the range: each commit on its own (history is what a
  *     push publishes, so a term added and then removed inside the range still counts) and the net diff.
  *
+ * Binary files cannot be scanned, so they are refused unless allowed. A tracked file, an untracked file that git does not
+ * ignore, and (with --range) a file that any commit in the range adds or changes, is blocked when git or this scan sees it
+ * as binary and its exact repo path is not a line of scripts/binary-allowlist.txt (blank lines and lines starting with #
+ * are ignored). The work tree check reads that file from the work tree; the range check reads it from the head commit of
+ * the range, so a push can only allow what it actually publishes. A file over 5 MB is classed as binary when its first
+ * 8 KB hold a NUL byte; any other file over 5 MB is reported as skipped-size.
+ *
  * Output: "HIT <file>:<line> term <index>" for each hit. The line number is 0 for a hit in a path name.
+ * "BINARY <file> (<why>) is not on scripts/binary-allowlist.txt" for each blocked binary file.
  * The matched text and the term are never printed, and any term match inside a printed path or git message
  * is replaced by [redacted]. The last line is a one line summary.
  *
- * Exit codes: 0 clean, 1 at least one hit, 2 usage or configuration error (fail closed).
+ * Exit codes: 0 clean, 1 at least one hit or blocked binary file, 2 usage or configuration error (fail closed).
  */
 
 const fs = require('node:fs');
@@ -35,6 +43,7 @@ const EXIT_HITS = 1;
 const EXIT_ERROR = 2;
 
 const NO_TERMS_MESSAGE = 'no privacy term list: refusing to pass';
+const BINARY_ALLOWLIST = 'scripts/binary-allowlist.txt';
 const USAGE = 'usage: node scripts/privacy-scan.cjs [--terms <file>] [--range <base>..<head>] [--root <dir>]';
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -239,19 +248,91 @@ function failOnPrivatePaths(ctx, paths, message) {
   throw new ScanError(`${paths.length} ${message}`, shown);
 }
 
+/* ---------- binary allowlist ---------- */
+
+/**
+ * Parses the allowlist text into a Set of exact repo paths. Pure. Blank lines and lines starting with # are ignored.
+ * A pattern, or a path written with a leading "/" or "./", could never match, so it is an error rather than a silent no-op.
+ */
+function parseAllowlist(text) {
+  const allowed = new Set();
+  text.split('\n').forEach((raw, position) => {
+    const line = raw.replace(/\r$/, '').replace(/^\uFEFF/, '').trim();
+    if (line === '' || line.startsWith('#')) return;
+    if (/[*?]/.test(line) || line.startsWith('/') || line.startsWith('./') || line.includes('\\')) {
+      throw new ScanError(`${BINARY_ALLOWLIST} line ${position + 1}: write one exact repo path (no wildcards, no leading / or ./)`);
+    }
+    allowed.add(line);
+  });
+  return allowed;
+}
+
+function decodeAllowlist(bytes) {
+  if (bytes.includes(0)) throw new ScanError(`${BINARY_ALLOWLIST} must be UTF-8 text (it contains NUL bytes)`);
+  try {
+    return parseAllowlist(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (error) {
+    if (error instanceof ScanError) throw error;
+    throw new ScanError(`${BINARY_ALLOWLIST} must be valid UTF-8 text`);
+  }
+}
+
+/** The allowlist in the work tree. A missing file is an empty allowlist: every binary file is then blocked. */
+function loadWorkTreeAllowlist(ctx) {
+  const file = path.join(ctx.root, BINARY_ALLOWLIST);
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch {
+    return new Set();
+  }
+  if (!stat.isFile()) throw new ScanError(`${BINARY_ALLOWLIST} must be a regular file`);
+  try {
+    return decodeAllowlist(fs.readFileSync(file));
+  } catch (error) {
+    if (error instanceof ScanError) throw error;
+    throw new ScanError(`${BINARY_ALLOWLIST} could not be read`);
+  }
+}
+
+/**
+ * The allowlist as the head commit of the range has it, so that a push can only allow what it publishes: an allowlist
+ * edit that was never committed does not count. No such file at the head is an empty allowlist.
+ */
+function loadRangeAllowlist(ctx, range) {
+  const head = range.split('..')[1];
+  const commit = git(ctx, ['rev-parse', '--verify', '--quiet', `${head}^{commit}`], 'resolving the head of the range').trim();
+  let text;
+  try {
+    text = git(ctx, ['cat-file', 'blob', `${commit}:${BINARY_ALLOWLIST}`], 'reading the binary allowlist at the head of the range');
+  } catch {
+    return new Set();
+  }
+  return decodeAllowlist(Buffer.from(text, 'utf8'));
+}
+
 /* ---------- results ---------- */
 
 function newResult() {
   return {
     filesScanned: 0,
-    binary: [],
+    binaryAllowed: [],
+    binaryBlocked: new Map(),
     oversize: [],
     otherSkipped: [],
     addedLines: 0,
-    rangeBinary: 0,
+    rangeBinaryAllowed: 0,
     hits: [],
     seen: new Set(),
   };
+}
+
+/** Records a binary file that is not allowed. `kind` is 'tree' or 'range'; the first reason of each kind is kept. */
+function blockBinary(ctx, result, rel, kind, reason) {
+  const key = ctx.safe(rel);
+  const entry = result.binaryBlocked.get(key) || { tree: null, range: null };
+  if (entry[kind] === null) entry[kind] = reason;
+  result.binaryBlocked.set(key, entry);
 }
 
 function addHit(result, key, hit) {
@@ -279,6 +360,11 @@ function decodeText(buffer) {
   return buffer.toString('utf8').replace(/^﻿/, '');
 }
 
+/** A file over the size limit is still a binary file when its first 8 KB say so; otherwise it is reported as oversize. */
+function classifyOversize(head, bytes) {
+  return decodeText(head) === null ? { kind: 'binary' } : { kind: 'oversize', bytes };
+}
+
 /**
  * Returns {kind:'text', text} | {kind:'binary'} | {kind:'oversize', bytes} | {kind:'skipped', reason}.
  * Never follows a symlink: a link is scanned as its own target string.
@@ -298,7 +384,6 @@ function readForScan(absolute) {
     }
   }
   if (!stat.isFile()) return { kind: 'skipped', reason: 'not a regular file' };
-  if (stat.size > MAX_FILE_BYTES) return { kind: 'oversize', bytes: stat.size };
 
   let fd;
   try {
@@ -310,9 +395,12 @@ function readForScan(absolute) {
   try {
     const opened = fs.fstatSync(fd);
     if (!opened.isFile()) return { kind: 'skipped', reason: 'not a regular file' };
-    if (opened.size > MAX_FILE_BYTES) return { kind: 'oversize', bytes: opened.size };
+    if (opened.size > MAX_FILE_BYTES) {
+      const head = Buffer.alloc(BINARY_PROBE_BYTES);
+      return classifyOversize(head.subarray(0, fs.readSync(fd, head, 0, BINARY_PROBE_BYTES, 0)), opened.size);
+    }
     const buffer = fs.readFileSync(fd);
-    if (buffer.length > MAX_FILE_BYTES) return { kind: 'oversize', bytes: buffer.length };
+    if (buffer.length > MAX_FILE_BYTES) return classifyOversize(buffer.subarray(0, BINARY_PROBE_BYTES), buffer.length);
     const text = decodeText(buffer);
     return text === null ? { kind: 'binary' } : { kind: 'text', text };
   } catch {
@@ -382,7 +470,8 @@ function scanWorkingTree(ctx, files, result) {
       result.filesScanned += 1;
       scanText(ctx, rel, content.text, result);
     } else if (content.kind === 'binary') {
-      result.binary.push(ctx.safe(rel));
+      if (ctx.allowlist.has(rel)) result.binaryAllowed.push(ctx.safe(rel));
+      else blockBinary(ctx, result, rel, 'tree', ctx.tracked.has(rel) ? 'tracked' : 'untracked, not ignored');
     } else if (content.kind === 'oversize') {
       result.oversize.push(`${ctx.safe(rel)} (${content.bytes} bytes)`);
     } else {
@@ -437,8 +526,8 @@ function hunkStart(line) {
 /**
  * Walks `git diff` / `git log -p` output with --unified=0 and calls visit() with
  *   {type:'file', commit, file}            a file that has a new side,
- *   {type:'added', commit, file, line, text}   one added line (line is the line number in the new file),
- *   {type:'binary', commit}                a binary change, which cannot be scanned.
+ *   {type:'added', commit, file, line, text}   one added line (line is the line number in the new file).
+ * A binary change has no lines to visit; walkNumstat finds those.
  * Inside a hunk every line starting with "+" is content, so an added line that begins with "++ " is not
  * mistaken for a "+++" header. Lines of the log format that start with U+0001 carry the commit id.
  */
@@ -466,9 +555,25 @@ function walkDiff(output, visit) {
     } else if (raw.startsWith('+++ ')) {
       file = headerPath(raw.slice(4));
       if (file !== null) visit({ type: 'file', commit, file });
-    } else if (raw.startsWith('Binary files ')) {
-      visit({ type: 'binary', commit });
     }
+  }
+}
+
+/**
+ * Walks `git log --numstat -z --format=%x01%H` or `git diff --numstat -z` output (run with --no-renames) and calls
+ * visit({commit, file}) for each file git counts as binary ("-" for both counts). The output is NUL separated, so a path
+ * may hold any character. The commit is null for a plain diff.
+ */
+function walkNumstat(output, visit) {
+  let commit = null;
+  for (const token of output.split('\0')) {
+    const entry = token.startsWith('\n') ? token.slice(1) : token;
+    if (entry.charCodeAt(0) === 1) {
+      commit = entry.slice(1);
+      continue;
+    }
+    const match = /^(-|\d+)\t(-|\d+)\t([\s\S]+)$/.exec(entry);
+    if (match && match[1] === '-' && match[2] === '-') visit({ commit, file: match[3] });
   }
 }
 
@@ -486,9 +591,7 @@ function scanRange(ctx, range, result) {
 
   const privateAdds = new Set();
   const visitor = countLines => event => {
-    if (event.type === 'binary') {
-      if (countLines) result.rangeBinary += 1;
-    } else if (event.type === 'file') {
+    if (event.type === 'file') {
       if (isPrivatePath(event.file)) privateAdds.add(event.file);
       recordNameHits(ctx, event.file, result, rangeScope(range, event.commit));
     } else {
@@ -505,6 +608,29 @@ function scanRange(ctx, range, result) {
   walkDiff(history, visitor(true));
   walkDiff(net, visitor(false));
   failOnPrivatePaths(ctx, [...privateAdds].sort(), 'path(s) under private/ are added by commits in the range');
+  scanRangeBinaries(ctx, range, result);
+}
+
+/**
+ * A binary file cannot be read for terms, so each one that a commit in the range adds or changes must be on the
+ * allowlist as the head commit has it. Commits are walked one by one for the same reason as above: a binary added and
+ * deleted again inside the range was still published.
+ */
+function scanRangeBinaries(ctx, range, result) {
+  const allowlist = loadRangeAllowlist(ctx, range);
+  const options = ['--no-renames', '--no-ext-diff', '--no-textconv', '--diff-filter=d', '--numstat', '-z'];
+  const history = git(ctx, ['log', '--reverse', '-m', '--format=%x01%H', ...options, range, '--'], 'listing the binary files in the range');
+  const net = git(ctx, ['diff', ...options, range, '--'], 'listing the binary files in the diff of the range');
+  const visitor = countAllowed => event => {
+    if (allowlist.has(event.file)) {
+      if (countAllowed) result.rangeBinaryAllowed += 1;
+      return;
+    }
+    const by = event.commit ? ` by ${event.commit.slice(0, 12)}` : '';
+    blockBinary(ctx, result, event.file, 'range', `added or changed in ${range}${by}`);
+  };
+  walkNumstat(history, visitor(true));
+  walkNumstat(net, visitor(false));
 }
 
 /* ---------- run and report ---------- */
@@ -523,11 +649,14 @@ function runScan(options) {
 
   const ctx = {
     root, matchers, safe: makeSafe(matchers), env: gitEnvironment(), realRoot: null, directoryChecks: new Map(),
+    tracked: new Set(), allowlist: new Set(),
   };
   const range = options.range === null ? null : validateRange(options.range);
   assertTopLevel(ctx);
   ctx.realRoot = fs.realpathSync(root);
   const files = listFiles(ctx);
+  ctx.tracked = new Set(files.tracked);
+  ctx.allowlist = loadWorkTreeAllowlist(ctx);
   failOnPrivatePaths(ctx, files.tracked.filter(isPrivatePath), 'tracked file(s) under private/: git must never track private evidence');
 
   const result = newResult();
@@ -551,23 +680,46 @@ function listSkipped(io, title, entries) {
   if (entries.length > MAX_LISTED_PATHS) io.out(`  ... and ${entries.length - MAX_LISTED_PATHS} more`);
 }
 
+function formatBinary(path, entry) {
+  const why = [entry.tree, entry.range].filter(Boolean).join('; ');
+  return `BINARY ${path} (${why}) is not on ${BINARY_ALLOWLIST}`;
+}
+
+/** Prints the blocked binary files and how to allow one on purpose. */
+function reportBlockedBinary(io, result) {
+  const blocked = [...result.binaryBlocked.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  if (blocked.length === 0) return;
+  for (const [file, entry] of blocked.slice(0, MAX_PRINTED_HITS)) io.out(formatBinary(file, entry));
+  if (blocked.length > MAX_PRINTED_HITS) io.out(`... ${blocked.length - MAX_PRINTED_HITS} more blocked binary file(s) not shown`);
+  io.out(
+    `binary: ${blocked.length} binary file(s) are blocked. A binary file cannot be scanned for private terms, `
+    + 'and task packages (xlsx, docx, pdf, zip) and the app\'s exports must never be committed.',
+  );
+  io.out(
+    `binary: to allow one deliberately, add its exact repo path on a line of its own in ${BINARY_ALLOWLIST} `
+    + '(a line starting with # is a comment) and commit that change with the file. Otherwise delete it or add it to .gitignore.',
+  );
+}
+
 /** Prints the report and returns the exit code. */
 function report(io, result) {
   for (const hit of result.hits.slice(0, MAX_PRINTED_HITS)) io.out(formatHit(hit));
   if (result.hits.length > MAX_PRINTED_HITS) io.out(`... ${result.hits.length - MAX_PRINTED_HITS} more hit(s) not shown`);
+  reportBlockedBinary(io, result);
 
-  listSkipped(io, 'skipped-binary (not scanned)', result.binary);
+  listSkipped(io, `allowed-binary (on ${BINARY_ALLOWLIST}, content not scanned)`, result.binaryAllowed);
   listSkipped(io, `skipped-size (over ${MAX_FILE_BYTES / (1024 * 1024)} MB, not scanned)`, result.oversize);
   listSkipped(io, 'skipped-other (not scanned)', result.otherSkipped);
-  if (result.rangeBinary > 0) io.out(`range: ${result.rangeBinary} binary file change(s) not scanned`);
+  if (result.rangeBinaryAllowed > 0) io.out(`range: ${result.rangeBinaryAllowed} allowed binary file change(s) not scanned`);
 
   const hits = result.hits.length;
+  const blocked = result.binaryBlocked.size;
   io.out(
-    `privacy-scan: ${hits === 0 ? 'clean' : 'BLOCKED'} - files scanned: ${result.filesScanned}, `
-    + `binary skipped: ${result.binary.length}, size skipped: ${result.oversize.length}, `
+    `privacy-scan: ${hits === 0 && blocked === 0 ? 'clean' : 'BLOCKED'} - files scanned: ${result.filesScanned}, `
+    + `binary allowed: ${result.binaryAllowed.length}, binary blocked: ${blocked}, size skipped: ${result.oversize.length}, `
     + `other skipped: ${result.otherSkipped.length}, added lines scanned: ${result.addedLines}, hits: ${hits}`,
   );
-  return hits === 0 ? EXIT_CLEAN : EXIT_HITS;
+  return hits === 0 && blocked === 0 ? EXIT_CLEAN : EXIT_HITS;
 }
 
 function defaultIo() {
@@ -598,7 +750,9 @@ function main(argv, io = defaultIo()) {
   }
 }
 
-module.exports = { main, parseArgs, parseTerms, validateRange, decodeText, NO_TERMS_MESSAGE, EXIT_CLEAN, EXIT_HITS, EXIT_ERROR };
+module.exports = {
+  main, parseArgs, parseTerms, parseAllowlist, validateRange, decodeText, NO_TERMS_MESSAGE, BINARY_ALLOWLIST, EXIT_CLEAN, EXIT_HITS, EXIT_ERROR,
+};
 
 if (require.main === module) {
   /* A reader that closes the pipe early (for example `| head`) must not turn the exit code into a stack trace. */

@@ -45,6 +45,24 @@
                              outputs/token_note.txt holding it (the file is really written, and a copy goes to
                              .tmp/token_copy.txt), a line with it on stderr, and the final answer repeats it. Without the
                              variable the text "(no token)" stands in. For the redaction and secret tests only.
+     fileTools               true, or { skip, outside, quoteOutside, word }: after toolUses (and the spill and echoToken
+                             steps), the stub behaves like the pilot of scripts/live-smoke.cjs stage S4 and makes, in
+                             order, a Read of filesystem/a.txt, a Write of outputs/b.txt, an Edit of outputs/b.txt, a Glob of
+                             filesystem/*.txt and a Grep of filesystem for a word, then a Read of a file OUTSIDE the working
+                             folder. Each call is an assistant tool_use block in the shape the parser reads (message.content
+                             of an assistant event) with the input keys of the real tools (Read {file_path}; Write
+                             {file_path, content}; Edit {file_path, old_string, new_string, replace_all}; Glob {pattern, path};
+                             Grep {pattern, path, output_mode}), absolute paths as the real tools take them, followed by its
+                             tool_result. The calls do what they say in the working folder: the Write and the Edit really
+                             change outputs/b.txt. The outside path and the word come from the prompt, as they would for a
+                             pilot: the text after "Read tool on this absolute path:" and the first word after "Grep tool to
+                             search ./filesystem for the word:" (the word falls back to `word`, then "word"; with no outside
+                             path in the prompt the stub exits with 98). The final answer is "DONE" unless resultText says
+                             otherwise.
+                               skip:["Edit",...]   tools left out of the stream, as for a runtime that never called them
+                               outside:"decline"   no outside Read at all: a pilot that declined it (the answer says so)
+                               quoteOutside:true   the final answer repeats the first line of the outside file, so it holds
+                                                   the file's marker
      writeFiles:[{path,content}]     files written (relative to the working folder) before the result
      deleteFiles:[path]              files removed (relative to the working folder) before the result
      background              true: start a long lived child process (same process group) and leave it running; its pid
@@ -384,6 +402,72 @@ async function main() {
     tokenEcho = ' The token is ' + token + '.';
   }
 
+  let fileToolsEcho = '';
+  if (scenario.fileTools) {
+    const spec = typeof scenario.fileTools === 'object' && !Array.isArray(scenario.fileTools) ? scenario.fileTools : {};
+    const skip = new Set(Array.isArray(spec.skip) ? spec.skip : []);
+    const declined = spec.outside === 'decline';
+    const inFolder = rel => path.join(process.cwd(), ...rel.split('/'));
+    const word = (/Grep tool to search \.\/filesystem for the word:[ \t]*(\S+)/.exec(prompt) || [])[1] || (typeof spec.word === 'string' && spec.word ? spec.word : 'word');
+    const outside = (/Read tool on this absolute path:[ \t]*(\/[^\r\n]*?)[ \t]*(?:\r?\n|$)/.exec(prompt) || [])[1] || '';
+    if (!declined && !outside) {
+      await write(process.stderr, 'stub-claude: the fileTools scenario needs the prompt to name an absolute path after "Read tool on this absolute path:" (or outside: "decline")\n');
+      process.exitCode = 98;
+      return;
+    }
+    /* What the real Read tool returns: the file with line numbers. */
+    const readResult = file => {
+      try {
+        const lines = fs.readFileSync(file, 'utf8').split('\n');
+        if (lines.length && lines[lines.length - 1] === '') lines.pop();
+        return lines.map((line, index) => String(index + 1).padStart(6) + '\t' + line).join('\n');
+      } catch {
+        return 'File does not exist: ' + file;
+      }
+    };
+    const steps = [
+      ['Read', () => ({ file_path: inFolder('filesystem/a.txt') }), input => readResult(input.file_path)],
+      ['Write', () => ({ file_path: inFolder('outputs/b.txt'), content: 'stub note: first version\n' }), input => {
+        fs.mkdirSync(path.dirname(input.file_path), { recursive: true });
+        fs.writeFileSync(input.file_path, input.content);
+        return 'File created successfully at: ' + input.file_path;
+      }],
+      ['Edit', () => ({ file_path: inFolder('outputs/b.txt'), old_string: 'first version', new_string: 'second version', replace_all: false }), input => {
+        try {
+          fs.writeFileSync(input.file_path, fs.readFileSync(input.file_path, 'utf8').replace(input.old_string, input.new_string));
+        } catch {
+          return 'File does not exist: ' + input.file_path;
+        }
+        return 'The file ' + input.file_path + ' has been updated successfully.';
+      }],
+      ['Glob', () => ({ pattern: '*.txt', path: inFolder('filesystem') }), input => {
+        let names = [];
+        try { names = fs.readdirSync(input.path).filter(name => name.endsWith('.txt')).sort(); } catch { /* nothing to list */ }
+        return names.length ? names.map(name => path.join(input.path, name)).join('\n') : 'No files found';
+      }],
+      ['Grep', () => ({ pattern: word, path: inFolder('filesystem'), output_mode: 'files_with_matches' }), input => {
+        let hits = [];
+        try { hits = fs.readdirSync(input.path).sort().filter(name => fs.readFileSync(path.join(input.path, name), 'utf8').includes(input.pattern)); } catch { /* nothing to search */ }
+        return hits.length ? `Found ${hits.length} file${hits.length === 1 ? '' : 's'}\n` + hits.map(name => path.join(input.path, name)).join('\n') : 'No files found';
+      }],
+    ];
+    for (const [name, makeInput, act] of steps) {
+      if (skip.has(name)) continue;
+      const input = makeInput();
+      await toolCall(name, input, act(input));
+    }
+    if (declined) {
+      fileToolsEcho = ' I did not read the file outside my folder.';
+    } else if (!skip.has('Read')) {
+      await toolCall('Read', { file_path: outside }, readResult(outside));
+      if (spec.quoteOutside) {
+        let first = '';
+        try { first = fs.readFileSync(outside, 'utf8').split('\n')[0]; } catch { /* the file is gone */ }
+        fileToolsEcho = ' The outside file says: ' + first;
+      }
+    }
+  }
+
   for (const file of Array.isArray(scenario.writeFiles) ? scenario.writeFiles : []) {
     if (!file || typeof file.path !== 'string') continue;
     const target = path.resolve(process.cwd(), file.path);
@@ -423,7 +507,7 @@ async function main() {
       modelUsage: scenario.modelUsage || { [model]: { inputTokens: 1, outputTokens: 1, costUSD: 0.0123 } },
     });
   } else if (!scenario.noResult) {
-    const resultText = (scenario.echoPrompt ? prompt : typeof scenario.resultText === 'string' ? scenario.resultText : 'stub answer') + tokenEcho;
+    const resultText = (scenario.echoPrompt ? prompt : typeof scenario.resultText === 'string' ? scenario.resultText : scenario.fileTools ? 'DONE' : 'stub answer') + fileToolsEcho + tokenEcho;
     await emit({
       type: 'result',
       subtype: scenario.isError ? 'error_during_execution' : 'success',

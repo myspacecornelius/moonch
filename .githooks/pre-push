@@ -1,0 +1,9 @@
+#!/bin/sh
+# Versioned pre-push hook: runs the privacy scan (scripts/pre-push.cjs) over what the push publishes.
+# Turn it on once per clone with `npm run setup` (git config core.hooksPath .githooks).
+# Git passes the remote name and address as arguments and one line per pushed ref on stdin; both go straight through.
+if ! command -v node >/dev/null 2>&1; then
+  echo 'pre-push: node was not found, so the privacy scan could not run. Push blocked.' >&2
+  exit 1
+fi
+exec node "$(dirname "$0")/../scripts/pre-push.cjs" "$@"

@@ -3,7 +3,11 @@
   "version": "3.0.0",
   "private": true,
   "description": "A workspace for locking the five failure modes of a derivative finance task, anchoring each to source evidence and recomputed economics, and drafting lint-checked grader guidance. Offline by default with no model calls. Served by its local companion (npm start) it can also run local Claude Code agents as audited blind pilots, after an explicit approval for each round. Private evidence stays local.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "setup": "git config core.hooksPath .githooks",
     "start": "node backend/server.cjs --open",
     "privacy": "node scripts/privacy-scan.cjs",
     "test": "node --test tests/*.test.cjs",
@@ -11,11 +15,10 @@
     "test:dashboard": "node tests/dashboard-browser.cjs",
     "test:candidates": "node tests/candidates-browser.cjs",
     "test:agents": "node tests/agents-browser.cjs",
-    "test:mission": "node tests/mission-browser.cjs",
-    "test:workbench": "node tests/workbench-browser.cjs",
     "test:ideas": "node tests/ideas-browser.cjs",
     "smoke": "node scripts/live-smoke.cjs",
-    "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs && python3 scripts/package-filebase.py --manifest-only"
+    "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs",
+    "package": "python3 scripts/package-filebase.py"
   },
   "license": "UNLICENSED"
 }
