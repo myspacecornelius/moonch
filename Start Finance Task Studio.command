@@ -58,6 +58,16 @@ else
   printf '%s\n' 'Claude: not found. The Agents page will report this too. To use local agents, install the claude CLI'
   printf '%s\n' '        and sign in (run claude once in a terminal), or set CLAUDE_BIN to its path. Everything else works without it.'
 fi
+# Privacy hook check: the pre-push hook is per clone, so say so when this clone has neither the versioned hook folder
+# (npm run setup) nor a manual hook. A copy that is not a git work tree has no hook to install and says nothing.
+# The block between the markers is plain POSIX shell, so tests/repo-hygiene.test.cjs can run it with sh.
+# privacy-hook-check:begin
+studio_hooks_path="$(git config core.hooksPath 2>/dev/null || true)"
+studio_git_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$studio_git_dir" ] && [ "$studio_hooks_path" != '.githooks' ] && [ "$studio_hooks_path" != '.githooks/' ] && [ ! -e "$studio_git_dir/hooks/pre-push" ]; then
+  printf '%s\n' 'Privacy hook not installed: run npm run setup once'
+fi
+# privacy-hook-check:end
 printf '%s\n' 'Starting the companion on 127.0.0.1. Nothing runs a model until you approve a round on the Agents page.'
 
 exec "$studio_node" backend/server.cjs --open

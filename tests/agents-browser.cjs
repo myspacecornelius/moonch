@@ -17,11 +17,11 @@
    The companion runs from a private copy of the files it serves, made in the system temporary folder, so round state is written
    there and the project's own private/ folder is never read or written.
 
-   Environment: CHROME_BIN (default /opt/pw-browsers/chromium-1194/chrome-linux/chrome when it exists), QA_OUTPUT (default qa/agents),
+   Environment: CHROME_BIN (default /opt/pw-browsers/chromium-1194/chrome-linux/chrome when it exists), QA_OUTPUT (default: a fresh temp folder; set QA_OUTPUT=qa/agents to refresh the retained screenshots),
    AGENTS_TEST_SERVER (debugging only: run another server entry point instead of the copy of backend/server.cjs). */
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),net=require('node:net'),{spawn}=require('node:child_process'),assert=require('node:assert/strict');
 const {cleanEnv}=require('./fixtures/clean-env.cjs');
-const root=path.resolve(__dirname,'..'),out=path.join(root,process.env.QA_OUTPUT||'qa/agents'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));
+const root=path.resolve(__dirname,'..'),out=process.env.QA_OUTPUT?path.resolve(root,process.env.QA_OUTPUT):fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-qa-')),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));console.log('QA output folder: '+out);
 const defaultChrome='/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const binary=process.env.CHROME_BIN||(fs.existsSync(defaultChrome)?defaultChrome:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
 const stub=path.join(root,'backend','agents','stub-claude.cjs');

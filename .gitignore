@@ -5,9 +5,31 @@
 /model-run.js
 /model-runs/
 /LOCAL_SERVER.json
+# Task packages and documents are never committed. tests/fixtures holds the one synthetic zip the tests need.
+*.xlsx
+*.xlsm
+*.xls
+*.docx
+*.doc
+*.pdf
+*.zip
+*.pptx
+!tests/fixtures/**
+
 # The app's own downloads of private material (Finance_Agent_Round_<id>_PRIVATE.json holds the frozen gold and the prompt; the analysis
-# workspace and its results use the same suffix). Keep them outside the repository; if one lands inside it, git must not offer it.
-*_PRIVATE.*
+# workspace and its results use the same suffix; <title>-evaluator-draft-PRIVATE.json, <title>-failure-modes-PRIVATE.txt and
+# <title>-working-document-PRIVATE.md use a hyphen). Keep them outside the repository; if one lands inside it, git must not offer it.
+# The app's project download (<title>-project.json) holds the private evaluator evidence.
+# These two rules come after the tests/fixtures exception above on purpose, so they apply inside tests/fixtures too.
+*[_-]PRIVATE.*
+*-project.json
+
+# Local scratch space and local assistant settings.
+/tmp/
+/.claude/settings.local.json
+
+# Rebuilt from the tracked files by `npm run package`; it differs per machine, so it is not versioned.
+/FILEBASE_MANIFEST.json
 
 # Headless QA working output. Reports and the retained screenshots are committed explicitly.
 qa/**/downloads/
@@ -22,10 +44,6 @@ qa/**/*.png
 !qa/candidates/mobile-new-dividend-candidates.png
 !qa/agents/desktop-agents.png
 !qa/agents/mobile-agents.png
-!qa/mission/desktop-mission.png
-!qa/mission/mobile-mission.png
-!qa/workbench/desktop-workbench.png
-!qa/workbench/mobile-workbench.png
 
 __pycache__/
 .DS_Store

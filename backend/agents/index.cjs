@@ -46,6 +46,8 @@ function createAgentService(options = {}) {
     setCompanionPort: async port => store.setCompanionPort(port),
     whenSettled: async id => store.whenSettled(id),
     shutdown: async () => store.shutdown(),
+    /* Synchronous, for the companion's process 'exit' hook: SIGKILL the process group of every pilot still running. */
+    killPilots: () => store.killPilotsNow(),
   };
 }
 

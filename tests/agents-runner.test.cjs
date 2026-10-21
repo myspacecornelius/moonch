@@ -25,7 +25,7 @@ const packageEngine = require('../package-engine.js');
 
 const STUB = path.resolve(__dirname, '..', 'backend', 'agents', 'stub-claude.cjs');
 const TOOL_LIST = 'Bash,Read,Write,Edit,Glob,Grep';
-const PILOT_PREFIX = 'The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message.\n\n';
+const PILOT_PREFIX = 'The task materials are in ./filesystem. Save any files you produce to ./outputs. When you finish, give your answer in your final message. If a file you need is not in ./filesystem, say so in your answer; do not search elsewhere on this computer.\n\n';
 const PROMPT = 'Assess the Atlas liquidity position using the supplied records and recommend whether the borrowing can proceed.';
 const ACK = ['shell-access', 'network', 'isolation-by-audit'];
 const GOLD = {

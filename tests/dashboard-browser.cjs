@@ -1,6 +1,6 @@
 /* Optional developer QA for the package dashboard. Uses an isolated headless Chromium profile; never attaches to an existing browser. The private-module branch runs only when a locally kept evidence module exists. */
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process'),assert=require('node:assert/strict');
-const root=path.resolve(__dirname,'..'),out=path.join(root,process.env.QA_OUTPUT||'qa/dashboard'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));
+const root=path.resolve(__dirname,'..'),out=process.env.QA_OUTPUT?path.resolve(root,process.env.QA_OUTPUT):fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-qa-')),profile=fs.mkdtempSync(path.join(os.tmpdir(),'finance-studio-headless-'));console.log('QA output folder: '+out);
 const binary=process.env.CHROME_BIN||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const privateDir=path.join(root,'private'),privateModule=process.env.PRIVATE_EVIDENCE==='none'?null:process.env.PRIVATE_EVIDENCE||(fs.existsSync(privateDir)?fs.readdirSync(privateDir).filter(f=>f==='evidence-module.js'||/-audit\.js$/.test(f)).sort().map(f=>path.join(privateDir,f))[0]:null);
 fs.mkdirSync(out,{recursive:true});const downloads=path.join(out,'downloads');fs.rmSync(downloads,{recursive:true,force:true});fs.mkdirSync(downloads,{recursive:true});

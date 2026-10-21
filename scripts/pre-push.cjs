@@ -2,7 +2,11 @@
 'use strict';
 /* Pre-push hook that runs the privacy scan over what the push publishes (docs/local-agents.md section 14).
 
-   Install it in each clone (hooks are not versioned). From the top of the work tree:
+   Turn it on in each clone (git config is not versioned). The versioned hook is .githooks/pre-push; from the top of the work tree:
+
+     npm run setup          (git config core.hooksPath .githooks)
+
+   or, by hand, the same hook as a plain file:
 
      printf '#!/bin/sh\nexec node scripts/pre-push.cjs "$@"\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 
@@ -10,7 +14,8 @@
      <local ref> <local sha> <remote ref> <remote sha>
    For every ref that is not a deletion the hook scans the commits that push would publish, so a term added in one commit and
    removed in the next still counts, as well as the files in the work tree (scripts/privacy-scan.cjs does both when it is given
-   --range). Any hit, and any failure to scan, blocks the push (the scan fails closed).
+   --range). Any hit, and any failure to scan, blocks the push (the scan fails closed). So does a binary file that the push
+   adds or changes (or that the work tree holds) when its path is not on scripts/binary-allowlist.txt as the pushed commit has it.
 
    - An existing branch: the range is <remote sha>..<local sha>.
    - A new branch, or a remote sha this clone does not have: the commits not on any remote-tracking branch of that remote,

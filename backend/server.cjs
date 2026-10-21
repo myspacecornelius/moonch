@@ -31,13 +31,20 @@
                                                   has passed the path redactor (scrubLogText) and is cut to 2000 characters.
 
    Module API (used by the tests):
-     createServer({ root, service, port, runner?, state?, log? }) -> { server, nonce, runner, listen(), close(), shutdown() }
-       listen() resolves { port, url }. close() stops the listener and drops connections. shutdown() also cancels the
-       archived adapter and every running round (service.shutdown()) before it closes.
+     createServer({ root, service, port, runner?, state?, log? }) -> { server, nonce, runner, listen(port?), close(), shutdown(), killPilots() }
+       listen() resolves { port, url } (listen(0) binds a free port instead of the port given to createServer). close() stops
+       the listener and drops connections. shutdown() also cancels the archived adapter and every running round
+       (service.shutdown()) before it closes. killPilots() is the synchronous last resort: SIGKILL to every pilot's process group.
      redactRoundData(value, { keepApproval? }) -> a copy of round data with what a running pilot must not read left out
      scrubLogText(text, redact?) -> the text of a log line with every absolute path replaced, cut to 2000 characters
-     installSignalHandlers(app, { proc?, exit?, log?, forceAfterMs? })
+     installSignalHandlers(app, { proc?, exit?, log?, forceAfterMs?, cleanup? })
+       SIGINT, SIGTERM, SIGHUP (the Terminal window closed) and SIGQUIT all run the same shutdown. cleanup() runs once the
+       shutdown is done, and again from the process 'exit' hook, which also calls app.killPilots().
      localServerRecord({ url, pid, startedAt, runApprovedOnce }) -> the LOCAL_SERVER.json content
+     findRunningCompanion(root, { pid?, isAlive?, probe?, timeoutMs? }) -> { url, pid } of a companion that is already running
+       for this folder (LOCAL_SERVER.json names a live pid that is not this process and its url answers GET /api/status), else null
+     portChoice(env, usual?) -> { port, fixed }: FINANCE_STUDIO_PORT when it is set, otherwise the usual port (DEFAULT_PORT)
+     listenWithFallback(app, { port, fixed }) -> app.listen() result, plus fellBack when the usual port was busy
      usableClaudeBin(value) -> value when it names an executable file, otherwise undefined */
 
 const fs = require('node:fs');
@@ -59,6 +66,9 @@ const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415]);
 const GENERIC_ERROR = 'The companion hit an internal error. The details are in the terminal where it is running.';
 const DRAIN_ALLOWANCE = 16 * 1024 * 1024; /* bytes read and thrown away after a 413 before the connection is dropped */
 const SETTLE_MS = 10000; /* shutdown waits this long for requests that are still being answered */
+const DEFAULT_PORT = 47321; /* the usual port: the same address every start keeps the browser's saved work (localStorage is per origin) */
+const STATUS_TIMEOUT_MS = 1500; /* how long a start waits for an earlier companion to answer GET /api/status */
+const KEEP_OPEN_LINE = 'Keep this window open while a round runs; closing it stops the companion and its pilots.';
 const TOOL_LESS_WHILE_RUNNING = 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started';
 const LAUNCH_WHILE_TOOL_LESS = 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started';
 
@@ -394,7 +404,7 @@ function createServer(options = {}) {
   async function withApproval(view) {
     if (!view || typeof view !== 'object' || !view.freeze || !['frozen', 'approved'].includes(view.status)) return view;
     try {
-      const { summary, summarySha256, commandLine, workingFolder } = await service.approvalSummary(view.id);
+      const { summary, summarySha256, commandLine, workingFolder, promptPrefix } = await service.approvalSummary(view.id);
       /* The service says the command line and the folder itself. Reading them out of the text is only a fallback for a
          service that does not, and then the last Command line is the real one (file names come before it). */
       return {
@@ -405,6 +415,8 @@ function createServer(options = {}) {
           summarySha256,
           commandLine: typeof commandLine === 'string' ? commandLine : summaryLine(summary, 'Command: ', true),
           workingFolder: typeof workingFolder === 'string' ? workingFolder : summaryLine(summary, 'Working folder per pilot: '),
+          /* the fixed text every pilot sees before the writer's prompt, for the page to show word for word (null from a service that does not say) */
+          promptPrefix: typeof promptPrefix === 'string' ? promptPrefix : null,
           model: view.config.model,
           effort: view.config.effort,
           count: view.config.count,
@@ -643,15 +655,23 @@ function createServer(options = {}) {
     }
   }
 
-  function listen() {
+  /* listen(0) after a listen that failed (the usual port was busy) binds a free port on the same server. Both listeners are
+     removed when the other event comes, so a second attempt does not run the first one's callback too. */
+  function listen(listenPort = port) {
     return new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, HOST, () => {
-        server.off('error', reject);
+      const failed = error => {
+        server.off('listening', bound);
+        reject(error);
+      };
+      const bound = () => {
+        server.off('error', failed);
         server.on('error', error => log(`companion: server error: ${error && error.message ? error.message : error}`));
         boundPort = server.address().port;
         tellServicePort(boundPort).then(() => resolve({ port: boundPort, url: `http://${HOST}:${boundPort}` }));
-      });
+      };
+      server.once('error', failed);
+      server.once('listening', bound);
+      server.listen(listenPort, HOST);
     });
   }
 
@@ -702,33 +722,173 @@ function createServer(options = {}) {
     return shuttingDown;
   }
 
-  return { server, nonce, runner, listen, close, shutdown };
+  /* Synchronous, for the process 'exit' hook (installSignalHandlers): nothing is awaited and nothing is saved. */
+  function killPilots() {
+    if (typeof service.killPilots === 'function') service.killPilots();
+  }
+
+  return { server, nonce, runner, listen, close, shutdown, killPilots };
 }
 
-/* On SIGINT or SIGTERM: cancel every running round, then exit. A second signal exits at once. */
+/* The exit code of a second signal, which does not wait for the shutdown (128 plus the signal number). */
+const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129, SIGQUIT: 131 };
+
+/* On SIGINT, SIGTERM, SIGHUP (the Terminal window was closed) or SIGQUIT: cancel every running round, then exit. A second
+   signal exits at once. cleanup() (the LOCAL_SERVER.json removal) runs when the shutdown is done. A hook on the process
+   'exit' event is the last resort: whatever ends the process (an uncaught exception, the forced exit after a stuck
+   shutdown), it sends SIGKILL to the process group of every pilot still running, so none is left behind, and runs cleanup()
+   again (it must do nothing the second time). */
 function installSignalHandlers(app, options = {}) {
   const proc = options.proc || process;
   const exit = options.exit || (code => process.exit(code));
   const report = options.log || (message => console.error(message));
   const forceAfterMs = options.forceAfterMs === undefined ? 20000 : options.forceAfterMs;
+  const cleanup = () => {
+    try { if (typeof options.cleanup === 'function') options.cleanup(); } catch { /* the record is a convenience, never a reason to stay */ }
+  };
   let stopping = false;
   const onSignal = signal => {
-    if (stopping) { exit(signal === 'SIGINT' ? 130 : 143); return; }
+    if (stopping) { exit(SIGNAL_EXIT[signal] || 143); return; }
     stopping = true;
     const timer = setTimeout(() => exit(1), forceAfterMs);
     timer.unref();
     app.shutdown().catch(error => report(`companion: shutdown failed: ${error && error.message ? error.message : error}`)).then(() => {
       clearTimeout(timer);
+      cleanup();
       exit(0);
     });
   };
-  proc.on('SIGINT', () => onSignal('SIGINT'));
-  proc.on('SIGTERM', () => onSignal('SIGTERM'));
+  for (const signal of Object.keys(SIGNAL_EXIT)) {
+    try { proc.on(signal, () => onSignal(signal)); } catch { /* a platform that has no such signal */ }
+  }
+  proc.on('exit', () => {
+    try { if (typeof app.killPilots === 'function') app.killPilots(); } catch { /* the process is ending; nothing more can be done */ }
+    cleanup();
+  });
   return onSignal;
 }
 
 function localServerRecord({ url, pid, startedAt, runApprovedOnce }) {
   return { url, pid, startedAt, modelCallsOnLaunch: runApprovedOnce ? 1 : 0 };
+}
+
+/* ------------------------------------------------------------------ one companion per folder, and the port */
+
+const LOCAL_SERVER_FILE = 'LOCAL_SERVER.json';
+
+/* The parsed LOCAL_SERVER.json of a folder, or null when it is missing, unreadable or not an object. */
+function readLocalServerRecord(root) {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(root, LOCAL_SERVER_FILE), 'utf8'));
+    return isPlainObject(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/* Removes LOCAL_SERVER.json when it still records this pid (a companion started later may have written its own). */
+function removeLocalServerRecord(root, pid = process.pid) {
+  const record = readLocalServerRecord(root);
+  if (!record || record.pid !== pid) return false;
+  try {
+    fs.unlinkSync(path.join(root, LOCAL_SERVER_FILE));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* True when a process with this pid exists. Signal 0 only asks; EPERM means it exists and belongs to someone else. */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error) && error.code === 'EPERM';
+  }
+}
+
+/* True when `url` (http on 127.0.0.1) answers GET /api/status with a companion's status within timeoutMs. */
+function answersStatus(url, timeoutMs = STATUS_TIMEOUT_MS) {
+  return new Promise(resolve => {
+    let target;
+    try { target = new URL(url); } catch { resolve(false); return; }
+    const port = Number(target.port);
+    if (target.protocol !== 'http:' || target.hostname !== HOST || !Number.isInteger(port) || port < 1) { resolve(false); return; }
+    let timer = null;
+    let finished = false;
+    const finish = value => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const req = http.get({ host: HOST, port, path: '/api/status', agent: false }, res => {
+      const parts = [];
+      let size = 0;
+      res.on('data', part => {
+        size += part.length;
+        if (size > 1024 * 1024) { req.destroy(); finish(false); } else parts.push(part);
+      });
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(parts).toString('utf8'));
+          finish(res.statusCode === 200 && isPlainObject(body) && typeof body.nonce === 'string');
+        } catch {
+          finish(false);
+        }
+      });
+      res.on('error', () => finish(false));
+    });
+    req.on('error', () => finish(false));
+    timer = setTimeout(() => { req.destroy(); finish(false); }, timeoutMs);
+  });
+}
+
+/* The companion that is already running for this folder, as { url, pid }, or null. LOCAL_SERVER.json must name a pid that is
+   alive and is not this process, and its url must answer GET /api/status in time. A record whose pid is dead, or whose url
+   does not answer, is stale: the caller goes on and overwrites it. `isAlive` and `probe` can be replaced (tests). */
+async function findRunningCompanion(root, options = {}) {
+  const self = options.pid === undefined ? process.pid : options.pid;
+  const isAlive = options.isAlive || pidAlive;
+  const probe = options.probe || answersStatus;
+  const timeoutMs = options.timeoutMs === undefined ? STATUS_TIMEOUT_MS : options.timeoutMs;
+  const record = readLocalServerRecord(root);
+  if (!record || !Number.isInteger(record.pid) || record.pid === self || typeof record.url !== 'string') return null;
+  let url;
+  try { url = new URL(record.url).origin; } catch { return null; }
+  try {
+    if (!isAlive(record.pid) || !await probe(url, timeoutMs)) return null;
+  } catch {
+    return null;
+  }
+  return { url, pid: record.pid };
+}
+
+/* FINANCE_STUDIO_PORT when it is set, otherwise the usual port. `fixed` says the writer chose the port, so a busy port is an
+   error and not a reason to pick another one. A value that is not a port number reaches createServer, which refuses it. */
+function portChoice(env, usual = DEFAULT_PORT) {
+  const given = env.FINANCE_STUDIO_PORT;
+  if (given === undefined || given === '') return { port: usual, fixed: false };
+  return { port: Number(given), fixed: true };
+}
+
+/* app.listen(), and when the usual port is busy (EADDRINUSE, and the writer did not choose it) a free port instead:
+   the answer then carries fellBack and usualPort. Any other failure, and a busy port the writer chose, is thrown. */
+async function listenWithFallback(app, { port, fixed }) {
+  try {
+    return await app.listen();
+  } catch (error) {
+    if (fixed || !error || error.code !== 'EADDRINUSE') throw error;
+  }
+  return { ...await app.listen(0), fellBack: true, usualPort: port };
+}
+
+function openBrowser(url, say) {
+  const opener = require('node:child_process').spawn('open', [url], { stdio: 'ignore' });
+  opener.on('error', () => say('Could not open a browser automatically. Open the address above.'));
+  opener.unref();
 }
 
 /* ------------------------------------------------------------------ private evidence and the script entry */
@@ -788,23 +948,38 @@ async function describePilotSignIn(env) {
   return 'your own Claude Code sign-in (no pilot token stored; README, "Pilot sign-in")';
 }
 
-async function runCompanion(argv = process.argv.slice(2), env = process.env) {
-  const audit = loadEvidenceAudit(ROOT);
-  const service = createAgentService({ root: ROOT, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
-  const app = createServer({ root: ROOT, service, port: Number(env.FINANCE_STUDIO_PORT || 0), state: loadModelRunState(ROOT) });
-  installSignalHandlers(app);
-  const { url } = await app.listen();
-  const runApprovedOnce = argv.includes('--run-approved-once');
-  fs.writeFileSync(path.join(ROOT, 'LOCAL_SERVER.json'), JSON.stringify(localServerRecord({ url, pid: process.pid, startedAt: new Date().toISOString(), runApprovedOnce }), null, 2));
-  console.log('Finance Task Studio: ' + url + (audit ? '' : ' (no private evidence module found; viewer only)'));
-  console.log('Pilot sign-in: ' + await describePilotSignIn(env));
-  if (argv.includes('--open')) {
-    const opener = require('node:child_process').spawn('open', [url], { stdio: 'ignore' });
-    opener.on('error', () => console.log('Could not open a browser automatically. Open the address above.'));
-    opener.unref();
+/* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, usualPort, proc and exit (for
+   installSignalHandlers), isAlive and probe (findRunningCompanion). Resolves { app, url }, or { alreadyRunning: true, url }
+   when another companion already serves this folder. */
+async function runCompanion(argv = process.argv.slice(2), env = process.env, deps = {}) {
+  const root = deps.root || ROOT;
+  const say = deps.log || (message => console.log(message));
+  const openUrl = deps.openUrl || (address => openBrowser(address, say));
+  /* One companion per folder. This comes before anything is loaded and above all before the agent service exists: creating
+     it recovers the rounds of a companion that died and stops the pilots it left behind, which must never be done to the
+     rounds of a companion that is still running. */
+  const earlier = await findRunningCompanion(root, { isAlive: deps.isAlive, probe: deps.probe });
+  if (earlier) {
+    say('Finance Task Studio is already running at ' + earlier.url);
+    if (argv.includes('--open')) openUrl(earlier.url);
+    return { alreadyRunning: true, url: earlier.url };
   }
+  const audit = loadEvidenceAudit(root);
+  const service = (deps.createService || createAgentService)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
+  const choice = portChoice(env, deps.usualPort);
+  const app = createServer({ root, service, port: choice.port, state: loadModelRunState(root) });
+  const listening = await listenWithFallback(app, choice);
+  const { url } = listening;
+  installSignalHandlers(app, { proc: deps.proc, exit: deps.exit, cleanup: () => removeLocalServerRecord(root, process.pid) });
+  const runApprovedOnce = argv.includes('--run-approved-once');
+  fs.writeFileSync(path.join(root, LOCAL_SERVER_FILE), JSON.stringify(localServerRecord({ url, pid: process.pid, startedAt: new Date().toISOString(), runApprovedOnce }), null, 2));
+  say('Finance Task Studio: ' + url + (audit ? '' : ' (no private evidence module found; viewer only)'));
+  if (listening.fellBack) say(`The usual port ${listening.usualPort} is busy, so this start uses another address. Work saved in the browser by earlier sessions (the project and the Agents draft) will not show at this address.`);
+  say('Pilot sign-in: ' + await describePilotSignIn(env));
+  say(KEEP_OPEN_LINE);
+  if (argv.includes('--open')) openUrl(url);
   if (runApprovedOnce) {
-    if (!audit) { console.error('No private evidence module found; the archived analysis cannot start.'); return; }
+    if (!audit) { console.error('No private evidence module found; the archived analysis cannot start.'); return { app, url }; }
     try {
       await app.runner.start(audit);
       console.log('Harness status: ' + app.runner.state.status);
@@ -812,6 +987,7 @@ async function runCompanion(argv = process.argv.slice(2), env = process.env) {
       console.error(error.message);
     }
   }
+  return { app, url };
 }
 
 if (require.main === module) {
@@ -821,4 +997,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, HttpError, ASSETS };
+module.exports = {
+  createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, HttpError, ASSETS,
+  runCompanion, findRunningCompanion, removeLocalServerRecord, pidAlive, portChoice, listenWithFallback, DEFAULT_PORT, KEEP_OPEN_LINE,
+};

@@ -7,6 +7,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { EVALUATOR_PATTERN, ID_RE, LIMITS, WITHHELD_ROLES } = require('./constants.cjs');
 const { classifyPath, GAF_PATTERN } = require('../../package-engine.js');
@@ -60,16 +61,39 @@ function realProjectRoot(projectRoot) {
   try { return fs.realpathSync(root); } catch { return root; }
 }
 
+const RELATIVE_PATH_MESSAGE = 'Paste the full path of the unzipped task\'s filesystem folder, for example /Users/you/Downloads/task/filesystem (in Finder, select the folder and press Option-Command-C).';
+const INSIDE_PROJECT_MESSAGE = 'The source folder is inside the Studio project. Pilots must not run beside the Studio\'s private files, so unzip or copy the task outside this folder, then paste the full path of its filesystem folder.';
+
+/* A folder path as a person pastes it, as a path: trimmed, one pair of surrounding single or double quotes removed, a leading
+   ~ or ~/ expanded to the home folder, and every backslash escape undone (Terminal writes My\ Task\ (1) when a folder is
+   dragged into it). A text that is already an absolute path to a folder is kept as it is, so a path this function returned
+   (a round stores it) comes back unchanged and a folder whose real name holds a backslash still works. No other change is
+   made: a relative path stays relative and is refused by resolveSourceDir. */
+function cleanSourcePath(text) {
+  if (typeof text !== 'string') return text;
+  try { if (path.isAbsolute(text) && fs.statSync(text).isDirectory()) return text; } catch { /* cleaned below */ }
+  let clean = text.trim();
+  const quote = clean[0];
+  if (clean.length >= 2 && (quote === '"' || quote === '\'') && clean[clean.length - 1] === quote) clean = clean.slice(1, -1);
+  let home = '';
+  if (clean === '~' || clean.startsWith('~/')) { home = os.homedir(); clean = clean.slice(1); }
+  return home + clean.replace(/\\(.)/g, '$1');
+}
+
 /* The source folder must exist, be a directory, and sit entirely outside the Studio project (which holds private/). */
 function resolveSourceDir(sourceDir, projectRoot) {
   if (typeof sourceDir !== 'string' || !sourceDir.trim() || sourceDir.includes('\0')) throw new PacketError('A source folder path is required');
-  if (!path.isAbsolute(sourceDir)) throw new PacketError('The source folder must be an absolute path');
+  const given = cleanSourcePath(sourceDir);
+  if (!path.isAbsolute(given)) throw new PacketError(RELATIVE_PATH_MESSAGE);
   let real;
-  try { real = fs.realpathSync(sourceDir); } catch { throw new PacketError('The source folder does not exist'); }
+  try { real = fs.realpathSync(given); } catch { throw new PacketError('The source folder does not exist. Check the path: in Finder, select the folder and press Option-Command-C to copy it'); }
   if (!fs.statSync(real).isDirectory()) throw new PacketError('The source path is not a folder');
   const root = realProjectRoot(projectRoot);
-  if (within(real, root)) throw new PacketError('The source folder is inside the Studio project. Use a folder outside it');
+  if (within(real, root)) throw new PacketError(INSIDE_PROJECT_MESSAGE);
   if (within(root, real)) throw new PacketError('The source folder contains the Studio project. Use a folder that does not');
+  let home = null;
+  try { home = fs.realpathSync(os.homedir()); } catch { /* no home folder to compare with */ }
+  if (home && real === home) throw new PacketError('That is your whole home folder. Paste the path of the task\'s filesystem folder inside it, for example ~/Downloads/task/filesystem');
   return real;
 }
 
@@ -313,4 +337,4 @@ function snapshotOutputs(folder) {
   return found.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-module.exports = { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, isGafPath, GAF_RE, PacketError };
+module.exports = { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, isGafPath, cleanSourcePath, GAF_RE, PacketError };

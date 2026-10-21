@@ -178,3 +178,102 @@ test('a deletion passes, a missing term list blocks (the scan fails closed), and
   assert.match(noTerms.stdout + noTerms.stderr, /Push blocked/);
   assert.equal(w.remoteHead('topic'), null);
 });
+
+/* ------------------------------------------------------------------ binary files, and the versioned hook */
+
+const VERSIONED_HOOKS = path.resolve(__dirname, '..', '.githooks');
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+
+function commitFiles(w, files, message) {
+  for (const [name, content] of Object.entries(files)) {
+    const full = path.join(w.work, name);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+  }
+  git(w.work, ['add', '-A']);
+  git(w.work, ['commit', '-q', '-m', message]);
+  return git(w.work, ['rev-parse', 'HEAD']);
+}
+
+test('a push that adds a binary file not on the allowlist is blocked, and one that allows it in the same push goes through', () => {
+  const w = world('binary');
+  const base = w.commit('notes.txt', 'plain text\n', 'baseline');
+  assert.equal(w.push(['origin', 'main']).status, 0);
+
+  commitFiles(w, { 'packages/Task Package.xlsx': PNG }, 'adds a task package');
+  const blocked = w.push(['origin', 'main']);
+  assert.notEqual(blocked.status, 0, 'the hook blocks the push');
+  const output = blocked.stdout + blocked.stderr;
+  assert.match(output, /BINARY packages\/Task Package\.xlsx \(tracked; added or changed in /);
+  assert.match(output, /to allow one deliberately, add its exact repo path/);
+  assert.match(output, /Push blocked/);
+  assert.equal(w.remoteHead('main'), base, 'nothing reached the remote');
+
+  git(w.work, ['reset', '-q', '--hard', 'HEAD~1']);
+  const allowed = commitFiles(w, { 'packages/shot.png': PNG, 'scripts/binary-allowlist.txt': '# on purpose\npackages/shot.png\n' }, 'adds a screenshot and allows it');
+  const pushed = w.push(['origin', 'main']);
+  assert.equal(pushed.status, 0, pushed.stdout + pushed.stderr);
+  assert.equal(w.remoteHead('main'), allowed);
+});
+
+test('a new branch is checked for binary files from its first unpushed commit, even when the work tree is clean again', () => {
+  const w = world('binary-new-branch');
+  w.commit('notes.txt', 'plain text\n', 'baseline');
+  assert.equal(w.push(['origin', 'main']).status, 0);
+  git(w.work, ['checkout', '-q', '-b', 'feature']);
+  commitFiles(w, { 'export.zip': PNG }, 'adds an export');
+  git(w.work, ['rm', '-q', 'export.zip']);
+  git(w.work, ['commit', '-q', '-m', 'removes the export']);
+  const blocked = w.push(['origin', 'feature']);
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stdout + blocked.stderr, /BINARY export\.zip \(added or changed in /);
+  assert.equal(w.remoteHead('feature'), null);
+});
+
+test('the versioned .githooks/pre-push is executable and, as core.hooksPath, blocks a leak, a binary and a new branch, and passes a clean push', () => {
+  const mode = fs.statSync(path.join(VERSIONED_HOOKS, 'pre-push')).mode;
+  assert.ok(mode & 0o100, '.githooks/pre-push must be executable');
+  const listed = tryGit(path.resolve(__dirname, '..'), ['ls-files', '--stage', '--', '.githooks/pre-push']);
+  if (listed.status === 0 && listed.stdout.trim()) assert.match(listed.stdout, /^100755 /, 'git must track it as an executable file');
+
+  const w = world('versioned-hook', { installHook: false });
+  git(w.work, ['config', 'core.hooksPath', VERSIONED_HOOKS]);
+  const base = w.commit('notes.txt', 'plain text\n', 'baseline');
+  assert.equal(w.push(['origin', 'main']).status, 0, 'a clean push goes through the versioned hook');
+  assert.equal(w.remoteHead('main'), base);
+
+  w.commit('notes.txt', `plain text ${TERM}\n`, 'leaks');
+  w.commit('notes.txt', 'plain text\n', 'fixes it');
+  const leak = w.push(['origin', 'main']);
+  assert.notEqual(leak.status, 0, 'stdin and arguments reach the scan, so the range is read from the commits');
+  assert.match(leak.stdout + leak.stderr, /HIT notes\.txt/);
+  assert.match(leak.stdout + leak.stderr, /Push blocked/);
+  assert.equal(w.remoteHead('main'), base);
+
+  git(w.work, ['reset', '-q', '--hard', base]);
+  commitFiles(w, { 'memo.docx': PNG }, 'adds a memo');
+  const binary = w.push(['origin', 'main']);
+  assert.notEqual(binary.status, 0);
+  assert.match(binary.stdout + binary.stderr, /BINARY memo\.docx/);
+
+  git(w.work, ['reset', '-q', '--hard', base]);
+  git(w.work, ['checkout', '-q', '-b', 'feature']);
+  w.commit('other.txt', `fresh ${TERM}\n`, 'leak on a new branch');
+  assert.notEqual(w.push(['origin', 'feature']).status, 0, 'the remote name argument reaches the hook');
+  assert.equal(w.remoteHead('feature'), null);
+});
+
+test('the versioned hook refuses the push when node cannot be found', { skip: process.platform === 'win32' }, () => {
+  const run = spawnSync('/bin/sh', [path.join(VERSIONED_HOOKS, 'pre-push'), 'origin', 'url'], { encoding: 'utf8', input: '', env: { PATH: path.join(scratch, 'no-such-bin') } });
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stderr, /node was not found.*Push blocked/);
+});
+
+test('the very first push of a repository is checked for binary files too', () => {
+  const w = world('binary-first-push');
+  commitFiles(w, { 'readme.txt': 'plain text\n', 'task.pdf': PNG }, 'first commit with a pdf');
+  const blocked = w.push(['origin', 'main']);
+  assert.notEqual(blocked.status, 0, blocked.stdout + blocked.stderr);
+  assert.match(blocked.stdout + blocked.stderr, /BINARY task\.pdf \(tracked; added or changed in /);
+  assert.equal(w.remoteHead('main'), null, 'nothing reached the remote');
+});

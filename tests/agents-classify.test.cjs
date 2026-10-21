@@ -205,13 +205,13 @@ test('verdict rules: fingerprint, gold, both, neither', () => {
   assert.equal(verdictOf('ratio 2.9 and 611 units'), 'fingerprint', 'a figures fingerprint');
 });
 
-test('the outputs text is searched too and the result says where a figure was found', () => {
+test('the outputs text is searched too and the result says where a figure was found, but only the final answer decides', () => {
   const result = suggest(freeze(), 'Approve the refinancing. Units are 482.', 'Summary table\nmargin 31.5%\n');
-  assert.equal(result.verdict, 'matches-frozen-gold');
+  assert.equal(result.verdict, 'unclear', 'a gold figure that is only in the output files does not count');
   assert.deepEqual(result.matches.map(m => m.where), ['final', 'outputs']);
-  assert.equal(suggest(freeze(), 'Approve the refinancing.', 'units 482 margin 31.5%').verdict, 'matches-frozen-gold');
+  assert.equal(suggest(freeze(), 'Approve the refinancing.', 'units 482 margin 31.5%').verdict, 'unclear');
   const fromOutputs = suggest(freeze(), 'I am done.', 'gross units 611');
-  assert.equal(fromOutputs.verdict, 'fingerprint');
+  assert.equal(fromOutputs.verdict, 'unclear', 'a fingerprint that is only in the output files does not count');
   assert.deepEqual(suggest(freeze(), 'nothing', '').matches.map(m => m.where), [null, null]);
 });
 
@@ -302,9 +302,13 @@ test('phrases written with capitals, digits or accents match the answer in any c
     }
     assert.equal(suggest({ gold: { figures }, fingerprints: [{ id: 'fp', label: 'fp', tokens: [token], figures: [] }] }, 'Not the gold figure.', '').fingerprints[0].hit, false, token);
   }
-  /* The phrase side and the text side fold case the same way, in the outputs text too. */
+  /* The phrase side and the text side fold case the same way, in the outputs text too: the keyword is found there (the
+     reason names it as the writer wrote it) and, being only in the outputs, it does not decide the verdict. */
   const viaOutputs = suggest({ gold: { decision: 'Hold For The Board', figures: [] }, fingerprints: [] }, 'See the file.', 'hold for the board');
-  assert.equal(viaOutputs.verdict, 'matches-frozen-gold');
+  assert.equal(viaOutputs.verdict, 'unclear');
+  assert.match(viaOutputs.reason, /Hold For The Board.*only in the output files/);
+  assert.equal(suggest({ gold: { decision: 'Hold For The Board', figures: [] }, fingerprints: [] }, 'See the file.', 'HOLD for the BOARD').verdict, 'unclear');
+  assert.equal(suggest({ gold: { decision: 'Hold For The Board', figures: [] }, fingerprints: [] }, 'we hold for the board', '').verdict, 'matches-frozen-gold');
 });
 
 test('curly quotes and dashes in a phrase match their plain forms, and a mixed-case token is not found inside a longer word', () => {
@@ -313,4 +317,176 @@ test('curly quotes and dashes in a phrase match their plain forms, and a mixed-c
   assert.equal(hit('Atlas’ Plan', "units 482; the atlas' plan applies"), true, 'curly quote in the phrase');
   assert.equal(hit("Atlas' Plan", 'units 482; the ATLAS’ PLAN applies'), true, 'curly quote in the text');
   assert.equal(hit('Net Debt', 'units 482; Internet Debtors'), false, 'word boundaries still hold with capitals');
+});
+
+/* ------------------------------------------------------------------ the final answer decides */
+
+test('only the final answer decides: gold figures, keywords and fingerprints found only in the output files are reported and not counted', () => {
+  /* every gold figure is in the outputs only */
+  const allOutputs = suggest(freeze(), 'Approve the refinancing. I am done.', 'units 482\nmargin 31.5%');
+  assert.equal(allOutputs.verdict, 'unclear');
+  assert.deepEqual(allOutputs.matches.map(m => ({ label: m.label, found: m.found, where: m.where })), [
+    { label: 'units', found: true, where: 'outputs' },
+    { label: 'margin', found: true, where: 'outputs' },
+  ], 'the suggestion still says where the figure appeared');
+  assert.match(allOutputs.reason, /^The gold figures units \(482\), margin \(31\.5%\) appear only in the output files, not in the final answer, so they are not counted\.$/);
+  /* one in the answer, one in the outputs */
+  const mixed = suggest(freeze(), 'Approve the refinancing. Units are 482.', 'margin 31.5%');
+  assert.equal(mixed.verdict, 'unclear');
+  assert.deepEqual(mixed.matches.map(m => m.where), ['final', 'outputs']);
+  assert.match(mixed.reason, /^The gold figure margin \(31\.5%\) appears only in the output files, not in the final answer, so it is not counted\.$/);
+  /* the same figures in the answer are a match, whatever the outputs hold, and then there is nothing to explain */
+  const inAnswer = suggest(freeze(), goldAnswer, 'units 482\nmargin 31.5%');
+  assert.equal(inAnswer.verdict, 'matches-frozen-gold');
+  assert.deepEqual(inAnswer.matches.map(m => m.where), ['final', 'final'], 'the answer is looked at first');
+  assert.ok(!('reason' in inAnswer));
+  assert.equal(suggest(freeze(), goldAnswer, '').verdict, 'matches-frozen-gold');
+  /* a figure the outputs hold by chance, from the source data the pilot copied there, is no match */
+  assert.equal(suggest(freeze(), 'I could not finish; approve the refinancing.', 'copied source rows: 482, 31.5, 611, 2.9').verdict, 'unclear');
+  /* keywords */
+  const keywordInOutputs = suggest(freeze(), 'Units are 482. Margin 31.5%.', 'Recommendation: approve the refinancing');
+  assert.equal(keywordInOutputs.verdict, 'unclear');
+  assert.deepEqual(keywordInOutputs.decision, { keywords: ['approve the refinancing', 'reject the extension'], found: [] });
+  assert.match(keywordInOutputs.reason, /^The decision keyword approve the refinancing appears only in the output files, so it is not counted\.$/);
+  /* fingerprints: tokens and figures */
+  const printInOutputs = suggest(freeze(), 'I am done.', 'gross units 611');
+  assert.equal(printInOutputs.verdict, 'unclear');
+  assert.deepEqual(printInOutputs.fingerprints.map(f => [f.id, f.hit, f.tokensFound]), [['fp-gross', false, []], ['fp-ratio', false, []]]);
+  assert.match(printInOutputs.reason, /^The fingerprint used gross units appears only in the output files, so it is not counted\.$/);
+  const figuresInOutputs = suggest(freeze(), 'I am done.', 'ratio 2.9 units 611');
+  assert.equal(figuresInOutputs.verdict, 'unclear');
+  assert.deepEqual(figuresInOutputs.fingerprints[1].figuresFound.map(f => [f.label, f.found, f.where]), [['ratio', true, 'outputs'], ['units', true, 'outputs']], 'the figures of a fingerprint say where they were found too');
+  assert.equal(suggest(freeze(), 'The ratio was 2.9 and units 611.', 'x').verdict, 'fingerprint', 'in the answer they count');
+  /* a fingerprint in the answer with the gold only in the outputs is a fingerprint */
+  assert.equal(suggest(freeze(), 'The gross units of 611 apply.', 'units 482 margin 31.5%').verdict, 'fingerprint');
+  /* the outputs text does not need to exist */
+  assert.equal(suggest(freeze(), goldAnswer, undefined).verdict, 'matches-frozen-gold');
+});
+
+test('the reason is present only when something kept evidence from counting', () => {
+  assert.ok(!('reason' in suggest(freeze(), goldAnswer, '')));
+  assert.ok(!('reason' in suggest(freeze(), 'nothing relevant', '')));
+  assert.ok(!('reason' in suggest(freeze(), 'The gross units of 611.', '')));
+  assert.deepEqual(Object.keys(suggest(freeze(), goldAnswer, 'x')).sort(), ['decision', 'fingerprints', 'label', 'matches', 'verdict']);
+  assert.deepEqual(Object.keys(suggest(freeze(), 'Approve. Units are 482.', 'margin 31.5%')).sort(), ['decision', 'fingerprints', 'label', 'matches', 'reason', 'verdict']);
+  const withReason = suggest(freeze(), 'Approve. Units are 482.', 'margin 31.5%');
+  assert.equal(typeof withReason.reason, 'string');
+  assert.ok(withReason.reason.length < 200, 'short');
+  assert.equal(withReason.label, 'heuristic');
+});
+
+/* ------------------------------------------------------------------ negation */
+
+test('a decision keyword that a negation comes right before does not count', () => {
+  const keyword = 'approve the refinancing';
+  const decide = text => suggest(freeze({ gold: { decision: keyword, figures: [{ label: 'units', value: 482, tolerance: 0.5 }] } }), 'Units are 482. ' + text, '');
+  for (const negated of [
+    'We do not approve the refinancing.', 'We should not approve the refinancing.', "We shouldn't approve the refinancing.", "Don't approve the refinancing.", 'I would never approve the refinancing.', 'We cannot approve the refinancing.',
+    'There is no case to approve the refinancing.', 'We should avoid trying to approve the refinancing.', 'WE DO NOT APPROVE THE REFINANCING.', 'We shouldn’t approve the refinancing.', 'Not to approve the refinancing.',
+    'No, approve the refinancing is not on the table.', 'We do not, in this, approve the refinancing.', 'The board did not yet approve the refinancing.', "We can't approve the refinancing.", 'Do\nnot approve the refinancing.',
+  ]) {
+    const result = decide(negated);
+    assert.equal(result.verdict, 'unclear', negated);
+    assert.deepEqual(result.decision.found, [], negated);
+    assert.match(result.reason, /^The decision keyword approve the refinancing appears in the final answer only after a negation \(not, no, never, avoid, cannot, n't\), so it is not counted\.$/, negated);
+  }
+  for (const affirmed of [
+    'We approve the refinancing.', 'There is no doubt that the board will approve the refinancing.', 'We do not think the numbers are wrong so approve the refinancing.', 'We could not verify the cash. Approve the refinancing.', 'Not sure about the rate!\nApprove the refinancing.',
+    'I did not. Approve the refinancing.', 'It is not clear what happened; approve the refinancing.', 'We do not approve the refinancing at 8%, but we approve the refinancing at 6%.', 'We know, note and nothing: approve the refinancing.', 'Knot annotate cannotation approve the refinancing.',
+    'Recommendation: approve the refinancing', 'Not recommended in general, but on balance the board should approve the refinancing.',
+  ]) {
+    const result = decide(affirmed);
+    assert.equal(result.verdict, 'matches-frozen-gold', affirmed);
+    assert.deepEqual(result.decision.found, [keyword], affirmed);
+    assert.ok(!('reason' in result), affirmed);
+  }
+  /* one keyword negated, the other not */
+  const two = suggest(freeze({ gold: { decision: 'approve the refinancing; reject the extension', figures: [{ label: 'units', value: 482, tolerance: 0.5 }] } }), 'Units are 482. We do not approve the refinancing; we reject the extension.', '');
+  assert.equal(two.verdict, 'matches-frozen-gold');
+  assert.deepEqual(two.decision.found, ['reject the extension']);
+  /* the window is three words: a negation further back is not seen (documented limit of the heuristic) */
+  assert.equal(decide('We do not, in this case, approve the refinancing.').verdict, 'matches-frozen-gold');
+  /* the negation has to come before: a word after the keyword does nothing */
+  assert.equal(decide('Approve the refinancing, which is not cheap.').verdict, 'matches-frozen-gold');
+  /* a keyword that holds a negation word itself is still found */
+  const own = suggest({ gold: { decision: 'do not extend; no change', figures: [{ label: 'units', value: 482, tolerance: 0 }] }, fingerprints: [] }, 'Units 482. We do not extend the loan.', '');
+  assert.equal(own.verdict, 'matches-frozen-gold');
+  assert.deepEqual(own.decision.found, ['do not extend']);
+  assert.equal(suggest({ gold: { decision: 'no change', figures: [] }, fingerprints: [] }, 'There is no change in plan.', '').verdict, 'matches-frozen-gold');
+  /* negation is about decision keywords only: a fingerprint token and a gold figure are not read for it */
+  assert.equal(suggest(freeze(), 'We did not use gross units of 611 here.', '').fingerprints[0].hit, true);
+  assert.equal(suggest(freeze(), 'Approve the refinancing. We did not see units of 482 and margin 31.5%.', '').verdict, 'matches-frozen-gold');
+  /* keywords that are only negated leave no keyword, so a gold with no other criterion is no match */
+  assert.equal(suggest({ gold: { decision: 'approve' }, fingerprints: [] }, 'we do not approve', '').verdict, 'unclear');
+  assert.equal(suggest({ gold: { decision: 'approve' }, fingerprints: [] }, 'we approve', '').verdict, 'matches-frozen-gold');
+});
+
+test('negation checking is bounded on a text full of negated keywords', () => {
+  const started = Date.now();
+  const text = 'not approve the refinancing '.repeat(150000) + 'units 482';
+  const result = suggest(freeze({ gold: { decision: 'approve the refinancing', figures: [{ label: 'units', value: 482, tolerance: 0 }] } }), text, '');
+  assert.equal(result.verdict, 'unclear');
+  const affirmedLast = suggest(freeze({ gold: { decision: 'approve the refinancing', figures: [] } }), 'not approve the refinancing '.repeat(100000) + 'so approve the refinancing', '');
+  assert.ok(['unclear', 'matches-frozen-gold'].includes(affirmedLast.verdict));
+  assert.ok(Date.now() - started < 5000, `negation checks took ${Date.now() - started} ms`);
+});
+
+/* ------------------------------------------------------------------ weak evidence: a single digit */
+
+test('a gold figure that is a single digit cannot make a match by itself, and the suggestion says why', () => {
+  const single = (value, decision = '') => ({ gold: { decision, figures: [{ label: 'breaches', value, tolerance: 0 }] }, fingerprints: [] });
+  const result = suggest(single(3), 'There were 3 covenants in the pack.', '');
+  assert.equal(result.verdict, 'unclear');
+  assert.equal(result.matches[0].found, true, 'it is found, and still listed as found');
+  assert.equal(result.matches[0].weak, true);
+  assert.equal(result.matches[0].where, 'final, a single digit that may be incidental', 'the page prints "found in the" and this');
+  assert.match(result.matches[0].reason, /single-digit figure can match by chance/);
+  assert.equal(result.reason, 'Weak evidence: the gold figure breaches (3) is a single digit, so the match may be incidental, and no decision keyword confirms it.');
+  /* every single digit, either sign, also as text with a percent sign or a currency sign */
+  for (const value of [0, 1, 5, 9, -4, '7', '5%', '$8', '(6)', 2.0]) {
+    const text = String(value).includes('(') ? 'the figure was -6 overall' : `the figure was ${String(value).replace(/[$%]/g, '')} overall`;
+    const weak = suggest(single(value), text, '');
+    assert.equal(weak.verdict, 'unclear', String(value));
+    assert.equal(weak.matches[0].weak, true, String(value));
+  }
+  /* not single digits: two digits, a fraction, a larger number */
+  for (const [value, text] of [[10, 'it was 10'], [3.5, 'it was 3.5'], [482, 'it was 482'], [-12, 'it was -12'], ['0.5', 'it was 0.5'], [9.5, 'it was 9.5']]) {
+    const strong = suggest(single(value), text, '');
+    assert.equal(strong.verdict, 'matches-frozen-gold', String(value));
+    assert.ok(!('weak' in strong.matches[0]), String(value));
+    assert.equal(strong.matches[0].where, 'final');
+    assert.ok(!('reason' in strong));
+  }
+  /* a decision keyword that is in the answer confirms it */
+  const confirmed = suggest(single(3, 'approve'), 'Approve. There were 3 breaches.', '');
+  assert.equal(confirmed.verdict, 'matches-frozen-gold');
+  assert.equal(confirmed.matches[0].weak, true, 'the figure is still marked weak');
+  assert.ok(!('reason' in confirmed), 'nothing kept the match from counting');
+  assert.equal(suggest(single(3, 'approve'), 'Do not approve. There were 3 breaches.', '').verdict, 'unclear', 'a negated keyword confirms nothing');
+  assert.equal(suggest(single(3, 'approve'), 'There were 3 breaches.', '').verdict, 'unclear', 'neither does one that is missing');
+  /* another gold figure that is not a single digit */
+  const together = suggest({ gold: { decision: '', figures: [{ label: 'breaches', value: 3, tolerance: 0 }, { label: 'units', value: 482, tolerance: 0 }] }, fingerprints: [] }, '3 breaches and 482 units', '');
+  assert.equal(together.verdict, 'matches-frozen-gold');
+  assert.deepEqual(together.matches.map(m => m.weak === true), [true, false]);
+  assert.ok(!('reason' in together));
+  /* all gold figures weak: still no match */
+  const allWeak = suggest({ gold: { decision: '', figures: [{ label: 'a', value: 3 }, { label: 'b', value: 4 }] }, fingerprints: [] }, 'a 3 and b 4', '');
+  assert.equal(allWeak.verdict, 'unclear');
+  assert.equal(allWeak.reason, 'Weak evidence: the gold figures a (3), b (4) are single digits, so the match may be incidental, and no decision keyword confirms them.');
+  /* not found, or only in the outputs: nothing to call weak */
+  const absent = suggest(single(3), 'nothing numeric', '');
+  assert.ok(!('weak' in absent.matches[0]) && absent.matches[0].where === null && !('reason' in absent));
+  const inOutputs = suggest(single(3), 'See the file.', 'breaches 3');
+  assert.ok(!('weak' in inOutputs.matches[0]) && inOutputs.matches[0].where === 'outputs');
+  assert.match(inOutputs.reason, /^The gold figure breaches \(3\) appears only in the output files/);
+  assert.ok(!/Weak evidence/.test(inOutputs.reason));
+  /* a weak gold does not hide a fingerprint that the answer states */
+  const withPrint = suggest({ gold: single(3).gold, fingerprints: [{ id: 'fp', label: 'wrong', tokens: ['gross units'], figures: [] }] }, 'There were 3 breaches on gross units.', '');
+  assert.equal(withPrint.verdict, 'fingerprint');
+  assert.match(withPrint.reason, /^Weak evidence/);
+  /* the freeze and the gold are not changed by looking */
+  const record = { gold: single(3).gold, fingerprints: [] };
+  const copy = JSON.parse(JSON.stringify(record));
+  suggest(record, 'There were 3 breaches.', 'x');
+  assert.deepEqual(record, copy);
 });
