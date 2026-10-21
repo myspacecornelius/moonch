@@ -1080,26 +1080,35 @@ test('runtime: runtimeBin is validated, no option turns the rule off, and a text
 
 /* ------------------------------------------------------------------ Homebrew and application bundles */
 
-test('the Homebrew directories and application bundle programs may be run, nothing else under them may be used', t => {
+test('Homebrew and application bundle programs may be run as the command word, and are an access in every other place', t => {
   const fx = fixture(t);
   const soffice = '/Applications/LibreOffice.app/Contents/MacOS/soffice';
   assertClean(fx, bash('/opt/homebrew/bin/python3 x.py'), 'a program from Homebrew');
   assertClean(fx, bash('/opt/homebrew/sbin/dnsmasq --version; time /opt/homebrew/bin/pdftotext -v'), 'sbin, and behind a wrapper');
+  assertClean(fx, bash('FOO=1 /opt/homebrew/bin/python3 x.py; nohup /opt/homebrew/bin/python3 -V; env X=1 /opt/homebrew/sbin/dnsmasq --version'), 'behind an assignment and wrappers');
   assertClean(fx, bash(`${soffice} --headless --convert-to xlsx ./filesystem/a.csv --outdir ./outputs`), 'LibreOffice, as the command');
   assertClean(fx, bash(`nohup ${soffice} --version & env FOO=1 "/Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel" --version`), 'behind wrappers, with a space in the name');
   assertClean(fx, bash(`cd filesystem && ${soffice} --headless --convert-to csv --outdir ../outputs a.xlsx`), 'after a cd');
-  assertClean(fx, bash('cat /opt/homebrew/bin/python3 | head -1; ls -l /opt/homebrew/bin/brew'), 'the binary directories may be read, like /usr/local/bin');
-  assertClean(fx, tool('Read', { file_path: '/opt/homebrew/bin/brew' }));
-  /* writing */
-  assertFlags(fx, bash('echo x > /opt/homebrew/bin/tool'), 'abs', 'redirect into /opt/homebrew/bin');
-  assertFlags(fx, bash('echo x >> /opt/homebrew/sbin/tool'), 'abs', 'redirect into /opt/homebrew/sbin');
-  assertFlags(fx, tool('Write', { file_path: '/opt/homebrew/bin/tool', content: 'x' }), 'abs');
-  assertFlags(fx, tool('Edit', { file_path: '/opt/homebrew/sbin/tool', old_string: 'a', new_string: 'b' }), 'abs');
-  /* reading other places */
-  assertFlags(fx, bash('cat /opt/homebrew/etc/x'), 'abs', 'only the two binary directories are allowed');
-  assertFlags(fx, bash('ls /opt/homebrew/bin'), 'abs', 'the directory itself');
-  assertFlags(fx, bash('cat /opt/homebrew/Cellar/python/3.12/bin/python3'), 'abs');
-  assertFlags(fx, tool('Read', { file_path: '/opt/homebrew/etc/x' }), 'abs');
+  assertClean(fx, bash('/opt/homebrew/bin/python3 -c "print(1)" > outputs/a.txt'), 'the program may write to the folder');
+  /* the system directories are as they always were: readable, runnable, not writable by a redirect or a file tool */
+  assertClean(fx, bash('cat /usr/local/bin/pdftotext | head -1; ls -l /usr/bin/env'));
+  assertClean(fx, tool('Read', { file_path: '/usr/local/bin/pdftotext' }));
+  /* Homebrew's directories as an operand, a redirect target or a file tool path: abs */
+  for (const dir of ['/opt/homebrew/bin', '/opt/homebrew/sbin']) {
+    for (const command of [
+      `cp filesystem/a.csv ${dir}/evil`, `mv outputs/a.csv ${dir}/evil`, `rm ${dir}/python3`, `rm -f ${dir}/brew ${dir}/python3`, `echo x | tee ${dir}/evil`, `chmod +x ${dir}/evil`, `ln -s outputs/a ${dir}/evil`,
+      `ln -sf ${dir}/python3 outputs/py`, `sed -i s/a/b/ ${dir}/brew`, `install -m 755 outputs/x ${dir}/x`, `dd if=outputs/x of=${dir}/x`, `touch ${dir}/x`, `cp ${dir}/python3 outputs/`, `cat ${dir}/python3`,
+      `ls -l ${dir}/brew`, `echo x > ${dir}/evil`, `echo x >> ${dir}/evil`, `tar -xf outputs/a.tar -C ${dir}`, `mkdir ${dir}/sub`, `find ${dir} -name x`, `head -1 ${dir}/python3`, `xargs ${dir}/x`,
+      `${dir}/python3 ${dir}/other`, `cat ${dir}/../etc/x`, `${dir}/../etc/x`, `${dir}/sub/x`, `${dir}/`, `ls ${dir}`, `/opt/homebrew/etc/x`,
+    ]) assertFlags(fx, bash(command), 'abs', command);
+    assertFlags(fx, tool('Read', { file_path: `${dir}/brew` }), 'abs', 'a file tool read');
+    assertFlags(fx, tool('Write', { file_path: `${dir}/tool`, content: 'x' }), 'abs');
+    assertFlags(fx, tool('Edit', { file_path: `${dir}/tool`, old_string: 'a', new_string: 'b' }), 'abs');
+    assertFlags(fx, tool('Write', { file_path: 'outputs/run.py', content: `subprocess.run(['${dir}/python3', 'x.py'])\n` }), 'abs', 'named in code, not run as a command word');
+  }
+  /* the command stays clean while its arguments are still checked */
+  assertFlags(fx, bash('/opt/homebrew/bin/python3 /etc/hosts'), 'abs');
+  assertFlags(fx, bash('/opt/homebrew/bin/python3 x.py > /opt/homebrew/bin/out'), 'abs');
   /* inside a bundle only the program that is run is allowed */
   assertFlags(fx, bash('cat /Applications/X.app/Contents/Info.plist'), 'abs');
   assertFlags(fx, bash('cat /Applications/X.app/Contents/MacOS/x'), 'abs', 'reading the program is not running it');
@@ -1392,7 +1401,7 @@ test('code and data: the machine-wide and parent folder rules run on programs, a
   const flagged = tool('Write', { file_path: './outputs/s.py', content: "import os\nprint(os.listdir('..'))\n" });
   exactKinds(fx, flagged, ['dotdot']);
   for (const ext of ['py', 'pyw', 'sh', 'bash', 'zsh', 'r', 'R', 'js', 'mjs', 'cjs', 'ts', 'rb', 'pl', 'ps1', 'PY', 'ipynb']) {
-    assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "x = ls('..')\n" }))).includes('dotdot'), `.${ext}`);
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "x = os.listdir('..')\n" }))).includes('dotdot'), `.${ext}`);
     assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "glob.glob('/**/*.xlsx')" }))).includes('bare-root'), `.${ext} glob`);
     assert.ok(kinds(fx.audit(tool('Write', { file_path: `outputs/s.${ext}`, content: "os.system('mdfind -name x')" }))).includes('machine-search'), `.${ext} search`);
   }
@@ -1438,4 +1447,137 @@ test('code and data: in Bash only code strings and heredocs fed to a program are
   ]) assertFlags(fx, bash(command), kind, command);
   /* and a program that stays inside the folder is clean */
   assertClean(fx, bash("python3 - <<'EOF'\nimport glob\nprint(glob.glob('filesystem/*.csv'))\nEOF"));
+});
+
+/* ------------------------------------------------------------------ a quoted .. is a path only where a path goes */
+
+const SCRIPT_PATH_NOTE = /^unverifiable-path: code built a path from the folder the script itself is in \(__file__, __dirname\) and a "\.\.", so where it points depends on where the script is and was not checked$/;
+
+test('a quoted .. is the parent folder only as an argument of a call that takes a path; as a value it is data', t => {
+  const fx = fixture(t);
+  const values = [
+    "df = pd.read_csv('filesystem/a.csv', na_values='..')", "df = pd.read_csv('filesystem/a.csv', na_values=['..', 'n/a'])", 'ws["A1"] = ".."', "parts = 'a..b'.split('..')", 'x <- read.csv("filesystem/a.csv", na.strings="..")',
+    "df.replace('..', float('nan'), inplace=True)", "v = '..'", "if cell == '..':\n    pass", "row = {'gdp': '..'}", "pd.read_csv('filesystem/a.csv', na_values={'gdp': '..'})", "rows = [['..', 1], ['..', 2]]",
+    "writer.writerow(['..', 1])", "print('..')", "re.sub('..', '', s)", "s.replace('..', '.')", "df.fillna('..')", "open('filesystem/a.csv', newline='')", "os.path.join('filesystem', 'a..b')", "glob.glob('filesystem/*..csv')",
+    "csv.reader(f, delimiter='..')", "df = pd.read_excel('filesystem/m.xlsx', na_values=('..',))", 'cell.value = ".."', "label = os.path.join('filesystem', str(x or '..'))", "np.where(df['v'] == '..', np.nan, df['v'])",
+    "const v = cells.map(c => c === '..' ? null : c)", 'my $x = join("..", 1, 2);', "# pardir is the parent folder in a comment\npardir = 3\npardir_report = pardir + 1",
+  ];
+  for (const code of values) {
+    for (const [file, label] of [['outputs/s.py', 'a written .py'], ['outputs/s.R', 'a written .R'], ['outputs/s.js', 'a written .js']]) {
+      const result = fx.audit(tool('Write', { file_path: file, content: code + '\n' }));
+      assert.deepEqual([result.violations, result.notes], [[], []], `${label}: ${code}`);
+    }
+    const heredoc = fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`));
+    assert.deepEqual([heredoc.violations, heredoc.notes], [[], []], `a here document: ${code}`);
+  }
+  for (const command of [
+    `python3 -c "import pandas as pd; pd.read_csv('filesystem/a.csv', na_values='..')"`, `python3 -c "print('a..b'.split('..'))"`, `Rscript -e 'read.csv("filesystem/a.csv", na.strings="..")'`, `node -e "console.log('a..b'.split('..'))"`,
+    `perl -e 'print join("..", 1, 2)'`, `python3 -c "import pandas as pd; df = pd.read_csv('filesystem/a.csv', na_values=['..', 'n/a']); df['v'] = df['v'].replace('..', None)"`,
+  ]) {
+    const result = fx.audit(bash(command));
+    assert.deepEqual([result.status, result.violations, result.notes], ['CLEAN', [], []], command);
+  }
+  /* as an argument of a call that takes a path, it is the parent folder */
+  const parents = [
+    "os.listdir('..')", 'os.chdir("..")', "os.scandir('..')", "os.walk('..')", "os.path.join('..', 'x')", "os.path.join(base, '..', 'x')", "path.join('..', 'x')", "Path('..')", "pathlib.Path('..').resolve()", "open('..')",
+    "glob.glob('..')", "iglob('..')", "setwd('..')", 'setwd(dir = "..")', "list.files('..')", 'list.files(path = "..")', "fs.readdirSync('..')", "fs.readdir('..', cb)", 'opendir(DIR, "..")', "os.path.abspath('..')",
+    "path.resolve(process.cwd(), '..')", "Dir.chdir('..')", "Dir.entries('..')", "file.path('..', 'x')", "print(os.listdir('..'))", 'files = sorted(os.listdir(".."))', "os.path.join(\n    base,\n    '..',\n    'filesystem')",
+    "os.path.join(os.path.dirname(os.getcwd()), 'x')", "os.walk(r'..')", "open(os.path.join('..', 'a.csv'))",
+  ];
+  for (const code of parents) {
+    for (const file of ['outputs/s.py', 'outputs/s.R', 'outputs/s.js']) {
+      assert.ok(kinds(fx.audit(tool('Write', { file_path: file, content: code + '\n' }))).includes('dotdot'), `${file}: ${code}`);
+    }
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('dotdot'), `a here document: ${code}`);
+  }
+  /* inside a longer relative path it was always read */
+  for (const code of ["open('../x')", "pd.read_csv('../filesystem/a.csv')", 'read.csv("../a.csv")', "glob.glob('../*.csv')"]) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/s.py', content: code + '\n' }))).includes('dotdot'), code);
+  }
+  assertFlags(fx, bash(`python3 -c "import os; os.listdir('..')"`), 'dotdot');
+  assertFlags(fx, bash(`Rscript -e "setwd('..')"`), 'dotdot');
+  assertFlags(fx, bash(`node -e "require('fs').readdirSync('..')"`), 'dotdot');
+  assertClean(fx, bash(`cd filesystem && python3 -c "import os; print(os.listdir('..'))"`), 'the parent of filesystem is the folder');
+  /* a data file is not read for it at all */
+  assertClean(fx, tool('Write', { file_path: 'outputs/t.json', content: '{"f":"os.listdir(\'..\')"}' }));
+});
+
+test('a quoted .. next to the script\'s own location is a note, because the base is the script\'s folder', t => {
+  const fx = fixture(t);
+  for (const code of [
+    "os.path.join(os.path.dirname(__file__), '..', 'filesystem')", "os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'filesystem', 'a.csv')", "path.join(__dirname, '..', 'x')", "os.path.abspath(os.path.join(__file__, '..'))",
+    "pathlib.Path(os.path.join(os.path.dirname(__file__), '..'))", "Path(__file__, '..')",
+  ]) {
+    for (const event of [tool('Write', { file_path: 'outputs/run.py', content: code + '\n' }), bash(`python3 - <<'EOF'\n${code}\nEOF`)]) {
+      const result = fx.audit(event);
+      assert.equal(result.status, 'CLEAN', `${code}: ${JSON.stringify(result.violations)}`);
+      assert.deepEqual(result.violations, [], code);
+      assert.equal(result.notes.length, 1, code);
+      assert.match(result.notes[0], SCRIPT_PATH_NOTE, code);
+    }
+  }
+  /* a plain use beside it is still a violation, and the note is there too */
+  const both = fx.audit(tool('Write', { file_path: 'outputs/run.py', content: "os.chdir('..')\nbase = os.path.join(os.path.dirname(__file__), '..')\n" }));
+  assert.deepEqual(kinds(both), ['dotdot']);
+  assert.ok(both.notes.some(note => SCRIPT_PATH_NOTE.test(note)));
+  /* the script's folder without a .. is not noted, and neither is a data file */
+  assert.deepEqual(fx.audit(tool('Write', { file_path: 'outputs/run.py', content: "os.path.join(os.path.dirname(__file__), 'filesystem')\nPath(__file__).parent / 'x'\n" })).notes, []);
+  assert.deepEqual(fx.audit(tool('Write', { file_path: 'outputs/run.txt', content: "os.path.join(os.path.dirname(__file__), '..', 'filesystem')" })).notes, []);
+  assert.equal(fx.audit([bash('true'), tool('Write', { file_path: 'outputs/a.py', content: "path.join(__dirname, '..')" }), tool('Write', { file_path: 'outputs/b.py', content: "path.join(__dirname, '..')" })]).notes.length, 1, 'one line, however many calls');
+});
+
+test('os.pardir and os.path.pardir are the parent folder, the word pardir alone is not', t => {
+  const fx = fixture(t);
+  for (const code of ['os.pardir', 'os.path.pardir', "os.path.join(os.pardir, 'x')", 'x = os.path.pardir + "/y"', 'from os import pardir', 'from os.path import join, pardir']) {
+    assert.ok(kinds(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code + '\n' }))).includes('dotdot'), code);
+    assert.ok(kinds(fx.audit(bash(`python3 - <<'EOF'\n${code}\nEOF`))).includes('dotdot'), 'a here document: ' + code);
+  }
+  assertFlags(fx, bash(`python3 -c "import os; print(os.pardir)"`), 'dotdot');
+  for (const code of ['pardir = 3', 'pardir_report = 1', "df['pardir'] = 1", 'my.pardir = 2', '# pardir is the parent folder', 'xos.pardir_x = 1', 'print(pardir)', "os.pardirs = []"]) {
+    assert.deepEqual(fx.audit(tool('Write', { file_path: 'outputs/a.py', content: code + '\n' })).violations, [], code);
+  }
+  assertClean(fx, bash(`cd filesystem && python3 -c "import os; print(os.pardir)"`), 'resolved from the working directory like a ..');
+});
+
+/* ------------------------------------------------------------------ code piped to an interpreter, and printed to a program file */
+
+test('code piped to an interpreter, and echo or printf output written to a program file, is scanned as code', t => {
+  const fx = fixture(t);
+  for (const [command, kind] of [
+    ["cat <<'EOF' | python3\nimport os\nos.listdir('..')\nEOF", 'dotdot'],
+    ["cat <<'EOF' | python3 -\nglob.glob('/**/*.xlsx')\nEOF", 'bare-root'],
+    ["cat <<'EOF' | python3 -u -\nos.system('mdfind -name x')\nEOF", 'machine-search'],
+    ["cat <<EOF | python3.11\nos.chdir('..')\nEOF", 'dotdot'],
+    ["cat <<'EOF' | python3 -W ignore -\nos.chdir('..')\nEOF", 'dotdot'],
+    ['echo "import os; os.listdir(\'..\')" | python3', 'dotdot'],
+    ['echo "os.system(\'mdfind x\')" | python3 -', 'machine-search'],
+    ['echo "glob.glob(\'/**/*.xlsx\')" | python3', 'bare-root'],
+    ["printf 'import os\\nos.chdir(\"..\")\\n' | python3", 'dotdot'],
+    ['echo "setwd(\'..\')" | Rscript -', 'dotdot'],
+    ['echo "fs.readdirSync(\'..\')" | node', 'dotdot'],
+    ['echo "os.listdir(\'..\')" |\n  python3', 'dotdot'],
+    ['cat <<< "os.chdir(\'..\')" | python3', 'dotdot'],
+    ['echo "os.listdir(\'..\')" > outputs/s.py', 'dotdot'],
+    ['echo "os.listdir(\'..\')" >> outputs/s.py', 'dotdot'],
+    ['echo -e "import os\\nos.listdir(\'..\')" > outputs/s.py', 'dotdot'],
+    ["printf '%s\\n' \"os.listdir('..')\" >> outputs/s.py", 'dotdot'],
+    ['echo "mdfind -name x" > outputs/run.sh', 'machine-search'],
+    ['echo "setwd(\'..\')" >> outputs/s.R', 'dotdot'],
+    ['echo "glob.glob(\'/**/*.xlsx\')" | tee outputs/s.py', 'bare-root'],
+    ['echo "os.listdir(\'..\')" | tee -a outputs/s.py', 'dotdot'],
+    ['echo "os.listdir(\'..\')" | cat > outputs/s.py', 'dotdot'],
+  ]) assertFlags(fx, bash(command), kind, command);
+  /* data is data: into a program as input to -c, to a script file, to cat or grep, or to a data file */
+  for (const command of [
+    'echo \'"..",1\' | python3 -c "import sys; print(sys.stdin.read())"', 'echo "os.listdir(\'..\')" | python3 outputs/x.py', 'echo "os.listdir(\'..\')" | cat', 'echo "os.listdir(\'..\')" | grep os', "cat <<'EOF' | python3 outputs/x.py\n\"..\",1\nEOF",
+    'echo \'"..",1\' > outputs/t.csv', 'echo "os.listdir(\'..\')" > outputs/t.md', 'echo "os.listdir(\'..\')" | tee outputs/t.json', 'echo "os.listdir(\'..\')" | cat > outputs/t.txt', "printf '\"..\",1\\n' >> outputs/t.csv",
+    'echo "os.listdir(\'..\')" || python3 -', 'echo "os.listdir(\'..\')"; python3 -', 'echo "os.listdir(\'..\')" && python3 -c "print(1)"', 'echo "os.listdir(\'..\')" | perl -e \'print <STDIN>\'',
+    'echo "print(1)" | python3', 'echo hello > outputs/s.py', "cat <<'EOF' | python3\nprint(1)\nEOF",
+  ]) {
+    const result = fx.audit(bash(command));
+    assert.deepEqual(result.violations, [], command);
+  }
+  /* ordinary shell is not affected: || is not a pipe, and a pipe into a shell is still the old note */
+  assert.deepEqual(fx.audit(bash('ls filesystem || echo none')).violations, []);
+  assert.deepEqual(fx.audit(bash('echo aGk= | base64 -d | sh')).notes.map(note => note.split(':')[0]), ['unverifiable-input']);
 });

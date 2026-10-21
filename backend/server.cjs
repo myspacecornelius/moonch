@@ -41,8 +41,14 @@
        SIGINT, SIGTERM, SIGHUP (the Terminal window closed) and SIGQUIT all run the same shutdown. cleanup() runs once the
        shutdown is done, and again from the process 'exit' hook, which also calls app.killPilots().
      localServerRecord({ url, pid, startedAt, runApprovedOnce }) -> the LOCAL_SERVER.json content
-     findRunningCompanion(root, { pid?, isAlive?, probe?, timeoutMs? }) -> { url, pid } of a companion that is already running
-       for this folder (LOCAL_SERVER.json names a live pid that is not this process and its url answers GET /api/status), else null
+     findRunningCompanion(root, { pid?, isAlive?, probe?, timeoutMs? }) -> null, or { status, url, pid, detail? } for the companion
+       LOCAL_SERVER.json names. null (the record is stale) when there is no record, its pid is dead or is this process, the
+       connection to its url is refused, or the url answers as a companion with another pid. status 'running': the url answers
+       as a companion with the recorded pid. status 'unclear': the pid is alive and something is there but it did not say
+       (no answer in time, an error, not a companion); the start is refused, because a slow companion must not be mistaken
+       for a dead one. GET /api/status?probe=1 answers { companion, pid } at once; the full /api/status carries pid as well.
+     claimFolder(root, { pid?, isAlive? }) -> { claimed: true, release() } or { claimed: false, holder }: the exclusive
+       LOCAL_SERVER.lock (created with the flag wx, holding the pid); a lock whose pid is dead is taken over
      portChoice(env, usual?) -> { port, fixed }: FINANCE_STUDIO_PORT when it is set, otherwise the usual port (DEFAULT_PORT)
      listenWithFallback(app, { port, fixed }) -> app.listen() result, plus fellBack when the usual port was busy
      usableClaudeBin(value) -> value when it names an executable file, otherwise undefined */
@@ -67,7 +73,9 @@ const GENERIC_ERROR = 'The companion hit an internal error. The details are in t
 const DRAIN_ALLOWANCE = 16 * 1024 * 1024; /* bytes read and thrown away after a 413 before the connection is dropped */
 const SETTLE_MS = 10000; /* shutdown waits this long for requests that are still being answered */
 const DEFAULT_PORT = 47321; /* the usual port: the same address every start keeps the browser's saved work (localStorage is per origin) */
-const STATUS_TIMEOUT_MS = 1500; /* how long a start waits for an earlier companion to answer GET /api/status */
+const STATUS_TIMEOUT_MS = 5000; /* how long a start waits for an earlier companion to answer GET /api/status?probe=1 */
+const LOCK_WAIT_MS = 10000; /* how long a start waits for another start that holds LOCAL_SERVER.lock to come up */
+const COMPANION_ID = 'finance-task-studio';
 const KEEP_OPEN_LINE = 'Keep this window open while a round runs; closing it stops the companion and its pilots.';
 const TOOL_LESS_WHILE_RUNNING = 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started';
 const LAUNCH_WHILE_TOOL_LESS = 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started';
@@ -480,7 +488,17 @@ function createServer(options = {}) {
      out on purpose: it carries hashes, verdicts and fingerprint ids but no gold, and the page stores it as evidence as it
      is. */
   const routes = [
-    { method: 'GET', pattern: '/api/status', handler: async () => ({ state: currentState(), connection: 'local-sdk-adapter', canStart: false, nonce, adapter: 'deepseek-account', agents: await agentsStatus() }) },
+    /* pid: this companion's process id, which a later start compares with LOCAL_SERVER.json. The full answer waits for runtime
+       detection (agentsStatus), which can run `claude --version` for up to five seconds, so a later start asks with ?probe=1
+       and gets { companion, pid } at once, whatever else the companion is doing. */
+    {
+      method: 'GET',
+      pattern: '/api/status',
+      handler: async ({ query }) => {
+        if (query.get('probe') === '1') return { companion: COMPANION_ID, pid: process.pid };
+        return { state: currentState(), pid: process.pid, connection: 'local-sdk-adapter', canStart: false, nonce, adapter: 'deepseek-account', agents: await agentsStatus() };
+      },
+    },
     { method: 'POST', pattern: '/api/cancel', legacy: true, handler: async () => { runner.cancel(); return { cancelRequested: true, state: currentState() }; } },
     { method: 'POST', pattern: '/api/agents/packet/inspect', limit: 'packet', handler: ({ body }) => service.inspectPacket(body) },
     { method: 'GET', pattern: '/api/agents/rounds', roundData: true, handler: async () => ({ rounds: await service.listRounds() }) },
@@ -809,13 +827,21 @@ function pidAlive(pid) {
   }
 }
 
-/* True when `url` (http on 127.0.0.1) answers GET /api/status with a companion's status within timeoutMs. */
-function answersStatus(url, timeoutMs = STATUS_TIMEOUT_MS) {
+/* What GET <url>/api/status?probe=1 says, as one of
+     { kind: 'companion', pid }   the answer is a companion's (it carries companion and pid)
+     { kind: 'refused' }          nothing listens there: the connection was refused (ECONNREFUSED)
+     { kind: 'unclear', detail }  anything else: no answer within timeoutMs, another connection error, an error status, an
+                                  answer that is not a companion's, or an address that is not http on 127.0.0.1
+   Only an address of this machine is ever asked. */
+function probeCompanion(url, timeoutMs = STATUS_TIMEOUT_MS) {
   return new Promise(resolve => {
     let target;
-    try { target = new URL(url); } catch { resolve(false); return; }
+    try { target = new URL(url); } catch { resolve({ kind: 'unclear', detail: 'the address in the record is not usable' }); return; }
     const port = Number(target.port);
-    if (target.protocol !== 'http:' || target.hostname !== HOST || !Number.isInteger(port) || port < 1) { resolve(false); return; }
+    if (target.protocol !== 'http:' || target.hostname !== HOST || !Number.isInteger(port) || port < 1) {
+      resolve({ kind: 'unclear', detail: 'the address in the record is not an address of this machine' });
+      return;
+    }
     let timer = null;
     let finished = false;
     const finish = value => {
@@ -824,46 +850,164 @@ function answersStatus(url, timeoutMs = STATUS_TIMEOUT_MS) {
       clearTimeout(timer);
       resolve(value);
     };
-    const req = http.get({ host: HOST, port, path: '/api/status', agent: false }, res => {
+    const req = http.get({ host: HOST, port, path: '/api/status?probe=1', agent: false }, res => {
       const parts = [];
       let size = 0;
       res.on('data', part => {
         size += part.length;
-        if (size > 1024 * 1024) { req.destroy(); finish(false); } else parts.push(part);
+        if (size > 1024 * 1024) { finish({ kind: 'unclear', detail: 'the answer is too large to be a companion\'s' }); req.destroy(); } else parts.push(part);
       });
       res.on('end', () => {
-        try {
-          const body = JSON.parse(Buffer.concat(parts).toString('utf8'));
-          finish(res.statusCode === 200 && isPlainObject(body) && typeof body.nonce === 'string');
-        } catch {
-          finish(false);
-        }
+        let body = null;
+        try { body = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { /* not JSON */ }
+        if (res.statusCode !== 200) finish({ kind: 'unclear', detail: `it answered with status ${res.statusCode}` });
+        else if (isPlainObject(body) && body.companion === COMPANION_ID && Number.isInteger(body.pid)) finish({ kind: 'companion', pid: body.pid });
+        else finish({ kind: 'unclear', detail: 'what answers there is not a companion that says its process id' });
       });
-      res.on('error', () => finish(false));
+      res.on('error', () => finish({ kind: 'unclear', detail: 'the answer was cut off' }));
     });
-    req.on('error', () => finish(false));
-    timer = setTimeout(() => { req.destroy(); finish(false); }, timeoutMs);
+    req.on('error', error => finish(error && error.code === 'ECONNREFUSED' ? { kind: 'refused' } : { kind: 'unclear', detail: `the connection failed (${error && error.code ? error.code : 'error'})` }));
+    timer = setTimeout(() => {
+      finish({ kind: 'unclear', detail: `it did not answer within ${Math.round(timeoutMs / 100) / 10} seconds` });
+      req.destroy();
+    }, timeoutMs);
   });
 }
 
-/* The companion that is already running for this folder, as { url, pid }, or null. LOCAL_SERVER.json must name a pid that is
-   alive and is not this process, and its url must answer GET /api/status in time. A record whose pid is dead, or whose url
-   does not answer, is stale: the caller goes on and overwrites it. `isAlive` and `probe` can be replaced (tests). */
+/* The companion LOCAL_SERVER.json names, as { status, url, pid, detail? }, or null when the record is stale.
+   Stale means exactly one of: there is no usable record (none, unreadable, no whole-number pid) or its pid is this process
+   (a number handed out again) or no longer exists; the connection to its url is refused; or its url answers as a companion
+   with another pid. Nothing else is stale. In particular a companion that is slow, answers with an error, or is not
+   recognisably a companion is NOT taken for dead: a start that went on would recover its rounds and kill its pilots.
+     status 'running'  the url answers as a companion with the recorded pid
+     status 'unclear'  the pid is alive and something is there, but it did not say who it is (detail says why)
+   `isAlive` and `probe` can be replaced (tests); probe(url, timeoutMs) resolves as probeCompanion does. */
 async function findRunningCompanion(root, options = {}) {
   const self = options.pid === undefined ? process.pid : options.pid;
   const isAlive = options.isAlive || pidAlive;
-  const probe = options.probe || answersStatus;
+  const probe = options.probe || probeCompanion;
   const timeoutMs = options.timeoutMs === undefined ? STATUS_TIMEOUT_MS : options.timeoutMs;
   const record = readLocalServerRecord(root);
-  if (!record || !Number.isInteger(record.pid) || record.pid === self || typeof record.url !== 'string') return null;
-  let url;
-  try { url = new URL(record.url).origin; } catch { return null; }
+  if (!record || !Number.isInteger(record.pid) || record.pid <= 0 || record.pid === self) return null;
+  if (!isAlive(record.pid)) return null;
+  let url = null;
+  try { url = new URL(record.url).origin; } catch { /* the probe says it cannot use the address */ }
+  let answer;
   try {
-    if (!isAlive(record.pid) || !await probe(url, timeoutMs)) return null;
+    answer = await probe(url, timeoutMs);
+  } catch (error) {
+    answer = { kind: 'unclear', detail: `the check failed (${error && error.message ? error.message : error})` };
+  }
+  if (answer && answer.kind === 'refused') return null;
+  if (answer && answer.kind === 'companion') return answer.pid === record.pid ? { status: 'running', url, pid: record.pid } : null;
+  return { status: 'unclear', url: url === 'null' ? null : url, pid: record.pid, detail: answer && typeof answer.detail === 'string' ? answer.detail : 'it did not say who it is' };
+}
+
+/* The refusal when a companion may be running but did not say so: names the address and both ways out. */
+function unclearCompanionMessage(found) {
+  const where = found.url ? `process ${found.pid}, ${found.url}` : `process ${found.pid}`;
+  return `the companion that LOCAL_SERVER.json records (${where}) may still be running, but it did not confirm that: ${found.detail}. If it is running, close that companion (press Control-C in its window), then start again. If no companion is running, delete LOCAL_SERVER.json, then start again.`;
+}
+
+/* ------------------------------------------------------------------ the claim on the folder (LOCAL_SERVER.lock) */
+
+const LOCK_FILE = 'LOCAL_SERVER.lock';
+const claimedHere = new Set(); /* lock files this process holds, so a leftover that carries a pid handed out again is not mistaken for ours */
+
+function readLockPid(file) {
+  try {
+    const text = fs.readFileSync(file, 'utf8').trim();
+    return /^[0-9]{1,10}$/.test(text) ? Number(text) : null;
   } catch {
     return null;
   }
-  return { url, pid: record.pid };
+}
+
+/* Removes the lock when it holds this pid. */
+function releaseFolder(root, pid = process.pid) {
+  const file = path.join(root, LOCK_FILE);
+  if (readLockPid(file) !== pid) return false;
+  claimedHere.delete(file);
+  try {
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* Claims the folder with an exclusive file (flag wx: it is created only if it does not exist, whoever else asks at the same
+   moment) that holds this pid. { claimed: true, release() }, or { claimed: false, holder } when the lock is held by a pid that
+   is alive. A lock whose pid is dead is taken over: it is renamed away (only one taker succeeds) and claimed again; a live
+   claim that this moved by mistake, because it was made in between, is put back. A lock that holds this very pid but that
+   this process did not make is a leftover, and is taken over too. */
+function claimFolder(root, options = {}) {
+  const pid = options.pid === undefined ? process.pid : options.pid;
+  const isAlive = options.isAlive || pidAlive;
+  const file = path.join(root, LOCK_FILE);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const fd = fs.openSync(file, 'wx', 0o600);
+      try { fs.writeSync(fd, String(pid)); } finally { fs.closeSync(fd); }
+      claimedHere.add(file);
+      return { claimed: true, release: () => releaseFolder(root, pid) };
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+    }
+    const holder = readLockPid(file);
+    /* A file that holds no pid is a claim that is being written at this moment (created, not written yet) when it is new, and
+       a damaged leftover when it is not. */
+    let fresh = false;
+    if (holder === null) {
+      try { fresh = Date.now() - fs.statSync(file).mtimeMs < 2000; } catch { continue; }
+    }
+    const stale = holder === null ? !fresh : (holder === pid ? !claimedHere.has(file) : !isAlive(holder));
+    if (!stale) return { claimed: false, holder };
+    const moved = `${file}.${pid}.old`;
+    try { fs.renameSync(file, moved); } catch { continue; }
+    const movedPid = readLockPid(moved);
+    try { fs.unlinkSync(moved); } catch { /* nothing to remove */ }
+    if (movedPid !== null && movedPid !== holder && isAlive(movedPid)) {
+      try { fs.writeFileSync(file, String(movedPid), { flag: 'wx', mode: 0o600 }); } catch { /* someone claimed it again */ }
+      return { claimed: false, holder: movedPid };
+    }
+  }
+  return { claimed: false, holder: readLockPid(file) };
+}
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/* The start of a companion: the folder is claimed first, so two starts that begin together cannot both go on, and only
+   then is the record looked at. Resolves { release } (this start goes on; release() gives the folder back), or { earlier }
+   when a companion is already running. Throws, with a message that says what to do, when a companion may be running but did
+   not say so, or when another start that holds the folder has not come up within lockWaitMs. */
+async function claimStart(root, deps = {}) {
+  const check = () => findRunningCompanion(root, { isAlive: deps.isAlive, probe: deps.probe, timeoutMs: deps.statusTimeoutMs });
+  const waitMs = deps.lockWaitMs === undefined ? LOCK_WAIT_MS : deps.lockWaitMs;
+  const started = Date.now();
+  for (;;) {
+    const claim = claimFolder(root, { isAlive: deps.isAlive });
+    if (claim.claimed) {
+      let found;
+      try {
+        found = await check();
+      } catch (error) {
+        claim.release();
+        throw error;
+      }
+      if (!found) return { release: claim.release };
+      claim.release();
+      if (found.status === 'running') return { earlier: found };
+      throw new Error(unclearCompanionMessage(found));
+    }
+    const found = await check();
+    if (found && found.status === 'running') return { earlier: found };
+    if (found) throw new Error(unclearCompanionMessage(found));
+    if (Date.now() - started >= waitMs) {
+      throw new Error(`another start of Finance Task Studio${claim.holder ? ` (process ${claim.holder})` : ''} has had this folder for ${Math.round((Date.now() - started) / 1000)} seconds and has not come up. If it is still starting, wait for it. If it is stuck, close it, then start again. If no companion is running, delete ${LOCK_FILE}, then start again.`);
+    }
+    await wait(100);
+  }
 }
 
 /* FINANCE_STUDIO_PORT when it is set, otherwise the usual port. `fixed` says the writer chose the port, so a busy port is an
@@ -949,28 +1093,44 @@ async function describePilotSignIn(env) {
 }
 
 /* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, usualPort, proc and exit (for
-   installSignalHandlers), isAlive and probe (findRunningCompanion). Resolves { app, url }, or { alreadyRunning: true, url }
-   when another companion already serves this folder. */
+   installSignalHandlers), isAlive and probe (findRunningCompanion), statusTimeoutMs and lockWaitMs (claimStart). Resolves
+   { app, url }, or { alreadyRunning: true, url } when another companion already serves this folder. Rejects, with what to do
+   about it, when a companion may be running but did not say so (claimStart). */
 async function runCompanion(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const root = deps.root || ROOT;
   const say = deps.log || (message => console.log(message));
   const openUrl = deps.openUrl || (address => openBrowser(address, say));
-  /* One companion per folder. This comes before anything is loaded and above all before the agent service exists: creating
-     it recovers the rounds of a companion that died and stops the pilots it left behind, which must never be done to the
-     rounds of a companion that is still running. */
-  const earlier = await findRunningCompanion(root, { isAlive: deps.isAlive, probe: deps.probe });
-  if (earlier) {
-    say('Finance Task Studio is already running at ' + earlier.url);
-    if (argv.includes('--open')) openUrl(earlier.url);
-    return { alreadyRunning: true, url: earlier.url };
+  /* One companion per folder. The folder is claimed (LOCAL_SERVER.lock) and the record looked at before anything is loaded,
+     and above all before the agent service exists: creating it recovers the rounds of a companion that died and stops the
+     pilots it left behind, which must never be done to the rounds of a companion that is still running. */
+  const claim = await claimStart(root, deps);
+  if (claim.earlier) {
+    say('Finance Task Studio is already running at ' + claim.earlier.url);
+    if (argv.includes('--open')) openUrl(claim.earlier.url);
+    return { alreadyRunning: true, url: claim.earlier.url };
   }
-  const audit = loadEvidenceAudit(root);
-  const service = (deps.createService || createAgentService)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
-  const choice = portChoice(env, deps.usualPort);
-  const app = createServer({ root, service, port: choice.port, state: loadModelRunState(root) });
-  const listening = await listenWithFallback(app, choice);
+  let audit;
+  let app;
+  let listening;
+  try {
+    audit = loadEvidenceAudit(root);
+    const service = (deps.createService || createAgentService)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
+    const choice = portChoice(env, deps.usualPort);
+    app = createServer({ root, service, port: choice.port, state: loadModelRunState(root) });
+    listening = await listenWithFallback(app, choice);
+  } catch (error) {
+    claim.release();
+    throw error;
+  }
   const { url } = listening;
-  installSignalHandlers(app, { proc: deps.proc, exit: deps.exit, cleanup: () => removeLocalServerRecord(root, process.pid) });
+  installSignalHandlers(app, {
+    proc: deps.proc,
+    exit: deps.exit,
+    cleanup: () => {
+      removeLocalServerRecord(root, process.pid);
+      claim.release();
+    },
+  });
   const runApprovedOnce = argv.includes('--run-approved-once');
   fs.writeFileSync(path.join(root, LOCAL_SERVER_FILE), JSON.stringify(localServerRecord({ url, pid: process.pid, startedAt: new Date().toISOString(), runApprovedOnce }), null, 2));
   say('Finance Task Studio: ' + url + (audit ? '' : ' (no private evidence module found; viewer only)'));
@@ -999,5 +1159,5 @@ if (require.main === module) {
 
 module.exports = {
   createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, HttpError, ASSETS,
-  runCompanion, findRunningCompanion, removeLocalServerRecord, pidAlive, portChoice, listenWithFallback, DEFAULT_PORT, KEEP_OPEN_LINE,
+  runCompanion, findRunningCompanion, claimFolder, releaseFolder, removeLocalServerRecord, pidAlive, portChoice, listenWithFallback, DEFAULT_PORT, KEEP_OPEN_LINE,
 };

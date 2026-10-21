@@ -74,7 +74,8 @@ function allowBinaries(dir, ...paths) {
   put(dir, 'scripts/binary-allowlist.txt', `# synthetic allowlist\n\n${paths.join('\n')}\n`);
 }
 
-const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+/* A real PNG signature followed by NUL bytes, so the content is binary. */
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
 function writeTerms(content) {
   const file = path.join(freshDir('terms'), 'terms.txt');
@@ -161,6 +162,58 @@ test('the default term file is <root>/private/privacy-terms.txt and private/ sta
   assert.equal(run.status, 1, run.all);
   assert.match(run.stdout, /^HIT notes\.txt:1 term 1$/m);
   assert.doesNotMatch(run.stdout, /private/);
+});
+
+/* ---------- a linked worktree uses the term list of the main checkout ---------- */
+
+function mainWithWorktree(content = `${SECRET}\n`) {
+  const dir = createRepo();
+  put(dir, '.gitignore', '/private/\n');
+  put(dir, 'readme.txt', 'Atlas Foods.\n');
+  put(dir, 'private/privacy-terms.txt', content);
+  commitAll(dir, 'initial');
+  const worktree = path.join(freshDir('worktrees'), 'wt');
+  git(dir, ['worktree', 'add', '-q', worktree, '-b', 'side']);
+  return { dir, worktree };
+}
+
+test('a linked worktree falls back to the main checkout\'s private/privacy-terms.txt', () => {
+  const { dir, worktree } = mainWithWorktree();
+  assert.ok(!fs.existsSync(path.join(worktree, 'private')), 'the worktree has no private folder of its own');
+  const clean = scan(worktree);
+  assert.equal(clean.status, 0, clean.all);
+  assert.equal(count(clean.stdout, 'hits'), 0);
+  put(worktree, 'notes.txt', `mentions ${SECRET}\n`);
+  const leak = scan(worktree);
+  assert.equal(leak.status, 1, leak.all);
+  assert.match(leak.stdout, /^HIT notes\.txt:1 term 1$/m);
+  assert.equal(scan(dir).status, 0, 'the main checkout still uses its own file');
+});
+
+test('a worktree\'s own term list wins over the main checkout\'s, --terms wins over both, and with none anywhere the scan refuses', () => {
+  const { dir, worktree } = mainWithWorktree('main-only-term\n');
+  put(worktree, 'a.txt', `main-only-term and ${SECRET}\n`);
+  const fromMain = scan(worktree);
+  assert.match(fromMain.stdout, /^HIT a\.txt:1 term 1$/m);
+  put(worktree, 'private/privacy-terms.txt', `${SECRET}\n`);
+  const own = scan(worktree);
+  assert.equal(own.status, 1, own.all);
+  assert.equal(count(own.stdout, 'hits'), 1);
+  const explicit = scan(worktree, ['--terms', writeTerms('quokka-sapphire\n')]);
+  assert.equal(explicit.status, 0, explicit.all);
+
+  const missingExplicit = scan(worktree, ['--terms', path.join(scratch, 'no-such-terms.txt')]);
+  assert.equal(missingExplicit.status, 2, 'an explicit --terms file is never replaced by the main checkout\'s');
+  assert.ok(missingExplicit.stderr.includes(NO_TERMS));
+
+  fs.rmSync(path.join(worktree, 'private'), { recursive: true });
+  fs.rmSync(path.join(dir, 'private'), { recursive: true });
+  const none = scan(worktree);
+  assert.equal(none.status, 2, none.all);
+  assert.ok(none.stderr.includes(NO_TERMS));
+  const looked = none.stderr.split('\n').filter(line => line.includes('looked for:'));
+  assert.equal(looked.length, 2, 'both places are named: ' + none.stderr);
+  assert.ok(looked.some(line => line.includes(path.join(dir, 'private'))) && looked.some(line => line.includes(path.join(worktree, 'private'))));
 });
 
 /* ---------- term syntax ---------- */
@@ -635,6 +688,138 @@ test('a hostile file name cannot forge extra output lines', { skip: process.plat
   assert.ok(lines.some(line => line.startsWith('HIT x?HIT forged.txt:1 term 9:1 term 3')), run.stdout);
 });
 
+/* ---------- what counts as binary ---------- */
+
+const NUL_FREE_PDF = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n');
+const NUL_FREE_ZIP = Buffer.from('PK\x03\x04plain looking bytes only');
+const NUL_FREE_OLE = Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0]), Buffer.from('plain looking bytes only')]);
+const LATIN1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+
+test('a PDF, zip container or old Office file with no NUL byte, and bytes that are not UTF-8, are binary files that need the allowlist', () => {
+  const dir = cleanRepo();
+  put(dir, 'docs/memo.pdf', NUL_FREE_PDF);
+  put(dir, 'docs/book.xlsx', NUL_FREE_ZIP);
+  put(dir, 'docs/old.xls', NUL_FREE_OLE);
+  put(dir, 'docs/notes.txt', LATIN1);
+  put(dir, 'docs/fine.txt', Buffer.from('café ✓ plain UTF-8\n'));
+  put(dir, 'docs/mention.txt', Buffer.from('a line that mentions %PDF- and PK in the middle\n'));
+  commitAll(dir, 'documents');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  for (const name of ['docs/memo.pdf', 'docs/book.xlsx', 'docs/old.xls', 'docs/notes.txt']) {
+    assert.ok(run.stdout.includes(`BINARY ${name} (tracked) is not on scripts/binary-allowlist.txt`), name + '\n' + run.stdout);
+  }
+  assert.doesNotMatch(run.stdout, /BINARY docs\/(fine|mention)\.txt/, 'valid UTF-8 text is still text');
+  assert.equal(count(run.stdout, 'binary blocked'), 4);
+  assert.equal(count(run.stdout, 'files scanned'), 4, 'the two readme files and the two text files');
+
+  allowBinaries(dir, 'docs/notes.txt');
+  const partly = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(count(partly.stdout, 'binary blocked'), 3);
+  assert.equal(count(partly.stdout, 'binary allowed'), 1);
+});
+
+test('a term in UTF-8 text beyond ASCII is still found, and a large file cut mid-character stays a skipped-size file', () => {
+  const dir = cleanRepo();
+  put(dir, 'accented.txt', Buffer.from(`café ${SECRET} ✓\n`));
+  const limit = 5 * 1024 * 1024;
+  /* 8191 ASCII bytes, then two-byte characters: the 8 KB probe ends inside a character. */
+  put(dir, 'big-accented.txt', Buffer.concat([Buffer.alloc(8191, 0x61), Buffer.from('é'.repeat(limit / 2))]));
+  commitAll(dir, 'text');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^HIT accented\.txt:1 term 3$/m);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
+  assert.equal(count(run.stdout, 'size skipped'), 1);
+});
+
+/* ---------- an allowlisted path must still hold what its entry says ---------- */
+
+const HASH = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+const ZIP_BYTES = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(16, 0)]);
+
+test('an allowlisted .png path must hold a real PNG: a zip, a PDF or plain text there is blocked in the work tree', () => {
+  const dir = cleanRepo();
+  put(dir, 'qa/dashboard/desktop-overview.png', PNG_BYTES);
+  allowBinaries(dir, 'qa/dashboard/desktop-overview.png');
+  commitAll(dir, 'a real screenshot');
+  const ok = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(ok.status, 0, ok.all);
+  assert.equal(count(ok.stdout, 'binary allowed'), 1);
+
+  for (const [label, bytes] of [['a zip with NUL bytes', ZIP_BYTES], ['a NUL-free zip', NUL_FREE_ZIP], ['a PDF', NUL_FREE_PDF], ['plain text', Buffer.from('not an image\n')], ['a short file', Buffer.from([0x89, 0x50])], ['an empty file', Buffer.alloc(0)]]) {
+    put(dir, 'qa/dashboard/desktop-overview.png', bytes);
+    const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+    assert.equal(run.status, 1, `${label}: ${run.all}`);
+    assert.match(run.stdout, /^BINARY qa\/dashboard\/desktop-overview\.png \(tracked\) fails its scripts\/binary-allowlist\.txt entry: not a PNG file$/m, label);
+    assert.equal(count(run.stdout, 'binary allowed'), 0, label + ': a path that fails its check is not counted as allowed');
+  }
+});
+
+test('a sha256 pin fixes the content: the pinned file passes, any other content at that path is blocked, in any letter case', () => {
+  const dir = cleanRepo();
+  put(dir, 'tests/fixtures/package.zip', ZIP_BYTES);
+  allowBinaries(dir, `tests/fixtures/package.zip sha256=${HASH(ZIP_BYTES).toUpperCase()}`);
+  commitAll(dir, 'pinned fixture');
+  const ok = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(ok.status, 0, ok.all);
+  assert.equal(count(ok.stdout, 'binary allowed'), 1);
+
+  put(dir, 'tests/fixtures/package.zip', Buffer.concat([ZIP_BYTES, Buffer.from([1])]));
+  const swapped = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(swapped.status, 1, swapped.all);
+  assert.match(swapped.stdout, /^BINARY tests\/fixtures\/package\.zip \(tracked\) fails its scripts\/binary-allowlist\.txt entry: sha256 differs from the pinned value$/m);
+
+  put(dir, 'tests/fixtures/package.zip', Buffer.from('now plain text\n'));
+  const text = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(text.status, 1, 'a pin also holds when the replacement is text: ' + text.all);
+  assert.match(text.stdout, /sha256 differs from the pinned value/);
+});
+
+test('a path with a pin that does not exist in the work tree blocks nothing by itself, and the pins in the repository match', () => {
+  const dir = cleanRepo();
+  allowBinaries(dir, `gone.zip sha256=${HASH('x')}`, 'gone.png');
+  commitAll(dir, 'allowlist only');
+  assert.equal(scan(dir, ['--terms', writeTerms(TERMS)]).status, 0);
+  const root = path.join(__dirname, '..');
+  const entries = scanner.parseAllowlist(fs.readFileSync(path.join(root, 'scripts', 'binary-allowlist.txt'), 'utf8'));
+  const pinned = [...entries].filter(([, entry]) => entry.sha256 !== null);
+  assert.ok(pinned.some(([file]) => file === 'tests/fixtures/package.zip'), 'the test fixture zip is pinned');
+  for (const [file, entry] of pinned) assert.equal(HASH(fs.readFileSync(path.join(root, file))), entry.sha256, file);
+});
+
+/* ---------- tracked files that .gitignore ignores ---------- */
+
+const IGNORE_RULES = '*[_-]PRIVATE.*\n*-project.json\n!keep-project.json\n';
+
+test('a force-added ignored export is blocked as a tracked file, named, with the way out', () => {
+  const dir = createRepo();
+  put(dir, '.gitignore', IGNORE_RULES);
+  put(dir, 'readme.txt', 'Atlas Foods.\n');
+  put(dir, 'keep-project.json', '{"invented":true}\n');
+  commitAll(dir, 'initial');
+  put(dir, 'Finance_Agent_Round_r1_PRIVATE.json', '{"gold":"invented"}\n');
+  put(dir, 'T-project.json', '{"invented":true}\n');
+  put(dir, `${SECRET}-project.json`, '{"invented":true}\n');
+  git(dir, ['add', '-f', 'Finance_Agent_Round_r1_PRIVATE.json', 'T-project.json', `${SECRET}-project.json`]);
+  commitAll(dir, 'oops, forced');
+  const run = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^IGNORED Finance_Agent_Round_r1_PRIVATE\.json \(tracked\) is ignored by \.gitignore, so it must not be in git$/m);
+  assert.match(run.stdout, /^IGNORED T-project\.json \(tracked\) is ignored by /m);
+  assert.match(run.stdout, /^IGNORED \[redacted\]-project\.json \(tracked\) is ignored by /m, 'the printed path is redacted');
+  assert.match(run.stdout, /^ignored: take each out of git with git rm --cached <path>/m);
+  assert.doesNotMatch(run.stdout, /IGNORED keep-project\.json/, 'a path with a ! exception is not ignored');
+  assert.equal(count(run.stdout, 'ignored blocked'), 3);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
+  assert.ok(!run.all.toLowerCase().includes(SECRET));
+
+  git(dir, ['rm', '-q', '--cached', 'T-project.json', 'Finance_Agent_Round_r1_PRIVATE.json', `${SECRET}-project.json`]);
+  const fixed = scan(dir, ['--terms', writeTerms(TERMS)]);
+  assert.equal(fixed.status, 0, 'once git no longer tracks them the files are ignored and untracked, which is where they belong: ' + fixed.all);
+  assert.equal(count(fixed.stdout, 'ignored blocked'), 0);
+});
+
 /* ---------- --range: added lines of the commits to be pushed ---------- */
 
 function shortOf(sha) {
@@ -857,6 +1042,111 @@ test('a binary file introduced only on a merged branch is found through the merg
   assert.equal(count(run.stdout, 'binary blocked'), 1);
 });
 
+test('a PDF, a zip container and Latin-1 text added in the range are binary files even though git diffs them as text', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  put(dir, 'memo.pdf', NUL_FREE_PDF);
+  put(dir, 'book.xlsx', NUL_FREE_ZIP);
+  put(dir, 'old.doc', NUL_FREE_OLE);
+  put(dir, 'notes.txt', LATIN1);
+  put(dir, 'fine.txt', Buffer.from('café ✓\n'));
+  const added = commitAll(dir, 'documents');
+  const range = `${base}..HEAD`;
+  assert.doesNotMatch(git(dir, ['diff', '--numstat', range]), /^-\t-\t/m, 'git itself calls all of these text');
+  const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', range]);
+  assert.equal(run.status, 1, run.all);
+  for (const name of ['memo.pdf', 'book.xlsx', 'old.doc', 'notes.txt']) {
+    assert.ok(run.stdout.includes(`BINARY ${name} (tracked; added or changed in ${range} by ${shortOf(added)}) is not on `), name + '\n' + run.stdout);
+  }
+  assert.doesNotMatch(run.stdout, /BINARY fine\.txt/);
+  assert.equal(count(run.stdout, 'binary blocked'), 4);
+});
+
+test('an allowed .png path that holds a zip in an intermediate commit of the range is blocked, although the final tree has a real PNG', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  put(dir, 'qa/shot.png', PNG_BYTES);
+  allowBinaries(dir, 'qa/shot.png');
+  const first = commitAll(dir, 'a real screenshot, allowed');
+  put(dir, 'qa/shot.png', ZIP_BYTES);
+  const swapped = commitAll(dir, 'a zip under the screenshot name');
+  put(dir, 'qa/shot.png', Buffer.concat([PNG_BYTES, Buffer.from([7])]));
+  commitAll(dir, 'a real screenshot again');
+  const terms = writeTerms(TERMS);
+  assert.equal(scan(dir, ['--terms', terms]).status, 0, 'the final tree is fine');
+
+  const run = scan(dir, ['--terms', terms, '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 1, run.all);
+  assert.ok(run.stdout.includes(`BINARY qa/shot.png (added or changed in ${base}..HEAD by ${shortOf(swapped)}) fails its scripts/binary-allowlist.txt entry: not a PNG file`), run.stdout);
+  assert.ok(!run.stdout.includes(shortOf(first)), 'the first commit was fine');
+  assert.equal(count(run.stdout, 'binary blocked'), 1);
+
+  const onlyGood = scan(dir, ['--terms', terms, '--range', `${base}..${first}`]);
+  assert.equal(onlyGood.status, 0, onlyGood.all);
+  assert.match(onlyGood.stdout, /^range: 1 allowed binary file change\(s\) not scanned$/m);
+});
+
+test('plain text under an allowed .png name, and a changed blob under a sha256 pin, are blocked in the range', () => {
+  const dir = createRepo();
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  put(dir, 'qa/shot.png', Buffer.from('this is not an image\n'));
+  put(dir, 'fixtures/package.zip', ZIP_BYTES);
+  allowBinaries(dir, 'qa/shot.png', `fixtures/package.zip sha256=${HASH(ZIP_BYTES)}`);
+  commitAll(dir, 'text as a screenshot');
+  const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 1, run.all);
+  assert.match(run.stdout, /^BINARY qa\/shot\.png \(tracked; added or changed in .*\) fails its scripts\/binary-allowlist\.txt entry: not a PNG file$/m);
+  assert.doesNotMatch(run.stdout, /BINARY fixtures\/package\.zip/, 'the pinned file matches its pin');
+
+  put(dir, 'fixtures/package.zip', Buffer.concat([ZIP_BYTES, Buffer.from([1])]));
+  const changed = commitAll(dir, 'a different zip at the pinned path');
+  const pinned = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
+  assert.ok(pinned.stdout.includes(`BINARY fixtures/package.zip (tracked; added or changed in ${base}..HEAD by ${shortOf(changed)}) fails its scripts/binary-allowlist.txt entry: sha256 differs from the pinned value`), pinned.stdout);
+});
+
+test('a force-added ignored export is blocked in the range, even when a later commit removes it', () => {
+  const dir = createRepo();
+  put(dir, '.gitignore', IGNORE_RULES);
+  put(dir, 'a.txt', 'header\n');
+  const base = commitAll(dir, 'base');
+  put(dir, 'Finance_Agent_Round_r1_PRIVATE.json', '{"gold":"invented"}\n');
+  put(dir, 'with space/T-project.json', '{"invented":true}\n');
+  put(dir, 'keep-project.json', '{"invented":true}\n');
+  git(dir, ['add', '-f', 'Finance_Agent_Round_r1_PRIVATE.json', 'with space/T-project.json']);
+  const added = commitAll(dir, 'adds ignored exports');
+  git(dir, ['rm', '-q', 'Finance_Agent_Round_r1_PRIVATE.json', 'with space/T-project.json']);
+  commitAll(dir, 'removes them again');
+  const terms = writeTerms(TERMS);
+  const range = `${base}..HEAD`;
+  assert.equal(scan(dir, ['--terms', terms]).status, 0, 'the final tree no longer tracks them');
+  const run = scan(dir, ['--terms', terms, '--range', range]);
+  assert.equal(run.status, 1, run.all);
+  assert.ok(run.stdout.includes(`IGNORED Finance_Agent_Round_r1_PRIVATE.json (added or changed in ${range} by ${shortOf(added)}) is ignored by .gitignore, so it must not be in git`), run.stdout);
+  assert.ok(run.stdout.includes(`IGNORED with space/T-project.json (added or changed in ${range} by ${shortOf(added)}) is ignored by `), run.stdout);
+  assert.doesNotMatch(run.stdout, /IGNORED keep-project\.json/, 'a path with a ! exception is not ignored');
+  assert.equal(count(run.stdout, 'ignored blocked'), 2);
+  assert.match(run.stdout, /^ignored: take each out of git with git rm --cached <path>/m);
+});
+
+test('a path that only a range deletes is never blocked as ignored or binary', () => {
+  const dir = createRepo();
+  put(dir, '.gitignore', IGNORE_RULES);
+  put(dir, 'a.txt', 'header\n');
+  put(dir, 'T-project.json', '{"invented":true}\n');
+  put(dir, 'old.bin', PNG_BYTES);
+  git(dir, ['add', '-f', 'T-project.json']);
+  const base = commitAll(dir, 'base, already carrying both');
+  git(dir, ['rm', '-q', 'T-project.json', 'old.bin']);
+  commitAll(dir, 'deletes both');
+  const run = scan(dir, ['--terms', writeTerms(TERMS), '--range', `${base}..HEAD`]);
+  assert.equal(run.status, 0, run.all);
+  assert.equal(count(run.stdout, 'ignored blocked'), 0);
+  assert.equal(count(run.stdout, 'binary blocked'), 0);
+});
+
 test('private/ paths added by commits in the range are an error', () => {
   const dir = createRepo();
   put(dir, 'a.txt', 'header\n');
@@ -898,20 +1188,36 @@ test('parseTerms and validateRange behave as documented', () => {
   assert.throws(() => scanner.validateRange('a..b;rm'), /--range must look like/);
 });
 
-test('parseAllowlist keeps exact paths, skips comments and blanks, and rejects patterns', () => {
-  const allowed = scanner.parseAllowlist('\ufeff# c\r\n\r\n qa/a.png \r\ntests/fixtures/package.zip\n');
-  assert.deepEqual([...allowed], ['qa/a.png', 'tests/fixtures/package.zip']);
-  assert.equal(allowed.has('qa/a.png'), true);
+test('parseAllowlist keeps exact paths and optional pins, skips comments and blanks, and rejects bad lines', () => {
+  const hash = 'ab'.repeat(32);
+  const allowed = scanner.parseAllowlist(`﻿# c\r\n\r\n qa/a.png \r\ntests/fixtures/package.zip sha256=${hash.toUpperCase()}\r\nwith space/odd name.zip\tsha256=${hash}\nqa/b c.png\n`);
+  assert.deepEqual([...allowed.keys()], ['qa/a.png', 'tests/fixtures/package.zip', 'with space/odd name.zip', 'qa/b c.png']);
+  assert.deepEqual(allowed.get('qa/a.png'), { sha256: null });
+  assert.deepEqual(allowed.get('tests/fixtures/package.zip'), { sha256: hash }, 'the pin is kept in lower case');
+  assert.deepEqual(allowed.get('with space/odd name.zip'), { sha256: hash });
   assert.equal(allowed.has('QA/a.png'), false);
   assert.equal(scanner.parseAllowlist('').size, 0);
   assert.throws(() => scanner.parseAllowlist('ok.bin\nqa/*.png\n'), /line 2: write one exact repo path/);
+  assert.throws(() => scanner.parseAllowlist('ok.bin sha256=abc\n'), /line 1: sha256= needs 64 hexadecimal digits/);
+  assert.throws(() => scanner.parseAllowlist(`a.bin sha256=${hash}x\n`), /line 1: sha256= needs 64 hexadecimal digits/);
+  assert.throws(() => scanner.parseAllowlist(`sha256=${hash}\n`), /line 1: put the exact repo path before sha256=/);
+  assert.throws(() => scanner.parseAllowlist('a.bin\n# c\na.bin\n'), /line 3: the path is listed twice/);
   assert.equal(scanner.BINARY_ALLOWLIST, 'scripts/binary-allowlist.txt');
 });
 
-test('decodeText treats NUL bytes in the first 8 KB as binary and honours byte order marks', () => {
+test('decodeText treats NUL bytes in the first 8 KB, document signatures and invalid UTF-8 as binary, and honours byte order marks', () => {
   assert.equal(scanner.decodeText(Buffer.from([0x61, 0, 0x62])), null);
   assert.equal(scanner.decodeText(Buffer.from('plain text')), 'plain text');
   assert.equal(scanner.decodeText(Buffer.from('﻿with bom')), 'with bom');
   assert.equal(scanner.decodeText(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hi', 'utf16le')])), 'hi');
   assert.equal(scanner.decodeText(Buffer.concat([Buffer.from([0xff, 0xfe, 0, 0]), Buffer.from('hi', 'utf16le')])), null);
+  assert.equal(scanner.decodeText(Buffer.from('%PDF-1.7\nno NUL byte in here\n')), null, 'a PDF');
+  assert.equal(scanner.decodeText(Buffer.from('PK\x03\x04plain looking')), null, 'a zip container');
+  assert.equal(scanner.decodeText(Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0]), Buffer.from('plain looking')])), null, 'an old Office file');
+  assert.equal(scanner.decodeText(Buffer.from('see %PDF-1.7 and PK\x03\x04 later')), 'see %PDF-1.7 and PK\x03\x04 later', 'a signature only counts at the start');
+  assert.equal(scanner.decodeText(Buffer.from([0x63, 0x61, 0x66, 0xe9])), null, 'Latin-1 bytes are not UTF-8');
+  assert.equal(scanner.decodeText(Buffer.from('café ✓')), 'café ✓', 'valid UTF-8 beyond ASCII is text');
+  const cut = Buffer.from('é').subarray(0, 1);
+  assert.equal(scanner.decodeText(Buffer.concat([Buffer.from('ab'), cut])), null, 'a character cut off in a whole file is invalid');
+  assert.equal(scanner.decodeText(Buffer.concat([Buffer.from('ab'), cut]), { partial: true }), 'ab', 'but not at the end of a probe');
 });

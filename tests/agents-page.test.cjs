@@ -1867,6 +1867,50 @@ test('quoting a folder does not get past the checks: the pilots folder, the proj
   assert.equal((await w.service.listRounds()).length, 1, 'no round came from any of them');
 });
 
+test('a packet folder is cleaned once, checked on the real path and stored as that real path: the doubled-backslash text is refused, and a stored source folder always exists', { skip: process.platform === 'win32' }, async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const id = await finishedRoundViaService(w);
+  const pilots = path.join(w.tmpRoot, 'finance-studio-pilots');
+  const earlier = path.join(pilots, id + '-1');
+  assert.ok(fs.existsSync(path.join(earlier, 'outputs')), 'an earlier pilot folder with its outputs exists');
+  const rounds = async () => (await w.service.listRounds()).length;
+  const refused = async (text, pattern, label) => {
+    await assert.rejects(w.service.inspectPacket({ sourceDir: text }), error => error.status === 400 && pattern.test(error.message), `inspect ${label}`);
+    await assert.rejects(w.service.createRound(roundBody(w, { sourceDir: text })), error => error.status === 400 && pattern.test(error.message), `create ${label}`);
+  };
+  /* two backslashes then a slash: one cleaning gives <pilots>\/<run>, which names nothing; only a second cleaning would give the earlier pilot's folder */
+  const doubled = pilots + '\\\\/' + id + '-1';
+  for (const text of [doubled, `'${doubled}'`, `"${doubled}"`, ` ${doubled}\n`, pilots + '\\\\/', path.join(earlier, 'outputs').replace(/\/outputs$/, '\\\\/outputs')]) await refused(text, /does not exist|holds pilot folders/, JSON.stringify(text));
+  /* a text that does name the pilot folders in one reading is refused as that, whatever the writing */
+  for (const text of [pilots, earlier, `'${earlier}'`, `"${pilots}/"`, ` ${earlier}\n`, earlier.replace(/-/g, '\\-'), earlier.replace(/\//g, '/./')]) await refused(text, /holds pilot folders from earlier runs/, JSON.stringify(text));
+  assert.equal(await rounds(), 1, 'no round came from any of them');
+
+  /* every text that is accepted gives a round whose stored source folder exists, is the real folder, and is what was listed */
+  const awkward = path.join(w.base, AWKWARD_NAME, 'filesystem');
+  fs.mkdirSync(awkward, { recursive: true });
+  fs.writeFileSync(path.join(awkward, 'Cash_Facts.csv'), 'Label,Value\nOpening usable cash,100\n');
+  const link = path.join(w.base, 'link-to-task');
+  fs.symlinkSync(awkward, link);
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = w.base;
+  process.env.USERPROFILE = w.base;
+  t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  const forms = [awkward, `'${awkward}'`, `"${awkward}"`, `  ${awkward}\n`, terminalEscape(awkward), `~/${terminalEscape(AWKWARD_NAME)}/filesystem`, link, `'${link}'`];
+  const real = fs.realpathSync(awkward);
+  for (const text of forms) {
+    const listing = await w.service.inspectPacket({ sourceDir: text });
+    assert.deepEqual(listing.files.map(f => f.path), ['Cash_Facts.csv'], JSON.stringify(text));
+    const round = await w.service.createRound(roundBody(w, { sourceDir: text }));
+    const stored = JSON.parse(fs.readFileSync(path.join(w.roundsDir, round.id, 'round.json'), 'utf8')).packet.sourceDir;
+    assert.ok(fs.statSync(stored).isDirectory(), `the stored folder exists for ${JSON.stringify(text)}`);
+    assert.equal(stored, real, 'and it is the real folder');
+    /* the round can be carried forward from the stored path: it is read again as it is, not cleaned into something else */
+    await w.service.freezeRound(round.id, GOLD);
+    const next = await w.service.nextRound(round.id);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(w.roundsDir, next.id, 'round.json'), 'utf8')).packet.sourceDir, real);
+  }
+});
+
 /* ====================================================================== freeze form figures (task 3) */
 
 const freezePosts = page => page.requests.filter(r => r.method === 'POST' && /\/freeze$/.test(r.url));
@@ -1965,6 +2009,43 @@ test('a fingerprint figure goes through the same reading, and the tolerance fiel
   await page.type('fig', { value: '12 EUR', dataset: { kind: 'pfig', i: 0, j: 0, f: 'value' } });
   await page.click('freeze');
   assert.match(figureErrors(page), /Fingerprint 1 figure 1 needs a numeric value\./);
+});
+
+test('carrying a round forward fills figures as digits, never with an exponent, so a tiny tolerance or a huge value does not block Freeze', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  const gold = {
+    gold: { decision: 'hold', figures: [{ label: 'Tiny tolerance', value: 1250, tolerance: 1e-7 }, { label: 'Huge value', value: 1.5e21, tolerance: 0 }, { label: 'Tiny value', value: 1.25e-10, tolerance: 1.5e21 }, { label: 'Negative tiny', value: -2.5e-8, tolerance: 0 }], notes: 'synthetic' },
+    fingerprints: [{ id: 'fp-tiny', label: 'Tiny figure', tokens: ['available facility counted'], figures: [{ label: 'Wrong tiny', value: 1e-7, tolerance: 1e-9 }] }],
+  };
+  const first = await w.service.createRound(roundBody(w));
+  const frozenFirst = await w.service.freezeRound(first.id, gold);
+  const { summarySha256 } = await w.service.approvalSummary(first.id);
+  await w.service.approveRound(first.id, { summarySha256, acknowledgements: ACK });
+  await w.service.launchRound(first.id);
+  await w.service.whenSettled(first.id);
+
+  const page = makePage(t, w);
+  await page.boot();
+  await page.type('select-round', { value: first.id });
+  await waitFor(() => page.enabled('next-round'), { label: 'the next-round button', timeout: 10000 });
+  await page.click('next-round');
+  const next = (await w.service.listRounds()).find(row => row.id !== first.id);
+  assert.equal(next.carriedFrom, first.id);
+
+  const typed = field => [...page.section('freeze').matchAll(new RegExp(`data-f="${field}"[^>]*value="([^"]*)"`, 'g'))].map(m => m[1]);
+  assert.deepEqual(typed('value'), ['1250', '1500000000000000000000', '0.000000000125', '-0.000000025', '0.0000001'], 'values as digits (the last is the fingerprint figure)');
+  assert.deepEqual(typed('tolerance'), ['0.0000001', '0', '1500000000000000000000', '0', '0.000000001'], 'tolerances as digits');
+  assert.ok([...typed('value'), ...typed('tolerance')].every(text => !/e/i.test(text)), 'no exponent in any figure of the form');
+
+  await page.click('freeze');
+  assert.doesNotMatch(figureErrors(page), /needs a numeric value|tolerance that is not a number/, figureErrors(page));
+  assert.equal(page.status().startsWith('Gold frozen for round ' + next.id), true, page.status());
+  const posted = JSON.parse(freezePosts(page).at(-1).body);
+  assert.deepEqual(posted.gold.figures.map(f => [f.value, f.tolerance]), [[1250, 1e-7], [1.5e21, 0], [1.25e-10, 1.5e21], [-2.5e-8, 0]], 'the same numbers go back to the companion');
+  assert.deepEqual(posted.fingerprints[0].figures.map(f => [f.value, f.tolerance]), [[1e-7, 1e-9]]);
+  const frozen = await w.service.getRound(next.id);
+  assert.equal(frozen.status, 'frozen');
+  assert.equal(frozen.freeze.contentSha256, frozenFirst.freeze.contentSha256, 'the carried gold is the same content');
 });
 
 /* ====================================================================== author review privacy (task 5) */

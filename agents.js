@@ -1571,9 +1571,18 @@ ${o.guideline}</textarea></label>
   }
   /* "Start next round from this round": the companion makes a new draft from the stored round, and the form is filled
      from it (the folder is listed again, so the file table is current). Nothing is frozen or approved. */
+  /* A number as digits, never with an exponent: String(1e-7) is "1e-7" and String(1.5e21) is "1.5e+21", which parseFigure refuses, so a carried
+     figure typed that way would block the freeze. The digits are the shortest ones that read back as the same number. Text is left as it is. */
+  function typedFigure(v){
+    if(typeof v!=='number'||!Number.isFinite(v))return String(v);
+    const text=String(v),m=/^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(text);
+    if(!m)return text;
+    const digits=m[2]+(m[3]||''),point=m[2].length+Number(m[4]);
+    return m[1]+(point<=0?'0.'+'0'.repeat(-point)+digits:point>=digits.length?digits+'0'.repeat(point-digits.length):digits.slice(0,point)+'.'+digits.slice(point));
+  }
   function fzFromContent(content){
     const gold=content&&content.gold&&typeof content.gold==='object'?content.gold:{};
-    const figure=f=>({label:String(f&&f.label!=null?f.label:''),value:String(f&&f.value!=null?f.value:''),tolerance:f&&f.tolerance!=null&&f.tolerance!==''?String(f.tolerance):''});
+    const figure=f=>({label:String(f&&f.label!=null?f.label:''),value:f&&f.value!=null?typedFigure(f.value):'',tolerance:f&&f.tolerance!=null&&f.tolerance!==''?typedFigure(f.tolerance):''});
     const figures=Array.isArray(gold.figures)?gold.figures.slice(0,50).map(figure):[];
     const prints=Array.isArray(content&&content.fingerprints)?content.fingerprints.slice(0,20).map(fp=>({id:String(fp&&fp.id||''),label:String(fp&&fp.label||''),
       tokens:Array.isArray(fp&&fp.tokens)?fp.tokens.map(String).join('\n'):'',figures:Array.isArray(fp&&fp.figures)?fp.figures.slice(0,50).map(figure):[]})):[];

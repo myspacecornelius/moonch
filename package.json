@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "setup": "git config core.hooksPath .githooks",
+    "setup": "node scripts/setup-hooks.cjs",
     "start": "node backend/server.cjs --open",
     "privacy": "node scripts/privacy-scan.cjs",
     "test": "node --test tests/*.test.cjs",

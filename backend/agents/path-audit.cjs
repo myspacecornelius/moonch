@@ -93,27 +93,37 @@
      - in code, a quoted glob that starts at the root with a wildcard (a quoted slash followed by stars or question marks,
        such as the pattern for every .xlsx file anywhere), and os.walk, os.listdir, os.scandir, glob, Path and the like given
        os.sep, os.path.sep or '/' (bare-root);
-     - in code, the parent folder written without a path: a quoted '..' or "..", os.pardir, Path.cwd().parent and
-       dirname(os.getcwd()) are read as `..` from the tracked working directory, and Path.cwd().parents is a dotdot;
+     - in code, the parent folder written without a path: a quoted '..' or ".." as an argument of a call that takes a path
+       (listdir, chdir, scandir, walk, path.join, Path(, open(, glob, setwd, list.files, readdir, opendir and the like),
+       os.pardir, os.path.pardir, Path.cwd().parent and dirname(os.getcwd()) are read as `..` from the tracked working
+       directory, and Path.cwd().parents is a dotdot. A quoted ".." anywhere else is a value (na_values='..', a split on
+       '..', a cell) and is not flagged. When the call also names the script's own location (os.path.join(os.path.dirname(
+       __file__), '..', 'filesystem'), __dirname) the base is not the working directory, so it is a note, not a violation
+       (`unverifiable-path`, the second wording below);
      - in a shell command, $(dirname $PWD) and $(dirname "$PWD") are the parent of the tracked working directory, and
        $PWD/.. or "$PWD"/.. with a working directory that is not known is a dotdot (with a known one, the path is resolved
        and judged like any other).
-   "In code" means text that is a program: a Bash code string (python -c, node -e, Rscript -e), a here document fed to an
-   interpreter or written to a file with a code extension, and what a file tool writes to a file with a code extension
-   (.py .sh .bash .zsh .R .js .ts .rb .pl .ps1 and the like) or that starts with a #! line. What is written to any other
+   "In code" means text that is a program: a Bash code string (python -c, node -e, Rscript -e), a here document or here
+   string fed to an interpreter or written to a file with a code extension, what echo or printf prints into an
+   interpreter's input (echo "..." | python3, cat <<EOF | python3 -) or to a file with a code extension (echo "..." >
+   outputs/s.py, | tee outputs/s.sh), and what a file tool writes to a file with a code extension (.py .sh .bash .zsh .R
+   .js .ts .rb .pl .ps1 and the like) or that starts with a #! line. The command right before the pipe is the one read: an
+   interpreter given a script file or an inline program (-c, -e) takes its input as data. What is written to any other
    file (.csv .json .txt .md and the like) is data and keeps only the checks it had before these rules: a statistical table
    can hold a quoted ".." for "not available", and that is not the parent folder.
    Not flagged: the word locate in a sentence, a quoted "locate the totals", find / replace, and a '..' that resolves to a
    folder inside the pilot folder (after cd filesystem).
 
-   Programs (see classifyAbsolute). The directories of the system's and Homebrew's programs (/usr/bin, /bin, /usr/local/bin,
-   /usr/sbin, /sbin, /opt/homebrew/bin, /opt/homebrew/sbin) may be read and run, never written. A program inside a macOS
-   application bundle, /Applications/<Name>.app/Contents/MacOS/<program>, may be run as the command of a shell command
-   (soffice from LibreOffice); any other use of a path in a bundle is an access like any other.
+   Programs (see classifyAbsolute). The directories of the system's programs (/usr/bin, /bin, /usr/local/bin, /usr/sbin,
+   /sbin) may be read and run, never written by a redirect or a file tool. A program in Homebrew's bin or sbin
+   (/opt/homebrew/bin/python3) or inside a macOS application bundle (/Applications/<Name>.app/Contents/MacOS/<program>, such
+   as soffice from LibreOffice) may be run as the command word of a shell command, and that is all: as an operand (cp, mv,
+   rm, tee, chmod, ln, sed -i, cat) or in code text the same path is an access like any other.
 
-   Paths the text cannot show (note `unverifiable-path`). An argument or a redirect target of a command that is built
-   wholly from a variable the command did not set, or from command output, names a path the audit cannot check. It is
-   noted and never discards a run. Not noted: the arguments of echo, printf and the other commands that only print their
+   Paths the text cannot show (note `unverifiable-path`, in two wordings). An argument or a redirect target of a command
+   that is built wholly from a variable the command did not set, or from command output, names a path the audit cannot
+   check. In code, a path call given a ".." and the script's own location (__file__, __dirname) names a folder that depends
+   on where the script is. Both are noted and never discard a run. Not noted: the arguments of echo, printf and the other commands that only print their
    words, grep, sed and awk patterns, the loop variable of for, a process substitution, the special parameters $? $# $$ $!
    and an arithmetic expansion, and the arguments of [, test, sleep, exit and the like. */
 
@@ -139,9 +149,11 @@ const DEFAULT_BUDGET_MS = 5000;
 const MAX_LOOPBACK_HITS = 50;
 
 const SAFE_DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
-const SAFE_BIN_DIRS = new Set(['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/opt/homebrew/sbin']);
-/* A program inside a macOS application bundle. It may be run as the command of a shell command, nothing else in the bundle. */
-const APP_BINARY_RE = /^\/Applications\/[^/]+\.app\/Contents\/MacOS\/[^/]+$/;
+const SAFE_BIN_DIRS = new Set(['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin']);
+/* A program inside a macOS application bundle, or in Homebrew's bin or sbin. It may be run as the command word of a shell
+   command (soffice, python3 from Homebrew) and nothing else: as an operand (cp x /opt/homebrew/bin/y, rm, tee, chmod, ln,
+   sed -i) or in code text it is an access like any other. Unlike SAFE_BIN_DIRS this is not a place that may be read. */
+const RUNNABLE_RE = /^\/(?:Applications\/[^/]+\.app\/Contents\/MacOS|opt\/homebrew\/s?bin)\/[^/]+$/;
 /* Top level directories that make an absolute path inside free text believable. */
 const TOP_LEVEL = new Set(['etc', 'usr', 'var', 'home', 'Users', 'tmp', 'opt', 'bin', 'sbin', 'root', 'mnt', 'Volumes', 'proc', 'sys',
   'dev', 'Library', 'System', 'Applications', 'private', 'srv', 'run', 'lib', 'lib64', 'boot', 'media', 'snap', 'nix', 'cores']);
@@ -179,8 +191,15 @@ const MACHINE_SEARCH_TEXT_RES = [
   new RegExp(`(?<![\\w.-])(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})\\s{1,8}-[A-Za-z]`),
   new RegExp(`(?<![\\w.-])xargs\\s{1,8}(?:-\\S{1,20}\\s{1,8}){0,6}(?:[\\w./-]{0,120}/)?(?:${MACHINE_SEARCH_NAMES})(?![\\w.-])`),
 ];
-const QUOTED_PARENT_RE = /(['"])\.\.\1/;
-const PARDIR_RE = /(?<![\w$])pardir(?!\w)/;
+/* A quoted ".." is the parent folder only as an argument of a call that takes a path (or inside a longer relative path such
+   as '../x', which TEXT_DOTDOT_RE reads). Anywhere else it is a value: na_values='..', a split on '..', a cell. Statistical
+   tables (World Bank, OECD) use ".." for "not available". */
+const PATH_CALL_RE = /(?<![\w$])(?:listdir|chdir|scandir|walk|setwd|readdir|readdirSync|opendir|glob|iglob|rglob|abspath|realpath|normpath|Path|PurePath|PurePosixPath|open|list\.files|list\.dirs|file\.path|Dir\.entries|(?:path|posixpath|ntpath|os\.path)\.(?:join|resolve))\s*\(/g;
+const PARENT_ARG_RE = /^(?:(?:path|dir|top|directory|folder|file|filename|root|cwd)\s*=\s*)?[rRuUbBfF]{0,2}(['"])\.\.\1$/;
+const SCRIPT_BASE_RE = /__file__|__dirname|__filename/; /* the script's own folder, not the working directory */
+const MAX_PATH_CALLS = 2000;
+const MAX_CALL_CHARS = 600;
+const PARDIR_RE = /(?<![\w$.])os\.(?:path\.)?pardir(?!\w)|\bfrom\s+os(?:\.path)?\s+import\s[^\n]{0,200}?\bpardir\b/;
 const CWD_PARENT_RE = /\bPath\s{0,8}\.\s{0,8}cwd\s{0,8}\(\s{0,8}\)(?:\s{0,8}\.\s{0,8}(?:resolve|absolute)\s{0,8}\(\s{0,8}\))?\s{0,8}\.\s{0,8}parent(s?)(?!\w)/;
 const DIRNAME_CWD_RE = /\bdirname\s{0,8}\(\s{0,8}(?:os\.getcwd|process\.cwd|Path\.cwd)\s{0,8}\(\s{0,8}\)\s{0,8}\)/;
 /* A URL in free text. The match stops at $, a backtick and braces, so a substitution inside a URL is still scanned. */
@@ -501,6 +520,43 @@ function plausibleTop(segment) {
   return TOP_LEVEL.has(segment) || fs.existsSync('/' + segment);
 }
 
+/* Does this code pass a quoted ".." to a call that takes a path? { direct } when it does, { script } when the call also
+   names the script's own location (os.path.join(os.path.dirname(__file__), '..', 'filesystem')): the folder that names is
+   the script's, and where the script is cannot be read from the text. Each call is read as far as its closing bracket. */
+function parentCalls(body) {
+  const found = { direct: false, script: false };
+  let calls = 0;
+  for (const match of body.matchAll(PATH_CALL_RE)) {
+    if (++calls > MAX_PATH_CALLS) break;
+    const start = match.index + match[0].length;
+    const limit = Math.min(body.length, start + MAX_CALL_CHARS);
+    const args = [];
+    let depth = 1;
+    let quote = '';
+    let argStart = start;
+    let end = limit;
+    for (let i = start; i < limit; i++) {
+      const c = body[i];
+      if (quote) {
+        if (c === '\\') i++;
+        else if (c === quote) quote = '';
+      } else if (c === "'" || c === '"') quote = c;
+      else if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') {
+        if (--depth === 0) { end = i; break; }
+      } else if (c === ',' && depth === 1) {
+        args.push(body.slice(argStart, i));
+        argStart = i + 1;
+      }
+    }
+    args.push(body.slice(argStart, end));
+    if (!args.some(arg => PARENT_ARG_RE.test(arg.trim()))) continue;
+    if (SCRIPT_BASE_RE.test(body.slice(match.index, end))) found.script = true;
+    else found.direct = true;
+  }
+  return found;
+}
+
 /* Code that looks beyond the folder without writing an absolute path: a search of the whole machine, a glob that starts at
    the root, find /, and the parent folder written as '..', os.pardir or Path.cwd().parent (see `machine-search` at the top). */
 function scanBeyondFolder(body, run, state) {
@@ -517,7 +573,9 @@ function scanBeyondFolder(body, run, state) {
   }
   const parents = CWD_PARENT_RE.exec(body);
   if (parents && parents[1]) run.report('dotdot', truncate(parents[0], 80)); /* .parents lists every ancestor */
-  if (QUOTED_PARENT_RE.test(body) || PARDIR_RE.test(body) || DIRNAME_CWD_RE.test(body) || (parents && !parents[1])) {
+  const called = parentCalls(body);
+  if (called.script) run.note(UNVERIFIABLE_SCRIPT_PATH);
+  if (called.direct || PARDIR_RE.test(body) || DIRNAME_CWD_RE.test(body) || (parents && !parents[1])) {
     const violation = classifyRelative(run.ctx, '..', state);
     if (violation) run.report(violation.kind, violation.path);
   }
@@ -1111,7 +1169,12 @@ function lex(src) {
       continue;
     }
     if (c === ';') { operator(';'); i += src[i + 1] === ';' || src[i + 1] === '&' ? 2 : 1; continue; }
-    if (c === '|') { operator('|'); i += src[i + 1] === '|' || src[i + 1] === '&' ? 2 : 1; continue; }
+    if (c === '|') { /* a pipe is '|' or '|&', an or-list is '||' */
+      const two = src.slice(i, i + 2);
+      operator(two === '||' || two === '|&' ? two : '|');
+      i += two === '||' || two === '|&' ? 2 : 1;
+      continue;
+    }
     if (c === '&') {
       if (src[i + 1] === '&') { operator('&&'); i += 2; continue; }
       if (src[i + 1] === '>') {
@@ -1154,15 +1217,20 @@ function lex(src) {
 /* Group tokens into statements: simple commands plus subshell open and close markers. */
 function toStatements(tokens) {
   const statements = [];
-  let current = { t: 'cmd', words: [], redirs: [] };
+  /* piped: the command comes right after a pipe (a | b), so its input is the output of the one before */
+  let current = { t: 'cmd', words: [], redirs: [], piped: false };
   const flush = () => {
     if (current.words.length || current.redirs.length) statements.push(current);
-    current = { t: 'cmd', words: [], redirs: [] };
+    current = { t: 'cmd', words: [], redirs: [], piped: false };
   };
   for (const token of tokens) {
     if (token.k === 'word') current.words.push(token.w);
     else if (token.k === 'redir') current.redirs.push(token);
-    else if (token.v === '(') { flush(); statements.push({ t: 'open' }); } else if (token.v === ')') { flush(); statements.push({ t: 'close' }); } else flush();
+    else if (token.v === '(') { flush(); statements.push({ t: 'open' }); } else if (token.v === ')') { flush(); statements.push({ t: 'close' }); } else {
+      const continued = token.v === '\n' && current.piped && !current.words.length && !current.redirs.length; /* a pipe may end a line */
+      flush();
+      current.piped = token.v === '|' || token.v === '|&' || continued;
+    }
   }
   flush();
   return statements;
@@ -1567,6 +1635,7 @@ const UNVERIFIABLE_COMMAND = 'unverifiable-command: a command name was built fro
 const UNVERIFIABLE_CODE = 'unverifiable-code: code given to eval or a shell was built at run time, so only its visible part was checked';
 const UNVERIFIABLE_INPUT = 'unverifiable-input: a shell read its commands from its input (for example a pipe), so those commands were not checked';
 const UNVERIFIABLE_PATH = 'unverifiable-path: a path argument or redirect target was built wholly from a variable or command output, so it could not be checked and the run is not provably confined to the folder';
+const UNVERIFIABLE_SCRIPT_PATH = 'unverifiable-path: code built a path from the folder the script itself is in (__file__, __dirname) and a "..", so where it points depends on where the script is and was not checked';
 /* Commands whose arguments are numbers, words or test operators, so a value built at run time in them is not noted. */
 const NO_PATH_OPERANDS = new Set(['[', '[[', 'test', 'sleep', 'exit', 'return', 'kill', 'shift', 'let', 'unset', 'wait']);
 
@@ -1667,12 +1736,23 @@ const INTERPRETERS = new Set([...INLINE_CODE.keys(), 'deno', 'bun', 'tsx', 'ts-n
 /* Does the text this command is given (a here document or a here string) hold a program? The command is an interpreter,
    or it writes a file with a code extension (cat > outputs/run.py <<EOF, tee outputs/run.sh <<EOF). */
 function inputIsCode(command, words, state, run) {
+  if (command.feedsCode) return true; /* cat <<'EOF' | python3 */
   let idx = 0;
   while (idx < words.length && parseAssignment(words[idx])) idx++;
   idx = skipPrefix(words, idx);
   if (idx < words.length && INTERPRETERS.has(path.posix.basename(literal(words[idx])).replace(/[\d.]+$/, ''))) return true;
-  const targets = command.redirs.filter(redirect => redirect.target && !redirect.op.startsWith('<')).map(redirect => redirect.target).concat(words.slice(idx + 1));
+  return writesCodeFile(command, words.slice(idx + 1), state, run);
+}
+
+/* Does the command write a file with a code extension: a redirect to it, or a file name among its arguments (tee)? */
+function writesCodeFile(command, args, state, run) {
+  const targets = command.redirs.filter(redirect => redirect.target && !redirect.op.startsWith('<')).map(redirect => redirect.target).concat(args);
   return targets.some(word => CODE_FILE_RE.test(expand(word, state, run).text));
+}
+
+/* What echo or printf prints, as the text of one string (an option such as -n is not part of it). */
+function printedText(args, state, run) {
+  return args.filter(word => !/^-[neE]+$/.test(literal(word))).map(word => expand(word, state, run).text).join(' ');
 }
 
 /* The code string given with -c (or an interpreter's inline code flag), or -1 when there is none. */
@@ -1733,9 +1813,10 @@ function evaluateCommand(command, run, state, depth) {
   const args = words.slice(idx + 1);
   const plain = !name.includes('/');
   const nameExp = expand(nameWord, state, run);
-  /* A program inside an application bundle may be run (soffice); naming anything else in the bundle is an access. */
-  const appBinary = !nameExp.dynamic && !nameExp.home && nameExp.text.startsWith('/') && APP_BINARY_RE.test(path.posix.normalize(nameExp.text));
-  if ((!plain || nameExp.dynamic) && !appBinary) checkWord(nameWord, 'path', run, state, true);
+  /* A program inside an application bundle or in Homebrew's bin may be run (soffice, python3); naming anything else there,
+     or naming it as an operand, is an access. */
+  const runnable = !nameExp.dynamic && !nameExp.home && nameExp.text.startsWith('/') && RUNNABLE_RE.test(path.posix.normalize(nameExp.text));
+  if ((!plain || nameExp.dynamic) && !runnable) checkWord(nameWord, 'path', run, state, true);
   if (nameExp.dynamic && !nameExp.prefix) run.note(UNVERIFIABLE_COMMAND);
 
   if (plain && (name === 'cd' || name === 'chdir' || name === 'pushd' || name === 'popd')) {
@@ -1783,8 +1864,11 @@ function evaluateCommand(command, run, state, depth) {
     return;
   }
   if (exe === 'find') evaluateFind(args, run, state);
-  else if (SPECS.has(exe)) evaluateWithGrammar(SPECS.get(exe), args, run, state);
-  else {
+  else if (SPECS.has(exe)) {
+    evaluateWithGrammar(SPECS.get(exe), args, run, state);
+    /* echo and printf print a program when it goes to an interpreter or to a file with a code extension */
+    if (plain && (exe === 'echo' || exe === 'printf') && (command.feedsCode || writesCodeFile(command, [], state, run))) scanText(printedText(args, state, run), run, state, 'code');
+  } else {
     /* the words of a [[ ]] test come after the reserved word [[, which the command lookup stepped over */
     const quiet = NO_PATH_OPERANDS.has(exe) || words.slice(0, idx).some(word => literal(word) === '[[');
     args.forEach(word => checkWord(word, 'path', run, state, quiet));
@@ -1792,9 +1876,47 @@ function evaluateCommand(command, run, state, depth) {
   runHeredocs(command.redirs, false, run, state, depth, codeInput);
 }
 
+const INTERPRETER_VALUE_OPTS = new Set(['-W', '-X', '-r', '--require', '--import', '--loader']); /* python3 -W ignore -, node -r x */
+
+/* In `echo "..." | python3` and `cat <<'EOF' | python3 -` what the first command prints is a program: mark it, so that
+   what it prints is scanned as code. The same for the output of a command piped into tee or cat that writes a file with a
+   code extension. */
+function markPipedCode(statements) {
+  for (let i = 1; i < statements.length; i++) {
+    const next = statements[i];
+    if (next.t !== 'cmd' || !next.piped || statements[i - 1].t !== 'cmd') continue;
+    if (readsProgramFromInput(next)) statements[i - 1].feedsCode = true;
+  }
+}
+
+function readsProgramFromInput(command) {
+  const words = command.words;
+  let idx = 0;
+  while (idx < words.length && parseAssignment(words[idx])) idx++;
+  idx = skipPrefix(words, idx);
+  if (idx >= words.length) return false;
+  const exe = path.posix.basename(literal(words[idx]));
+  const args = words.slice(idx + 1).map(literal);
+  const base = exe.replace(/[\d.]+$/, '');
+  if (INTERPRETERS.has(base)) {
+    const inline = INLINE_CODE.get(base);
+    if (inline && args.some(arg => inline.test(arg))) return false; /* the program is the option's text; the input is data */
+    /* python3, python3 -, node -: no script file, so the input is the program (an option's value is not a script file) */
+    for (let i = 0; i < args.length; i++) {
+      if (INTERPRETER_VALUE_OPTS.has(args[i])) i++;
+      else if (!args[i].startsWith('-')) return false;
+    }
+    return true;
+  }
+  const toCodeFile = command.redirs.some(redirect => redirect.target && !redirect.op.startsWith('<') && CODE_FILE_RE.test(literal(redirect.target)));
+  return toCodeFile || (exe === 'tee' && args.some(arg => CODE_FILE_RE.test(arg)));
+}
+
 function auditShell(code, run, state, depth) {
   const stack = [];
-  for (const statement of toStatements(lex(code))) {
+  const statements = toStatements(lex(code));
+  markPipedCode(statements);
+  for (const statement of statements) {
     if (statement.t === 'open') stack.push(cloneState(state));
     else if (statement.t === 'close') {
       const snapshot = stack.pop();

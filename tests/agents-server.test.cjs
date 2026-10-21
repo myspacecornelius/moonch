@@ -195,7 +195,8 @@ test('GET /api/status keeps its fields and adds the agents block', async t => {
   assert.equal(response.headers['x-content-type-options'], 'nosniff');
   assert.equal(response.headers['referrer-policy'], 'no-referrer');
   assert.equal(response.headers['x-frame-options'], 'DENY');
-  assert.deepEqual(Object.keys(response.json).sort(), ['adapter', 'agents', 'canStart', 'connection', 'nonce', 'state']);
+  assert.deepEqual(Object.keys(response.json).sort(), ['adapter', 'agents', 'canStart', 'connection', 'nonce', 'pid', 'state']);
+  assert.equal(response.json.pid, process.pid, 'pid is how a later start tells this companion from another process (LOCAL_SERVER.json)');
   assert.equal(response.json.state, null);
   assert.equal(response.json.connection, 'local-sdk-adapter');
   assert.equal(response.json.canStart, false);
