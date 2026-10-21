@@ -80,22 +80,25 @@ function hasPhrase(prepared, phrase) {
 }
 
 /* A decision keyword that a negation comes right before does not say what it seems to say ("do not approve the
-   refinancing"). A negation counts when it is one of the three words before the keyword in the same sentence: not, no,
-   never, avoid, cannot, and any contraction ending in n't (don't, shouldn't, can't, ...), so "do not" and "should not"
-   are covered by their "not". A full stop, !, ?, ; or a new line ends the sentence, so a negation in an earlier sentence
-   does not carry over. */
+   refinancing"). A negation counts when it is one of the three words before the keyword in the same clause: not, no, never,
+   cannot, and any contraction ending in n't (don't, shouldn't, can't, ...), so "do not" and "should not" are covered by
+   their "not". "avoid" counts only as the word directly before the keyword ("avoid refinancing"); further back it is the
+   start of a purpose clause ("To avoid default, refinance"). A clause ends at a full stop, !, ?, ;, : or a comma, at a
+   dash with spaces around it, and at a new line, so a negation in an earlier clause does not carry over, and "no" with a
+   comma after it ("No, reject the proposal.") is an answer and not a negator. */
 const NEGATION_WORDS = 3;
 const NEGATION_LOOKBACK = 100; /* characters looked at before a keyword, enough for three words */
 const MAX_KEYWORD_OCCURRENCES = 20000; /* occurrences of one keyword examined, so no text costs more than a bounded amount */
-const isNegator = word => /^(?:not|no|never|avoid|cannot|dont)$/.test(word) || /n't$/.test(word);
+const isNegator = word => /^(?:not|no|never|cannot|dont)$/.test(word) || /n't$/.test(word);
+const endsClause = word => /[.!?;:,]$/.test(word.replace(/["')\]]+$/, '')) || /^-+$/.test(word);
 
 function negatedAt(lower, index) {
   const before = lower.slice(Math.max(0, index - NEGATION_LOOKBACK), index);
   const words = before.slice(before.lastIndexOf('\n') + 1).split(/\s+/).filter(Boolean);
-  let seen = 0;
-  for (let i = words.length - 1; i >= 0 && seen < NEGATION_WORDS; i--, seen++) {
-    if (/[.!?;]$/.test(words[i])) return false; /* the word ends an earlier sentence */
-    if (isNegator(words[i].replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, ''))) return true;
+  for (let i = words.length - 1, seen = 0; i >= 0 && seen < NEGATION_WORDS; i--, seen++) {
+    if (endsClause(words[i])) return false; /* the word closes an earlier clause */
+    const bare = words[i].replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, '');
+    if (isNegator(bare) || (seen === 0 && bare === 'avoid')) return true;
   }
   return false;
 }
@@ -131,10 +134,12 @@ function findFigure(figure, texts) {
   return { label: typeof item.label === 'string' ? item.label : '', value: item.value, found: where !== null, where };
 }
 
-/* A gold figure with a single digit (0 to 9, either sign) turns up in almost any answer, so a match on it is weak. */
+/* A gold figure written as one digit (0 to 9, with an optional sign) turns up in almost any answer, so a match on it is
+   weak. It is judged by how it was written, not by its value: 3.0, 2.0x, 5% and $8 name a figure the writer was more
+   specific about than a bare digit. */
 const isSingleDigit = value => {
-  const target = parseFigure(value);
-  return target !== null && Number.isInteger(target) && Math.abs(target) <= 9;
+  const written = typeof value === 'number' ? String(value) : typeof value === 'string' ? value : '';
+  return /^[-+]?\d$/.test(written.trim());
 };
 
 /* Only the final answer decides a verdict. What the pilot wrote into its output files can hold the source figures it was
@@ -168,9 +173,10 @@ function checkFingerprint(fingerprint, texts) {
    - matches-frozen-gold needs every gold figure in the final answer, no fingerprint hit, and at least one decision keyword
      when gold.decision (keywords separated by semicolons) is given. A gold with no figures and no keywords proves nothing,
      so it is never a match.
-   - A decision keyword does not count when not, no, never, avoid, cannot or a contraction ending in n't stands within
-     three words before it in the same sentence ("do not approve the refinancing").
-   - A gold figure that is a single digit (0 to 9, either sign) is weak evidence: its entry has weak: true, and its `where`
+   - A decision keyword does not count when not, no, never, cannot or a contraction ending in n't stands within three words
+     before it in the same clause, or avoid stands directly before it ("do not approve the refinancing"). A comma, colon,
+     semicolon, full stop, spaced dash or new line ends the clause.
+   - A gold figure written as one digit (0 to 9, optional sign; not 3.0, 5% or $8) is weak evidence: its entry has weak: true, and its `where`
      reads "final, a single digit that may be incidental" (which the page prints after "found in the"). When every gold
      figure is weak and no decision keyword confirms them, the answer is not a match (unclear, or fingerprint when one hits).
    - A fingerprint hits only when all of its tokens appear or all of its figures match, in the final answer.

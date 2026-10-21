@@ -5,15 +5,35 @@
 /model-run.js
 /model-runs/
 /LOCAL_SERVER.json
-# Task packages and documents are never committed. tests/fixtures holds the one synthetic zip the tests need.
-*.xlsx
-*.xlsm
-*.xls
-*.docx
-*.doc
-*.pdf
-*.zip
-*.pptx
+/LOCAL_SERVER.lock*
+# Task packages, documents, archives and data exports are never committed, whatever the letter case of the extension
+# (Task.XLSX, a/b.Pdf). tests/fixtures holds the synthetic files the tests need.
+*.[xX][lL][sS][xX]
+*.[xX][lL][sS][mM]
+*.[xX][lL][sS][bB]
+*.[xX][lL][sS]
+*.[xX][lL][tT][xX]
+*.[xX][lL][tT][mM]
+*.[dD][oO][cC][xX]
+*.[dD][oO][cC][mM]
+*.[dD][oO][cC]
+*.[dD][oO][tT][xX]
+*.[pP][dD][fF]
+*.[zZ][iI][pP]
+*.[pP][pP][tT][xX]
+*.[pP][pP][tT][mM]
+*.[pP][pP][tT]
+*.[oO][dD][tT]
+*.[oO][dD][sS]
+*.[oO][dD][pP]
+*.[rR][tT][fF]
+*.[nN][uU][mM][bB][eE][rR][sS]
+*.[pP][aA][gG][eE][sS]
+*.[kK][eE][yY]
+*.7[zZ]
+*.[rR][aA][rR]
+*.[gG][zZ]
+*.[cC][sS][vV]
 !tests/fixtures/**
 
 # The app's own downloads of private material (Finance_Agent_Round_<id>_PRIVATE.json holds the frozen gold and the prompt; the analysis
@@ -22,7 +42,7 @@
 # The app's project download (<title>-project.json) holds the private evaluator evidence.
 # These two rules come after the tests/fixtures exception above on purpose, so they apply inside tests/fixtures too.
 *[_-]PRIVATE.*
-*-project.json
+*-[pP][rR][oO][jJ][eE][cC][tT].[jJ][sS][oO][nN]
 
 # Local scratch space and local assistant settings.
 /tmp/

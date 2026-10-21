@@ -382,8 +382,8 @@ test('a decision keyword that a negation comes right before does not count', () 
   const decide = text => suggest(freeze({ gold: { decision: keyword, figures: [{ label: 'units', value: 482, tolerance: 0.5 }] } }), 'Units are 482. ' + text, '');
   for (const negated of [
     'We do not approve the refinancing.', 'We should not approve the refinancing.', "We shouldn't approve the refinancing.", "Don't approve the refinancing.", 'I would never approve the refinancing.', 'We cannot approve the refinancing.',
-    'There is no case to approve the refinancing.', 'We should avoid trying to approve the refinancing.', 'WE DO NOT APPROVE THE REFINANCING.', 'We shouldn’t approve the refinancing.', 'Not to approve the refinancing.',
-    'No, approve the refinancing is not on the table.', 'We do not, in this, approve the refinancing.', 'The board did not yet approve the refinancing.', "We can't approve the refinancing.", 'Do\nnot approve the refinancing.',
+    'There is no case to approve the refinancing.', 'WE DO NOT APPROVE THE REFINANCING.', 'We shouldn’t approve the refinancing.', 'Not to approve the refinancing.',
+    'The board did not yet approve the refinancing.', "We can't approve the refinancing.", 'Do\nnot approve the refinancing.',
   ]) {
     const result = decide(negated);
     assert.equal(result.verdict, 'unclear', negated);
@@ -404,7 +404,7 @@ test('a decision keyword that a negation comes right before does not count', () 
   const two = suggest(freeze({ gold: { decision: 'approve the refinancing; reject the extension', figures: [{ label: 'units', value: 482, tolerance: 0.5 }] } }), 'Units are 482. We do not approve the refinancing; we reject the extension.', '');
   assert.equal(two.verdict, 'matches-frozen-gold');
   assert.deepEqual(two.decision.found, ['reject the extension']);
-  /* the window is three words: a negation further back is not seen (documented limit of the heuristic) */
+  /* a comma ends the clause, so a negation before it is not seen (documented limit of the heuristic) */
   assert.equal(decide('We do not, in this case, approve the refinancing.').verdict, 'matches-frozen-gold');
   /* the negation has to come before: a word after the keyword does nothing */
   assert.equal(decide('Approve the refinancing, which is not cheap.').verdict, 'matches-frozen-gold');
@@ -419,6 +419,59 @@ test('a decision keyword that a negation comes right before does not count', () 
   /* keywords that are only negated leave no keyword, so a gold with no other criterion is no match */
   assert.equal(suggest({ gold: { decision: 'approve' }, fingerprints: [] }, 'we do not approve', '').verdict, 'unclear');
   assert.equal(suggest({ gold: { decision: 'approve' }, fingerprints: [] }, 'we approve', '').verdict, 'matches-frozen-gold');
+});
+
+test('a clause boundary ends the negation window; "no," is an answer; avoid counts only right before the keyword', () => {
+  const on = (keyword, text) => suggest({ gold: { decision: keyword, figures: [{ label: 'units', value: 482, tolerance: 0 }] }, fingerprints: [] }, 'Units are 482. ' + text, '');
+  const affirmed = (keyword, text) => {
+    const result = on(keyword, text);
+    assert.equal(result.verdict, 'matches-frozen-gold', text);
+    assert.deepEqual(result.decision.found, [keyword], text);
+    assert.ok(!('reason' in result), text);
+  };
+  const negated = (keyword, text) => {
+    const result = on(keyword, text);
+    assert.equal(result.verdict, 'unclear', text);
+    assert.deepEqual(result.decision.found, [], text);
+    assert.match(result.reason, /only after a negation/, text);
+  };
+  /* the four sentences of the review */
+  affirmed('reject the proposal', 'Should the lender accept? No, reject the proposal.');
+  affirmed('refinance', 'To avoid default, refinance the term loan now.');
+  affirmed('approve', 'There are no issues, approve the refinancing.');
+  affirmed('approve the refinancing', 'The board should not delay: approve the refinancing.');
+  /* each boundary: , : ; . ! ? a spaced dash (any kind), a new line */
+  for (const mark of [',', ':', ';', '.', '!', '?']) affirmed('approve the refinancing', `We would not wait${mark} approve the refinancing.`);
+  for (const dash of ['-', '--', '\u2013', '\u2014']) affirmed('approve the refinancing', `We would not wait ${dash} approve the refinancing.`);
+  affirmed('approve the refinancing', 'We would not wait\napprove the refinancing.');
+  affirmed('approve the refinancing', 'No: approve the refinancing.');
+  affirmed('approve the refinancing', 'No; approve the refinancing.');
+  affirmed('approve the refinancing', 'No - approve the refinancing.');
+  affirmed('approve the refinancing', 'NO, APPROVE THE REFINANCING.');
+  affirmed('approve the refinancing', 'Never mind, approve the refinancing.');
+  affirmed('approve the refinancing', '(no), approve the refinancing.');
+  /* a dash inside a word is not a boundary */
+  negated('approve the refinancing', 'We do not co-sign then approve the refinancing.');
+  negated('approve the refinancing', 'We do not re-approve the refinancing.');
+  /* still negated: not, no, never, cannot and n't within three words of the keyword in the same clause */
+  negated('approve the refinancing', 'We should not approve the refinancing.');
+  negated('approve the first offer', 'We do not approve the first offer.');
+  negated('approve the first offer', 'I would not now approve the first offer.');
+  negated('approve the refinancing', 'There is no case to approve the refinancing.');
+  negated('approve the refinancing', "Lenders shouldn't approve the refinancing.");
+  negated('approve the refinancing', 'We cannot approve the refinancing.');
+  negated('approve the refinancing', 'Never will they approve the refinancing.');
+  negated('approve the refinancing', 'Rejected. We do not approve the refinancing.');
+  negated('approve the refinancing', 'Yes? No. We do not now approve the refinancing.');
+  /* avoid counts only as the word right before the keyword */
+  negated('refinancing', 'We should avoid refinancing the term loan.');
+  negated('refinancing', 'Avoid refinancing.');
+  affirmed('refinance', 'We should avoid default and refinance the term loan.');
+  affirmed('refinance', 'We avoid trying to refinance the term loan.');
+  affirmed('refinance', 'To avoid default and delay, refinance the term loan.');
+  affirmed('refinance', 'Avoid: refinance the term loan.');
+  /* the same keyword said both ways: one plain use is enough */
+  affirmed('approve the refinancing', 'We do not approve the refinancing at 8%. We approve the refinancing at 6%.');
 });
 
 test('negation checking is bounded on a text full of negated keywords', () => {
@@ -442,12 +495,20 @@ test('a gold figure that is a single digit cannot make a match by itself, and th
   assert.equal(result.matches[0].where, 'final, a single digit that may be incidental', 'the page prints "found in the" and this');
   assert.match(result.matches[0].reason, /single-digit figure can match by chance/);
   assert.equal(result.reason, 'Weak evidence: the gold figure breaches (3) is a single digit, so the match may be incidental, and no decision keyword confirms it.');
-  /* every single digit, either sign, also as text with a percent sign or a currency sign */
-  for (const value of [0, 1, 5, 9, -4, '7', '5%', '$8', '(6)', 2.0]) {
-    const text = String(value).includes('(') ? 'the figure was -6 overall' : `the figure was ${String(value).replace(/[$%]/g, '')} overall`;
+  /* a gold value written as one digit, with an optional sign and spaces around it */
+  for (const [value, text] of [[0, 'the figure was 0 overall'], [1, 'the figure was 1 overall'], [5, 'the figure was 5 overall'], [9, 'the figure was 9 overall'], [-4, 'the figure was -4 overall'], ['7', 'the figure was 7 overall'],
+    ['-4', 'the figure was -4 overall'], ['+4', 'the figure was 4 overall'], [' 3 ', 'the figure was 3 overall'], [2.0, 'the figure was 2 overall']]) {
     const weak = suggest(single(value), text, '');
     assert.equal(weak.verdict, 'unclear', String(value));
     assert.equal(weak.matches[0].weak, true, String(value));
+  }
+  /* written with more than a bare digit, the writer was specific: a decimal point, a percent or currency sign, a multiple, brackets */
+  for (const [value, text] of [['3.0', 'it was 3'], ['2.0x', 'it was 2'], ['5%', 'it was 5'], ['$8', 'it was 8'], ['(6)', 'it was -6'], ['4.', 'it was 4'], ['0.0', 'it was 0'], ['1,0', 'it was 10'], ['5 %', 'it was 5']]) {
+    const specific = suggest(single(value), text, '');
+    assert.equal(specific.verdict, 'matches-frozen-gold', String(value));
+    assert.ok(!('weak' in specific.matches[0]), String(value));
+    assert.equal(specific.matches[0].where, 'final', String(value));
+    assert.ok(!('reason' in specific), String(value));
   }
   /* not single digits: two digits, a fraction, a larger number */
   for (const [value, text] of [[10, 'it was 10'], [3.5, 'it was 3.5'], [482, 'it was 482'], [-12, 'it was -12'], ['0.5', 'it was 0.5'], [9.5, 'it was 9.5']]) {

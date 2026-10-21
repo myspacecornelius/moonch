@@ -1,8 +1,16 @@
-# Binary files git may track or publish. One exact repo path per line; blank lines and lines starting with # are ignored.
+# Binary files git may track or publish. One entry per line: an exact repo path, optionally followed by sha256=<64 hex digits>.
+# Blank lines and lines starting with # are ignored.
 #
 # The privacy scan cannot read inside a binary file, so scripts/privacy-scan.cjs and the pre-push hook BLOCK every binary
-# file (tracked, untracked and not ignored, or added by a commit being pushed) whose path is not listed here. Task packages
-# (xlsx, docx, pdf, zip) and the app's own exports must never be listed: they stay out of git (see .gitignore).
+# file (tracked, untracked and not ignored, or added by a commit being pushed) whose path is not listed here. Binary means a
+# NUL byte in the first 8 KB, a start of %PDF-, PK\x03\x04 (zip, xlsx, docx) or \xD0\xCF\x11\xE0 (old Office), or bytes that are
+# not valid UTF-8. Task packages (xlsx, docx, pdf, zip) and the app's own exports must never be listed: they stay out of git
+# (see .gitignore).
+#
+# Listing a path allows only the kind of file it names, not whatever is put there later:
+#   - a path ending in .png must hold a real PNG (the 8 byte signature), in the work tree and in every commit of a push;
+#   - a sha256=<hex> pins the exact content (sha256sum <file>); any other content at that path is blocked. Pin everything
+#     that is not a screenshot, and update the pin in the same commit as the file.
 #
 # To allow one on purpose: add its exact repo path as a line here (no wildcards, no leading ./ or /) and commit this
 # change together with the file. The push check reads this file from the commit being pushed, not from the work tree.
@@ -17,5 +25,5 @@ qa/dashboard/mobile-overview.png
 qa/legacy/desktop-failure-modes.png
 qa/legacy/mobile-failure-modes.png
 
-# Synthetic test fixture (a package zip built from invented data).
-tests/fixtures/package.zip
+# Synthetic test fixture (a package zip built from invented data), pinned so that no other zip can take its place.
+tests/fixtures/package.zip sha256=b4a9dbe4fc26247c9481a7c02d1fe5cf2d5d0e40344c5a181129d30c51000611

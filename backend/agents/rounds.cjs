@@ -19,7 +19,7 @@ const {
 } = require('./claude-runner.cjs');
 const { auditToolCalls } = require('./path-audit.cjs');
 const { readPilotToken, gatewayFindings, describeFindings, redactFilesUnder, makeRedactor, sourceText, validToken } = require('./pilot-token.cjs');
-const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, cleanSourcePath, GAF_RE } = require('./pilot-folder.cjs');
+const { inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, hashFile, resolveSourceDir, GAF_RE } = require('./pilot-folder.cjs');
 const { suggest, hashFreeze, parseFigure } = require('./classify.cjs');
 
 const SCHEMA = 'finance-agent-round';
@@ -865,6 +865,9 @@ function buildReviewPrompt(promptText, packageText) {
 /* Added to a run's stderr tail when the start of the companion stopped a pilot that an earlier companion left running. */
 const LEFTOVER_PILOT_NOTE = 'A pilot process left over from the previous companion was stopped at startup.';
 
+/* A leftover process counts as the recorded pilot only if it started within this long of the recorded spawn time. */
+const BINARY_MATCH_SLACK_MS = 10000;
+
 class RoundStore {
   constructor(options = {}) {
     this.root = path.resolve(options.root || path.join(__dirname, '..', '..'));
@@ -955,15 +958,26 @@ class RoundStore {
 
   /* A pilot is spawned detached, so the pid recorded for a running run (run.pilot, see _recordPilot) is also its process
      group id. If the companion died without stopping it (a crash, a kill), the pilot can still be running; it is stopped
-     here, before the round is closed. A pid is trusted only while the process is alive and its command line names the
-     runtime binary recorded with the pid (and, for a group, the process leads that group), because the number can be handed
-     to an unrelated program once the pilot has ended. Returns true when a process was stopped. */
+     here, before the round is closed. The number can be handed to an unrelated program once the pilot has ended, so a
+     process is signalled only when every one of these is established, and when any of them cannot be, nothing is signalled:
+       - it is alive and, for a group, leads that group (pgid is its pid);
+       - a word of its command line (split at white space) is the recorded runtime binary or has exactly its file name, so
+         `node /path/stub-claude.cjs` and a native `claude` match, and a path that merely passes through a folder called
+         .claude, or a file named notes.txt there, does not;
+       - it started within BINARY_MATCH_SLACK_MS of the spawn time recorded with the pid (from ps etime), which separates a
+         pilot from an interactive claude session that has the same file name.
+     Returns true when a process was stopped. */
   _stopLeftoverPilot(pilot) {
     if (!isObject(pilot) || !Number.isInteger(pilot.pid) || pilot.pid <= 1 || pilot.pid === process.pid) return false;
-    const name = typeof pilot.bin === 'string' ? path.basename(pilot.bin) : '';
+    const bin = typeof pilot.bin === 'string' ? pilot.bin : '';
+    const name = path.basename(bin);
     if (!name || name === '.' || name === path.sep) return false;
+    const spawnedMs = typeof pilot.spawnedAt === 'string' ? Date.parse(pilot.spawnedAt) : NaN;
+    if (!Number.isFinite(spawnedMs)) return false;
     const found = this._processInfo(pilot.pid);
-    if (!found || !found.command.includes(name) || (pilot.group === true && found.pgid !== pilot.pid)) return false;
+    if (!found || typeof found.command !== 'string' || (pilot.group === true && found.pgid !== pilot.pid)) return false;
+    if (!found.command.split(/\s+/).some(word => word === bin || path.basename(word) === name)) return false;
+    if (!Number.isFinite(found.startedAtMs) || Math.abs(found.startedAtMs - spawnedMs) > BINARY_MATCH_SLACK_MS) return false;
     try {
       process.kill(pilot.group === true ? -pilot.pid : pilot.pid, 'SIGKILL');
       return true;
@@ -972,12 +986,22 @@ class RoundStore {
     }
   }
 
-  /* { pgid, command } of a running process, from ps (the same on macOS and Linux), or null: not running, or ps is not there. */
+  /* Seconds from ps etime, [[dd-]hh:]mm:ss (the same on macOS and Linux), or null when the text is not that. */
+  static elapsedSeconds(text) {
+    const match = /^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/.exec(String(text).trim());
+    if (!match) return null;
+    const [, days, hours, minutes, seconds] = match;
+    return Number(days || 0) * 86400 + Number(hours || 0) * 3600 + Number(minutes) * 60 + Number(seconds);
+  }
+
+  /* { pgid, command, startedAtMs } of a running process, from ps, or null: not running, ps is not there, or its answer
+     cannot be read. startedAtMs is now minus the elapsed time ps reports, so it is good to about a second. */
   _processInfo(pid) {
     try {
-      const out = childProcess.execFileSync('ps', ['-ww', '-o', 'pgid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
-      const match = /^\s*(\d+)\s+([^\n]*)/.exec(out);
-      return match ? { pgid: Number(match[1]), command: match[2] } : null;
+      const out = childProcess.execFileSync('ps', ['-ww', '-o', 'pgid=,etime=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const match = /^\s*(\d+)\s+(\S+)\s+([^\n]*)/.exec(out);
+      const elapsed = match ? RoundStore.elapsedSeconds(match[2]) : null;
+      return match && elapsed !== null ? { pgid: Number(match[1]), command: match[3], startedAtMs: Date.now() - elapsed * 1000 } : null;
     } catch {
       return null;
     }
@@ -1219,10 +1243,19 @@ class RoundStore {
     if (inside(real, pilots) || inside(pilots, real)) throw bad('That folder holds pilot folders from earlier runs. Choose the folder the solver files come from');
   }
 
+  /* The packet folder a writer typed or pasted, as the real folder it names. The text is cleaned once, by resolveSourceDir, and every
+     refusal (the project, the home folder, the pilot folders) is made on the real path that is then listed and stored, so no check
+     can pass on one reading of the text and a later step use another. */
+  _sourceFolder(text) {
+    let real;
+    try { real = resolveSourceDir(text, this.root); } catch (error) { throw asAgentError(error); }
+    this._refuseOwnFolders(real);
+    return real;
+  }
+
   inspectPacket(body) {
     const input = needObject(body, 'The request body');
-    const sourceDir = cleanSourcePath(cleanText(input.sourceDir, 'sourceDir', 4096, true));
-    this._refuseOwnFolders(sourceDir);
+    const sourceDir = this._sourceFolder(cleanText(input.sourceDir, 'sourceDir', 4096, true));
     try {
       return clone(inspectSource(sourceDir, { projectRoot: this.root }));
     } catch (error) {
@@ -1238,14 +1271,14 @@ class RoundStore {
     if (typeof input.gafVisible !== 'boolean') throw bad('gafVisible must be true or false');
     const config = parseConfig(input.config);
     const versions = parseVersions(input.versions);
-    const sourceDir = cleanSourcePath(cleanText(input.sourceDir, 'sourceDir', 4096, true));
+    const typedDir = cleanText(input.sourceDir, 'sourceDir', 4096, true);
     const snapshot = input.carriedFrom === undefined || input.carriedFrom === null ? null : this._carrySnapshot(input.carriedFrom);
     /* `task` is not part of the stored `carried` record (that is what the approval compares); it only fills in a task the
        request left out, so a round carried forward stays with its task. An explicit task, even empty, wins. */
     const { task: carriedTask = '', ...carried } = snapshot || {};
     const task = taskInput === null ? carriedTask : taskInput;
 
-    this._refuseOwnFolders(sourceDir);
+    const sourceDir = this._sourceFolder(typedDir); /* the real folder: it is what is listed and what the round stores */
     let listing;
     try { listing = inspectSource(sourceDir, { projectRoot: this.root }); } catch (error) { throw asAgentError(error); }
     const usable = new Map(listing.files.filter(file => !file.excluded).map(file => [file.path, file]));
@@ -1520,7 +1553,9 @@ class RoundStore {
     const acknowledged = Array.isArray(input.acknowledgements) ? input.acknowledgements : [];
     const complete = ACKNOWLEDGEMENTS.every(item => acknowledged.includes(item)) && acknowledged.every(item => ACKNOWLEDGEMENTS.includes(item));
     if (!complete) throw bad(`Every acknowledgement is required: ${ACKNOWLEDGEMENTS.join(', ')}`);
-    round.approval = { approvedAt: this.now(), summarySha256: expected, acknowledgements: ACKNOWLEDGEMENTS.slice() };
+    /* promptPrefixSha256: the Studio's own fixed pilot text at this moment. It is inside the summary, so when the Studio is
+       updated and the text changes, the summary hash stops matching, and the launch can say that this is the reason. */
+    round.approval = { approvedAt: this.now(), summarySha256: expected, promptPrefixSha256: sha256Text(PILOT_PROMPT_PREFIX), acknowledgements: ACKNOWLEDGEMENTS.slice() };
     round.status = 'approved';
     this._persistRound(round);
     return roundView(round);
@@ -1538,6 +1573,11 @@ class RoundStore {
     }
     if (JSON.stringify(config) !== JSON.stringify(round.config)) throw new AgentError(409, `APPROVAL MISMATCH: the stored round configuration is not the one that was approved. ${MISMATCH_NEXT}`);
     if (!round.approval || sha256Text(this._summaryText(round)) !== round.approval.summarySha256) {
+      /* A round approved before the Studio's fixed pilot text changed has a different summary now. It did not change; the
+         Studio did (an approval stored without the prefix hash is from before this check, and says the same). */
+      if (round.approval && round.approval.promptPrefixSha256 !== sha256Text(PILOT_PROMPT_PREFIX)) {
+        throw new AgentError(409, 'APPROVAL MISMATCH: The Studio\'s fixed pilot text changed after this round was approved. Cancel this round, then freeze and approve it again. Nothing was started');
+      }
       throw new AgentError(409, `APPROVAL MISMATCH: the round changed after it was approved. ${MISMATCH_NEXT}`);
     }
     let stored;

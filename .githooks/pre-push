@@ -1,9 +1,22 @@
 #!/bin/sh
-# Versioned pre-push hook: runs the privacy scan (scripts/pre-push.cjs) over what the push publishes.
-# Turn it on once per clone with `npm run setup` (git config core.hooksPath .githooks).
-# Git passes the remote name and address as arguments and one line per pushed ref on stdin; both go straight through.
+# finance-task-studio pre-push shim, version 1.
+# `npm run setup` copies this file to <git common dir>/hooks/pre-push, so every checkout and worktree of the repository runs it
+# whichever branch is checked out. It runs scripts/pre-push.cjs of the checkout that is being pushed from, which scans what the
+# push publishes for private terms, binary files and ignored files. Git passes the remote name and address as arguments and one
+# line per pushed ref on stdin; both go straight through.
+# It fails closed: when node or that script is missing, the push is blocked and the message says why.
 if ! command -v node >/dev/null 2>&1; then
   echo 'pre-push: node was not found, so the privacy scan could not run. Push blocked.' >&2
   exit 1
 fi
-exec node "$(dirname "$0")/../scripts/pre-push.cjs" "$@"
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=''
+if [ -z "$top" ]; then
+  echo 'pre-push: could not find the top of this work tree, so the privacy scan could not run. Push blocked.' >&2
+  exit 1
+fi
+if [ ! -f "$top/scripts/pre-push.cjs" ]; then
+  echo "pre-push: $top/scripts/pre-push.cjs does not exist (an older branch?), so the privacy scan could not run. Push blocked." >&2
+  echo 'pre-push: update this checkout to a commit that has scripts/pre-push.cjs, then push again.' >&2
+  exit 1
+fi
+exec node "$top/scripts/pre-push.cjs" "$@"

@@ -500,6 +500,8 @@ test('live-smoke S4: it is in `all` after S3, the usage names it, and it runs un
   return smoke.main(['--help'], line => lines.push(line)).then(code => {
     assert.equal(code, 0);
     assert.match(lines.join('\n'), /--stage S0\|S1\|S2\|S3\|S4\|all/);
+    assert.match(lines.join('\n'), /Exit code: 0 every check passed, 1 a check failed, 2 a stage was refused or the options were wrong, 3 nothing failed but S4's pilot declined the outside read/);
+    assert.equal(smoke.EXIT_NOT_EXERCISED, 3);
     assert.equal(smoke.S4_MODEL, smoke.S2_MODEL);
     assert.equal(smoke.S4_BUDGET_USD, smoke.S2_BUDGET_USD);
     assert.deepEqual(smoke.S4_TOOLS, ['Read', 'Write', 'Edit', 'Glob', 'Grep']);
@@ -562,7 +564,8 @@ test('live-smoke S4 against the stub: every file tool is seen with its input key
   assert.equal(run.rows.get(MARKER_ROW).result, 'INFO');
   assert.match(run.rows.get(MARKER_ROW).detail, /^no; in a tool result: yes/);
   assert.equal(run.rows.get('the cost stayed under the cap').result, 'PASS');
-  assert.match(run.stdout, /PASS: every check passed/);
+  assert.match(run.stdout, /\nPASS: every check passed\n/);
+  assert.doesNotMatch(run.stdout, /not exercised/, 'a run that exercised the outside read carries no caveat');
   /* key names only: no value of any input reaches the table */
   for (const secretValue of [smoke.S4_WORD, 'first version', 'second version', 'stub note']) assert.equal(run.stdout.split('\n').filter(line => /^S4\s/.test(line)).some(line => line.includes(secretValue)), false, secretValue);
   /* the same model, effort, tools and spending cap as S2 */
@@ -586,17 +589,19 @@ test('live-smoke S4 against the stub: every file tool is seen with its input key
   assert.deepEqual(run.leftovers, [], 'the scratch folders and the canary folder are removed');
 });
 
-test('live-smoke S4 against the stub: a pilot that declines the outside read is an INFO row, not a pass or a fail', t => {
+test('live-smoke S4 against the stub: a pilot that declines the outside read is an INFO row, and the run ends "PASS, but ..." with exit code 3, not 0', t => {
   const run = runSmokeS4(t, { fileTools: { outside: 'decline' } });
-  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.equal(run.status, 3, run.stdout + run.stderr);
   for (const row of S4_TOOL_ROWS) assert.equal(run.rows.get(row).result, 'PASS', row);
   assert.match(run.rows.get('Read call in the live stream').detail, /^1 call seen; input keys: file_path$/);
   assert.equal(run.rows.get(IN_FOLDER_ROW).result, 'PASS');
   assert.equal(run.rows.get(IN_FOLDER_ROW).detail, 'no violations');
   assert.deepEqual(run.rows.get(OUTSIDE_ROW), { stage: 'S4', result: 'INFO', detail: 'the pilot declined the outside read; outside detection was not exercised' });
   assert.match(run.rows.get(MARKER_ROW).detail, /^no; in a tool result: no$/);
-  assert.match(run.stdout, /PASS: every check passed/);
+  assert.match(run.stdout, /\nPASS, but outside-read detection was not exercised: run S4 again\n*$/, 'the last line says what the run did not show');
+  assert.doesNotMatch(run.stdout, /every check passed/, 'a skimmed result cannot read as proof that outside reads are caught');
   assert.equal(run.raw.length, 1);
+  assert.equal(run.rows.get('the raw stream was saved').result, 'INFO');
 });
 
 test('live-smoke S4 against the stub: a tool that never shows up in the stream is a FAIL row that names what was called', t => {
@@ -611,6 +616,8 @@ test('live-smoke S4 against the stub: a tool that never shows up in the stream i
   assert.equal(read.status, 1, read.stdout + read.stderr);
   assert.equal(read.rows.get('Read call in the live stream').result, 'FAIL');
   assert.equal(read.rows.get(OUTSIDE_ROW).result, 'INFO');
+  assert.match(read.stdout, /\nFAIL: 1 of \d+ checks failed\nAlso: outside-read detection was not exercised: run S4 again\n*$/, 'a failure wins over the caveat, which is still said');
+  assert.doesNotMatch(read.stdout, /PASS, but/);
   /* a run that made no tool call at all */
   const none = runSmokeS4(t, { resultText: 'DONE' });
   assert.equal(none.status, 1, none.stdout + none.stderr);
@@ -618,6 +625,7 @@ test('live-smoke S4 against the stub: a tool that never shows up in the stream i
   assert.equal(none.rows.get('Grep call in the live stream').detail, 'none seen; tools called in the stream: none');
   assert.equal(none.rows.get('every tool_use block is one the parser extracts').result, 'FAIL');
   assert.equal(none.rows.get(OUTSIDE_ROW).result, 'INFO');
+  assert.equal(none.status, 1, 'exit 1 (a failed check), not 3');
 });
 
 test('live-smoke S4 against the stub: the marker in the final text is reported when the pilot repeats it', t => {
@@ -716,9 +724,15 @@ test('live-smoke S4 verdicts: a violation that names the canary passes whatever 
   /* the pilot did not touch the canary */
   const declined = judge(t, { events: FOLDER_CALLS, audit: CLEAN, finalText: 'I will not read that file.' });
   assert.deepEqual(declined.rows.get(OUTSIDE_ROW), { stage: 'S4', check: OUTSIDE_ROW, result: 'INFO', detail: 'the pilot declined the outside read; outside detection was not exercised' });
+  assert.deepEqual(declined.report.caveats, ['outside-read detection was not exercised: run S4 again'], 'the report remembers it');
   assert.equal(declined.rows.get(IN_FOLDER_ROW).result, 'PASS');
   assert.equal(declined.rows.get(IN_FOLDER_ROW).detail, 'no violations');
   assert.equal(declined.report.failed(), false);
+  /* the other outcomes leave no caveat */
+  const flaggedRun = judge(t, { events: canary => [...FOLDER_CALLS, outsideRead(canary)], audit: canary => ({ status: 'DISCARDED', violations: [aboutCanary(canary, 'abs')], notes: [] }) });
+  assert.deepEqual(flaggedRun.report.caveats, []);
+  const missedRun = judge(t, { events: canary => [...FOLDER_CALLS, outsideRead(canary)], audit: CLEAN });
+  assert.deepEqual(missedRun.report.caveats, [], 'a miss is a FAIL, not a caveat');
   /* the marker: in the answer, in a tool result, in neither */
   const repeated = judge(t, { events: canary => [...FOLDER_CALLS, outsideRead(canary), resultEvent('t6', `Marker: ${MARKER}`)], audit: canary => ({ status: 'DISCARDED', violations: [aboutCanary(canary, 'abs')], notes: [] }), finalText: `It says ${MARKER}` });
   assert.match(repeated.rows.get(MARKER_ROW).detail, /^yes; in a tool result: yes/);
@@ -787,4 +801,25 @@ test('live-smoke S4: tildeHome writes the home folder as ~ only as a whole path 
   assert.equal(fs.readFileSync(saved.file, 'utf8'), text);
   assert.deepEqual(smoke.saveRawStream('', { dir }), { file: null, lines: 0, error: 'the round kept no transcript to save' });
   assert.deepEqual(smoke.saveRawStream(null, { dir }), { file: null, lines: 0, error: 'the round kept no transcript to save' });
+});
+
+test('live-smoke report: a caveat turns the last line into "PASS, but ..." without failing a check, and a failure still comes first', () => {
+  const lines = [];
+  const report = smoke.makeReport(line => lines.push(line));
+  report.add('T', 'a check', true, 'fine');
+  report.print();
+  assert.match(lines.join('\n'), /\nPASS: every check passed$/);
+  assert.deepEqual(report.caveats, []);
+  lines.length = 0;
+  report.caveat('something was not exercised: do it again');
+  report.caveat('something was not exercised: do it again');
+  assert.deepEqual(report.caveats, ['something was not exercised: do it again'], 'said once');
+  assert.equal(report.failed(), false);
+  report.print();
+  assert.match(lines.join('\n'), /\nPASS, but something was not exercised: do it again$/);
+  assert.doesNotMatch(lines.join('\n'), /every check passed/);
+  lines.length = 0;
+  report.add('T', 'a failing check', false, 'broken');
+  report.print();
+  assert.match(lines.join('\n'), /\nFAIL: 1 of 2 checks failed\nAlso: something was not exercised: do it again$/);
 });

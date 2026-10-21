@@ -2,11 +2,13 @@
 'use strict';
 /* Pre-push hook that runs the privacy scan over what the push publishes (docs/local-agents.md section 14).
 
-   Turn it on in each clone (git config is not versioned). The versioned hook is .githooks/pre-push; from the top of the work tree:
+   Turn it on once per clone (hooks are not versioned). From the top of the work tree:
 
-     npm run setup          (git config core.hooksPath .githooks)
+     npm run setup          (node scripts/setup-hooks.cjs)
 
-   or, by hand, the same hook as a plain file:
+   That copies the shim .githooks/pre-push into the repository's common hooks folder, which every worktree and branch shares.
+   The shim runs the scripts/pre-push.cjs of the checkout being pushed from, and blocks the push if node or this file is missing.
+   Setup does not set core.hooksPath, and it will not overwrite another pre-push hook without --force. By hand, the same thing:
 
      printf '#!/bin/sh\nexec node scripts/pre-push.cjs "$@"\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 
@@ -15,12 +17,15 @@
    For every ref that is not a deletion the hook scans the commits that push would publish, so a term added in one commit and
    removed in the next still counts, as well as the files in the work tree (scripts/privacy-scan.cjs does both when it is given
    --range). Any hit, and any failure to scan, blocks the push (the scan fails closed). So does a binary file that the push
-   adds or changes (or that the work tree holds) when its path is not on scripts/binary-allowlist.txt as the pushed commit has it.
+   adds or changes (or that the work tree holds) when its path is not on scripts/binary-allowlist.txt as the pushed commit has it,
+   and a path that .gitignore ignores (see the header of scripts/privacy-scan.cjs).
 
    - An existing branch: the range is <remote sha>..<local sha>.
    - A new branch, or a remote sha this clone does not have: the commits not on any remote-tracking branch of that remote,
      from the first of them. Push to a named remote (git push origin ...) so that the hook knows which one that is.
-   - FINANCE_PRIVACY_TERMS names another term list (the scan's --terms). The default is private/privacy-terms.txt. */
+   - FINANCE_PRIVACY_TERMS names another term list (the scan's --terms). The default is private/privacy-terms.txt; in a linked
+     worktree, which has no private/ folder of its own, the scan falls back to the main checkout's (the directory above the git
+     common dir), so a push from a worktree is scanned with the same terms. */
 
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');

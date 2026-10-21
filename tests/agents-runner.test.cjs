@@ -613,7 +613,8 @@ test('inspectPacket lists files and refuses folders inside the project', async t
   await rejects(w.service.inspectPacket({ sourceDir: path.join(w.pilots, 'rnd-aaaaaaaaaaaa-1') }), 400, /pilot folders/);
   await rejects(w.service.inspectPacket({ sourceDir: w.pilots }), 400, /pilot folders/);
   await rejects(w.service.inspectPacket({ sourceDir: w.tmpRoot }), 400, /pilot folders/);
-  await rejects(w.service.inspectPacket({ sourceDir: w.base }), 400, /pilot folders/);
+  /* base holds the project as well as the pilots, so the project refusal can come first */
+  await rejects(w.service.inspectPacket({ sourceDir: w.base }), 400, /pilot folders|contains the Studio project/);
   await rejects(newRound(w, { sourceDir: path.join(w.pilots, 'rnd-aaaaaaaaaaaa-1') }), 400, /pilot folders/);
   await rejects(w.service.inspectPacket({}), 400);
   await rejects(w.service.inspectPacket(null), 400);

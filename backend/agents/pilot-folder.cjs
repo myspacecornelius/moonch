@@ -80,7 +80,10 @@ function cleanSourcePath(text) {
   return home + clean.replace(/\\(.)/g, '$1');
 }
 
-/* The source folder must exist, be a directory, and sit entirely outside the Studio project (which holds private/). */
+/* The source folder must exist, be a directory, and sit entirely outside the Studio project (which holds private/). The text is
+   cleaned here, once, and the real path comes back: callers that go on to check, list or store the folder (rounds.cjs _sourceFolder)
+   use that path and never clean the text again, because a second cleaning of an unclean text can read it differently. A real path
+   given back in comes out unchanged, so inspectSource and buildPilotFolder can take the result. */
 function resolveSourceDir(sourceDir, projectRoot) {
   if (typeof sourceDir !== 'string' || !sourceDir.trim() || sourceDir.includes('\0')) throw new PacketError('A source folder path is required');
   const given = cleanSourcePath(sourceDir);
@@ -337,4 +340,4 @@ function snapshotOutputs(folder) {
   return found.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-module.exports = { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, isGafPath, cleanSourcePath, GAF_RE, PacketError };
+module.exports = { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, checkPilotsRoot, isGafPath, cleanSourcePath, resolveSourceDir, GAF_RE, PacketError };

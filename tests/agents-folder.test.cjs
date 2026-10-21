@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, isGafPath, cleanSourcePath, PacketError } = require('../backend/agents/pilot-folder.cjs');
+const { hashFile, inspectSource, buildPilotFolder, verifyFolder, snapshotOutputs, isGafPath, cleanSourcePath, resolveSourceDir, PacketError } = require('../backend/agents/pilot-folder.cjs');
 const { inferRole, classifyPath, WITHHELD_ROLES } = require('../package-engine.js');
 const constants = require('../backend/agents/constants.cjs');
 
@@ -776,6 +776,49 @@ test('inspectSource accepts a folder path as pasted: quoted, padded, dragged int
   const listing = plain.files.map(f => ({ path: f.path, sha256: f.sha256 }));
   const built = buildPilotFolder({ sourceDir: terminalEscape(w.awkward), files: listing, promptText: 'Synthetic prompt', destRoot: w.destRoot, runId: 'rnd-pasted-1', gafVisible: true, projectRoot: w.projectRoot });
   assert.deepEqual(built.manifest.map(m => m.path), ['Cash_Facts.csv']);
+});
+
+test('resolveSourceDir cleans the text once and returns the real folder; resolving that result again changes nothing, so no later step can read it differently', { skip: process.platform === 'win32' }, t => {
+  const w = awkwardWorld(t);
+  const real = fs.realpathSync(w.awkward);
+  const plain = inspectSource(w.awkward, { projectRoot: w.projectRoot });
+  const forms = [w.awkward, `'${w.awkward}'`, `"${w.awkward}"`, `  ${w.awkward}\n`, terminalEscape(w.awkward), `${terminalEscape(w.awkward)}/`];
+  for (const text of forms) {
+    const resolved = resolveSourceDir(text, w.projectRoot);
+    assert.equal(resolved, real, JSON.stringify(text));
+    assert.equal(resolveSourceDir(resolved, w.projectRoot), resolved, 'resolving the result again gives the same path');
+    assert.deepEqual(inspectSource(resolved, { projectRoot: w.projectRoot }), plain, 'listing the result gives the listing of the text');
+  }
+  /* a link comes back as the folder it points to, so what is checked, listed and stored is one path */
+  const link = path.join(w.base, 'link-to-task');
+  fs.symlinkSync(w.awkward, link);
+  assert.equal(resolveSourceDir(link, w.projectRoot), real);
+  assert.equal(resolveSourceDir(`'${link}'`, w.projectRoot), real);
+  /* a folder whose real name holds a backslash: typed the way Terminal writes it, then resolved again, it stays that folder */
+  const odd = path.join(w.base, 'back\\slash');
+  fs.mkdirSync(odd);
+  const oddResolved = resolveSourceDir(terminalEscape(odd), w.projectRoot);
+  assert.equal(oddResolved, fs.realpathSync(odd));
+  assert.equal(resolveSourceDir(oddResolved, w.projectRoot), oddResolved);
+});
+
+test('a text that reads one way after one cleaning and another way after two is read once: the first reading is used, and it is refused when it names nothing', { skip: process.platform === 'win32' }, t => {
+  const w = world(t);
+  w.put('a.csv');
+  const pilots = path.join(w.base, 'pilots');
+  fs.mkdirSync(path.join(pilots, 'rnd-x-1'), { recursive: true });
+  fs.writeFileSync(path.join(pilots, 'rnd-x-1', 'out.txt'), 'x');
+  /* two backslashes then a slash: one cleaning gives <folder>\/<name>, which is no folder; a second one would give <folder>/<name>, which is */
+  const doubled = `${pilots}\\\\/rnd-x-1`;
+  assert.equal(cleanSourcePath(doubled), `${pilots}\\/rnd-x-1`, 'one cleaning');
+  assert.equal(cleanSourcePath(cleanSourcePath(doubled)), `${pilots}/rnd-x-1`, 'a second cleaning would read it differently');
+  assert.ok(fs.statSync(path.join(pilots, 'rnd-x-1')).isDirectory());
+  for (const text of [doubled, `'${doubled}'`, `${w.source}\\\\/..\\\\/source`]) {
+    assert.throws(() => resolveSourceDir(text, w.projectRoot), error => error instanceof PacketError && error.status === 400 && /does not exist/.test(error.message), JSON.stringify(text));
+    assert.throws(() => inspectSource(text, { projectRoot: w.projectRoot }), error => error instanceof PacketError && /does not exist/.test(error.message), JSON.stringify(text));
+  }
+  /* the real folder, written once, is found; the same folder after the pilots folder is told to be refused by its own check (rounds.cjs) */
+  assert.equal(resolveSourceDir(`${pilots}/rnd-x-1`, w.projectRoot), fs.realpathSync(path.join(pilots, 'rnd-x-1')));
 });
 
 test('a folder that does not exist is named as such, whatever the quoting, and the message says how to copy a path', t => {

@@ -58,14 +58,20 @@ else
   printf '%s\n' 'Claude: not found. The Agents page will report this too. To use local agents, install the claude CLI'
   printf '%s\n' '        and sign in (run claude once in a terminal), or set CLAUDE_BIN to its path. Everything else works without it.'
 fi
-# Privacy hook check: the pre-push hook is per clone, so say so when this clone has neither the versioned hook folder
-# (npm run setup) nor a manual hook. A copy that is not a git work tree has no hook to install and says nothing.
+# Privacy hook check: the pre-push hook is per clone, so say so when this clone has none (npm run setup installs it). It looks
+# only when this folder is itself the top of a git checkout (a .git entry, and git agrees); a copy with no .git, or one inside
+# another repository, runs no git at all and says nothing. git is asked where this checkout's pre-push hook would be, which
+# follows core.hooksPath and worktrees; a missing file is the warning.
 # The block between the markers is plain POSIX shell, so tests/repo-hygiene.test.cjs can run it with sh.
 # privacy-hook-check:begin
-studio_hooks_path="$(git config core.hooksPath 2>/dev/null || true)"
-studio_git_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-if [ -n "$studio_git_dir" ] && [ "$studio_hooks_path" != '.githooks' ] && [ "$studio_hooks_path" != '.githooks/' ] && [ ! -e "$studio_git_dir/hooks/pre-push" ]; then
-  printf '%s\n' 'Privacy hook not installed: run npm run setup once'
+if [ -e .git ]; then
+  studio_top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$studio_top" ] && [ "$studio_top" = "$(pwd -P)" ]; then
+    studio_hook_file="$(git rev-parse --git-path hooks/pre-push 2>/dev/null || true)"
+    if [ -n "$studio_hook_file" ] && [ ! -e "$studio_hook_file" ]; then
+      printf '%s\n' 'Privacy hook not installed: run npm run setup once'
+    fi
+  fi
 fi
 # privacy-hook-check:end
 printf '%s\n' 'Starting the companion on 127.0.0.1. Nothing runs a model until you approve a round on the Agents page.'
