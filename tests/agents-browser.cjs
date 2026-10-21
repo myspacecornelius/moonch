@@ -4,10 +4,11 @@
 
    Flow: offline edition message, inspect a synthetic packet folder (with a hostile file name), settings above the freeze (five pilots
    by default, the spending cap and the round maximum), freeze, stepper cap, stale freeze, the pre-flight before approval, approve and
-   launch 5 pilots that run in one wave, the status strip and the tab title counting them, classify two, export, then "Start next
-   round from this round" (a new draft with carriedFrom, frozen with the same content hash). Then the server is restarted with the
-   stub's violation scenario: a reload restores the form kept in the browser, and a second round produces a DISCARDED run, which
-   must not be classifiable or exported.
+   launch 5 pilots that run in one wave, the status strip and the tab title counting them, classify two, the pilot gate card (waiting
+   while pilots run, then counting the two verdicts, with no percent sign), the simulated grader with its calibration on a pasted
+   reference answer, export, then "Start next round from this round" (a new draft with carriedFrom, frozen with the same content
+   hash). Then the server is restarted with the stub's violation scenario: a reload restores the form kept in the browser, and a
+   second round produces a DISCARDED run, which must not be classifiable or exported.
 
    It also checks what the other views rely on: the Task field (typed, sent with the round, restored, never makes a freeze stale), the
    drawer's "where the output is" block with its Copy button, at most one yellow button on the page at each step, the pill kinds,
@@ -30,7 +31,7 @@ const stub=path.join(root,'backend','agents','stub-claude.cjs');
    simulated grader and the author review run in folders that pick scenario 1. The second server run makes a call outside the folder. */
 const SCENARIO_ENV='FINANCE_STUB_SCENARIO';
 const SCENARIO_CLEAN=JSON.stringify([
-  {resultText:'Decision: approve. Units owed: 2,480. {"verdict":"meets-guidance","reason":"The answer states the guided figure."}',writeFiles:[{path:'outputs/answer.txt',content:'approve 2,480\n'}],delayMs:4000},
+  {resultText:'Decision: approve. Units owed: 2,480. {"verdict":"meets-guidance","reason":"The answer states the guided figure.","score":0.97,"items":[{"item":"Units owed","met":true,"reason":"Stated."}]}',writeFiles:[{path:'outputs/answer.txt',content:'approve 2,480\n'}],delayMs:4000},
   {resultText:'Hold the transfer. Units owed: 2,915. {"verdict":"does-not-meet-guidance","reason":"The figure differs."}',writeFiles:[{path:'outputs/answer.txt',content:'hold 2,915\n'}],delayMs:4000}
 ]);
 const SCENARIO_DISCARD=JSON.stringify({toolUses:[{name:'Read',input:{file_path:'/etc/hosts'},result:'synthetic'}],resultText:'Decision: approve. Units owed: 2,480.'});
@@ -227,6 +228,8 @@ async function fillPacketAndFreeze(options){
   assert.deepEqual(await primaries(),['goto-step'],'while the pilots run, the rail is the one yellow button');
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].every(tr=>tr.children[1].querySelector(".pill.violet"))'),true,'a running pilot is violet');
   assert.equal(await evaluate('!!document.querySelector("#ag-strip .pill.violet")'),true,'and so is the running round in the strip');
+  assert.match(await text('#ag-pilot-gate'),/Pilot gate \(pilot-based\)\s*Directional\s*Waiting for the round to end\./,'while pilots run the gate only waits');
+  assert.doesNotMatch(await text('#ag-pilot-gate'),/Wrong|Correct|Chance|Projected/);
   await screenshot('desktop-one-wave',1440,1000);
   checks.push('all five pilots run at once (one wave): the status strip shows 5 running and the tab title reads (0/5) Agents');
 
@@ -281,16 +284,31 @@ async function fillPacketAndFreeze(options){
   assert.match(await text('#ag-runs'),/Your verdicts so far \(directional only, n = 5\)/);assert.match(await text('#ag-runs'),/Matches the frozen gold 1/);
   assert.equal(await evaluate('[...document.querySelectorAll("#ag-runs tbody tr")].map(tr=>tr.children[7].textContent.trim()).join("|")'),'Matches the frozen gold|Lands on a frozen fingerprint|Not classified|Not classified|Not classified','the table lists each saved verdict');
   checks.push('detail drawer shows final answer, outputs and audit; the heuristic suggestion (gold figures, fingerprint ids) copies into the controls; verdict and fingerprint chips save and the table lists them; Escape closes and returns focus');
+  await waitFor('/Rounds of this design/.test(document.querySelector("#ag-pilot-gate").textContent)','the pilot gate');
+  const gateText=await text('#ag-pilot-gate');
+  assert.match(gateText,/Pilot-based and directional/);assert.match(gateText,/at least six completed runs averaging 0\.60 or lower/);
+  assert.match(gateText,/Wrong \(lands on a frozen fingerprint\)\s*1 of 2/);assert.match(gateText,/Correct \(matches the frozen gold\)\s*1 of 2/);
+  assert.match(gateText,/Projected batch mean\s*0\.48 to 0\.61/,'(0.82 + 0.13)/2 to (0.90 + 0.32)/2');assert.match(gateText,/Chance a ten-run batch averages 0\.60 or lower\s*0\.\d\d(?!\d)/);
+  assert.match(gateText,/No ship bar was frozen with this design/);
+  assert.ok(!gateText.includes('%'),'no percentage in the pilot gate');assert.ok(!/pass rate|success rate|failure rate/i.test(gateText),'no rate wording in the pilot gate');
+  assert.equal(await evaluate('!!document.querySelector("#ag-runs + #ag-pilot-gate")'),true,'the gate is its own card, right after the runs');
+  checks.push('the pilot gate card waits while pilots run, then counts the two verdicts (1 of 2 wrong, 1 of 2 correct), projects 0.48 to 0.61, and shows no percent sign or rate wording');
 
   /* 8. Simulated grader and author review are separate approvals. */
   await click('[data-ag="open-grader"]');await waitFor('!!document.querySelector("#agents-modal [data-ag=run-grader]")','grader dialog');
   assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=run-grader]").disabled'),true,'grader needs its own approval');
   assert.match(await text('#agents-modal'),/simulated grader, not Studio grading/i);
+  assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag-in=overlay-model]").value'),'claude-opus-4-8','the grading instrument is offered first');
   await setValue('[data-ag-in="guideline"]','You are grading a liquidity answer. The correct figure is 2,480 units.');
   for(const id of ['run','network','notools'])await click(`#agents-modal [data-id="${id}"]`);
   assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=run-grader]").disabled'),false);
   await click('#agents-modal [data-ag="run-grader"]');await waitFor('/Verdict: (meets-guidance|does-not-meet-guidance|unclear)/.test(document.querySelector("#agents-modal").textContent)','simulated grader result');
-  assert.match(await text('#agents-modal'),/Simulated grader, not Studio grading/);
+  assert.match(await text('#agents-modal'),/Simulated grader, not Studio grading/);assert.match(await text('#agents-modal'),/Score: 0\.97/);
+  await setValue('[data-ag-in="answer-run"]','ref');await waitFor('!!document.querySelector("#agents-modal [data-ag-in=reference]")','the reference answer box');
+  await setValue('[data-ag-in="reference"]','Synthetic reference: approve; units owed 2,480.');
+  assert.equal(await evaluate('document.querySelector("#agents-modal [data-ag=run-grader]").disabled'),false);
+  await click('#agents-modal [data-ag="run-grader"]');await waitFor('/Calibration: the simulated grader on your reference answer/.test(document.querySelector("#agents-modal").textContent)','the calibration result');
+  assert.match(await text('#ag-calibration'),/Your reference answer scored 0\.97; about 0\.98 is expected/);assert.ok(!(await text('#agents-modal')).includes('%'));
   await click('#agents-modal [data-ag="close-overlay"]');
   assert.equal(await evaluate('document.querySelector("[data-ag=open-review]").disabled'),true,'author review needs a loaded package');
   await evaluate(`(async()=>{await FinanceDashboard.ingest([new File(['Atlas owes Meridian 2,480 units.\\n'],'brief.txt',{type:'text/plain'})]);})()`);
@@ -300,7 +318,7 @@ async function fillPacketAndFreeze(options){
   for(const id of ['run','network','notools'])await click(`#agents-modal [data-id="${id}"]`);
   await click('#agents-modal [data-ag="run-review"]');await waitFor('/Author review result/.test(document.querySelector("#agents-modal").textContent)&&/Units owed/.test(document.querySelector("#agents-modal .ag-final").textContent)','author review result');
   await click('#agents-modal [data-ag="close-overlay"]');
-  checks.push('simulated grader and author review each run behind their own approval, end to end through the stub, and the grader is labelled as a simulation');
+  checks.push('simulated grader and author review each run behind their own approval, end to end through the stub, and the grader is labelled as a simulation; it offers claude-opus-4-8 first, shows the score, and calibrates on a pasted reference answer');
 
   /* 9. Export: add to project experiments, then download the round JSON. */
   await click('[data-ag="export-add"]');await waitFor('!!document.querySelector("#agents-modal [data-ag=export-confirm]")','export confirmation');

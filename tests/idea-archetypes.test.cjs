@@ -1,7 +1,7 @@
 'use strict';
 /* Tests for idea-archetypes.js (global FinanceIdeaArchetypes): the generic mechanism catalog of the idea generator.
    All fixtures here are synthetic. The catalog is checked as data: its shape, its ids and causal groups, its mechanism ids against the
-   research catalog, its text against the repo lint (the real FinanceCore.lintGuidance and the real FinanceCore.generateGuidance, which
+   research catalog, its text against the repo lint (the real FinanceCore.lintGuidance on fragments and the real FinanceCore.generateGuidance, which
    splice the fields into fixed sentences), the vocabulary the product keeps out of generated text, and its signals (they compile, they
    are lowercase, they stay fast on a large text and on hostile text). No fixture contains a workbook row, a score or an entity name. */
 const { test } = require('node:test');
@@ -150,7 +150,7 @@ test('every spliced sentence passes the real lint, both rebuilt by hand and thro
     title: a.name, mechanism: a.mechanism, causalGroup: a.causalGroup, wrongInterpretation: a.wrongApproach, correctInterpretation: a.correctTreatment,
     detectionMethod: a.detection, headlineWrong: a.consequence });
   for (const a of LIST) {
-    const own = C.lintGuidance(spliced(a));
+    const own = C.lintGuidance(spliced(a), {fragment: true});
     assert.deepEqual(own, [], a.id + ' rebuilt paragraph: ' + JSON.stringify(own));
     const p = C.blank();
     p.business = { objective: 'funding headroom for the planned payment', deliverable: 'a short memo', decision: 'whether to proceed', prompt: '' };
@@ -165,11 +165,11 @@ test('every spliced sentence passes the real lint, both rebuilt by hand and thro
 test('every other sentence also passes the lint when it stands alone', () => {
   for (const a of LIST) {
     for (const [field, text] of prose(a)) {
-      const items = C.lintGuidance(sentence(text));
+      const items = C.lintGuidance(sentence(text), {fragment: true});
       assert.deepEqual(items, [], a.id + ' ' + field + ': ' + JSON.stringify(items));
     }
     // the shipped build moves read as one block too, the way an author would paste them
-    assert.deepEqual(C.lintGuidance(a.buildMoves.join(' ')), [], a.id + ' build moves');
+    assert.deepEqual(C.lintGuidance(a.buildMoves.join(' '), {fragment: true}), [], a.id + ' build moves');
   }
 });
 

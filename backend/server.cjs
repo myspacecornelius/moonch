@@ -404,6 +404,7 @@ function createServer(options = {}) {
         maxPilotsPerRound: C.MAX_PILOTS_PER_ROUND,
         models: C.MODELS.slice(),
         efforts: C.EFFORTS.slice(),
+        graderModel: C.GRADER_MODEL,
       };
     }
   }

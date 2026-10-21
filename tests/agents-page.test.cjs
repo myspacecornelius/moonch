@@ -164,10 +164,10 @@ function makePage(t, world, { location, storage, pkg, engine, navigator, authori
   assert.ok(agents && typeof agents.handleEvent === 'function', 'agents.js exports its handler');
   t.after(() => agents.afterRender(false));
 
-  const all = () => ['ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs', 'ag-gate', 'ag-freeze-state', 'agents-modal'].map(id => element(id).innerHTML).join('\n');
+  const all = () => ['ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs', 'ag-pilot-gate', 'ag-gate', 'ag-freeze-state', 'agents-modal'].map(id => element(id).innerHTML).join('\n');
   /* Controls are looked up in the innermost painted copy first: the fake elements do not nest, so the gate and the freeze
      state are newer than the copies inside the cards that hold them. */
-  const newestFirst = () => ['agents-modal', 'ag-gate', 'ag-freeze-state', 'ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs'].map(id => element(id).innerHTML).join('\n');
+  const newestFirst = () => ['agents-modal', 'ag-gate', 'ag-freeze-state', 'ag-strip', 'ag-draft', 'ag-runtime', 'ag-packet', 'ag-settings', 'ag-freeze', 'ag-round', 'ag-runs', 'ag-pilot-gate'].map(id => element(id).innerHTML).join('\n');
   const tagOf = (action, dataset = {}) => {
     const wanted = Object.entries(dataset).map(([key, value]) => `data-${key}="${value}"`);
     const found = [...newestFirst().matchAll(/<(?:button|tr)\b[^>]*>/g)].map(match => match[0]).find(tag => tag.includes(`data-ag="${action}"`) && wanted.every(attribute => tag.includes(attribute)));
@@ -593,12 +593,20 @@ test('the packet card says where files land and warns about a nested filesystem 
   assert.match(nestedPage.section('packet'), /\.\/filesystem\/filesystem\//);
 });
 
-test('the simulated grader button says what it needs, and the footer text of the runs card is not a dead end', async t => {
+test('the simulated grader opens before any pilot has run, on a pasted reference answer, so the guidance can be calibrated first', async t => {
   const w = await makeWorld(t);
   const page = makePage(t, w);
   await page.boot();
-  assert.equal(page.enabled('open-grader'), false);
-  assert.match(page.section('runs'), /needs a completed pilot with a clean audit/);
+  assert.equal(page.enabled('open-grader'), true, 'calibration needs no pilot run');
+  assert.match(page.section('runs'), /It grades a completed pilot with a clean audit, or a reference answer you paste to calibrate the guidance before any pilot runs\./);
+  await page.click('open-grader');
+  assert.match(page.modal(), /<option value="ref" selected>Reference answer \(paste\)<\/option>/, 'with no clean run the dialog opens on the reference answer');
+  assert.doesNotMatch(page.modal(), /Pilot \d+ final answer/);
+  assert.match(page.modal(), /data-ag-in="reference"/);
+  await page.type('guideline', { value: 'You are grading a liquidity answer. Usable cash is 1,250.' });
+  await page.type('reference', { value: 'Synthetic reference: usable cash is 1,250, so hold the borrowing.' });
+  for (const id of ['run', 'network', 'notools']) await page.type('overlay-ack', { checked: true, dataset: { id }, event: 'change' });
+  assert.equal(page.enabled('run-grader'), true, 'a reference answer is enough');
 });
 
 /* ====================================================================== the two editions say different things about models */
@@ -1132,7 +1140,7 @@ test('the file edition makes no request at all: link says local false, and get, 
   const w = await makeWorld(t);
   const page = makePage(t, w, { location: FILE_EDITION });
   const { agents } = page;
-  assert.deepEqual(Object.keys(agents).sort(), ['afterRender', 'get', 'handleEvent', 'link', 'offlineMessage', 'openRound', 'openRun', 'post', 'render']);
+  assert.deepEqual(Object.keys(agents).sort(), ['afterRender', 'get', 'handleEvent', 'link', 'offlineMessage', 'openRound', 'openRun', 'pilotGate', 'post', 'render']);
   assert.deepEqual({ ...(await agents.link()) }, { local: false, ok: false, offlineMessage: 'Local agents need the companion: run npm start.', error: '' });
   assert.equal(agents.offlineMessage, 'Local agents need the companion: run npm start.');
   await assert.rejects(agents.get('/api/status'), failsWith(0, /Local agents need the companion: run npm start\./));
@@ -2126,4 +2134,316 @@ test('only an evaluator file is enough to turn Leave out on by default', async t
   assert.match(page.modal(), /data-ag-key="review-leave-out" checked/);
   assert.match(page.modal(), /Leave out the 1 file marked evaluator-only, run evidence or author review/);
   assert.equal(reviewCount(page), '1 of 2 files are left out; 1 file is sent as extracted text. Left out: File_evaluator_4.txt');
+});
+
+/* ====================================================================== the pilot gate and the ship bar */
+
+/* agents.js on its own, without a page: the pure gate computation is FinanceAgents.pilotGate. Its objects come from another realm,
+   so they are compared through JSON. */
+function gateFunction() {
+  const context = vm.createContext({ document: { title: '', addEventListener() {}, querySelector: () => null }, console, setTimeout, clearTimeout, location: FILE_EDITION });
+  context.window = context;
+  vm.runInContext(AGENTS_SOURCE, context, { filename: 'agents.js' });
+  return (runs, bar) => JSON.parse(JSON.stringify(context.FinanceAgents.pilotGate(runs, bar)));
+}
+const WRONG_ANSWER = 'Cash is 3,050 because the available facility counted as cash. Proceed.';
+/* A run row as a round view lists it; minute m of a synthetic day orders them. */
+const gateRun = (verdict, minute, extra = {}) => ({ n: minute, state: 'completed', audit: { status: 'CLEAN' }, endedAt: `2026-03-01T10:${String(minute).padStart(2, '0')}:00.000Z`, classification: verdict ? { humanVerdict: verdict } : null, ...extra });
+const GOLD_V = 'matches-frozen-gold';
+const FP_V = 'fingerprint';
+
+test('pilotGate counts only completed, clean runs with a verdict: wrong is a fingerprint, correct is the gold, unclear is counted apart and left out of the total', () => {
+  const gate = gateFunction();
+  const runs = [
+    gateRun(GOLD_V, 1), gateRun(FP_V, 2), gateRun(FP_V, 3), gateRun('unclear', 4),
+    gateRun(FP_V, 5, { audit: { status: 'DISCARDED' } }), gateRun(GOLD_V, 6, { state: 'failed' }), gateRun(GOLD_V, 7, { audit: null }),
+    gateRun('', 8), gateRun('a-verdict-nobody-knows', 9), null,
+    /* a run detail carries the full record instead of the row's name */
+    { n: 10, state: 'completed', audit: { status: 'CLEAN' }, endedAt: '2026-03-01T10:10:00.000Z', classification: { human: { verdict: FP_V, fingerprintIds: ['fp-alpha'] } } },
+  ];
+  const g = gate(runs, null);
+  assert.equal(g.wrong, 3);
+  assert.equal(g.correct, 1);
+  assert.equal(g.unclear, 1);
+  assert.equal(g.total, 4, 'wrong plus correct; unclear is left out');
+  assert.equal(g.bar, null);
+  const empty = gate([], null);
+  assert.deepEqual([empty.total, empty.range, empty.chance, empty.streak, empty.stop], [0, null, null, 0, false]);
+  assert.equal(gate(undefined, null).total, 0);
+  const onlyUnclear = gate([gateRun('unclear', 1)], { wrong: 5, of: 6 });
+  assert.deepEqual([onlyUnclear.total, onlyUnclear.unclear, onlyUnclear.chance], [0, 1, null]);
+});
+
+test('pilotGate: the streak counts correct verdicts in a row in the order the runs ended; unclear neither breaks nor extends it; three is the stop rule', () => {
+  const gate = gateFunction();
+  /* given out of order on purpose: the end time decides */
+  const g = gate([gateRun(GOLD_V, 9), gateRun(FP_V, 1), gateRun(GOLD_V, 5), gateRun('unclear', 7), gateRun(GOLD_V, 8)], null);
+  assert.equal(g.streak, 3);
+  assert.equal(g.stop, true);
+  const broken = gate([gateRun(GOLD_V, 1), gateRun(GOLD_V, 2), gateRun(FP_V, 3), gateRun(GOLD_V, 4), gateRun(GOLD_V, 5)], null);
+  assert.equal(broken.streak, 2, 'a wrong verdict starts the count again');
+  assert.equal(broken.stop, false);
+  assert.equal(gate([gateRun(GOLD_V, 1), gateRun(GOLD_V, 2), gateRun(GOLD_V, 3), gateRun(FP_V, 4)], null).streak, 0, 'the latest run decides');
+  const noTime = gate([gateRun(GOLD_V, 1), gateRun(FP_V, 2, { endedAt: null })], null);
+  assert.equal(noTime.streak, 0, 'a run with no end time counts as the latest');
+});
+
+test('pilotGate: the ship bar is met at `of` runs or more with at least the same share wrong; it is not met yet before that', () => {
+  const gate = gateFunction();
+  const runs = (wrong, correct) => [...Array.from({ length: wrong }, (_, i) => gateRun(FP_V, i + 1)), ...Array.from({ length: correct }, (_, i) => gateRun(GOLD_V, wrong + i + 1))];
+  const bar = { wrong: 5, of: 6 };
+  assert.deepEqual(gate(runs(5, 0), bar).bar, { wrong: 5, of: 6, n: 5, met: false }, 'five runs are not six yet');
+  assert.deepEqual(gate(runs(5, 1), bar).bar, { wrong: 5, of: 6, n: 6, met: true });
+  assert.deepEqual(gate(runs(4, 2), bar).bar, { wrong: 5, of: 6, n: 6, met: false });
+  assert.equal(gate(runs(5, 2), bar).bar.met, false, 'five of seven is less than five of six');
+  assert.equal(gate(runs(6, 1), bar).bar.met, true);
+  assert.equal(gate(runs(10, 2), bar).bar.met, true, 'ten of twelve is the same share');
+  assert.equal(gate(runs(9, 3), bar).bar.met, false);
+  for (const odd of [null, undefined, {}, { wrong: 0, of: 6 }, { wrong: 7, of: 6 }, { wrong: '5', of: '6' }, { wrong: 1.5, of: 6 }]) assert.equal(gate(runs(5, 1), odd).bar, null, JSON.stringify(odd));
+});
+
+test('pilotGate: the projected batch mean range and the chance a ten-run batch averages 0.60 or lower, against values worked out by hand', () => {
+  const gate = gateFunction();
+  const runs = (correct, wrong) => [...Array.from({ length: correct }, (_, i) => gateRun(GOLD_V, i + 1)), ...Array.from({ length: wrong }, (_, i) => gateRun(FP_V, correct + i + 1))];
+  const near = (actual, expected, label) => assert.ok(Math.abs(actual - expected) < 1e-12, `${label}: ${actual} is not ${expected}`);
+  /* Range: low = (correct*0.82 + wrong*0.13)/total, high = (correct*0.90 + wrong*0.32)/total. */
+  const one = gate(runs(1, 5), null);
+  near(one.range.low, (0.82 + 5 * 0.13) / 6, '1 of 6 low');
+  near(one.range.high, (0.90 + 5 * 0.32) / 6, '1 of 6 high');
+  near(one.point, (0.86 + 5 * 0.25) / 6, '1 of 6 point');
+  /* Chance: C ~ beta-binomial(10, correct+1, wrong+1); a batch averages 0.60 or lower when C*0.86 + (10-C)*0.25 <= 6.0, so C <= 5.
+     P(C = k) = choose(10,k) B(k+a, 10-k+b) / B(a,b). With a = 2, b = 6 (1 correct of 6) the sum over k = 0..5 is 8929/9724; with
+     a = b = 4 (3 of 6) it is 2823/4862; 0 of 6 gives 869/884, 6 of 6 gives 9/221, 1 of 3 gives 103/143. */
+  near(one.chance, 8929 / 9724, '1 correct of 6');
+  const three = gate(runs(3, 3), null);
+  near(three.chance, 2823 / 4862, '3 correct of 6');
+  near(three.range.low, (3 * 0.82 + 3 * 0.13) / 6, '3 of 6 low');
+  near(three.range.high, (3 * 0.90 + 3 * 0.32) / 6, '3 of 6 high');
+  near(gate(runs(0, 6), null).chance, 869 / 884, '0 correct of 6');
+  near(gate(runs(6, 0), null).chance, 9 / 221, '6 correct of 6');
+  near(gate(runs(1, 2), null).chance, 103 / 143, '1 correct of 3');
+  /* With no verdicts the uniform prior alone would say 6/11; the gate says nothing instead. */
+  assert.equal(gate([], null).chance, null);
+});
+
+test('the pilot gate card pools the rounds of one design, says it is pilot-based and directional, shows no percent sign, and waits while a round runs', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { resultText: WRONG_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const two = { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } };
+  /* another design: the same packet, another prompt. It is read (same packet hash) and left out (another prompt hash). */
+  const other = await finishedRoundViaService(w, { ...two, promptText: PROMPT + ' Synthetic variant.' });
+  await w.service.classifyRun(other, 1, { verdict: GOLD_V });
+  await w.service.classifyRun(other, 2, { verdict: GOLD_V });
+  const first = await finishedRoundViaService(w, two);
+  await w.service.classifyRun(first, 1, { verdict: GOLD_V });
+  await w.service.classifyRun(first, 2, { verdict: FP_V, fingerprintIds: ['fp-alpha'] });
+  const second = await finishedRoundViaService(w, two);
+  await w.service.classifyRun(second, 1, { verdict: 'unclear' });
+  await w.service.classifyRun(second, 2, { verdict: FP_V, fingerprintIds: ['fp-alpha'] });
+
+  const page = makePage(t, w);
+  await page.boot();
+  await waitFor(() => /Rounds of this design/.test(page.section('pilot-gate')), { label: 'the gate to read the other rounds' });
+  const card = page.section('pilot-gate');
+  const text = card.replace(/<[^>]*>/g, ' ').replace(/&#39;/g, "'").replace(/\s+/g, ' ');
+  assert.match(text, /Pilot gate \(pilot-based\)/);
+  assert.match(text, /Pilot-based and directional/);
+  assert.match(text, /The platform's gate is at least six completed runs averaging 0\.60 or lower/);
+  assert.match(text, /matched a platform batch once and is untested elsewhere/);
+  assert.match(text, new RegExp(`Rounds of this design 2: ${second}, ${first}`), 'the selected round first, then the other round of its design');
+  assert.ok(!card.includes(other), 'a round with another prompt is another design');
+  assert.match(text, /Wrong \(lands on a frozen fingerprint\) 2 of 3/);
+  assert.match(text, /Correct \(matches the frozen gold\) 1 of 3/);
+  assert.match(text, /Unclear 1, left out/);
+  assert.match(text, /Three correct in a row: stop testing this design/, 'the stop rule is stated');
+  assert.doesNotMatch(card, /id="ag-pilot-gate-stop"/, 'and not reached');
+  /* 1 correct, 2 wrong: (0.82 + 0.26)/3 = 0.36 to (0.90 + 0.64)/3 = 0.51; chance 103/143 = 0.72 */
+  assert.match(text, /Projected batch mean 0\.36 to 0\.51/);
+  assert.match(text, /Chance a ten-run batch averages 0\.60 or lower 0\.72/);
+  assert.match(text, /No ship bar was frozen with this design/);
+  assert.ok(!card.includes('%'), 'no percent sign anywhere in the card');
+  assert.doesNotMatch(text, /pass rate|success rate|failure rate/i);
+  assert.ok(!page.section('runs').includes('%'), 'nor in the runs card');
+
+  /* A round of the same design starts. A page opened now shows the gate as waiting and reads nothing of the other rounds. */
+  const running = await approvedRoundViaService(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 3 } });
+  await w.service.launchRound(running);
+  await waitFor(async () => (await w.service.getRound(running)).runs[2].state === 'running', { label: 'pilot 3 to run' });
+  const live = makePage(t, w);
+  await live.boot();
+  assert.match(live.section('pilot-gate'), /Pilot gate \(pilot-based\)/);
+  assert.match(live.section('pilot-gate'), /Waiting for the round to end\./);
+  assert.doesNotMatch(live.section('pilot-gate'), /Wrong|Correct|Chance|Projected|Ship bar/, 'nothing else while a round runs');
+  assert.ok(!live.section('pilot-gate').includes('%'));
+  const viewReads = page => page.requests.filter(r => r.method === 'GET' && [first, second, other].some(id => r.url === `/api/agents/rounds/${id}`));
+  assert.equal(viewReads(live).length, 0, 'no round of the design is read while a round runs');
+
+  /* It ends: the gate reads the rounds again and comes back, the new round's unclassified runs adding nothing. */
+  await w.service.cancelRound(running);
+  await w.service.whenSettled(running);
+  await waitFor(() => /Wrong \(lands on a frozen fingerprint\)<\/dt><dd>2 of 3/.test(live.section('pilot-gate')), { label: 'the gate to come back', timeout: 10000 });
+  assert.match(live.section('pilot-gate'), new RegExp(`Rounds of this design</dt><dd>3: ${running}, `));
+  assert.ok(viewReads(live).length >= 2, 'the rounds of the design were read once nothing runs');
+});
+
+test('a round of another design selected while the gate is still reading gets its own rounds read when that read ends', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  /* design B: another packet folder, so its rounds are not among the first design's reads. Made first, so the page selects A. */
+  const sourceB = path.join(w.base, 'source-b');
+  fs.mkdirSync(sourceB);
+  fs.writeFileSync(path.join(sourceB, 'Borealis_Terms.txt'), 'Borealis facility terms, synthetic.\n');
+  const b1 = await finishedRoundViaService(w, { sourceDir: sourceB });
+  const b2 = await finishedRoundViaService(w, { sourceDir: sourceB });
+  const a1 = await finishedRoundViaService(w);
+  const a2 = await finishedRoundViaService(w);
+  await w.service.classifyRun(b1, 1, { verdict: FP_V, fingerprintIds: ['fp-alpha'] });
+  for (const id of [b2, a1, a2]) await w.service.classifyRun(id, 1, { verdict: GOLD_V });
+
+  const page = makePage(t, w);
+  /* hold the gate's read of a1 until the test lets it go */
+  const pass = page.context.fetch;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  page.context.fetch = async (url, init) => { if (url === `/api/agents/rounds/${a1}`) await held; return pass(url, init); };
+  await page.boot();
+  await waitFor(() => new RegExp(`Rounds of this design</dt><dd>1: ${a2}<`).test(page.section('pilot-gate')) && /Reading 1 more round with the same packet/.test(page.section('pilot-gate')), { label: `the gate of ${a2} to wait on its read` });
+
+  await page.type('select-round', { value: b2, event: 'change' });
+  assert.match(page.section('pilot-gate'), new RegExp(`Rounds of this design</dt><dd>1: ${b2}<`));
+  assert.match(page.section('pilot-gate'), /Reading 1 more round with the same packet/, 'the first read is still going, so this one waits');
+  release();
+  await waitFor(() => new RegExp(`Rounds of this design</dt><dd>2: ${b2}, ${b1}<`).test(page.section('pilot-gate')), { label: 'the second design to be read once the first read ends', timeout: 5000 });
+  assert.match(page.section('pilot-gate'), /Wrong \(lands on a frozen fingerprint\)<\/dt><dd>1 of 2/);
+  assert.doesNotMatch(page.section('pilot-gate'), /Reading \d+ more/);
+});
+
+test('a ship bar typed in the Freeze card is checked, frozen, shown in the approval and the gate, and filled again by Start next round', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { resultText: WRONG_ANSWER }, { resultText: WRONG_ANSWER }]);
+  const page = makePage(t, w);
+  await page.boot();
+  assert.match(page.section('freeze'), /Ship bar \(optional\)/);
+  assert.match(page.section('freeze'), /data-ag-key="bar-wrong"[^>]*value="5"[^>]*disabled/, 'suggested 5 of 6, off until ticked');
+  assert.match(page.section('freeze'), /data-ag-key="bar-of"[^>]*value="6"[^>]*disabled/);
+  await page.type('count', { value: '3', event: 'change' });
+  await page.type('bar-on', { checked: true, event: 'change' });
+  await page.type('bar', { value: '4', dataset: { f: 'wrong' } });
+  await page.type('bar', { value: '3', dataset: { f: 'of' } });
+  await page.fillAndFreeze();
+  assert.match(page.section('freeze-state'), /The ship bar needs whole numbers/);
+  assert.equal((await w.service.listRounds()).length, 0, 'nothing was created');
+
+  await page.type('bar', { value: '2', dataset: { f: 'wrong' } });
+  await page.click('freeze');
+  const id = (await w.service.listRounds())[0].id;
+  const round = await w.service.getRound(id);
+  assert.deepEqual(round.freeze.shipBar, { wrong: 2, of: 3 });
+  assert.match(page.section('freeze-state'), /Ship bar<\/dt><dd>at least 2 wrong of 3 runs/);
+  assert.match(page.section('freeze-state'), /gold and fingerprints and the ship bar, without the time stamp/);
+  await page.click('open-approve');
+  assert.match(page.modal(), /Ship bar<\/dt><dd>at least 2 wrong of 3 runs, frozen with the gold/);
+  assert.match(page.modal(), /Ship bar, frozen with the gold and covered by the content sha256: at least 2 wrong of 3 completed runs/);
+  await page.acknowledgeAll();
+  await page.click('approve-launch');
+  await w.service.whenSettled(id);
+  await waitFor(() => /Waiting for the round to end/.test(page.section('pilot-gate')) === false && /No classified runs of this design yet/.test(page.section('pilot-gate')), { label: 'the gate to say nothing is classified', timeout: 10000 });
+
+  /* classify in the drawer: one correct, then two wrong */
+  const classify = async (n, verdict) => {
+    await page.click('open-run', { n });
+    await waitFor(() => page.enabled('save-class') || /data-ag-in="verdict"/.test(page.modal()), { label: 'the drawer of pilot ' + n });
+    await page.type('verdict', { dataset: { id: verdict }, event: 'change' });
+    if (verdict === FP_V) await page.click('chip', { id: 'fp-alpha' });
+    await page.click('save-class');
+    await page.click('close-overlay');
+  };
+  await classify(1, GOLD_V);
+  await classify(2, FP_V);
+  assert.match(page.section('pilot-gate'), /Ship bar: at least 2 wrong of 3, not met yet \(2 runs so far\)\./);
+  await classify(3, FP_V);
+  assert.match(page.section('pilot-gate'), /Ship bar: at least 2 wrong of 3, met \(3 runs so far\)\./);
+  assert.ok(!page.section('pilot-gate').includes('%'));
+
+  /* the bar comes back with the gold when the round is carried forward, and freezing that is the same content */
+  await page.click('clear-draft');
+  assert.match(page.section('freeze'), /data-ag-key="bar-on"(?![^>]*checked)/, 'the cleared form has no bar');
+  await page.click('next-round');
+  assert.match(page.section('freeze'), /data-ag-key="bar-on"[^>]*checked/);
+  assert.match(page.section('freeze'), /data-ag-key="bar-wrong"[^>]*value="2"/);
+  assert.match(page.section('freeze'), /data-ag-key="bar-of"[^>]*value="3"/);
+  await page.click('freeze');
+  const next = (await w.service.listRounds()).find(row => row.id !== id);
+  const frozen = await w.service.getRound(next.id);
+  assert.deepEqual(frozen.freeze.shipBar, { wrong: 2, of: 3 });
+  assert.equal(frozen.freeze.contentSha256, round.freeze.contentSha256, 'the same design');
+  assert.match(page.section('freeze-state'), /Gold and fingerprints<\/dt><dd>unchanged<\/dd><dt>Ship bar<\/dt><dd>unchanged/);
+  await page.click('open-approve');
+  assert.match(page.modal(), new RegExp(`Round ${id}\\. Gold and fingerprints unchanged, ship bar unchanged \\(content SHA-256`));
+  await page.click('close-overlay');
+  /* the gate of the carried round is the gate of its design: the first round's verdicts */
+  await waitFor(() => /Ship bar: at least 2 wrong of 3, met \(3 runs so far\)/.test(page.section('pilot-gate')), { label: 'the carried round to show its design\'s gate' });
+});
+
+test('the ship bar is kept in the draft in this browser and restored after a reload', async t => {
+  const w = await makeWorld(t);
+  const storage = makeStorage();
+  const page = makePage(t, w, { storage });
+  await page.boot();
+  await page.type('bar-on', { checked: true, event: 'change' });
+  await page.type('bar', { value: '4', dataset: { f: 'wrong' } });
+  await waitFor(() => storage.map.has(DRAFT_KEY) && JSON.parse(storage.map.get(DRAFT_KEY)).fz.bar.wrong === '4', { label: 'the draft to be saved' });
+  assert.deepEqual(JSON.parse(storage.map.get(DRAFT_KEY)).fz.bar, { on: true, wrong: '4', of: '6' });
+  const again = makePage(t, w, { storage });
+  await again.boot();
+  assert.match(again.section('freeze'), /data-ag-key="bar-on"[^>]*checked/);
+  assert.match(again.section('freeze'), /data-ag-key="bar-wrong"[^>]*value="4"/);
+  assert.doesNotMatch(again.section('freeze'), /data-ag-key="bar-wrong"[^>]*disabled/);
+});
+
+test('the simulated grader offers the grading model first, grades a pasted reference answer as a calibration, and says when the guidance needs fixing', async t => {
+  const graded = '{"verdict": "meets-guidance", "reason": "States the figure.", "score": 0.9, "items": [{"item": "Usable cash of 1,250", "met": true, "reason": "Stated."}, {"item": "Hold <decision>", "met": false, "reason": "Not said."}]}';
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER + ' ' + graded });
+  await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-grader');
+  assert.match(page.modal(), /<option value="claude-opus-4-8" selected>claude-opus-4-8<\/option>/, 'the grading instrument is offered first');
+  assert.match(page.section('settings'), /<option value="claude-opus-5-5" selected>/, 'pilots keep their own default');
+  assert.match(page.modal(), /<option value="ref" >Reference answer \(paste\)<\/option>/);
+  assert.doesNotMatch(page.modal(), /data-ag-in="reference"/, 'no paste box until it is chosen');
+
+  await page.type('answer-run', { value: 'ref', event: 'change' });
+  assert.match(page.modal(), /<option value="ref" selected>/);
+  assert.match(page.modal(), /data-ag-in="reference"/);
+  assert.match(page.modal(), /should score about 0\.98\. Below 0\.95 the guidance likely needs fixing/);
+  await page.type('guideline', { value: 'You are grading a liquidity answer. Usable cash is 1,250.' });
+  for (const id of ['run', 'network', 'notools']) await page.type('overlay-ack', { checked: true, dataset: { id }, event: 'change' });
+  assert.equal(page.enabled('run-grader'), false, 'a calibration needs a reference answer');
+  const reference = 'Synthetic reference: usable cash is 1,250, so hold the borrowing.';
+  await page.type('reference', { value: reference });
+  /* typing only flips the button itself, which the fake page does not hold; ticking a box again repaints the dialog */
+  await page.type('overlay-ack', { checked: true, dataset: { id: 'run' }, event: 'change' });
+  assert.equal(page.enabled('run-grader'), true);
+  await page.click('run-grader');
+  const posted = page.requests.filter(r => r.method === 'POST' && r.url === '/api/agents/grader-sim').map(r => JSON.parse(r.body));
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].answerText, reference, 'the pasted text is what is graded');
+  assert.equal(posted[0].model, 'claude-opus-4-8');
+  const modal = page.modal();
+  assert.match(modal, /Calibration: the simulated grader on your reference answer/);
+  assert.match(modal, /Score: 0\.90/);
+  assert.match(modal, /Your reference answer scored 0\.90, below 0\.95\./);
+  assert.match(modal, /the guidance likely needs fixing before any pilot score means anything/);
+  assert.match(modal, /<strong>Met:<\/strong> Usable cash of 1,250 · Stated\./);
+  assert.match(modal, /<strong>Not met:<\/strong> Hold &lt;decision&gt; · Not said\./, 'item text is escaped');
+  assert.ok(!modal.includes('%'));
+
+  /* back to a pilot's answer: a plain simulated result, with its score, and no calibration note */
+  await page.type('answer-run', { value: '1', event: 'change' });
+  assert.doesNotMatch(page.modal(), /data-ag-in="reference"/);
+  await page.click('run-grader');
+  const pilot = page.modal();
+  assert.match(pilot, /Simulated grader, not Studio grading<\/strong><br>Verdict: meets-guidance/);
+  assert.match(pilot, /Score: 0\.90/);
+  assert.doesNotMatch(pilot, /id="ag-calibration"/);
+  const last = page.requests.filter(r => r.method === 'POST' && r.url === '/api/agents/grader-sim').map(r => JSON.parse(r.body)).pop();
+  assert.ok(last.answerText.startsWith(GOLD_ANSWER), 'the pilot\'s final answer is graded');
 });

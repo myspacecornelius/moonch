@@ -10,7 +10,7 @@
 
   const OFFLINE_MESSAGE='Local agents need the companion: run npm start.';
   const POLL_MS=1500;
-  const DEFAULT_PROMPT_WORDS=60;      /* the shipped-format limit in core.js; used only when the project is not available */
+  const DEFAULT_PROMPT_WORDS=120;     /* the prompt-length review cue in core.js; used only when the project is not available */
   const PACKAGE_DIGEST_CHARS=90000;   /* the companion refuses a review prompt over 120 KiB */
   const ID_RE=/^[a-z0-9-]{4,64}$/;
   const FINGERPRINT_ID_RE=/^[a-z0-9-]{2,40}$/;
@@ -57,6 +57,17 @@
   });
   /* What the spending cap covers, in the settings and the approval dialog (backend/agents/rounds.cjs STATEMENTS.cap). */
   const CAP_STATEMENT='The cap applies to each pilot process the Studio starts. It is not a ceiling on everything a pilot can start: a claude process that a pilot starts from its own shell has no cap and its tool calls are not audited. The audit discards a run whose tool calls start one, after the fact.';
+  /* The ship bar frozen with the gold (SHIP_BAR in backend/agents/constants.cjs, which refuses anything else): whole numbers,
+     1 <= wrong <= of <= 20, suggested as 5 of 6. */
+  const SHIP_BAR={maxRuns:20,suggestWrong:5,suggestOf:6};
+  /* The pilot gate's instrument: what a pilot run scores on the platform's grading when the writer's verdict is correct (matches
+     the frozen gold) or wrong (lands on a frozen fingerprint). Measured on the writer's own earlier tasks; it is not a property of
+     any new task, and it matched a platform batch once. The ranges give the projected batch mean, the points decide which ten-run
+     batches average 0.60 or lower. stop: correct verdicts in a row after which the design is not worth more pilots. */
+  const GATE=Object.freeze({correct:{low:0.82,high:0.90,point:0.86},wrong:{low:0.13,high:0.32,point:0.25},batch:10,mean:0.60,stop:3});
+  /* A calibration grades the writer's own reference answer, which should score about 0.98. Below 0.95 it is the guidance that
+     needs work, and no pilot score means anything until it has had it. */
+  const CALIBRATION={expected:0.98,floor:0.95};
   const causeOf=kind=>Object.prototype.hasOwnProperty.call(VIOLATION_CAUSES,kind)?VIOLATION_CAUSES[kind]:null;
 
   /* ---------- Escaping and markup. Interpolated values are escaped unless they are the result of html or raw. ---------- */
@@ -114,11 +125,13 @@
     mounted:false,
     pending:null,            // {roundId,n,step,at,bad}: what openRun / openRound asked for, applied when this view is mounted and ready
     applying:false,
-    noncePromise:null        // one shared /api/status request while the nonce is loaded for link, get and post
+    noncePromise:null,       // one shared /api/status request while the nonce is loaded for link, get and post
+    design:{views:{},busy:false}  // the pilot gate's reads of other rounds: round id -> {at: its row's lastActivityAt, view}
   };
   function blankFigure(){return {label:'',value:'',tolerance:''};}
   function blankFingerprint(n){return {id:'fp-'+n,label:'',tokens:'',figures:[]};}
-  function blankFreezeForm(){return {decision:'',notes:'',figures:[blankFigure()],fingerprints:[blankFingerprint(1)],errors:[]};}
+  function blankBar(){return {on:false,wrong:String(SHIP_BAR.suggestWrong),of:String(SHIP_BAR.suggestOf)};}
+  function blankFreezeForm(){return {decision:'',notes:'',figures:[blankFigure()],fingerprints:[blankFingerprint(1)],bar:blankBar(),errors:[]};}
   /* atOnce 0 means every pilot at once (one wave); a number below the pilot count runs that many at a time. */
   function blankConfig(model='',effort=''){return {model,effort,count:DEFAULT_PILOTS,atOnce:0,budget:BUDGET.pilotDefault.toFixed(2)};}
 
@@ -268,8 +281,12 @@
     if(!models.length||!efforts.length)throw new ApiError('The companion did not report model and effort choices.',0);
     const max=Number.isInteger(agents.maxPilotsPerRound)&&agents.maxPilotsPerRound>0?agents.maxPilotsPerRound:5;
     return {runtime:agents.runtime&&typeof agents.runtime==='object'?agents.runtime:{found:false},max,models,efforts,
-      defaultModel:pickDefault(models,'claude-opus-5-5'),defaultEffort:pickDefault(efforts,'medium')};
+      defaultModel:pickDefault(models,'claude-opus-5-5'),defaultEffort:pickDefault(efforts,'medium'),
+      graderModel:typeof agents.graderModel==='string'&&models.some(m=>m.id===agents.graderModel)?agents.graderModel:''};
   }
+  /* The simulated grader offers the companion's grading model first (the writer's grading instrument); pilots keep their own model.
+     An older companion names none, and the dialog then starts from the pilot model, as it did before. */
+  const graderModel=()=>S.status.graderModel||S.config.model;
   async function loadStatus(){
     const data=await api('GET','/api/status');
     S.nonce=typeof data.nonce==='string'?data.nonce:'';
@@ -369,7 +386,7 @@
     }
     return true;
   }
-  const SECTIONS={strip:stripHtml,draft:draftHtml,rail:railHtml,runtime:runtimeHtml,packet:packetHtml,settings:settingsHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml};
+  const SECTIONS={strip:stripHtml,draft:draftHtml,rail:railHtml,runtime:runtimeHtml,packet:packetHtml,settings:settingsHtml,freeze:freezeHtml,round:roundHtml,runs:runsHtml,'pilot-gate':pilotGateHtml};
   /* The step rail summarises every other section, so it is repainted after any of them (it changes only when its markup does). */
   function paintRail(){setHtml($('#ag-rail'),railHtml());centerCurrentStep();}
   /* On a narrow screen the steps form a scrolling row. Bring the current step into view by moving only that row, never the page. */
@@ -382,7 +399,8 @@
     }catch{/* nothing to scroll */}
   }
   function paintSection(name){setHtml($('#ag-'+name),SECTIONS[name]());if(name!=='rail')paintRail();if(name==='strip'||name==='runs')updateTitle();}
-  function paintAll(){if(S.phase==='ready')Object.keys(SECTIONS).forEach(paintSection);}
+  /* Every full paint also asks for any round the pilot gate still has to read; that call returns at once when it has them all. */
+  function paintAll(){if(S.phase==='ready'){Object.keys(SECTIONS).forEach(paintSection);syncDesign();}}
   /* The tab title counts the pilots of the selected round that have ended, like "(3/5) Agents", while this page shows. */
   function titleText(){
     const runs=runsOf(S.round);
@@ -450,6 +468,7 @@
         <section class="card" id="ag-freeze" aria-label="Freeze">${freezeHtml()}</section>
         <section class="card" id="ag-round" aria-label="Round">${roundHtml()}</section>
         <section class="card" id="ag-runs" aria-label="Runs">${runsHtml()}</section>
+        <section class="card" id="ag-pilot-gate" aria-label="Pilot gate">${pilotGateHtml()}</section>
       </div></div>`;
   }
 
@@ -661,8 +680,19 @@ ${f.notes}</textarea></label>
       <h3>Fingerprints of expected wrong answers</h3>
       <div class="ag-fplist">${f.fingerprints.map((fp,i)=>fingerprintHtml(fp,i))}</div>
       <div class="actions"><button type="button" class="small" data-ag="add-fp" data-ag-key="add-fp">Add a fingerprint</button></div>
+      <h3>Ship bar (optional)</h3>
+      ${shipBarHtml()}
       <div id="ag-freeze-state">${freezeStateHtml()}</div>`;
   }
+  /* The ship bar is decided before the first run and frozen with the gold, inside the content hash, so it cannot be moved once
+     verdicts come in. The Pilot gate card reads it. */
+  function shipBarHtml(){
+    const b=S.fz.bar,off=b.on?'':'disabled';
+    return html`<label class="check"><input type="checkbox" data-ag-in="bar-on" data-ag-key="bar-on" ${b.on?'checked':''}><span><strong>Freeze a ship bar with the gold</strong>Decide now, before any run, how many wrong answers this design needs before it ships. It is frozen with the gold and covered by the content hash, so it cannot move once verdicts come in.</span></label>
+      <div class="field-row" id="ag-ship-bar"><label class="field">At least this many wrong<input type="number" data-ag-in="bar" data-f="wrong" data-ag-key="bar-wrong" min="1" max="${SHIP_BAR.maxRuns}" step="1" value="${b.wrong}" ${off}></label>
+        <label class="field">Of this many runs<input type="number" data-ag-in="bar" data-f="of" data-ag-key="bar-of" min="1" max="${SHIP_BAR.maxRuns}" step="1" value="${b.of}" ${off}><small>Whole numbers, at most ${SHIP_BAR.maxRuns} runs. A usual bar is ${SHIP_BAR.suggestWrong} of ${SHIP_BAR.suggestOf}.</small></label></div>`;
+  }
+  const barText=bar=>'at least '+bar.wrong+' wrong of '+bar.of;
   function figureRowHtml(kind,i,j,fig,word){
     const base=`${kind}-${i}-${j}`;
     return html`<div class="ag-figrow">
@@ -711,24 +741,26 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     return html`${S.fz.errors.length?html`<div class="notice" role="alert"><strong>Fix before freezing</strong><ul class="plain-list">${S.fz.errors.map(e=>html`<li>${e}</li>`)}</ul></div>`:''}
       ${r&&r.carriedFrom?carryHtml(r):''}
       ${fr?versions.map(v=>html`<div class="notice neutral"><strong>${v.postHoc?'Post-hoc freeze version ':'Frozen '}${v.version?'(version '+v.version+')':''}</strong>
-        <dl class="history-details"><dt>Round</dt><dd>${r.id}</dd><dt>${v.postHoc?'Saved at':'Frozen at'}</dt><dd>${timeText(v.frozenAt)}</dd><dt>Freeze SHA-256</dt><dd>${v.sha256}</dd>${v.contentSha256?html`<dt>Content SHA-256</dt><dd>${v.contentSha256} <small>(gold and fingerprints, without the time stamp)</small></dd>`:''}${v.postHoc?html`<dt>Label</dt><dd>Post-hoc: written after launch, stored beside the original freeze</dd>`:''}</dl></div>`):html`<p class="muted">No freeze record for the selected round. Launch stays disabled until the gold is frozen.</p>`}
+        <dl class="history-details"><dt>Round</dt><dd>${r.id}</dd><dt>${v.postHoc?'Saved at':'Frozen at'}</dt><dd>${timeText(v.frozenAt)}</dd><dt>Freeze SHA-256</dt><dd>${v.sha256}</dd>${v.contentSha256?html`<dt>Content SHA-256</dt><dd>${v.contentSha256} <small>(gold and fingerprints${v.shipBar?' and the ship bar':''}, without the time stamp)</small></dd>`:''}${v.shipBar?html`<dt>Ship bar</dt><dd>${barText(v.shipBar)} runs</dd>`:''}${v.postHoc?html`<dt>Label</dt><dd>Post-hoc: written after launch, stored beside the original freeze</dd>`:''}</dl></div>`):html`<p class="muted">No freeze record for the selected round. Launch stays disabled until the gold is frozen.</p>`}
       ${stale?html`<div class="notice" role="status">The packet, prompt, settings or gold on this page no longer match the freeze of round ${r.id}. Freeze again to create a new round.</div>`:''}
       ${fr&&!afterDraft&&!known?html`<p class="footnote" id="ag-unknown-form">This page did not freeze round ${r.id} (or was reloaded since), so it cannot tell whether the form matches it. The approval dialog shows exactly what the round holds. Freeze again to make a new round from the form.</p>`:''}
       <div class="actions"><button type="button" class="${primaryClass('freeze')}" data-ag="freeze" data-ag-key="freeze" data-ag-lock ${locked()||settled?'disabled':''}>${settled?'Gold is frozen':fr?'Freeze again (new round)':'Freeze gold'}</button>
       ${wasLaunched&&fr?html`<button type="button" data-ag="refreeze" data-ag-key="refreeze" data-ag-lock ${locked()?'disabled':''}>Save a post-hoc freeze version</button>`:''}</div>
-      ${wasLaunched&&fr?html`<p class="footnote">A post-hoc version is stored beside the original, labelled post-hoc. It never replaces the original freeze. Fingerprints it adds can be chosen when you classify a run.</p>`:''}`;
+      ${wasLaunched&&fr?html`<p class="footnote">A post-hoc version is stored beside the original, labelled post-hoc. It never replaces the original freeze. Fingerprints it adds can be chosen when you classify a run.${fr.shipBar?' It keeps the ship bar frozen before the first run.':''}</p>`:''}`;
   }
   /* A round started from an earlier one: where it came from, both content hashes, and whether the content changed. */
   function carryHtml(r){
     const c=r.carried&&typeof r.carried==='object'?r.carried:{},ch=r.carryChanges&&typeof r.carryChanges==='object'?r.carryChanges:{};
     const own=r.freeze&&r.freeze.contentSha256;
     const content=ch.freezeContent===true?'changed':ch.freezeContent===false?'unchanged':'not frozen yet';
+    /* The companion compares a ship bar apart from the gold, and says so only when one of the two rounds has a bar. */
+    const bar='shipBar' in ch?(ch.shipBar===true?'changed':ch.shipBar===false?'unchanged':'not frozen yet'):'';
     const other=[['packet','packet files'],['prompt','prompt'],['gafVisible','gaf setting'],['settings','settings']].filter(([k])=>ch[k]===true).map(([,label])=>label);
     return html`<div class="notice neutral" id="ag-carry"><strong>Carried forward from round ${r.carriedFrom}</strong>
       <dl class="history-details"><dt>Its freeze</dt><dd>Version ${c.freezeVersion||'?'}${c.postHoc?', post-hoc':''}: SHA-256 ${c.freezeSha256||'not reported'}</dd>
         <dt>Its content SHA-256</dt><dd>${c.contentSha256||'not reported'}</dd>
         <dt>This round's content SHA-256</dt><dd>${own||(r.freeze?'not reported':'Not frozen yet. Check the gold and fingerprints below, then freeze to confirm them.')}</dd>
-        <dt>Gold and fingerprints</dt><dd>${content}</dd>
+        <dt>Gold and fingerprints</dt><dd>${content}</dd>${bar?html`<dt>Ship bar</dt><dd>${bar}</dd>`:''}
         <dt>Also changed</dt><dd>${other.length?other.join(', '):'nothing'}</dd></dl>
       <p class="footnote">Carrying a round forward fills the form. It never freezes, approves or launches anything: this round needs its own freeze and its own approval.</p></div>`;
   }
@@ -758,7 +790,8 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   const blankFig=fig=>!String(fig.label||'').trim()&&!String(fig.value||'').trim()&&!String(fig.tolerance||'').trim();
   const blankFp=fp=>!String(fp.label||'').trim()&&!String(fp.tokens||'').trim()&&fp.figures.every(blankFig)&&/^fp-\d+$/.test(String(fp.id||'').trim());
-  function buildFreeze(){
+  /* withBar false: a post-hoc version, which keeps the ship bar of the original freeze, so the bar fields are not read. */
+  function buildFreeze(withBar=true){
     const errors=[];
     const gold={decision:S.fz.decision.trim(),figures:[],notes:S.fz.notes.trim()};
     S.fz.figures.forEach((fig,j)=>{if(!blankFig(fig))gold.figures.push(cleanFigure(fig,'Gold figure '+(j+1),errors));});
@@ -774,12 +807,21 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       if(!tokens.length&&!figures.length)errors.push('Fingerprint '+(i+1)+' needs at least one token or figure.');
       fingerprints.push({id,label:String(fp.label||'').trim()||id,tokens,figures});
     });
-    return {gold,fingerprints,errors};
+    let shipBar=null;
+    if(withBar&&S.fz.bar.on){
+      const wrong=wholeOf(S.fz.bar.wrong),of=wholeOf(S.fz.bar.of);
+      if(wrong>=1&&of>=wrong&&of<=SHIP_BAR.maxRuns)shipBar={wrong,of};
+      else errors.push('The ship bar needs whole numbers: at least 1 wrong, of no fewer runs than that, and at most '+SHIP_BAR.maxRuns+' runs.');
+    }
+    return {gold,fingerprints,shipBar,errors};
   }
+  const wholeOf=value=>/^\s*\d{1,2}\s*$/.test(String(value==null?'':value))?Number(value):NaN;
+  /* The bar is in the signature only while it is ticked, so a form without one keeps the signature it had before the bar existed. */
   function freezeContent(){
     const trimmed=fig=>({label:String(fig.label).trim(),value:String(fig.value).trim(),tolerance:String(fig.tolerance).trim()});
     return {decision:S.fz.decision.trim(),notes:S.fz.notes.trim(),figures:S.fz.figures.filter(f=>!blankFig(f)).map(trimmed),
-      fingerprints:S.fz.fingerprints.filter(fp=>!blankFp(fp)).map(fp=>({id:fp.id.trim(),label:fp.label.trim(),tokens:lines(fp.tokens),figures:fp.figures.filter(f=>!blankFig(f)).map(trimmed)}))};
+      fingerprints:S.fz.fingerprints.filter(fp=>!blankFp(fp)).map(fp=>({id:fp.id.trim(),label:fp.label.trim(),tokens:lines(fp.tokens),figures:fp.figures.filter(f=>!blankFig(f)).map(trimmed)})),
+      ...(S.fz.bar.on?{shipBar:{wrong:String(S.fz.bar.wrong).trim(),of:String(S.fz.bar.of).trim()}}:{})};
   }
   function inputSig(){
     const files=S.packet.files||[];
@@ -902,11 +944,11 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       ${runs.length?runsTableHtml(runs):html`<div class="empty">${r?'No pilots have started in this round yet.':'No round selected. Freeze the gold to create one.'}</div>`}
       <div class="actions">${r&&['approved','running'].includes(r.status)?html`<button type="button" class="danger" data-ag="cancel-round" data-ag-key="cancel-round" data-ag-lock ${locked()?'disabled':''}>Cancel round</button>`:''}
         ${carry.show?html`<button type="button" data-ag="next-round" data-ag-key="next-round" data-ag-lock ${carry.ok&&!locked()?'':'disabled'}>Start next round from this round</button>`:''}
-        <button type="button" data-ag="open-grader" data-ag-key="open-grader" ${graderRuns().length&&!running?'':'disabled'}>Simulated grader…</button>
+        <button type="button" data-ag="open-grader" data-ag-key="open-grader" ${running?'disabled':''}>Simulated grader…</button>
         <button type="button" data-ag="open-review" data-ag-key="open-review" ${packageDocuments().length&&!running?'':'disabled'}>Author review…</button></div>
       ${carry.show?html`<p class="footnote" id="ag-next-note">${carry.ok?'Start next round from this round fills the form with its packet selection, prompt, gaf setting, settings, gold and fingerprints, as a new draft round. Nothing is frozen, approved or launched by it: the new round needs its own freeze and approval.':carry.why}</p>`:''}
       ${running?html`<p class="ag-why" id="ag-toolless-why">${RUNNING_TOOL_LESS}</p>`:''}
-      <p class="footnote">The simulated grader and the author review each ask for their own approval and use no tools. The grader is a simulation, not Studio grading, and it needs a completed pilot with a clean audit. The author review needs a task package loaded on the Overview page.</p>
+      <p class="footnote">The simulated grader and the author review each ask for their own approval and use no tools. The grader is a simulation, not Studio grading. It grades a completed pilot with a clean audit, or a reference answer you paste to calibrate the guidance before any pilot runs. The author review needs a task package loaded on the Overview page.</p>
       <div class="ag-export"><h3>Export</h3>
         <p class="muted">Adds one experiment record per clean, completed pilot to the project in the task editor, and downloads the round JSON. Discarded runs are listed separately and are not added.</p>
         <div class="actions"><button type="button" data-ag="export-add" data-ag-key="export-add" data-ag-lock ${r&&!locked()?'':'disabled'}>Add to project experiments…</button><button type="button" data-ag="export-download" data-ag-key="export-download" data-ag-lock ${r&&!locked()?'':'disabled'}>Download round JSON</button></div></div>`;
@@ -932,6 +974,104 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
   }
   const packageDocuments=()=>S.ctx.package&&Array.isArray(S.ctx.package.documents)?S.ctx.package.documents:[];
   const graderRuns=()=>runsOf(S.round).filter(run=>run.state==='completed'&&auditStatus(run)==='CLEAN');
+
+  /* 7. Pilot gate: the writer's verdicts on every round of one design, set against the platform's gate. Pilot-based and directional. */
+  /* Numbers are written as decimals with two places, never as a percentage. */
+  const dec=x=>(Math.round(Number(x)*100+1e-6)/100).toFixed(2);
+  const lnFact=n=>{let s=0;for(let i=2;i<=n;i++)s+=Math.log(i);return s;};
+  const lnBeta=(a,b)=>lnFact(a-1)+lnFact(b-1)-lnFact(a+b-1);      /* B(a,b) = (a-1)!(b-1)!/(a+b-1)! for whole a, b >= 1 */
+  /* The chance that a batch of GATE.batch runs averages GATE.mean or lower. With a uniform prior on how often a run is correct, the
+     number C of correct runs in the batch is beta-binomial(batch, correct+1, wrong+1). A batch averages the mean or lower when
+     C*0.86 + (batch-C)*0.25 <= batch*0.60, which for ten runs is C <= 5. */
+  function batchChance(correct,wrong){
+    const n=GATE.batch,a=correct+1,b=wrong+1;
+    let p=0;
+    for(let c=0;c<=n&&c*GATE.correct.point+(n-c)*GATE.wrong.point<=n*GATE.mean+1e-9;c++)p+=Math.exp(lnFact(n)-lnFact(c)-lnFact(n-c)+lnBeta(c+a,n-c+b)-lnBeta(a,b));
+    return Math.min(1,Math.max(0,p));
+  }
+  /* Pure (no DOM, no state), so tests call it as FinanceAgents.pilotGate. runs: run rows or details of the rounds of one design. Only
+     a completed run with a CLEAN audit and a verdict of yours counts: wrong is 'fingerprint', correct is 'matches-frozen-gold', and
+     unclear is counted on its own and left out of the total. The streak is the correct verdicts in a row at the end, in the order the
+     runs ended; an unclear verdict neither breaks nor extends it. The ship bar is met once there are at least `of` runs and the wrong
+     ones are at least the same share as `wrong` of `of` (5 of 6 needs 5 of 6, 10 of 12, ...). */
+  function pilotGate(runs,shipBar){
+    const at=run=>{const t=Date.parse(run.endedAt);return Number.isFinite(t)?t:Infinity;};
+    const list=(Array.isArray(runs)?runs:[]).filter(run=>run&&run.state==='completed'&&auditStatus(run)==='CLEAN'&&VERDICTS.some(v=>v.id===humanVerdictOf(run)))
+      .map((run,i)=>({verdict:humanVerdictOf(run),t:at(run),i})).sort((x,y)=>(x.t-y.t)||(x.i-y.i));
+    let wrong=0,correct=0,unclear=0,streak=0;
+    list.forEach(x=>{
+      if(x.verdict==='fingerprint'){wrong++;streak=0;}
+      else if(x.verdict==='matches-frozen-gold'){correct++;streak++;}
+      else unclear++;
+    });
+    const total=wrong+correct,mean=(c,w)=>total?(correct*c+wrong*w)/total:null;
+    const barOk=!!shipBar&&Number.isInteger(shipBar.wrong)&&Number.isInteger(shipBar.of)&&shipBar.wrong>=1&&shipBar.wrong<=shipBar.of;
+    return {wrong,correct,unclear,total,streak,stop:streak>=GATE.stop,
+      bar:barOk?{wrong:shipBar.wrong,of:shipBar.of,n:total,met:total>=shipBar.of&&wrong*shipBar.of>=shipBar.wrong*total}:null,
+      range:total?{low:mean(GATE.correct.low,GATE.wrong.low),high:mean(GATE.correct.high,GATE.wrong.high)}:null,
+      point:mean(GATE.correct.point,GATE.wrong.point),chance:total?batchChance(correct,wrong):null};
+  }
+  /* A design is the packet, the prompt and the frozen gold: the packet hash, the prompt hash and the content hash of the original
+     freeze (which holds the ship bar when one was frozen). A post-hoc version does not move a round to another design. */
+  const designKeyOf=r=>{const p=r&&r.packet,fr=r&&r.freeze;return p&&fr&&p.packetSha256&&p.promptSha256&&fr.contentSha256?p.packetSha256+' '+p.promptSha256+' '+fr.contentSha256:'';};
+  /* The listed rounds that may share the selected round's design and have runs. The list row has no prompt or content hash, so the
+     packet hash narrows the reads and the round view decides. Only rounds already listed are read. */
+  function designCandidates(){
+    const r=S.round;
+    if(!designKeyOf(r))return [];
+    return S.rounds.filter(x=>x&&x.id!==r.id&&x.packetSha256===r.packet.packetSha256&&x.runCount>0);
+  }
+  const designStale=x=>{const kept=S.design.views[x.id];return !kept||kept.at!==x.lastActivityAt;};
+  function designRounds(){
+    const r=S.round,key=designKeyOf(r);
+    if(!key)return [];
+    return [r,...designCandidates().map(x=>S.design.views[x.id]&&S.design.views[x.id].view).filter(v=>v&&designKeyOf(v)===key)];
+  }
+  /* Reads the rounds the gate does not have yet, or whose list row says something happened since (a run ended, a verdict was saved).
+     Never while a round runs: the companion withholds the gold and the verdicts then. One read at a time; never throws. */
+  async function syncDesign(){
+    if(S.design.busy||S.phase!=='ready'||anyRunning())return;
+    const wanted=designCandidates().filter(designStale);
+    if(!wanted.length)return;
+    S.design.busy=true;
+    let stored=0;
+    try{
+      for(const row of wanted){
+        if(anyRunning())break;
+        let view=null;
+        try{view=normalizeRound(await api('GET',roundPath(row.id)));}catch{view=null;/* left out of the gate until its row changes */}
+        if(view&&view.redacted===true)break;
+        S.design.views[row.id]={at:row.lastActivityAt,view};stored++;
+      }
+    }finally{S.design.busy=false;}
+    if(S.mounted&&S.phase==='ready')paintSection('pilot-gate');
+    /* A call made during these reads returned at once, so look again: the writer may have selected a round of another design, or a
+       row may have changed. Only after a pass that stored a view, so a read the companion withheld (which stores nothing) cannot loop. */
+    if(stored&&S.phase==='ready'&&!anyRunning()&&designCandidates().some(designStale))return syncDesign();
+  }
+  function pilotGateHtml(){
+    const head=html`<div class="card-title"><div><div class="eyebrow">7 Pilot gate</div><h2>Pilot gate (pilot-based)</h2></div>${pill('Directional')}</div>`;
+    if(anyRunning())return html`${head}<p class="muted" id="ag-pilot-gate-wait">Waiting for the round to end.</p>`;
+    const r=S.round;
+    if(!designKeyOf(r))return html`${head}<p class="muted" id="ag-pilot-gate-empty">${r?'Freeze this round to see the pilot gate of its design.':'Select a round to see the pilot gate of its design.'}</p>`;
+    const rounds=designRounds(),g=pilotGate(rounds.flatMap(runsOf),r.freeze.shipBar),waiting=designCandidates().filter(designStale).length;
+    const reading=waiting?html`<p class="footnote">Reading ${waiting} more ${waiting===1?'round':'rounds'} with the same packet.</p>`:'';
+    if(!g.total)return html`${head}<p class="muted" id="ag-pilot-gate-empty">No classified runs of this design yet${g.unclear?' ('+g.unclear+' unclear, left out)':''}. Classify clean runs as matching the frozen gold or landing on a fingerprint, and the gate appears here.</p>${reading}`;
+    const bar=g.bar?'Ship bar: '+barText(g.bar)+', '+(g.bar.met?'met':'not met yet')+' ('+g.bar.n+(g.bar.n===1?' run':' runs')+' so far)':'No ship bar was frozen with this design';
+    return html`${head}
+      <p class="muted">Pilot-based and directional. It pools your verdicts on the completed, clean runs of every round of this design: the same packet, the same prompt and the same frozen gold. The platform's gate is at least six completed runs averaging 0.60 or lower. This instrument matched a platform batch once and is untested elsewhere.</p>
+      <dl class="history-details" id="ag-pilot-gate-facts"><dt>Rounds of this design</dt><dd>${rounds.length}: ${rounds.map(x=>x.id).join(', ')}</dd>
+        <dt>Wrong (lands on a frozen fingerprint)</dt><dd>${g.wrong} of ${g.total}</dd>
+        <dt>Correct (matches the frozen gold)</dt><dd>${g.correct} of ${g.total}</dd>
+        <dt>Unclear</dt><dd>${g.unclear}, left out</dd>
+        <dt>Correct in a row, latest runs</dt><dd>${g.streak}<br><small>Stop rule. Three correct in a row: stop testing this design.</small></dd>
+        <dt>Projected batch mean</dt><dd>${dec(g.range.low)} to ${dec(g.range.high)}</dd>
+        <dt>Chance a ten-run batch averages 0.60 or lower</dt><dd>${dec(g.chance)}</dd></dl>
+      <p id="ag-pilot-gate-bar"><strong>${bar}.</strong></p>
+      ${g.stop?html`<div class="notice" role="status" id="ag-pilot-gate-stop"><strong>Three correct in a row: stop testing this design.</strong> The latest ${g.streak} classified runs matched the frozen gold, so more pilots of this design are unlikely to change the call.</div>`:''}
+      <p class="footnote">Instrument, measured on your own earlier tasks and not a property of this task: a correct run scores ${dec(GATE.correct.low)} to ${dec(GATE.correct.high)} (point ${dec(GATE.correct.point)}), a wrong run ${dec(GATE.wrong.low)} to ${dec(GATE.wrong.high)} (point ${dec(GATE.wrong.point)}). The range weights those by your wrong and correct counts. The chance assumes nothing about the design beyond your verdicts (a uniform prior) and counts a ten-run batch as averaging 0.60 or lower when at most five of its runs are correct.</p>
+      ${reading}`;
+  }
 
   /* ---------- Overlays: detail drawer and approval dialogs ---------- */
   function overlayHtml(){
@@ -1033,10 +1173,11 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       ${preflightHtml(check)}
       <dl class="history-details"><dt>Round</dt><dd>${round.id}</dd><dt>Model</dt><dd>${model}</dd><dt>Effort</dt><dd>${effort}</dd><dt>Pilots</dt><dd>${count} (at most ${S.status.max}; ${pacingText({count,concurrency:cfg.concurrency})})</dd>
         <dt>Spending cap per pilot</dt><dd>${usd(budget)} (--max-budget-usd ${budget.toFixed(2)})</dd><dt>Round maximum spend</dt><dd>${roundMax(count,budget)} (${count} × ${usd(budget)}) <span id="ag-approve-cap-note">${CAP_STATEMENT}</span></dd>
-        ${round.carriedFrom?html`<dt>Carried forward from</dt><dd>Round ${round.carriedFrom}. Gold and fingerprints ${round.carryChanges&&round.carryChanges.freezeContent===true?'changed':'unchanged'} (content SHA-256 ${round.carried&&round.carried.contentSha256||'?'} then, ${round.freeze&&round.freeze.contentSha256||'see the summary text'} now).</dd>`:''}
+        ${round.carriedFrom?html`<dt>Carried forward from</dt><dd>Round ${round.carriedFrom}. Gold and fingerprints ${round.carryChanges&&round.carryChanges.freezeContent===true?'changed':'unchanged'}${round.carryChanges&&typeof round.carryChanges.shipBar==='boolean'?', ship bar '+(round.carryChanges.shipBar?'changed':'unchanged'):''} (content SHA-256 ${round.carried&&round.carried.contentSha256||'?'} then, ${round.freeze&&round.freeze.contentSha256||'see the summary text'} now).</dd>`:''}
         <dt>Tools</dt><dd>${Array.isArray(tools)?tools.join(', '):'Bash, Read, Write, Edit, Glob, Grep'}</dd>
         <dt>Working folder</dt><dd>${s.workingFolder||s.folder||'One new folder per pilot, outside this project, under the system temporary folder'}</dd>
         <dt>Packet SHA-256</dt><dd>${s.packetSha256||packet.packetSha256||'not reported'}</dd><dt>Freeze SHA-256</dt><dd>${s.freezeSha256||freeze.sha256||'not reported'}</dd>
+        ${freeze.shipBar?html`<dt>Ship bar</dt><dd>${barText(freeze.shipBar)} runs, frozen with the gold</dd>`:''}
         <dt>gaf/ visible</dt><dd>${(s.gafVisible!==undefined?s.gafVisible:packet.gafVisible)?'Yes':'No'}</dd>
         <dt>Overridden files</dt><dd>${overrides.length?overrides.map(p=>html`<code class="ag-path">${p}</code> `):'None'}</dd>
         <dt>Summary SHA-256</dt><dd>${o.hash||'not provided by the companion'}</dd></dl>
@@ -1334,42 +1475,65 @@ ${form.note}</textarea></label>
   }
 
   /* Simulated grader */
+  /* What the run button needs: the three approvals, guidance, and an answer (a clean pilot, or a pasted reference answer). */
+  const graderReady=o=>!!(o.acks.run&&o.acks.network&&o.acks.notools&&o.guideline.trim()&&(o.source==='ref'?o.reference.trim():graderRuns().length)&&!o.busy);
   function graderHtml(o){
-    const runs=graderRuns(),allChecked=o.acks.run&&o.acks.network&&o.acks.notools;
+    const runs=graderRuns(),ref=o.source==='ref';
     return dialogFrame('Simulated grader',html`
-      <p class="muted">A tool-less agent reads the guideline text and one answer and returns a verdict and a reason. It is a <strong>simulated grader, not Studio grading</strong>, and it is one sample.</p>
+      <p class="muted">A tool-less agent reads the guideline text and one answer and returns a verdict and a reason, and a score and a list of items when it gives them. It is a <strong>simulated grader, not Studio grading</strong>, and it is one sample.</p>
       <label class="field">Guideline text<textarea data-ag-in="guideline" data-ag-key="guideline" rows="8" maxlength="40000" data-ag-initial>
 ${o.guideline}</textarea></label>
-      <label class="field">Answer to grade<select data-ag-in="answer-run" data-ag-key="answer-run">${runs.map(run=>html`<option value="${run.n}" ${String(run.n)===String(o.runN)?'selected':''}>Pilot ${run.n} final answer</option>`)}</select></label>
-      <label class="field">Model<select data-ag-in="overlay-model" data-ag-key="overlay-model">${S.status.models.map(m=>html`<option value="${m.id}" ${m.id===o.model?'selected':''}>${m.id}</option>`)}</select></label>
+      <label class="field">Answer to grade<select data-ag-in="answer-run" data-ag-key="answer-run">${runs.map(run=>html`<option value="${run.n}" ${!ref&&String(run.n)===String(o.runN)?'selected':''}>Pilot ${run.n} final answer</option>`)}<option value="ref" ${ref?'selected':''}>Reference answer (paste)</option></select></label>
+      ${ref?html`<label class="field">Reference answer (paste)<textarea data-ag-in="reference" data-ag-key="reference" rows="8" maxlength="60000">
+${o.reference}</textarea><small>Calibration: your own answer that meets the guidance should score about ${dec(CALIBRATION.expected)}. Below ${dec(CALIBRATION.floor)} the guidance likely needs fixing before any pilot score means anything.</small></label>`:''}
+      <label class="field">Model<select data-ag-in="overlay-model" data-ag-key="overlay-model">${S.status.models.map(m=>html`<option value="${m.id}" ${m.id===o.model?'selected':''}>${m.id}</option>`)}</select>${S.status.graderModel?html`<small>${S.status.graderModel} is offered first: it is the grading instrument. Pilots keep the model chosen in Settings.</small>`:''}</label>
       <fieldset class="ag-acks"><legend>Approve this one run</legend>
         <label class="check"><input type="checkbox" data-ag-in="overlay-ack" data-id="run" data-ag-key="g-run" ${o.acks.run?'checked':''}><span><strong>Run one simulated grader</strong>I approve a single run, with the model chosen above.</span></label>
         <label class="check"><input type="checkbox" data-ag-in="overlay-ack" data-id="network" data-ag-key="g-network" ${o.acks.network?'checked':''}><span><strong>Network use by the agent runtime</strong>The guideline text and the answer are sent to Anthropic by the claude program.</span></label>
         <label class="check"><input type="checkbox" data-ag-in="overlay-ack" data-id="notools" data-ag-key="g-notools" ${o.acks.notools?'checked':''}><span><strong>No tools</strong>The grader gets no shell, file or web tools. It cannot read your folders.</span></label></fieldset>
       ${o.error?html`<div class="notice" role="alert">${o.error}</div>`:''}
-      ${o.result?html`<div class="notice neutral" role="status"><strong>Simulated grader, not Studio grading</strong><br>Verdict: ${o.result.verdict||'(none returned)'}<br>Reason: ${o.result.reason||'(none returned)'}</div>`:''}
-      <div class="actions"><button type="button" class="primary" data-ag="run-grader" data-ag-key="run-grader" ${allChecked&&o.guideline.trim()&&runs.length&&!o.busy?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-grader">Close</button></div>`);
+      ${o.result?graderResultHtml(o.result):''}
+      <div class="actions"><button type="button" class="primary" data-ag="run-grader" data-ag-key="run-grader" ${graderReady(o)?'':'disabled'}>${o.busy?'Running…':'Approve and run'}</button><button type="button" data-ag="close-overlay" data-ag-key="cancel-grader">Close</button></div>`);
+  }
+  function graderResultHtml(r){
+    return html`<div class="notice neutral" role="status" id="ag-grader-result"><strong>${r.calibration?'Calibration: the simulated grader on your reference answer':'Simulated grader, not Studio grading'}</strong><br>Verdict: ${r.verdict||'(none returned)'}<br>Reason: ${r.reason||'(none returned)'}${r.score===null?'':html`<br>Score: ${dec(r.score)}`}
+      ${r.items.length?html`<ul class="plain-list" id="ag-grader-items">${r.items.map(i=>html`<li><strong>${i.met===true?'Met':i.met===false?'Not met':'Not judged'}:</strong> ${i.item||'(no item named)'}${i.reason?' · '+i.reason:''}</li>`)}</ul>`:''}</div>
+      ${r.calibration?calibrationHtml(r.score):''}`;
+  }
+  /* What a calibration says about the guidance. It grades the writer's own reference answer, so a low score points at the guidance. */
+  function calibrationHtml(score){
+    if(score===null)return html`<div class="notice" role="status" id="ag-calibration">The grader returned no score, so this calibration says nothing about the guidance yet. Run it again.</div>`;
+    if(score<CALIBRATION.floor)return html`<div class="notice" role="alert" id="ag-calibration"><strong>Your reference answer scored ${dec(score)}, below ${dec(CALIBRATION.floor)}.</strong> A reference answer should score about ${dec(CALIBRATION.expected)}, so the guidance likely needs fixing before any pilot score means anything.</div>`;
+    return html`<div class="notice neutral" role="status" id="ag-calibration">Your reference answer scored ${dec(score)}; about ${dec(CALIBRATION.expected)} is expected. The guidance reads your reference as meeting it, in this one sample.</div>`;
   }
   function openGrader(){
     if(anyRunning()){say(RUNNING_TOOL_LESS,true);return;}
+    /* Calibration needs no pilot, so it can come first: with no clean run the dialog opens on the reference answer. */
     const runs=graderRuns();
-    if(!runs.length){say('A simulated grader needs a completed run with a clean audit.',true);return;}
     const project=currentProject();
-    openOverlay({type:'grader',guideline:project&&typeof project.guidance==='string'?project.guidance:'',runN:runs[0].n,model:S.config.model,acks:{},busy:false,error:'',result:null});
+    openOverlay({type:'grader',guideline:project&&typeof project.guidance==='string'?project.guidance:'',source:runs.length?'run':'ref',runN:runs.length?runs[0].n:null,reference:'',model:graderModel(),acks:{},busy:false,error:'',result:null});
   }
+  /* The companion cleans score and items (parseGraderOutput in backend/agents/rounds.cjs); they are read the same way here, so an
+     older companion that sends neither shows a verdict and a reason as before. */
+  const resultScore=value=>typeof value==='number'&&Number.isFinite(value)?Math.min(1,Math.max(0,value)):null;
+  const resultItems=list=>Array.isArray(list)?list.filter(i=>i&&typeof i==='object').slice(0,20).map(i=>({item:typeof i.item==='string'?i.item:'',met:typeof i.met==='boolean'?i.met:null,reason:typeof i.reason==='string'?i.reason:''})):[];
   async function runGrader(){
     const o=S.overlay;
-    if(!o||o.type!=='grader'||o.busy||!(o.acks.run&&o.acks.network&&o.acks.notools))return;
+    if(!o||o.type!=='grader'||!graderReady(o))return;
+    const calibration=o.source==='ref';
     o.busy=true;o.error='';o.result=null;paintOverlay();
     try{
-      const detail=await api('GET',runPath(S.round.id,o.runN));
-      const run=detail.run&&typeof detail.run==='object'?detail.run:detail;
-      const answer=run.final&&typeof run.final.text==='string'?run.final.text:'';
-      if(!answer.trim())throw new Error('That pilot has no final answer to grade.');
+      let answer=o.reference;
+      if(!calibration){
+        const detail=await api('GET',runPath(S.round.id,o.runN));
+        const run=detail.run&&typeof detail.run==='object'?detail.run:detail;
+        answer=run.final&&typeof run.final.text==='string'?run.final.text:'';
+      }
+      if(!answer.trim())throw new Error(calibration?'Paste a reference answer to calibrate the guidance.':'That pilot has no final answer to grade.');
       const data=await api('POST','/api/agents/grader-sim',{guidelineText:o.guideline,answerText:answer,model:o.model});
       const result=data.result&&typeof data.result==='object'?data.result:data;
-      o.result={verdict:result.verdict,reason:result.reason};
-      say('Simulated grader finished. It is a simulation, not Studio grading.');
+      o.result={verdict:result.verdict,reason:result.reason,score:resultScore(result.score),items:resultItems(result.items),calibration};
+      say(calibration?'Calibration finished: the simulated grader read your reference answer.':'Simulated grader finished. It is a simulation, not Studio grading.');
     }catch(error){o.error=error.message;say(error.message,true);}
     o.busy=false;
     if(S.overlay===o)paintOverlay();
@@ -1549,18 +1713,18 @@ ${o.guideline}</textarea></label>
         S.roundId=round.id;
         S.round=round;
       }
-      rememberApproval(await api('POST',roundPath(round.id,'/freeze'),{gold:built.gold,fingerprints:built.fingerprints}));
+      rememberApproval(await api('POST',roundPath(round.id,'/freeze'),{gold:built.gold,fingerprints:built.fingerprints,...(built.shipBar?{shipBar:built.shipBar}:{})}));
       await refreshRound(round.id);
       await loadRounds();
     });
     const r=S.round,fr=r&&r.freeze,ch=r&&r.carryChanges;
     say('Gold frozen for round '+r.id+(fr&&fr.sha256?'. Freeze hash '+shortHash(fr.sha256)+'.':'.')
-      +(r.carriedFrom&&ch&&typeof ch.freezeContent==='boolean'?' Compared with round '+r.carriedFrom+', the gold and fingerprints are '+(ch.freezeContent?'changed':'unchanged')+'.':'')+' Nothing has run.');
+      +(r.carriedFrom&&ch&&typeof ch.freezeContent==='boolean'?' Compared with round '+r.carriedFrom+', the gold and fingerprints are '+(ch.freezeContent?'changed':'unchanged')+(typeof ch.shipBar==='boolean'?' and the ship bar is '+(ch.shipBar?'changed':'unchanged'):'')+'.':'')+' Nothing has run.');
     saveDraftSoon();
   }
   async function refreeze(){
     if(!S.round||!S.round.freeze)return;
-    const built=buildFreeze();
+    const built=buildFreeze(false);
     if(built.errors.length){S.fz.errors=built.errors;gates();say('Fix '+built.errors.length+' items before saving a post-hoc version.',true);return;}
     S.fz.errors=[];
     await work('refreeze',async()=>{
@@ -1586,7 +1750,9 @@ ${o.guideline}</textarea></label>
     const figures=Array.isArray(gold.figures)?gold.figures.slice(0,50).map(figure):[];
     const prints=Array.isArray(content&&content.fingerprints)?content.fingerprints.slice(0,20).map(fp=>({id:String(fp&&fp.id||''),label:String(fp&&fp.label||''),
       tokens:Array.isArray(fp&&fp.tokens)?fp.tokens.map(String).join('\n'):'',figures:Array.isArray(fp&&fp.figures)?fp.figures.slice(0,50).map(figure):[]})):[];
-    return {decision:String(gold.decision||''),notes:String(gold.notes||''),figures:figures.length?figures:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],errors:[]};
+    const bar=content&&content.shipBar;
+    return {decision:String(gold.decision||''),notes:String(gold.notes||''),figures:figures.length?figures:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],
+      bar:bar&&Number.isInteger(bar.wrong)&&Number.isInteger(bar.of)?{on:true,wrong:String(bar.wrong),of:String(bar.of)}:blankBar(),errors:[]};
   }
   async function loadFormFromRound(round){
     const p=round.packet||{},cfg=round.config||{},ids=list=>list.map(c=>c.id);
@@ -1654,7 +1820,7 @@ ${o.guideline}</textarea></label>
       include:files&&S.packet.inspectedDir?{dir:S.packet.inspectedDir,paths:files.filter(effectiveInclude).map(f=>f.path)}:S.draftInclude,
       prompt:S.prompt,label:S.label,task:S.task,gafVisible:S.packet.gafVisible,
       config:{model:S.config.model,effort:S.config.effort,count:S.config.count,atOnce:S.config.atOnce,budget:S.config.budget},
-      fz:{decision:S.fz.decision,notes:S.fz.notes,figures:S.fz.figures,fingerprints:S.fz.fingerprints},
+      fz:{decision:S.fz.decision,notes:S.fz.notes,figures:S.fz.figures,fingerprints:S.fz.fingerprints,bar:S.fz.bar},
       carry:S.carry,sigs:waitingSigs()};
   }
   /* The form signatures of rounds that are not launched yet, so a reload still knows which round the form froze. */
@@ -1717,7 +1883,9 @@ ${o.guideline}</textarea></label>
     const fz=d.fz&&typeof d.fz==='object'?d.fz:{};
     const gold=figures(fz.figures);
     const prints=Array.isArray(fz.fingerprints)?fz.fingerprints.slice(0,20).filter(fp=>fp&&typeof fp==='object').map(fp=>({id:textOf(fp.id,40),label:textOf(fp.label,160),tokens:textOf(fp.tokens,4000),figures:figures(fp.figures)})):[];
-    S.fz={decision:textOf(fz.decision,500),notes:textOf(fz.notes,4000),figures:gold.length?gold:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],errors:[]};
+    const bar=fz.bar&&typeof fz.bar==='object'?fz.bar:{};
+    S.fz={decision:textOf(fz.decision,500),notes:textOf(fz.notes,4000),figures:gold.length?gold:[blankFigure()],fingerprints:prints.length?prints:[blankFingerprint(1)],
+      bar:{on:bar.on===true,wrong:textOf(bar.wrong,3)||String(SHIP_BAR.suggestWrong),of:textOf(bar.of,3)||String(SHIP_BAR.suggestOf)},errors:[]};
     S.carry=d.carry&&typeof d.carry==='object'&&idOk(d.carry.from)?{from:d.carry.from}:null;
     if(d.sigs&&typeof d.sigs==='object')Object.keys(d.sigs).slice(0,10).forEach(id=>{if(idOk(id)&&typeof d.sigs[id]==='string'&&d.sigs[id].length<=200000)S.sigs[id]=d.sigs[id];});
     S.draftSavedAt=textOf(d.savedAt,40);
@@ -1755,7 +1923,7 @@ ${o.guideline}</textarea></label>
       if(S.roundId)await refreshRound(S.roundId);
       await loadRounds();
       if(wasRunning&&!anyRunning()){paintAll();gates();}
-      else{['strip','draft','runs','round'].forEach(paintSection);gates();}
+      else{['strip','draft','runs','round','pilot-gate'].forEach(paintSection);gates();}
       const o=S.overlay;
       if(o&&o.type==='drawer'&&(isActiveRun(o.run||{})||(o.run&&o.run.redacted===true&&!anyRunning())))await refreshDrawer();
     }catch(error){say(error.message,true);}
@@ -1887,7 +2055,7 @@ ${o.guideline}</textarea></label>
 
   /* ---------- Events ---------- */
   /* Inputs and clicks that change the form: each one saves the draft a moment later. */
-  const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','model','effort','count','label','task','budget','atonce']);
+  const DRAFT_INPUTS=new Set(['dir','prompt','include','gaf','decision','notes','fig','fp','bar-on','bar','model','effort','count','label','task','budget','atonce']);
   const DRAFT_CLICKS=new Set(['use-project-prompt','add-gfig','add-pfig','remove-fig','add-fp','remove-fp','count-dec','count-inc']);
   const CLICK={
     'goto-step':t=>goStep(t.dataset.step),
@@ -1953,6 +2121,8 @@ ${o.guideline}</textarea></label>
     notes:t=>{S.fz.notes=t.value;gates();},
     fig:t=>{const list=figList(t.dataset.kind,+t.dataset.i),fig=list&&list[+t.dataset.j];if(fig&&['label','value','tolerance'].includes(t.dataset.f)){fig[t.dataset.f]=t.value;gates();}},
     fp:t=>{const fp=S.fz.fingerprints[+t.dataset.i];if(fp&&['id','label','tokens'].includes(t.dataset.f)){fp[t.dataset.f]=t.value;gates();}},
+    'bar-on':t=>{S.fz.bar.on=!!t.checked;paintSection('freeze');gates();},
+    bar:t=>{if(['wrong','of'].includes(t.dataset.f)){S.fz.bar[t.dataset.f]=String(t.value==null?'':t.value).trim().slice(0,3);gates();}},
     model:t=>{S.config.model=t.value;gates();},
     effort:t=>{S.config.effort=t.value;gates();},
     count:(t,e)=>{setCount(t.value);if(e.type==='change'){t.value=S.config.count;paintSection('settings');}},
@@ -1974,9 +2144,23 @@ ${o.guideline}</textarea></label>
       if(!o||o.type!=='grader')return;
       o.guideline=t.value;
       const button=$('#agents-modal [data-ag="run-grader"]');
-      if(button)button.disabled=!(o.acks.run&&o.acks.network&&o.acks.notools&&o.guideline.trim()&&graderRuns().length&&!o.busy);
+      if(button)button.disabled=!graderReady(o);
     },
-    'answer-run':t=>{const o=S.overlay;if(o&&o.type==='grader')o.runN=Number(t.value);},
+    /* Typing the reference answer only updates the button, so the caret stays where it is. */
+    reference:t=>{
+      const o=S.overlay;
+      if(!o||o.type!=='grader')return;
+      o.reference=String(t.value==null?'':t.value);
+      const button=$('#agents-modal [data-ag="run-grader"]');
+      if(button)button.disabled=!graderReady(o);
+    },
+    'answer-run':t=>{
+      const o=S.overlay;
+      if(!o||o.type!=='grader')return;
+      if(t.value==='ref')o.source='ref';
+      else{o.source='run';o.runN=Number(t.value);}
+      paintOverlay();
+    },
     'review-leave-out':t=>{const o=S.overlay;if(o&&o.type==='review'){o.leaveOut=t.checked;paintOverlay();}},
     verdict:t=>{const o=S.overlay;if(o&&o.type==='drawer'&&VERDICTS.some(v=>v.id===t.dataset.id)){o.form.verdict=t.dataset.id;if(t.dataset.id!=='fingerprint')o.form.ids=[];paintOverlay();}},
     'class-note':t=>{const o=S.overlay;if(o&&o.type==='drawer')o.form.note=t.value;}
@@ -2006,5 +2190,6 @@ ${o.guideline}</textarea></label>
   }
   ['click','input','change','keydown'].forEach(type=>document.addEventListener(type,handleEvent));
 
-  window.FinanceAgents={render,afterRender,handleEvent,offlineMessage:OFFLINE_MESSAGE,link,get,post,openRun,openRound};
+  /* pilotGate is the pure computation behind the Pilot gate card, exposed so tests can check it without a page. */
+  window.FinanceAgents={render,afterRender,handleEvent,offlineMessage:OFFLINE_MESSAGE,link,get,post,openRun,openRound,pilotGate};
 })();

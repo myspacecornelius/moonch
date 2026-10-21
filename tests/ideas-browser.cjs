@@ -273,7 +273,7 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     const orderNotes = await notes('#ig-bar .ig-note');
     assert.equal(sha(orderNotes[0]), HASH.ordering, 'the ordering footnote, verbatim');
     assert.equal(orderNotes.length, 2, 'the footnote and one plain line on how the groups are formed');
-    assert.match(orderNotes[1], /^Ideas are grouped by status first, with reviewable hypotheses at the top and ideas that overlap a current mode at the bottom\./);
+    assert.match(orderNotes[1], /^Ideas are grouped by status first, with reviewable hypotheses at the top and ideas that overlap a trap already in the project at the bottom\./, 'a new task editor holds a trap ledger');
     assert.doesNotMatch(await text('#ig-bar'), /no precedent workbook loaded/i);
     const cards = await evaluate(`[...document.querySelectorAll('#ig-cards article')].map(a=>({status:(a.querySelector('.ig-status').className.match(/ig-status-([a-z-]+)/)||[])[1],scores:[...a.querySelectorAll('.ig-score')].map(s=>s.textContent.replace(/^recorded score /i,''))}))`);
     assert.equal(cards.length, 6);
@@ -308,7 +308,7 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     await click('#ig-mode-existing');
     await waitFor('!!document.querySelector("#ig-inputs .ig-pkg-title")', 'the package block');
     assert.match(await text('#ig-bar'), /changed since these ideas were made/, 'a different kind of task than the one the ideas were made for');
-    assert.match(await text('#ig-inputs'), /3 files · 1 mode in the project, 1 net-new\. Open net-new slots: 1\./);
+    assert.match(await text('#ig-inputs'), /3 files · 1 trap in the project\./, 'a new task editor holds a trap ledger, so the page counts traps and no slots');
     assert.equal(await evaluate('document.querySelector("#ig-generate").disabled'), false);
     await click('#ig-generate');
     await waitFor('!/changed since these ideas were made/.test(document.getElementById("ig-bar").innerText)', 'the stale note to clear');
@@ -319,7 +319,7 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     pass('existing task: the loaded package is named, ideas attach to solver-visible lines with document, locator and quote, and a stale note clears on Generate');
     await shot('03-existing-1440', 1440, 900);
 
-    /* ---------- add as net-new mode ---------- */
+    /* ---------- add as trap (a new task editor holds a trap ledger) ---------- */
     const pick = await evaluate(`(()=>{const a=[...document.querySelectorAll('#ig-cards article')].find(x=>x.querySelector('.ig-status-anchored'));return a?{id:a.getAttribute('data-ig-idea'),title:a.querySelector('.ig-card-title').textContent}:null})()`);
     assert.ok(pick, 'an anchored idea');
     const rootsBefore = await evaluate('FinanceAuthoring.getProject().roots.length');
@@ -328,8 +328,11 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     await waitFor('!!document.querySelector("#ig-modal [role=dialog]")', 'the confirm dialog');
     assert.equal(await evaluate('document.querySelector("#ig-modal [data-ig-dialog]").contains(document.activeElement)||document.activeElement===document.querySelector("#ig-modal [data-ig-dialog]")'), true, 'focus moved into the dialog');
     const dialog = await text('#ig-modal');
-    assert.match(dialog, /A derivative task locks five failure modes: three historical and two net-new\./);
-    assert.match(dialog, /This project has 1 mode, 1 of them net-new, so one net-new slot is open\./);
+    assert.match(dialog, /Add this idea as a trap\?/);
+    assert.match(dialog, /The trap arrives pending, with its failure point, trigger, wrong approach, correct treatment, detection and consequence written\./);
+    assert.match(dialog, /The decoy, the superseded version, the margin, the expected behaviour, the classification, the acceptable variations, the tolerance rationale, the right headline and the outputs stay yours to supply\./);
+    assert.doesNotMatch(dialog, /five failure modes|net-new|slot/i, 'no slot count for a trap ledger');
+    assert.equal(await text('#ig-dialog-confirm'), 'Add as trap');
     assert.equal(await evaluate('(()=>{const d=document.querySelector("#ig-modal [role=dialog]");return d.getAttribute("aria-modal")+"|"+!!document.getElementById(d.getAttribute("aria-labelledby"))+"|"+!!document.getElementById(d.getAttribute("aria-describedby"))})()'), 'true|true|true');
     for (let i = 0; i < 5; i++) { await press('Tab'); assert.equal(await evaluate('!!document.activeElement.closest("#ig-modal")'), true, 'Tab stays inside the dialog'); }
     await press('Tab', 8); assert.equal(await evaluate('!!document.activeElement.closest("#ig-modal")'), true, 'Shift+Tab stays inside the dialog');
@@ -348,14 +351,16 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     await click(`[data-key="add-${pick.id}"]`);
     await click('[data-ig="confirm-add"]');
     await waitFor(`FinanceAuthoring.getProject().roots.length===${rootsBefore + 1}`, 'the root to appear in the project');
-    const added = await evaluate('(()=>{const p=FinanceAuthoring.getProject(),r=p.roots[p.roots.length-1];return {title:r.title,lane:r.lane,group:r.causalGroup,status:r.reviewStatus,sources:r.sourceIds.length,facts:r.facts}})()');
+    const added = await evaluate('(()=>{const p=FinanceAuthoring.getProject(),r=p.roots[p.roots.length-1];return {title:r.title,lane:r.lane,group:r.causalGroup,status:r.reviewStatus,sources:r.sourceIds.length,facts:r.facts,duplicateCheck:r.duplicateCheck,decoy:r.decoy,framework:p.framework}})()');
     assert.equal(added.title, pick.title);
-    assert.equal(added.lane, 'net-new');
+    assert.equal(added.framework, 'trap-ledger');
+    assert.deepEqual([added.duplicateCheck, added.decoy], ['', ''], 'no duplicate-check note in a trap ledger, and the decoy is the author\'s');
     assert.match(added.group, /^cg-ia-\d\d$/);
     assert.equal(added.status, 'pending');
     assert.ok(added.sources >= 1 && /Treasury_Procedure\.txt/.test(added.facts) && /Build: /.test(added.facts), 'the idea carries its anchors and build moves into the root');
     assert.match(await text('#toast'), /^added "/i);
-    assert.match(await text(`#ig-card-${pick.id}`), /added to the project as a net-new mode\./i);
+    assert.match(await text('#toast'), /" as a trap\./);
+    assert.match(await text(`#ig-card-${pick.id}`), /added to the project as a trap\./i);
     assert.equal(await exists(`[data-key="add-${pick.id}"]`), false, 'the card cannot add the same idea again');
     assert.equal(await focusedId(), 'open-' + pick.id, 'focus moves to the next step on the card');
     assert.match(await text('#ig-bar'), /changed since these ideas were made/, 'the mode set changed');
@@ -366,7 +371,27 @@ const FORBIDDEN = '/%|\\b(?:pass|success|failure) rate\\b|\\blikely to\\b|\\bcau
     await click('[data-dash-action="close-advanced"]');
     await waitFor('document.querySelector("#advanced-shell").hidden===true&&!!document.querySelector("#ig-cards article")', 'the return to the ideas');
     assert.equal(await evaluate('document.querySelectorAll("#ig-cards article").length'), 6, 'the ideas survive the round trip');
-    pass('Add as net-new mode: confirm dialog with the cap and slots, Tab trap, Escape and Cancel add nothing, confirming puts a net-new root in the project with its anchors, toast, Open the task editor shows it');
+    pass('Add as trap: confirm dialog says what the trap brings and what stays the author\'s, Tab trap, Escape and Cancel add nothing, confirming puts a trap with its anchors and no duplicate-check note in the ledger, toast, Open the task editor shows it');
+
+    /* ---------- a failure-mode set keeps the net-new wording and the slot count ---------- */
+    await evaluate(`FinanceAuthoring.loadProject(Object.assign(FinanceCore.blank(), {framework: 'failure-mode-set'}))`);
+    await click('#ig-mode-new');
+    await click('#ig-mode-existing');
+    await waitFor('/Open net-new slots/.test(document.getElementById("ig-inputs").innerText)', 'the package line of a failure-mode set');
+    assert.match(await text('#ig-inputs'), /3 files · 1 mode in the project, 1 net-new\. Open net-new slots: 1\./);
+    await click('#ig-generate');
+    await waitFor('/Open net-new slots in the current project: 1\\./.test(document.getElementById("ig-bar").innerText)', 'the slot note');
+    assert.match(await text('#ig-bar'), /ideas that overlap a current mode at the bottom\./, 'the ordering line keeps the mode wording');
+    assert.ok((await evaluate('[...document.querySelectorAll("#ig-cards [data-ig=add]")].map(b=>b.textContent)')).every(l => l === 'Add as net-new mode'));
+    await click('#ig-cards [data-ig="add"]');
+    await waitFor('!!document.querySelector("#ig-modal [role=dialog]")', 'the confirm dialog of a failure-mode set');
+    const setDialog = await text('#ig-modal');
+    assert.match(setDialog, /Add this idea as a net-new mode\?/);
+    assert.match(setDialog, /A derivative task locks five failure modes: three historical and two net-new\./);
+    assert.match(setDialog, /This project has 1 mode, 1 of them net-new, so one net-new slot is open\./);
+    await press('Escape');
+    await waitFor('!document.querySelector("#ig-modal [role=dialog]")', 'Escape to close the dialog');
+    pass('a failure-mode set loaded into the editor: the package line, the slot note, the button and the dialog keep the net-new wording and the five mode sentence');
 
     /* ---------- reduced motion, accessibility, text ---------- */
     await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });

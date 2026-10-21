@@ -16,6 +16,7 @@ test('unconnected adapter cannot imply a model run',async()=>{assert.equal(E.ada
 test('malformed run histories cannot crash imported dashboard views',()=>{const r=E.analyzePackage(pkg());assert.equal(E.validateAnalysisRuns([r]).length,1);for(const field of ['limits','facts','proposals','findings']){const bad=structuredClone(r);bad[field]=null;assert.throws(()=>E.validateAnalysisRuns([bad]),/Invalid analysis history/);}});
 
 test('roles come from folders first, then whole words: substring hits are gone and grading words fail closed',()=>{const cases=[['Reference_Memo.docx','evaluator'],['guideline.md','evaluator'],['Solution.xlsx','evaluator'],['Cash_Runway_Model.xlsx','source'],['Credit_Analysis.docx','source'],['Goldman_Comps.xlsx','source'],['Information_Memorandum.pdf','source'],['Run-Rate_Revenue.xlsx','source'],['rerun.csv','source'],['Audit_Committee_Minutes.pdf','source'],['ReferenceMemo.docx','evaluator'],['AnswerKey.xlsx','evaluator'],['answerkey.pdf','evaluator'],['Grading Guidelines.pdf','evaluator'],['pkg.zip / answers/key.xlsx','evaluator'],['gaf/Reference_Memo.docx','template'],['gaf/answers/key.xlsx','evaluator'],['Task_Prompt.txt','prompt'],['TaskRequest.md','prompt'],['run_1.log','run-evidence'],['Run3.json','run-evidence'],['old-run.log','run-evidence'],['review.md','audit'],['sector.csv','source']];for(const [name,role] of cases){assert.equal(E.inferRole(name),role,name);assert.equal(E.classifyPath(name).role,role,name);}});
+test('guideline and guidance withhold grader text, not a named business document',()=>{for(const [name,role] of [['Currency_Overlay_Guidelines_ScheduleC.docx','source'],['Revenue_Guidance.pdf','source'],['Investment_Guidelines_2026.xlsx','source'],['Credit_Guidance_Note.pptx','source'],['Grader_Guidelines.txt','evaluator'],['Grading Guidelines.pdf','evaluator'],['Investment_Guidelines.txt','evaluator'],['guidance.md','evaluator'],['Guidelines.pdf','evaluator'],['Guidelines_2026.docx','evaluator'],['GraderGuidelines.docx','evaluator'],['Overlay_Guidelines_Answer.docx','evaluator']])assert.equal(E.classifyPath(name).role,role,name);});
 test('every withheld role says why, included roles say nothing, and a reason never echoes the file name',()=>{for(const name of ['Reference_Memo.docx','private/x.csv','run_1.log','review.md','model.xlsx','gaf/x.xlsx','Task_Prompt.txt','<img src=x onerror=alert(1)> answer.txt','<b>run 1</b>.log']){const c=E.classifyPath(name);assert.deepEqual(Object.keys(c).sort(),['reason','role','withheld']);assert.equal(c.withheld,E.WITHHELD_ROLES.includes(c.role),name);if(c.withheld){assert.match(c.reason,/^Withheld by default: \S/,name);assert.doesNotMatch(c.reason,/[<>]|img|onerror/,name);}else assert.equal(c.reason,'',name);}assert.ok(Object.isFrozen(E.WITHHELD_ROLES));for(const odd of [undefined,null,'','/','gaf/','a//b'])assert.doesNotThrow(()=>E.classifyPath(odd),String(odd));assert.equal(E.inferRole(''),'source');});
 test('ingestion assigns the same roles, and the browser build exports the same rule',async()=>{const p=await E.ingestFiles([new File(['x'],'Reference_Memo.docx'),new File(['y'],'Cash_Runway_Model.csv'),new File(['z'],'run_1.log')]);assert.deepEqual(p.documents.map(d=>d.role),['evaluator','source','run-evidence']);const vm=require('node:vm'),context=vm.createContext({TextDecoder,TextEncoder});vm.runInContext(fs.readFileSync(__dirname+'/../package-engine.js','utf8'),context);const B=context.FinancePackageEngine;assert.equal(typeof B.classifyPath,'function');for(const name of ['Solution.xlsx','gaf/Solution.xlsx','CashRunwayModel.xlsx','batch_2.csv','Audit_Notes.docx'])assert.deepEqual({...B.classifyPath(name)},E.classifyPath(name),name);});
 test('every word in the rule is load-bearing: each one, in its own name, gives its role',()=>{const role=(name,expected,word)=>{const c=E.classifyPath(name);assert.equal(c.role,expected,name);if(word)assert.ok(c.reason.includes(word),name+': '+c.reason);};
@@ -38,3 +39,58 @@ test('one gaf rule: a name the role table calls a gaf template is one the gaf se
     if(c.role==='template'&&!words.has('template')&&!words.has('templates'))assert.ok(GAF_RE.test(name),'a gaf template that the gaf setting would not hide: '+name);
     if(GAF_RE.test(name)&&!c.withheld)assert.equal(c.role,'template','a gaf file the role table does not call a template: '+name);}
   for(const name of ['gafHedge.csv','gaf2024.xlsx','x.gaf.csv','notes.gaf'])assert.equal(E.classifyPath(name).role,'source','not a gaf file, so a source: '+name);});
+
+/* Upload checks against the project guide, on invented documents only. */
+const jdoc=(name,role,records,metadata={},extra={})=>doc({id:name,name,role,kind:name.endsWith('.xlsx')?'xlsx':'docx',records,metadata,...extra});
+test('upload checks: residue in text and comments, property scrub, spaced names and answer-file names',()=>{
+  const r=E.analyzePackage(pkg([doc(),
+    jdoc('Borealis_Policy.docx','source',[{locator:'Paragraph 3',text:'Per the 29 July GAF, the target is 75%.'}],{properties:{creator:'python-docx'},comments:[{author:'Reviewer',locator:'Comment 1',text:'decoy for the pilot'}]}),
+    jdoc('Borealis Register.xlsx','source',[{locator:'Sheet!A1',text:'Limit'}],{properties:{creator:'Borealis Pension',company:'Borealis Pension'}}),
+    jdoc('gaf/Borealis_Model.xlsx','template',[{locator:'Sheet!A1',text:'golden figures'}],{properties:{creator:'python-docx'}}),
+    jdoc('Borealis_Approval_Final.docx','evaluator',[{locator:'Paragraph 1',text:'Approve.'}],{})]),{privateTerms:[]});
+  const titled=t=>r.findings.find(f=>f.title.startsWith(t));
+  const residue=titled('Build or platform words in Borealis_Policy.docx');
+  assert.equal(residue.severity,'review');assert.match(residue.summary,/Matched: gaf, decoy, pilot\./);assert.deepEqual(residue.citations.map(c=>c.locator),['Paragraph 3','Comment 1']);
+  assert.ok(!r.findings.some(f=>f.title.includes('gaf/Borealis_Model.xlsx')),'the gaf template is never checked');
+  const scrub=titled('Document properties to scrub in Borealis_Policy.docx');assert.equal(scrub.severity,'review');assert.match(scrub.summary,/creator "python-docx"/);
+  const spaced=titled('File names with spaces');assert.equal(spaced.severity,'error');assert.match(spaced.summary,/^Borealis Register\.xlsx\./);
+  assert.match(titled('Answer file name breaks the naming rule').summary,/^Borealis_Approval_Final\.docx\./);
+  const listed=titled('1 file carry author or company properties');assert.equal(listed.severity,'info');assert.match(listed.summary,/Borealis Register\.xlsx: creator "Borealis Pension", company "Borealis Pension"/);
+});
+test('upload checks: a private term marks a property or a residue word, and a prompt that names a file is a review cue',()=>{
+  const files=[doc({records:[{locator:'Line 1',text:'The register is in Borealis_Register.xlsx.'}]}),jdoc('Borealis_Policy.docx','source',[{locator:'Paragraph 1',text:'Limit “75%”.'}],{properties:{lastModifiedBy:'Pat Example'}})];
+  const plain=E.analyzePackage(pkg(files));
+  assert.ok(plain.findings.some(f=>f.title==='The prompt names a file'&&f.severity==='review'));
+  assert.ok(!plain.findings.some(f=>f.title.startsWith('Document properties to scrub')));
+  assert.ok(plain.findings.some(f=>f.title==='Lookalike punctuation in Borealis_Policy.docx'&&f.severity==='info'));
+  const marked=E.analyzePackage(pkg(files),{privateTerms:['pat example','',7,'quillon']});
+  assert.ok(!plain.findings.some(f=>f.title.startsWith('Build or platform words in Borealis_Policy')));
+  const quillon=E.analyzePackage(pkg([files[0],jdoc('Borealis_Policy.docx','source',[{locator:'Paragraph 1',text:'Uploaded to Quillon on 2 October.'}])]),{privateTerms:['quillon']});
+  assert.match(quillon.findings.find(f=>f.title==='Build or platform words in Borealis_Policy.docx').summary,/^Matched: quillon\./);
+  assert.match(marked.findings.find(f=>f.title==='Document properties to scrub in Borealis_Policy.docx').summary,/lastModifiedBy "Pat Example"/);
+  assert.ok(!E.analyzePackage(pkg([doc({records:[{locator:'Line 1',text:'Update the workbook and recommend the trade.'}]})])).findings.length,'a plain prompt stays finding-free');
+});
+
+test('writeZip gives a stored archive that readZip and its checksums accept, the same bytes every time',async()=>{const files=[{name:'a/b.txt',bytes:bytes('hello')},{name:'a/ü.csv',bytes:new Uint8Array([0,1,2,255])}];const one=E.writeZip(files),two=E.writeZip(files);assert.deepEqual(one,two);const z=await E.readZip(one);assert.deepEqual([...z.entries.keys()],['a/b.txt','a/ü.csv']);assert.equal(await z.text('a/b.txt'),'hello');assert.deepEqual([...await z.get('a/ü.csv')],[0,1,2,255]);});
+test('the upload pack lays files out by card, copies them byte for byte, and lists a checksum for each',async()=>{
+  const input={name:'Borealis_Policy.docx',bytes:bytes('policy bytes')},answer={name:'some/folder/Borealis_Approval_20261006.docx',bytes:bytes('answer bytes')};
+  const pack=await E.buildUploadPack({folder:'Borealis D1',prompt:' It is 6 October 2026. Tell me which trades I can approve. ',guidance:'Context\nThe answer file is Borealis_Approval_20261006.docx.\n',inputs:[input],answers:[answer],now:'2026-10-20T00:00:00Z'});
+  assert.equal(pack.name,'Borealis_D1_upload_pack_PRIVATE.zip');assert.deepEqual(pack.warnings,[]);
+  const z=await E.readZip(pack.bytes);assert.deepEqual([...z.entries.keys()],['Borealis_D1/1.2_prompt.txt','Borealis_D1/1.3_new_input_files/Borealis_Policy.docx','Borealis_D1/1.4_answer_file_ResponseFiles/Borealis_Approval_20261006.docx','Borealis_D1/1.4_grader_guidelines_ResponseText.txt','Borealis_D1/README_UPLOAD.txt','Borealis_D1/manifest_sha256.txt']);
+  assert.equal(await z.text('Borealis_D1/1.2_prompt.txt'),'It is 6 October 2026. Tell me which trades I can approve.\n');
+  assert.equal(await z.text('Borealis_D1/1.3_new_input_files/Borealis_Policy.docx'),'policy bytes');
+  const manifest=(await z.text('Borealis_D1/manifest_sha256.txt')).trim().split('\n');assert.equal(manifest.length,5);assert.equal(manifest[1],(await E.sha256(bytes('policy bytes')))+'  12  1.3_new_input_files/Borealis_Policy.docx');
+  const readme=await z.text('Borealis_D1/README_UPLOAD.txt');assert.match(readme,/^UPLOAD PACK: Borealis_D1\nBuilt 2026-10-20\./);assert.match(readme,/Borealis_Approval_20261006\.docx   \(12 bytes\)/);assert.match(readme,/Checks when the pack was built:\n  - none/);
+});
+test('the upload pack refuses what the form refuses or must never be resent, and warns on the rest',async()=>{
+  const ok={folder:'x',prompt:'p',guidance:'g Borealis_Approval.docx',inputs:[],answers:[{name:'Borealis_Approval.docx',bytes:bytes('a')}]};
+  await assert.rejects(E.buildUploadPack({...ok,prompt:' '}),/business prompt/);
+  await assert.rejects(E.buildUploadPack({...ok,guidance:''}),/grader guidance/);
+  await assert.rejects(E.buildUploadPack({...ok,answers:[]}),/answer file/);
+  await assert.rejects(E.buildUploadPack({...ok,inputs:[{name:'Borealis Register.xlsx',bytes:bytes('r')}]}),/space: Borealis Register\.xlsx/);
+  await assert.rejects(E.buildUploadPack({...ok,inputs:[{name:'gaf/Borealis_Model.xlsx',bytes:bytes('m')}]}),/never resent: Borealis_Model\.xlsx/);
+  await assert.rejects(E.buildUploadPack({...ok,inputs:[{name:'borealis_approval.docx',bytes:bytes('m')}]}),/share the name/);
+  await assert.rejects(E.buildUploadPack({...ok,answers:[{name:'Borealis_Approval.txt',bytes:bytes('a')}]}),/Excel, Word, PowerPoint or PDF/);
+  const warned=await E.buildUploadPack({...ok,prompt:'See Borealis_Register.xlsx.',answers:[{name:'Borealis_Approval_Final_v2.docx',bytes:bytes('a')}]});
+  assert.equal(warned.warnings.length,3,JSON.stringify(warned.warnings));assert.match(warned.warnings.join(' '),/naming rule/);assert.match(warned.warnings.join(' '),/does not name the answer file Borealis_Approval_Final_v2\.docx/);assert.match(warned.warnings.join(' '),/prompt names a file/);
+});

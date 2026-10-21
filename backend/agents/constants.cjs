@@ -4,8 +4,11 @@
 
 const MAX_PILOTS_PER_ROUND = 5;
 
-const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-5-5'];
+const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-5-5', 'claude-opus-4-8'];
 const DEFAULT_MODEL = 'claude-opus-5-5';
+/* The model the simulated grader dialog offers first: the writer's grading instrument, the one its calibration against the
+   platform's batch was made with. Pilots keep DEFAULT_MODEL. */
+const GRADER_MODEL = 'claude-opus-4-8';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const DEFAULT_EFFORT = 'medium';
@@ -35,6 +38,10 @@ const BUDGET_USD = {
   maxUsd: 20,
 };
 
+/* The ship bar a writer may freeze with the gold: at least `wrong` wrong answers of `of` runs, whole numbers with
+   1 <= wrong <= of <= maxRuns. The Freeze card suggests 5 of 6. */
+const SHIP_BAR = { maxRuns: 20, suggestWrong: 5, suggestOf: 6 };
+
 /* The pilot's own runtime configuration folder, inside its scratch folder (<folder>/.tmp/claude-config). The runtime
    keeps large tool outputs there, so they stay inside the pilot folder. */
 const PILOT_CONFIG_DIRNAME = 'claude-config';
@@ -61,11 +68,13 @@ module.exports = deepFreeze({
   MAX_PILOTS_PER_ROUND,
   MODELS,
   DEFAULT_MODEL,
+  GRADER_MODEL,
   EFFORTS,
   DEFAULT_EFFORT,
   TOOLS,
   LIMITS,
   BUDGET_USD,
+  SHIP_BAR,
   PILOT_CONFIG_DIRNAME,
   EVALUATOR_PATTERN,
   WITHHELD_ROLES,

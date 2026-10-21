@@ -19,7 +19,7 @@ test('prompt generator is deterministic and never truncates',()=>{const b={objec
 test('word count handles empty and whitespace',()=>{assert.equal(C.words(''),0);assert.equal(C.words('One\n two\tthree'),3);});
 test('solver export is strict allowlist even with malicious evaluator fields',()=>{const p=complete();p.notes='SECRET_NOTE';p.sources[0].excerpt='SECRET_EXCERPT';p.sources[0].cell='SECRET_CELL';p.roots[0].correctInterpretation='SECRET_CORRECT';p.roots[0].wrongInterpretation='SECRET_WRONG';p.roots[0].detectionMethod='SECRET_DETECTION';p.roots[3].duplicateCheck='SECRET_DUP';p.thesis='SECRET_THESIS';p.guidance='SECRET_GUIDANCE';p.task.industry='SECRET_TASK';p.library.modes[0].name='SECRET_LIBRARY';p.gates.private={status:'pending',notes:'SECRET_GATE'};p.experiments=[{notes:'SECRET_RUN'}];const s=JSON.stringify(C.solverDraft(p));for(const x of ['SECRET','rootRecords','sourceAnchors','experiments','oracle','title','library','guidance','thesis','modeId'])assert.ok(!s.includes(x),x);assert.ok(s.includes('Treasury_Procedure.txt'));assert.equal(C.solverDraft(p).wordCount,C.words(p.business.prompt));});
 test('solver manifest omits private-only sources and deduplicates file versions',()=>{const p=complete();p.sources.push({...p.sources[0],id:C.uid()},{...C.source(),file:'private.pdf'});assert.equal(C.solverDraft(p).suppliedFileManifest.length,4);});
-test('solver prompt empty and over 60 words block only solver export',()=>{const p=C.blank();assert.throws(()=>C.solverDraft(p));p.business.prompt='word '.repeat(61);assert.throws(()=>C.solverDraft(p),/at most 60 words/);p.business.prompt='word '.repeat(60);assert.equal(C.solverDraft(p).wordCount,60);assert.equal(C.evaluatorDraft(p).kind,'evaluator-draft');});
+test('only an empty prompt blocks solver export; a long prompt is a review cue, never a block',()=>{const p=C.blank();assert.throws(()=>C.solverDraft(p),/non-empty business prompt/);p.business.prompt='word '.repeat(150);assert.equal(C.solverDraft(p).wordCount,150);assert.equal(C.evaluatorDraft(p).kind,'evaluator-draft');});
 test('evaluator includes the failure-mode set and guidance lint without official fields',()=>{const p=complete(),e=C.evaluatorDraft(p);assert.equal(e.rootRecords.length,5);assert.equal(e.failureModeSet.locked,true);assert.deepEqual(e.failureModeSet.historical.map(x=>x.modeId),['SYN-FM-02','SYN-FM-01','SYN-FM-05']);assert.equal(e.failureModeSet.library.shortlist.length,10);assert.equal(e.graderGuidance.wordCount,C.words(p.guidance));assert.deepEqual(e.task,p.task);assert.equal(e.FailureAnalysis,undefined);assert.equal(e.GraderAnalysis,undefined);assert.equal(e.humanAttestation,undefined);});
 test('cash bridge uses funded cash, not facility eligibility or unpaid debt',()=>{const i={facility:'3000',fraction:'0.6',asOf:'2026-09-30',clearDate:'2026-09-30',releaseDate:'2026-10-01',opening:'100',fundedDraw:'500',otherInflows:'50',outflows:'2000'};const x=C.calculate('cash',i);assert.equal(x.details.eligibleFacility,1800);assert.equal(x.details.fundedCash,650);assert.equal(x.value,1350);assert.equal(C.calculate('cash',{...i,asOf:'2026-10-01'}).details.eligibleFacility,3000);assert.equal(C.calculate('cash',{...i,fundedDraw:'0'}).value,1850);});
 test('cash bridge rejects invalid calendar and unsupported draw',()=>{const i={facility:'3000',fraction:'0.6',asOf:'2026-09-30',clearDate:'2026-09-30',releaseDate:'2026-10-01',opening:'0',fundedDraw:'1801',otherInflows:'0',outflows:'2000'};assert.throws(()=>C.calculate('cash',i),/exceeds/);assert.throws(()=>C.calculate('cash',{...i,fundedDraw:'0',asOf:'2026-02-30'}),/date/);assert.throws(()=>C.calculate('cash',{...i,releaseDate:i.clearDate}),/after clearance/);});
@@ -53,7 +53,7 @@ test('non-binding decision output and older runs do not establish current diffic
 test('unsafe binding IDs and numerical overflow are rejected',()=>{const p=C.blank();p.roots[0].id='x.y';assert.throws(()=>C.parseProject(p),/IDs/);assert.throws(()=>C.calculate('ceiling',{constraints:'9999999999999999'}),/range/);assert.throws(()=>C.calculate('dividend',{budget:'9999999999999999',price:'0.0001',loanShares:'0',dividend:'0'}),/range/);assert.throws(()=>C.calculate('fixed',{a:'1000000000000000',b:'0.9999999'}),/range/);});
 test('general business direction is not automatically marked method leakage',()=>{const p=complete();p.business.prompt='Update the workbook using the supplied documents and recommend whether the payment can proceed.';assert.ok(!C.audit(p).some(x=>x.code==='teaching-language'));});
 test('calculation-only anchors and open author gates are reviewed',()=>{const p=complete(),s=C.source();s.title='Unreviewed calculation input';p.sources.push(s);p.roots[0].outputs[0].sourceIds.push(s.id);p.gates.example={status:'needs-work',notes:'Resolve support'};assert.ok(C.audit(p).some(x=>x.code==='source-unavailable'&&x.message.includes(s.title)));assert.ok(C.audit(p).some(x=>x.code==='gate-open'));});
-test('explicit 44-word project exception stays importable, preserves exact text, and never lowers the 60-word default',()=>{const p=complete();p.business.prompt=Array.from({length:44},(_,i)=>'word'+i).join(' ');assert.equal(C.solverDraft(p).wordCount,44);p.exportPolicy={businessPromptMaxWords:44,reason:'Author authorized preserving an original 44-word prompt.'};const parsed=C.parseProject(p);assert.deepEqual(parsed.exportPolicy,p.exportPolicy);assert.equal(C.promptLimit(parsed),60);assert.equal(C.solverDraft(parsed).businessPrompt,p.business.prompt);assert.equal(C.solverDraft(parsed).wordCount,44);assert.equal(C.solverDraft(parsed).exportPolicy,undefined);assert.deepEqual(C.evaluatorDraft(parsed).exportPolicy,p.exportPolicy);assert.ok(!C.audit(parsed).some(f=>f.code==='prompt-length'));assert.ok(C.audit(parsed).some(f=>f.code==='prompt-exception'));parsed.business.prompt+=' '+Array.from({length:17},(_,i)=>'extra'+i).join(' ');assert.equal(C.words(parsed.business.prompt),61);assert.throws(()=>C.solverDraft(parsed),/60 words/);assert.ok(C.audit(parsed).some(f=>f.code==='prompt-length'&&/over 60 words/.test(f.message)));});
+test('explicit 44-word project exception stays importable, preserves exact text, and never lowers the 120-word review cue',()=>{const p=complete();p.business.prompt=Array.from({length:44},(_,i)=>'word'+i).join(' ');assert.equal(C.solverDraft(p).wordCount,44);p.exportPolicy={businessPromptMaxWords:44,reason:'Author authorized preserving an original 44-word prompt.'};const parsed=C.parseProject(p);assert.deepEqual(parsed.exportPolicy,p.exportPolicy);assert.equal(C.promptLimit(parsed),120);assert.equal(C.solverDraft(parsed).businessPrompt,p.business.prompt);assert.equal(C.solverDraft(parsed).wordCount,44);assert.equal(C.solverDraft(parsed).exportPolicy,undefined);assert.deepEqual(C.evaluatorDraft(parsed).exportPolicy,p.exportPolicy);assert.ok(!C.audit(parsed).some(f=>f.code==='prompt-length'));assert.ok(C.audit(parsed).some(f=>f.code==='prompt-exception'));parsed.business.prompt+=' '+Array.from({length:77},(_,i)=>'extra'+i).join(' ');assert.equal(C.words(parsed.business.prompt),121);assert.equal(C.solverDraft(parsed).wordCount,121);assert.ok(C.audit(parsed).some(f=>f.code==='prompt-length'&&f.level==='review'&&/121 words/.test(f.message)));});
 test('word-limit exceptions require a reason and cannot silently broaden default',()=>{const p=complete();for(const policy of [{businessPromptMaxWords:999,reason:'x'},{businessPromptMaxWords:44,reason:''}]){p.exportPolicy=policy;assert.throws(()=>C.parseProject(p));}});
 
 /* Lint alignment with the shipped format (docs/local-agents.md section 13) and the public scrub (section 15). */
@@ -65,26 +65,26 @@ const reviewSentence=topic=>'The reviewer checks that '+topic+' follows the supp
 const guidanceBlock=(heading,topic,sentences)=>heading+'\n'+Array.from({length:sentences},()=>reviewSentence(topic)).join(' ');
 // A synthetic guideline in the five-block shipped layout, about 600 words.
 function shippedGuideline(headings=BLOCK_HEADINGS){
-  const opening='You are grading a response to a synthetic treasury task about a cash bridge.\n';
+  const opening='You are grading a response to a synthetic treasury task about a cash bridge. The answer file is Cash_Bridge_Review.xlsx. The file type and file names of a submission are not graded.\n';
   const bodies=[[headings[0],'the funded cash figure',5],[headings[1],'the final bridge amount',6],[headings[2],'each stated input',8],[headings[3],'the facility limit',8],[headings[4],'a rounded result',6]];
   return bodies.map(([h,topic,n],i)=>(i===0?h+'\n'+opening+Array.from({length:n},()=>reviewSentence(topic)).join(' '):guidanceBlock(h,topic,n))).join('\n\n');
 }
 const codesOf=(text,opts)=>C.lintGuidance(text,opts).map(x=>x.code);
 
-test('prompt limit defaults to 60 words and the 44-word exception can never lower it',()=>{
-  assert.equal(C.promptLimit(C.blank()),60);
-  assert.equal(C.promptLimit({exportPolicy:{businessPromptMaxWords:44,reason:'Authorized by the author.'}}),60);
+test('the prompt-length review cue is 120 words, never a blocker, and the 44-word exception can never lower it',()=>{
+  assert.equal(C.promptLimit(C.blank()),120);
+  assert.equal(C.promptLimit({exportPolicy:{businessPromptMaxWords:44,reason:'Authorized by the author.'}}),120);
   assert.throws(()=>C.promptLimit({exportPolicy:{businessPromptMaxWords:61,reason:'x'}}),/44-word limit/);
   assert.throws(()=>C.promptLimit({exportPolicy:{businessPromptMaxWords:44,reason:'  '}}),/authorization reason/);
   const p=complete();
-  p.business.prompt=Array.from({length:60},(_,i)=>'w'+i).join(' ');
+  p.business.prompt=Array.from({length:120},(_,i)=>'w'+i).join(' ');
   assert.ok(!C.audit(p).some(x=>x.code==='prompt-length'));
-  p.business.prompt+=' w60';
+  p.business.prompt+=' w120';
   const finding=C.audit(p).find(x=>x.code==='prompt-length');
-  assert.equal(finding.level,'blocker');
-  assert.match(finding.message,/over 60 words/);
+  assert.equal(finding.level,'review');
+  assert.match(finding.message,/121 words/);
 });
-test('the prompt generator still stops at 40 words even though the limit is 60',()=>{
+test('the prompt generator still stops at 40 words even though the review cue is 120',()=>{
   const b=n=>({objective:Array.from({length:n},(_,i)=>'w'+i).join(' '),deliverable:'the cash bridge',decision:'whether to proceed'});
   assert.equal(C.words(C.generatePrompt(b(26))),40);
   assert.throws(()=>C.generatePrompt(b(27)),/exceeds 40/);
@@ -197,4 +197,92 @@ test('every lint-bearing call in the authoring page passes the private lint term
   assert.ok(!/getEvidenceModule/.test(source),'getEvidenceModule deep-copies the module and must not run on every render');
   const dashboard=fs.readFileSync(require.resolve('../dashboard.js'),'utf8');
   assert.ok(/getLintTerms:\(\)=>D&&Array\.isArray\(D\.lintTerms\)/.test(dashboard),'dashboard.js must provide getLintTerms from the loaded module\'s lintTerms array only');
+});
+
+/* Task writing against the project guide: business-prompt and grader-guidance rules, on invented text only. */
+const GUIDE_PROMPT='It\'s Tuesday 6 October 2026, 08:00. Borealis Pension\'s quarterly mandate report is in the pack with the investment policy, the custody statement and procedure IP-4. I approve trades under IP-4 before 10:00. Tell me which rebalancing trades I can approve, the size of each, and how much of the limit is left. Short note with the calculations behind it.';
+const ABC_GUIDELINE=['You are grading a short note for the Borealis Pension investment office as at 6 October 2026: which rebalancing trades are approved and how much of the limit is left. The answer file is Borealis_Trade_Approval_20261006.docx. The file type and file names of a submission are not graded.','','Open "Borealis_Trade_Approval_20261006.docx" as your benchmark. This is an example of a correct answer for this task.','','A) MUST BE PRESENT AND CORRECT','The following are the key requirements of a correct answer. Use the golden answer and your judgment to identify any additional required content not listed here.','','- Approves the whole USD 12,000,000 trade, leaving USD 41,500,000 of the limit.','','B) PENALIZE FOR','The following are common errors observed on this task. This list is not exhaustive — apply your judgment to any other issues you identify.','','- Treats the 75% target as a limit and approves only USD 6,000,000.','','C) NEUTRAL','The following are examples of acceptable variations that should not affect the score. Other variations may also be neutral — use your judgment.','','- A trade from USD 11.5m to USD 12.5m.'].join('\n');
+test('a prompt in the shipped style is lint clean',()=>{assert.ok(C.words(GUIDE_PROMPT)>=55,String(C.words(GUIDE_PROMPT)));assert.deepEqual(C.lintPrompt(GUIDE_PROMPT),[]);const p=complete();p.business.prompt=GUIDE_PROMPT;assert.ok(!C.audit(p).some(x=>x.code.startsWith('prompt-')||x.code==='teaching-language'));});
+test('prompt lint: file names, platform terms and word-count requests are blockers; the rest are review cues',()=>{
+  const codes=t=>C.lintPrompt(t).map(x=>x.level+':'+x.code);
+  assert.ok(codes(GUIDE_PROMPT.replace('the custody statement','Custody_30Sep2026.xlsx')).includes('blocker:prompt-file-name'));
+  for(const term of ['GAF','SAF','Claude','golden answer','grader'])assert.ok(codes(GUIDE_PROMPT+' Check the '+term+'.').includes('blocker:prompt-internal-term'),term);
+  assert.ok(codes(GUIDE_PROMPT+' Keep it under 200 words.').includes('blocker:prompt-word-count'));
+  assert.ok(codes(GUIDE_PROMPT+' A 300-word note is fine.').includes('blocker:prompt-word-count'));
+  assert.ok(codes('Hi team. '+GUIDE_PROMPT).includes('review:prompt-role-play'));
+  assert.ok(codes('You are an analyst. '+GUIDE_PROMPT).includes('review:prompt-role-play'));
+  assert.ok(codes(GUIDE_PROMPT+' Thanks.').includes('review:prompt-role-play'));
+  assert.ok(codes(GUIDE_PROMPT.replace("It's Tuesday 6 October 2026, 08:00. ",'')).includes('review:prompt-date'));
+  assert.ok(codes(GUIDE_PROMPT+' The 75% target is not a limit.').includes('review:teaching-language'));
+  assert.ok(codes(GUIDE_PROMPT+' Work on a USD basis.').includes('review:teaching-language'));
+  assert.ok(codes(GUIDE_PROMPT+' Put the sizing on its own tab.').includes('review:prompt-prescriptive'));
+  assert.ok(codes(GUIDE_PROMPT+' Do not fabricate figures.').includes('review:prompt-safety-language'));
+  assert.ok(codes(GUIDE_PROMPT.replace("It's","It’s")).includes('review:prompt-unicode'));
+  assert.ok(codes(GUIDE_PROMPT+' This is a test task.').includes('review:prompt-internal-word'));
+  assert.ok(!codes(GUIDE_PROMPT+' Log it in Quillon.').includes('blocker:prompt-internal-term'));
+  assert.ok(C.lintPrompt(GUIDE_PROMPT+' Log it in Quillon.',{extraJargon:['quillon']}).some(x=>x.code==='prompt-internal-term'&&x.level==='blocker'));
+  assert.deepEqual(codes(''),['blocker:prompt-empty']);
+  assert.ok(C.lintPrompt(GUIDE_PROMPT).every(x=>x.rootId===null));
+});
+test('the A/B/C template lints without blockers: its fixed lines are its own, the writer\'s lines are still checked',()=>{
+  const lint=C.lintGuidance(ABC_GUIDELINE);
+  assert.deepEqual(lint.filter(x=>x.level==='blocker'),[],JSON.stringify(lint));
+  assert.deepEqual(lint.map(x=>x.code),['guidance-abc-template']);
+  const headed=ABC_GUIDELINE.replace('You are grading','Context\nYou are grading').replace('Open "','Golden Response\nOpen "');
+  assert.deepEqual(C.lintGuidance(headed),[]);
+  const cleaned=ABC_GUIDELINE.replace(/ — /g,', ');assert.deepEqual(C.lintGuidance(cleaned).filter(x=>x.level==='blocker'),[]);
+  const own=ABC_GUIDELINE.replace('- Approves the whole','- Penalize a note that approves the golden answer — the whole');
+  const codes=C.lintGuidance(own).filter(x=>x.level==='blocker').map(x=>x.code).sort();
+  assert.deepEqual(codes,['guidance-jargon','guidance-scoring','guidance-unicode']);
+});
+test('cleanGuidance keeps the A/B/C template lines verbatim and cleans everything else',()=>{
+  const text=ABC_GUIDELINE.replace('- A trade from','- A trade — from');
+  const c=C.cleanGuidance(text);
+  assert.equal(c.replacements,1);
+  assert.equal((c.text.match(/—/g)||[]).length,2);
+  assert.ok(c.text.includes('- A trade, from'));
+  assert.equal(C.cleanGuidance(ABC_GUIDELINE).text,ABC_GUIDELINE);
+});
+test('layout checks: named sections, answer file, a checkable must-have, and common failures with figures',()=>{
+  const codes=(t,o)=>C.lintGuidance(t,o).map(x=>x.code);
+  const sections=C.lintGuidance('Context\nThe note.\n\nGolden Response\nApprove it.').find(x=>x.code==='guidance-sections');
+  assert.match(sections.message,/missing: Must-haves, Common Failures, Acceptable Variation\./);
+  assert.ok(codes(ABC_GUIDELINE.replace(/Borealis_Trade_Approval_20261006\.docx/g,'the benchmark note')).includes('guidance-answer-file'));
+  assert.ok(codes(ABC_GUIDELINE.replace(' The file type and file names of a submission are not graded.','')).includes('guidance-file-names-sentence'));
+  assert.ok(codes(ABC_GUIDELINE.replace('the whole USD 12,000,000 trade, leaving USD 41,500,000 of the limit','the whole trade')).includes('guidance-must-have-value'));
+  const bare=C.lintGuidance(ABC_GUIDELINE.replace('- Treats the 75% target','- Uses the stale rate instead.\n- Treats the 75% target')).find(x=>x.code==='guidance-failure-figure');
+  assert.match(bare.message,/^1 of 2 common failures give no figure/);
+  const many=ABC_GUIDELINE.replace('- Treats the 75%',Array.from({length:10},(_,i)=>'- Error '+(i+1)+' gives USD '+(i+1)+'m.').join('\n')+'\n- Treats the 75%');
+  assert.ok(codes(many).includes('guidance-failure-count'));
+  assert.ok(codes('This is a critical error in the bridge.').includes('guidance-severity'));
+  assert.deepEqual(codes('The bridge adds the facility.',{fragment:true}),[]);
+  assert.ok(codes('The bridge adds the facility.').includes('guidance-sections'));
+});
+
+/* The trap ledger: new projects record traps; earlier files and the illustrations keep the failure-mode set. */
+test('new projects are trap ledgers; a file without the field loads as the earlier failure-mode set; a bad value throws',()=>{
+  const b=C.blank();assert.equal(b.framework,'trap-ledger');assert.ok(C.isTrapLedger(b));assert.equal(C.parseProject(b).framework,'trap-ledger');
+  const old=JSON.parse(JSON.stringify(b));delete old.framework;assert.equal(C.parseProject(old).framework,'failure-mode-set');
+  assert.throws(()=>C.parseProject({...b,framework:'other'}),/Framework/);
+  assert.equal(complete().framework,'failure-mode-set','the illustrations keep the five-mode set');
+  const r=C.parseProject({...b,roots:[{...b.roots[0],decoy:'Broker e-mail',superseded:'March draft',margin:'0.4 points'}]}).roots[0];assert.deepEqual([r.decoy,r.superseded,r.margin],['Broker e-mail','March draft','0.4 points']);
+  const legacy=C.parseProject(old).roots[0];assert.deepEqual([legacy.decoy,legacy.superseded,legacy.margin],['','','']);
+});
+test('a trap ledger has no set rules; it asks for a decoy, keeps the decoy off the deciding rule, and asks for the margin',()=>{
+  const p=complete();p.framework='trap-ledger';const codes=()=>C.audit(p).map(x=>x.code);
+  for(const c of ['set-size','historical-count','net-new-count','shortlist-short','library-activity','mode-id-empty','mode-id-unverified','mode-id-unlisted','duplicate-check'])assert.ok(!codes().includes(c),c);
+  assert.equal(codes().filter(c=>c==='trap-decoy').length,p.roots.length);
+  const r=p.roots[0];r.governingRule='Clause 7.3 sets the limit at 75 percent.';r.decoy='The broker e-mail cites clause 7.3 and the limit.';
+  const named=C.audit(p).find(x=>x.code==='trap-decoy-names-rule'&&x.rootId===r.id);assert.match(named.message,/\(Clause 7\.3\)/);assert.equal(named.heuristic,true);
+  r.decoy='The broker e-mail quotes the old 70 percent figure.';assert.ok(!C.audit(p).some(x=>x.code==='trap-decoy-names-rule'));
+  r.outputs[0].threshold='100';r.margin='';assert.ok(C.audit(p).some(x=>x.code==='trap-margin'&&x.rootId===r.id));r.margin='The gold clears the line by 2.94 points.';assert.ok(!C.audit(p).some(x=>x.code==='trap-margin'&&x.rootId===r.id));
+  p.roots=Array.from({length:11},()=>({...p.roots[0]}));assert.ok(codes().includes('trap-count'));
+  assert.deepEqual(C.clauseRefs('Schedule D 3.1, clause 7.3, OP-6 and Matrix section 4.'),['3.1','clause 7.3','OP-6','section 4']);
+});
+test('trap-ledger exports speak of traps, and the failure-mode set exports are unchanged',()=>{
+  const p=complete();p.framework='trap-ledger';p.roots[0].decoy='The broker e-mail';
+  const rec=C.failureModeRecords(p);assert.match(rec,/^TRAP LEDGER \(PRIVATE, AUTHOR-SIDE\)/);assert.match(rec,/Confident decoy: The broker e-mail/);assert.doesNotMatch(rec,/Historical Mode IDs|of 5/);
+  const doc=C.workingDocument(p);assert.match(doc,/Status: 5 traps recorded;/);assert.match(doc,/Trap ledger:\n  /);assert.doesNotMatch(doc,/Historical shortlist/);
+  const e=C.evaluatorDraft(p);assert.equal(e.framework,'trap-ledger');assert.equal(e.failureModeSet,undefined);assert.equal(e.trapLedger.traps.length,5);assert.equal(e.trapLedger.traps[0].decoy,'The broker e-mail');
+  const legacy=C.evaluatorDraft(complete());assert.equal(legacy.framework,'failure-mode-set');assert.equal(legacy.failureModeSet.locked,true);assert.match(C.failureModeRecords(complete()),/^FAILURE MODE SET/);
 });
