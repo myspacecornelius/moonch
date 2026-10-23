@@ -184,6 +184,8 @@ function makePage(t, { pkg = null, editor, dashboard, project, fetchLog = [] } =
   return page;
 }
 
+/* C.blank() is a trap ledger now, and so is the project a new task editor holds. The tests of the net-new slot text use a failure-mode set. */
+const SET_PROJECT = () => ({ ...C.blank(), framework: 'failure-mode-set' });
 const sanity = page => { assert.equal((page.html().match(/class="primary[ "]/g) || []).length, 1, 'one yellow primary, in every state'); const text = page.text(); assert.doesNotMatch(text, FORBIDDEN, 'no percent sign and no rate or prediction words'); assert.ok(!/style\s*=/.test(page.html()), 'no inline style'); assert.ok(!/\son[a-z]+\s*=/.test(page.html()), 'no inline handler'); };
 const ATLAS_PKG = async () => H.illustration('cash');
 
@@ -245,7 +247,7 @@ test('Existing task: with no package the page says so and offers the loader; the
 
 test('Existing task: a loaded package shows its title, file count and the mode set of the open project, and enables Generate', async t => {
   const pkg = await ATLAS_PKG();
-  const page = makePage(t, { pkg });
+  const page = makePage(t, { pkg, project: SET_PROJECT() });
   page.boot();
   page.type('mode', { value: 'existing', event: 'change' });
   const text = page.text();
@@ -533,7 +535,7 @@ test('the count is announced after the filter has settled, once, in the live reg
 
 test('Existing task: ideas that can attach name the document, the locator and the quote; ideas without evidence say what the task needs', async t => {
   const pkg = await ATLAS_PKG();
-  const page = makePage(t, { pkg });
+  const page = makePage(t, { pkg, project: SET_PROJECT() });
   page.boot();
   page.type('mode', { value: 'existing', event: 'change' });
   page.generate();
@@ -590,7 +592,7 @@ test('typing after generating marks the ideas as made from earlier inputs, and o
 /* ====================================================================== add and copy */
 
 test('Add as net-new mode: the dialog states the five mode cap and the open slots; Cancel and Escape add nothing', async t => {
-  const page = makePage(t);
+  const page = makePage(t, { project: SET_PROJECT() });
   page.boot();
   page.type('workflow', { value: 'Treasury facility review' });
   page.generate();
@@ -618,6 +620,7 @@ test('Add as net-new mode: the dialog states the five mode cap and the open slot
 
 test('Add as net-new mode: confirming calls the real addCandidate with a valid authoring project; the root is in the project; the toast and the editor offer follow', async t => {
   const editor = loadEditor();
+  editor.loadProject(SET_PROJECT());
   const page = makePage(t, { editor });
   page.boot();
   page.type('workflow', { value: 'Treasury facility review' });
@@ -692,8 +695,8 @@ test('Add as net-new mode for an existing task passes the package and keeps the 
   assert.ok(project.sources.some(s => s.file === 'Treasury_Procedure.txt' && s.suppliedToSolver === true));
 });
 
-test('the confirm text copes with a project over the net-new limit and with an overlapping idea; the editor is not required to exist', async t => {
-  const project = C.blank();
+test('the confirm text copes with a project over the net-new limit; the editor is not required to exist', async t => {
+  const project = SET_PROJECT();
   project.roots = [0, 1, 2].map(i => ({ ...C.root(), id: 'r' + i, lane: 'net-new', title: 'Atlas mode ' + i }));
   const page = makePage(t, { project, dashboard: false });
   page.boot();
@@ -711,17 +714,13 @@ test('the confirm text copes with a project over the net-new limit and with an o
   assert.match(page.text(), /It is on the Root design page of the task editor\./);
 });
 
-test('an idea that overlaps a current mode shows the warning on the card and in the dialog', async t => {
-  const project = C.blank();
-  const pkg = await ATLAS_PKG();
-  const page0 = makePage(t, { pkg });
+/* A project whose root repeats an anchored idea's own wording, so the model finds the idea covered. The base project sets the framework. */
+async function overlapPage(t, project) {
+  const pkg = await ATLAS_PKG(), page0 = makePage(t, { pkg });
   page0.boot();
   page0.type('mode', { value: 'existing', event: 'change' });
   page0.generate();
-  const target = page0.cards().find(c => c.status === 'anchored');
-  /* a project whose root repeats the idea's own wording, so the model finds it covered */
-  const M = page0.context.FinanceIdeasModel, A = page0.context.FinanceIdeaArchetypes;
-  const archetype = A.archetypes.find(a => a.name === target.title);
+  const target = page0.cards().find(c => c.status === 'anchored'), archetype = page0.context.FinanceIdeaArchetypes.archetypes.find(a => a.name === target.title);
   project.roots = [{ ...C.root(), id: 'r1', lane: 'net-new', title: archetype.name, causalGroup: archetype.causalGroup, mechanism: archetype.mechanism, governingRule: archetype.whyItHolds, wrongInterpretation: archetype.wrongApproach }];
   const page = makePage(t, { pkg, project });
   page.boot();
@@ -730,12 +729,30 @@ test('an idea that overlaps a current mode shows the warning on the card and in 
   page.type('search', { value: archetype.name });
   const flagged = page.cards().find(c => c.title === archetype.name);
   assert.ok(flagged && ['covered', 'overlap'].includes(flagged.status), 'the model reports the idea as covered: ' + (flagged && flagged.status));
-  assert.match(flagged.body, /adding it may count one failure twice\./i);
+  return { page, flagged, warn: decode((/<p class="ig-warn-line">([\s\S]*?)<\/p>/.exec(flagged.body) || [])[1] || '').replace(/<[^>]*>/g, '') };
+}
+
+test('an idea that overlaps a current mode shows the warning on the card and in the dialog', async t => {
+  const { page, flagged, warn } = await overlapPage(t, SET_PROJECT());
+  const M = page.context.FinanceIdeasModel;
+  assert.match(warn, /^A current mode (already covers|overlaps) this idea\. Adding it may count one failure twice\.$/);
   assert.match(flagged.body, /Same causal group as this idea\./, 'the current mode and the reason are named');
   assert.match(flagged.body, /Already covered|Overlaps a current mode/);
   page.click('add', { 'data-idea': flagged.id });
-  assert.match(page.region('ig-modal'), /overlaps a current mode, so adding it may count one failure twice/);
+  assert.match(page.region('ig-modal'), /This idea overlaps a current mode, so adding it may count one failure twice/);
   assert.ok(M.TEXT.statusWords.covered);
+  sanity(page);
+});
+
+test('a trap ledger: an idea that overlaps a trap already in the project says so in traps on the card and in the dialog', async t => {
+  const { page, flagged, warn } = await overlapPage(t, C.blank());
+  assert.match(warn, /^A trap in the project (already covers|overlaps) this idea\. Adding it may count one failure twice\.$/);
+  assert.match(flagged.body, /Same causal group as this idea\./, 'the trap and the reason are named');
+  page.click('add', { 'data-idea': flagged.id });
+  const modal = page.region('ig-modal');
+  assert.match(modal, /Add this idea as a trap\?/);
+  assert.match(modal, /This idea overlaps a trap already in the project, so adding it may count one failure twice: /);
+  assert.doesNotMatch(modal, /current mode/, 'the dialog speaks of traps');
   sanity(page);
 });
 
@@ -819,7 +836,7 @@ test('a workbook loaded after the ideas were made is not described as missing: t
 });
 
 test('the ordering footnote is followed by one plain line on how the groups are formed, and the filter explains the lead tag', async t => {
-  const page = makePage(t);
+  const page = makePage(t, { project: SET_PROJECT() });
   page.boot();
   await page.loadWorkbook(csvFile(CSV));
   page.type('workflow', { value: 'Meridian Close' });
@@ -828,6 +845,14 @@ test('the ordering footnote is followed by one plain line on how the groups are 
   assert.match(page.region('ig-filters'), /id="ig-lead-help"[^>]*>The lead tag marks the recipes that this catalog lists first\. It is a catalog note and says nothing about how any task will turn out\.</);
   assert.match(page.region('ig-filters'), /id="ig-lead"[^>]*aria-describedby="ig-lead-help"/);
   sanity(page);
+  /* A trap ledger (a blank project) names what the bottom group overlaps in traps. */
+  const ledger = makePage(t);
+  ledger.boot();
+  await ledger.loadWorkbook(csvFile(CSV));
+  ledger.type('workflow', { value: 'Meridian Close' });
+  ledger.generate();
+  assert.match(ledger.region('ig-bar'), /Ideas are grouped by status first, with reviewable hypotheses at the top and ideas that overlap a trap already in the project at the bottom\. The recorded score orders the ideas within each group\./);
+  assert.doesNotMatch(ledger.region('ig-bar'), /current mode/);
   const bare = makePage(t);
   bare.boot();
   bare.type('workflow', { value: 'x' });
@@ -879,7 +904,7 @@ test('a stray quote in the workbook is reported by line in the loader, not swall
 });
 
 test('the dialog says that adding a mode resets review gates marked as addressed, and only when there is one', async t => {
-  const withGate = C.blank();
+  const withGate = SET_PROJECT();
   withGate.gates = { brief: { status: 'addressed', notes: 'checked' }, teaching: { status: 'pending', notes: '' } };
   const page = makePage(t, { project: withGate });
   page.boot();
@@ -887,7 +912,7 @@ test('the dialog says that adding a mode resets review gates marked as addressed
   page.generate();
   page.click('add', { 'data-idea': page.cardIds()[0] });
   assert.match(page.region('ig-modal'), /The task editor resets any review gate you marked as addressed to pending when a mode is added\./);
-  const noGate = C.blank();
+  const noGate = SET_PROJECT();
   noGate.gates = { brief: { status: 'pending', notes: '' } };
   const quiet = makePage(t, { project: noGate });
   quiet.boot();
@@ -896,6 +921,106 @@ test('the dialog says that adding a mode resets review gates marked as addressed
   quiet.click('add', { 'data-idea': quiet.cardIds()[0] });
   assert.doesNotMatch(quiet.region('ig-modal'), /review gate/);
   assert.match(quiet.region('ig-modal'), /pending hypothesis/);
+});
+
+/* ====================================================================== a trap ledger */
+
+const addLabels = page => [...page.html().matchAll(/<button\b[^>]*data-ig="add"[^>]*>([^<]*)<\/button>/g)].map(m => m[1]);
+
+test('a trap ledger: the package line counts traps, the buttons read Add as trap, and the bar counts no slot even with three net-new roots', async t => {
+  const pkg = await ATLAS_PKG(), project = C.blank();
+  assert.equal(project.framework, 'trap-ledger', 'a blank project is a trap ledger');
+  project.roots = [0, 1, 2].map(i => ({ ...C.root(), id: 'r' + i, lane: 'net-new', title: 'Borealis trap ' + i }));
+  const page = makePage(t, { pkg, project });
+  page.boot();
+  page.type('mode', { value: 'existing', event: 'change' });
+  assert.match(page.region('ig-inputs'), /3 files · 3 traps in the project\./);
+  assert.doesNotMatch(page.region('ig-inputs'), /net-new|slots?/);
+  page.generate();
+  const labels = addLabels(page);
+  assert.equal(labels.length, page.cards().length, 'one add button on every card');
+  assert.ok(labels.every(l => l === 'Add as trap'), 'every add button reads Add as trap: ' + labels.join(', '));
+  assert.doesNotMatch(page.region('ig-bar'), /slot|over the limit/i, 'no slot note for a trap ledger');
+  assert.doesNotMatch(page.text(), /net-new|Add as net-new mode/);
+  page.boot({ ...pkg, fingerprint: 'e'.repeat(64) });
+  assert.match(page.region('ig-bar'), /The package, the workbook, the traps in the project or your inputs changed since these ideas were made\./);
+  sanity(page);
+});
+
+test('Add as trap: the dialog says what the trap brings and what stays the author\'s, with no slot count and no five mode sentence', async t => {
+  const page = makePage(t);
+  page.boot();
+  page.type('workflow', { value: 'Treasury facility review' });
+  page.generate();
+  page.click('add', { 'data-idea': page.cardIds()[0] });
+  const modal = page.region('ig-modal'), text = decode(modal.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ');
+  assert.match(modal, /role="dialog"[^>]*aria-modal="true"/);
+  assert.match(modal, /<h2 id="ig-dialog-h" class="ig-dialog-title">Add this idea as a trap\?<\/h2>/);
+  assert.match(text, /The trap arrives pending, with its failure point, trigger, wrong approach, correct treatment, detection and consequence written\./);
+  assert.match(text, /The decoy, the superseded version, the margin, the expected behaviour, the classification, the acceptable variations, the tolerance rationale, the right headline and the outputs stay yours to supply\./);
+  assert.match(text, /You edit and review it in the task editor\./);
+  assert.doesNotMatch(text, /five failure modes|net-new|slots?\b|historical|review gate/);
+  assert.match(modal, /data-ig="confirm-add"[^>]*>Add as trap</, 'the confirm button says what it does');
+  page.key('Escape');
+  assert.equal(page.calls.added.length, 0, 'nothing was added');
+  /* A gate marked as addressed is reset when a trap is added, and the dialog says so in the same words. */
+  const withGate = C.blank();
+  withGate.gates = { brief: { status: 'addressed', notes: 'checked' } };
+  const gated = makePage(t, { project: withGate });
+  gated.boot();
+  gated.type('workflow', { value: 'Treasury facility review' });
+  gated.generate();
+  gated.click('add', { 'data-idea': gated.cardIds()[0] });
+  assert.match(gated.region('ig-modal'), /The task editor resets any review gate you marked as addressed to pending when a trap is added\./);
+  sanity(page);
+});
+
+test('Add as trap: confirming with the real editor puts a pending trap into the ledger with no duplicate-check note; the toast, the card and the live region say trap', async t => {
+  const editor = loadEditor();
+  assert.equal(editor.getProject().framework, 'trap-ledger', 'a new task editor holds a trap ledger');
+  const page = makePage(t, { editor });
+  page.boot();
+  page.type('workflow', { value: 'Treasury facility review' });
+  page.type('description', { value: 'A facility with a target range and a limit.' });
+  page.generate();
+  const card = page.cards()[0], before = editor.getProject();
+  page.click('add', { 'data-idea': card.id });
+  page.click('confirm-add');
+  assert.equal(page.calls.added.length, 1);
+  const { candidate } = page.calls.added[0], ap = C.parseProject(clean(candidate.authoringProject));
+  assert.equal(ap.framework, 'trap-ledger', 'the model is told the framework through the open project');
+  assert.deepEqual([ap.roots[0].duplicateCheck, ap.roots[0].decoy, ap.roots[0].superseded, ap.roots[0].margin, ap.roots[0].reviewStatus], ['', '', '', '', 'pending']);
+  const after = editor.getProject(), added = after.roots[after.roots.length - 1];
+  assert.equal(after.roots.length, before.roots.length + 1, 'the trap is a root of the ledger');
+  assert.equal(after.framework, 'trap-ledger', 'adding a trap leaves the framework alone');
+  assert.equal(added.title, card.title);
+  assert.deepEqual([added.duplicateCheck, added.decoy, added.superseded, added.margin], ['', '', '', ''], 'no duplicate-check note; the decoy, the superseded version and the margin are the author\'s');
+  assert.ok(added.governingRule && added.triggeringCondition && added.wrongInterpretation && added.correctInterpretation && added.detectionMethod && added.headlineWrong, 'the failure point, trigger, wrong approach, correct treatment, detection and consequence are written');
+  const codes = new Set(C.audit(after).filter(x => x.rootId === added.id).map(x => x.code));
+  assert.ok(codes.has('trap-decoy') && !codes.has('duplicate-check'), 'the editor asks the author for the decoy');
+  assert.match(page.toasts.at(-1).text, new RegExp('^' + cap('added "') + card.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '" as a trap\\. Open the task editor to review it\\.$'));
+  assert.equal(page.toasts.at(-1).error, false);
+  assert.match(page.live(), /^added as a trap\.$/i);
+  assert.match(page.cards().find(c => c.id === card.id).body, /added to the project as a trap\./i);
+  page.generate();
+  assert.doesNotMatch(page.region('ig-bar'), /slot/i, 'no slot note after the add either');
+  assert.doesNotMatch(page.text(), /net-new/);
+  sanity(page);
+});
+
+test('with no project to read, the page speaks as a new task editor would: of traps', t => {
+  const page = makePage(t);
+  page.boot();
+  page.context.FinanceAuthoring = undefined;
+  page.type('workflow', { value: 'Treasury facility review' });
+  page.generate();
+  assert.ok(addLabels(page).every(l => l === 'Add as trap'));
+  page.click('add', { 'data-idea': page.cardIds()[0] });
+  assert.match(page.region('ig-modal'), /Add this idea as a trap\?/);
+  assert.doesNotMatch(page.region('ig-modal'), /could not be read|slots?\b/);
+  page.click('confirm-add');
+  assert.match(page.toasts.at(-1).text, /The task editor is not loaded, so the idea was not added\./);
+  assert.equal(page.toasts.at(-1).error, true);
 });
 
 test('the load task package button of this page: when the shell then shows another page, this page is asked for again; a cancelled picker or a failed read is not', async t => {

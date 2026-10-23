@@ -205,7 +205,9 @@ test('GET /api/status keeps its fields and adds the agents block', async t => {
   assert.equal(response.json.nonce, w.app.nonce);
 
   const agents = response.json.agents;
-  assert.deepEqual(Object.keys(agents).sort(), ['efforts', 'maxPilotsPerRound', 'models', 'runtime']);
+  assert.deepEqual(Object.keys(agents).sort(), ['efforts', 'graderModel', 'maxPilotsPerRound', 'models', 'runtime']);
+  assert.equal(agents.graderModel, C.GRADER_MODEL, 'the model the simulated grader dialog offers first');
+  assert.ok(C.MODELS.includes(agents.graderModel));
   assert.equal(agents.maxPilotsPerRound, C.MAX_PILOTS_PER_ROUND);
   assert.equal(agents.maxPilotsPerRound, 5);
   assert.deepEqual(agents.models, C.MODELS);
@@ -231,6 +233,7 @@ test('a status block that cannot be read still answers, from the fixed limits', 
   assert.equal(response.json.agents.runtime.found, false);
   assert.equal(response.json.agents.maxPilotsPerRound, 5);
   assert.deepEqual(response.json.agents.models, C.MODELS);
+  assert.equal(response.json.agents.graderModel, C.GRADER_MODEL);
   assert.equal(w.logs.length, 1);
 });
 
@@ -2004,4 +2007,33 @@ test('the port the companion listens on reaches the audit of the real service: a
   const detail = (await w.get(`/api/agents/rounds/${own}/runs/1`)).json;
   assert.equal(detail.audit.status, 'DISCARDED');
   assert.deepEqual(detail.audit.violations.map(violation => violation.kind), ['loopback']);
+});
+
+/* ====================================================================== the ship bar over HTTP */
+
+test('a ship bar is frozen through the route, named in the approval summary, refused when it is not whole numbers, and withheld with the gold while a round runs', async t => {
+  const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { hang: true }], { limits: { killGraceMs: 200 } });
+  const created = await createRound(w);
+  for (const shipBar of [{ wrong: 6, of: 5 }, { wrong: 1, of: 21 }, { wrong: '5', of: 6 }, 'five']) {
+    const refused = await w.post(`/api/agents/rounds/${created.id}/freeze`, { ...GOLD, shipBar });
+    assert.equal(refused.status, 400, JSON.stringify(shipBar));
+    assert.match(refused.json.error, /shipBar/);
+  }
+  const frozen = await w.post(`/api/agents/rounds/${created.id}/freeze`, { ...GOLD, shipBar: { wrong: 5, of: 6 } });
+  assert.equal(frozen.status, 200, frozen.text);
+  assert.deepEqual(frozen.json.freeze.shipBar, { wrong: 5, of: 6 });
+  assert.match(frozen.json.approvalSummary.text, /Ship bar, frozen with the gold and covered by the content sha256: at least 5 wrong of 6 completed runs/);
+  const plain = await frozenRound(w);
+  assert.doesNotMatch(plain.approvalSummary.text, /Ship bar/, 'a freeze without a bar has no such line');
+
+  const running = await approvedRound(w, { config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } });
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/launch`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).runs[1].state === 'running', { label: 'pilot 2 to run' });
+  const read = await w.get(`/api/agents/rounds/${created.id}`);
+  assert.equal(read.json.redacted, true);
+  assert.deepEqual(read.json.freeze, { sha256: frozen.json.freeze.sha256, frozenAt: frozen.json.freeze.frozenAt }, 'the bar goes with the gold');
+  assert.ok(!read.text.includes('shipBar'));
+  assert.equal((await w.post(`/api/agents/rounds/${running.id}/cancel`)).status, 200);
+  await waitFor(async () => (await w.service.getRound(running.id)).status === 'cancelled', { label: 'the round to end' });
+  assert.deepEqual((await w.get(`/api/agents/rounds/${created.id}`)).json.freeze.shipBar, { wrong: 5, of: 6 }, 'and comes back when the round has ended');
 });

@@ -465,14 +465,18 @@
   function rootText(r) {
     return ['title', 'governingRule', 'triggeringCondition', 'wrongInterpretation', 'correctInterpretation', 'detectionMethod', 'headlineWrong', 'correctiveAction'].map(k => str(r[k])).join(' . ').slice(0, CAP.rootText);
   }
+  /* A trap ledger has no lanes and no slot limit, so the net-new count means nothing there. Without a project the framework is not
+     known and the earlier failure-mode-set reading holds. */
+  const trapLedger = project => { const C = core(); return isObj(project) && (C && typeof C.isTrapLedger === 'function' ? C.isTrapLedger(project) : project.framework === 'trap-ledger'); };
   /* Which archetypes the current roots already cover. Levels: 'covered' (same causal group, or at least three signals or the whole
      name in one root), 'overlap' (one or two signals together with the same mechanism, or at least two signals), 'mechanism'
-     (same catalog mechanism only; the default period_alignment is not counted because blank roots carry it). */
+     (same catalog mechanism only; the default period_alignment is not counted because blank roots carry it). openNetNewSlots is
+     null for a trap ledger. */
   function coverage(project, archetypes) {
     const list = archetypeList(archetypes), cm = compile(list), C = core();
     const roots = isObj(project) ? arr(project.roots).filter(isObj) : [];
     const netNew = roots.filter(r => r.lane === 'net-new').length;
-    const out = {roots: roots.length, netNewCount: netNew, openNetNewSlots: (C ? C.SET.netNew : 2) - netNew, byArchetype: {}};
+    const out = {roots: roots.length, netNewCount: netNew, openNetNewSlots: trapLedger(project) ? null : (C ? C.SET.netNew : 2) - netNew, byArchetype: {}};
     if (!roots.length) return out;
     const infos = roots.map(r => {
       const text = rootText(r), padded = ' ' + norm(text), found = scanTerms(cm, padded, new Set()), seen = new Set(), negated = new Set(), rx = scanRegex(cm, text, CAP.rootText);
@@ -593,7 +597,7 @@
     if (mode === 'existing' && !pkg) notes.push('No task package is loaded, so the ideas are not tied to any document. Add a task package to see where each idea could attach.');
     else if (mode === 'existing' && !ideas.some(i => i.applicability.length)) notes.push('No wording in the solver-visible documents matched an idea, so every idea waits for the task to contain the materials it needs.');
     if (mode === 'new' && !task.description) notes.push('Add a short description of the task so the ideas can be matched to the materials it has.');
-    if (project) notes.push('Open net-new slots in the current project: ' + cov.openNetNewSlots + '.');
+    if (project && cov.openNetNewSlots !== null) notes.push('Open net-new slots in the current project: ' + cov.openNetNewSlots + '.');
     scanned.promptNames.slice(0, 3).forEach(n => notes.push('The task request already uses wording close to "' + n + '". Keep the request from naming this mechanism.'));
     if (scanned.promptNames.length > 3) notes.push(scanned.promptNames.length - 3 + ' more ideas share wording with the task request.');
     return {ideas, inputs, notes, ordering, generatedAt: typeof input.now === 'string' ? input.now : null};
@@ -606,7 +610,7 @@
   function lintText(value, field, options) {
     const t = String(value), C = core(), out = [];
     const add = (code, text) => out.push({code, field: field || '', text});
-    if (C) for (const item of C.lintGuidance(t, options)) { const m = /Found: "(.*)"\.$/s.exec(item.message); add(item.code, m ? m[1] : t.slice(0, 80)); }
+    if (C) for (const item of C.lintGuidance(t, {...options, fragment: true})) { const m = /Found: "(.*)"\.$/s.exec(item.message); add(item.code, m ? m[1] : t.slice(0, 80)); }
     let m;
     if ((m = TEACHING.exec(t))) add('teaching-word', m[0]);
     if (t.includes('%')) add('ui-percent', '%');
@@ -646,13 +650,16 @@
   }
   /* A single-root project for FinanceAuthoring.addCandidate(pkg, {id, title, authoringProject}). Only the idea's own text goes in,
      plus anchors that re-verify against pkg. No recorded score and no precedent text is ever written. The correct treatment goes
-     into correctInterpretation as the bare verb phrase (generateGuidance adds "The correct treatment is to "). */
+     into correctInterpretation as the bare verb phrase (generateGuidance adds "The correct treatment is to "). The project takes the
+     framework of options.project. Into a trap ledger no duplicate-check note is written (the ledger has no such rule) and the decoy,
+     the superseded version and the margin stay empty for the author; the lane stays net-new, which a trap ledger ignores. */
   function toAuthoringProject(idea, options) {
     const C = core(), E = engine();
     if (!C) fail('FinanceCore is required to build a project.');
     if (!isObj(idea) || !str(idea.id) || !str(idea.title)) fail('An idea needs an id and a title.');
-    const pkg = isObj(options?.pkg) ? options.pkg : null, project = isObj(options?.project) ? options.project : null;
+    const pkg = isObj(options?.pkg) ? options.pkg : null, project = isObj(options?.project) ? options.project : null, trap = trapLedger(project);
     const p = C.blank(), r = p.roots[0], sources = [], seen = new Set();
+    p.framework = trap ? 'trap-ledger' : 'failure-mode-set';
     const lines = [];
     const verify = pkg && E && typeof E.resolveClause === 'function';
     for (const a of arr(idea.applicability)) {
@@ -668,7 +675,7 @@
       sources.push({...C.source(), id: 'anchor-' + sources.length, title: a.documentName + ' ' + a.locator, file: (E.GAF_PATTERN || GAF).test(a.documentName) ? a.documentName.split('/').pop() : a.documentName, page: '', cell: a.locator, date: '', authority: 'Imported source; authority requires review', version: 'sha256:' + hit.document.sha256, excerpt: str(a.quote), reviewStatus: 'pending', suppliedToSolver: true});
     }
     const moves = arr(idea.buildMoves).map(str).filter(Boolean);
-    const near = nearestModes(idea, project);
+    const near = trap ? [] : nearestModes(idea, project);
     p.title = idea.title;
     p.sources = sources;
     Object.assign(r, {
@@ -677,8 +684,8 @@
       facts: [lines.join('\n'), moves.length ? 'Build: ' + moves.join(' ') : ''].filter(Boolean).join('\n\n').slice(0, CAP.facts),
       triggeringCondition: moves[0] || '', correctInterpretation: str(idea.correctTreatment), wrongInterpretation: str(idea.wrongApproach),
       detectionMethod: str(idea.detection), correctiveAction: sentence(upperFirst(str(idea.correctTreatment))), headlineWrong: str(idea.consequence),
-      duplicateCheck: ('To confirm: nearest current modes: ' + (near.length ? near.join('; ') : 'none found by keyword comparison') + '.').slice(0, 600),
-      expectedBehavior: '', classification: '', ambiguity: '', assumptions: '', resolution: '', reviewStatus: 'pending'
+      duplicateCheck: trap ? '' : ('To confirm: nearest current modes: ' + (near.length ? near.join('; ') : 'none found by keyword comparison') + '.').slice(0, 600),
+      decoy: '', superseded: '', margin: '', expectedBehavior: '', classification: '', ambiguity: '', assumptions: '', resolution: '', reviewStatus: 'pending'
     });
     return C.parseProject(p);
   }

@@ -21,7 +21,7 @@
   function out(id,label,unit,correct,wrong,calculation,sourceIds,extra={}){return {...C.output(),id,label,unit,correct,wrong,calculation,sourceIds,...extra};}
   function mode(id,fields){return {...C.root(),id,causalGroup:id,reviewStatus:'reviewed',...fields};}
   function seed(kind){
-    const p=C.blank();p.updatedAt='2026-10-07T00:00:00.000Z';
+    const p=C.blank();p.framework='failure-mode-set';p.updatedAt='2026-10-07T00:00:00.000Z'; // The illustrations show the earlier failure-mode set; new projects start as a trap ledger.
     if(kind==='cash'){
       p.title='Atlas reimbursement bridge (synthetic worked example)';p.task={id:'SYN-TASK-001',type:'Derivative task, workbook update',industry:'Corporate treasury (synthetic)',activity:ACTIVITY};p.versions={prompt:'syn-v1',workbook:'syn-v1',evaluator:'syn-v1'};
       p.business={objective:'liquidity for the planned payment',deliverable:'the cash bridge in the workbook',decision:'whether the payment can proceed',prompt:'Assess liquidity for the planned payment using the supplied materials. Update the cash bridge in the workbook and recommend whether the payment can proceed.'};

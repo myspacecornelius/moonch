@@ -593,7 +593,7 @@ test('refusals are PacketError with an HTTP style status', t => {
 
 test('constants carry the documented limits and allowlists and cannot be changed at run time', () => {
   assert.equal(constants.MAX_PILOTS_PER_ROUND, 5);
-  assert.deepEqual([...constants.MODELS], ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-5-5']);
+  assert.deepEqual([...constants.MODELS], ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-5-5', 'claude-opus-4-8']);
   assert.equal(constants.DEFAULT_MODEL, 'claude-opus-5-5');
   assert.ok(constants.MODELS.includes(constants.DEFAULT_MODEL));
   assert.deepEqual([...constants.EFFORTS], ['low', 'medium', 'high', 'xhigh', 'max']);

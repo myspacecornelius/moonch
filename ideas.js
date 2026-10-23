@@ -23,7 +23,7 @@
   const LBL = {
     newTask: 'New task', existingTask: 'Existing task', loadPackage: cap('load task package'), loadWorkbook: cap('load precedent workbook'),
     removeWorkbook: cap('remove workbook'), generate: 'Generate ideas', lead: cap('lead ideas only'), why: 'Why it holds', build: 'How to build it',
-    attach: cap('where it could attach'), precedents: cap('closest precedents'), add: 'Add as net-new mode', copy: 'Copy as text',
+    attach: cap('where it could attach'), precedents: cap('closest precedents'), add: 'Add as net-new mode', addTrap: 'Add as trap', copy: 'Copy as text',
     openEditor: 'Open the task editor', cancel: 'Cancel', clear: 'Clear filters', workflow: cap('workflow'), describe: 'Task description', inputs: cap('inputs'), leadTag: cap('lead idea'), recorded: cap('recorded score')
   };
   const TAGLINE = cap('failure mode ideas for a new or an existing task, from a mechanism catalog and your own precedents.');
@@ -31,12 +31,17 @@
   /* Sentences of this page about how the ideas were ordered. The two spec sentences (ordering footnote, no workbook) stay in the model's TEXT. */
   const LINE = {
     statusFirst: 'Ideas are grouped by status first, with reviewable hypotheses at the top and ideas that overlap a current mode at the bottom. The recorded score orders the ideas within each group.',
+    statusFirstTrap: 'Ideas are grouped by status first, with reviewable hypotheses at the top and ideas that overlap a trap already in the project at the bottom. The recorded score orders the ideas within each group.',
     noReadableScore: 'No closest precedent has a score that is a plain number, so these ideas are not ordered by recorded score.',
     loadedNow: 'A workbook is loaded now. Choose Generate ideas to add its closest precedents and to order the ideas by their recorded scores.',
     removed: 'These ideas were ordered with a workbook that has since been removed from this page. Choose Generate ideas to list them without it.',
     leadHelp: 'The lead tag marks the recipes that this catalog lists first. It is a catalog note and says nothing about how any task will turn out.',
     gatesReset: 'The task editor resets any review gate you marked as addressed to pending when a mode is added.',
-    stays: 'The workbook you loaded earlier is still in use.'
+    gatesResetTrap: 'The task editor resets any review gate you marked as addressed to pending when a trap is added.',
+    stays: 'The workbook you loaded earlier is still in use.',
+    /* A trap ledger has no lanes and no slot limit: the add dialog says what the idea brings and what stays the author's instead. */
+    trapWritten: 'The trap arrives pending, with its failure point, trigger, wrong approach, correct treatment, detection and consequence written.',
+    trapYours: 'The decoy, the superseded version, the margin, the expected behaviour, the classification, the acceptable variations, the tolerance rationale, the right headline and the outputs stay yours to supply.'
   };
   const unreadableLine = n => n + (n === 1 ? ' row has' : ' rows have') + ' no score that is a plain number, so ' + (n === 1 ? 'it does' : 'they do') + ' not take part in the ordering.';
 
@@ -86,13 +91,18 @@
   }
 
   /* ---------- the mode set of the open project, in the editor's own terms ---------- */
+  /* The page speaks the framework of the project an idea goes into: the editor's project, or, when none can be read, the blank project a
+     new editor starts from. A trap ledger is spoken of in traps, with no slot count; a failure-mode set in net-new modes and their slots. */
+  function isTrap(project) {
+    try { const C = W.FinanceCore; return C.isTrapLedger(project || currentProject() || C.blank()); } catch { return false; }
+  }
   function modeInfo() {
     const project = currentProject();
     if (!project || !Array.isArray(project.roots)) return null;
     const netNew = project.roots.filter(r => r && r.lane === 'net-new').length;
     const limit = W.FinanceCore && W.FinanceCore.SET ? W.FinanceCore.SET.netNew : 2;
     const gates = project.gates && typeof project.gates === 'object' ? Object.values(project.gates) : [];
-    return {roots: project.roots.length, netNew, open: limit - netNew, addressed: gates.filter(g => g && g.status === 'addressed').length};
+    return {roots: project.roots.length, netNew, open: limit - netNew, addressed: gates.filter(g => g && g.status === 'addressed').length, trap: isTrap(project)};
   }
   function slotsText(open) {
     if (open > 0) return open === 1 ? 'one net-new slot is open' : open + ' net-new slots are open';
@@ -101,7 +111,8 @@
   function projectSignature() {
     const project = currentProject();
     if (!project) return '';
-    try { return String(W.FinanceCore.snapshot(project)); } catch { return JSON.stringify(project.roots || []); }
+    /* The snapshot leaves the framework out, and the framing of the notes follows it. */
+    try { return String(W.FinanceCore.snapshot(project)) + '|' + String(project.framework || ''); } catch { return JSON.stringify(project.roots || []); }
   }
 
   /* ---------- what Generate needs, and what the current result was made from ---------- */
@@ -142,7 +153,7 @@
       return html`<p class="ig-meta">No task package is loaded.</p><div class="ig-row"><button type="button" id="ig-load-package" data-ig="load-package">${LBL.loadPackage}</button></div>`;
     }
     return html`<p class="ig-pkg-title">${pkg.title}</p>
-      <p class="ig-meta">${plural(pkg.documents.length, 'file')}${modes ? html` · ${plural(modes.roots, 'mode')} in the project, ${modes.netNew} <span class="ig-nb">net-new</span>. Open <span class="ig-nb">net-new</span> slots: ${Math.max(0, modes.open)}.` : ''}</p>`;
+      <p class="ig-meta">${plural(pkg.documents.length, 'file')}${!modes ? '' : modes.trap ? html` · ${plural(modes.roots, 'trap')} in the project.` : html` · ${plural(modes.roots, 'mode')} in the project, ${modes.netNew} <span class="ig-nb">net-new</span>. Open <span class="ig-nb">net-new</span> slots: ${Math.max(0, modes.open)}.`}</p>`;
   }
   function newTaskBlock() {
     return html`<div class="ig-field"><label for="ig-workflow">${LBL.workflow}</label>
@@ -202,7 +213,7 @@
     if (!r.libraryUsed) return html`<p class="ig-note">${r.removed ? LINE.removed : S.library ? LINE.loadedNow : TEXT.noLibrary}</p>`;
     const o = r.ordering, none = !!o && o.ordered === 0;
     return html`<p class="ig-note">${none ? LINE.noReadableScore : TEXT.orderingFootnote}</p>
-      ${none ? '' : html`<p class="ig-note">${LINE.statusFirst}</p>`}
+      ${none ? '' : html`<p class="ig-note">${isTrap() ? LINE.statusFirstTrap : LINE.statusFirst}</p>`}
       ${o && o.unreadable > 0 ? html`<p class="ig-note">${unreadableLine(o.unreadable)}</p>` : ''}`;
   }
   function barHtml() {
@@ -211,7 +222,7 @@
     return html`<h2 id="ig-results-h" class="ig-h2" tabindex="-1">Ideas</h2>
       ${S.error ? html`<p class="ig-error" role="alert"><span class="ig-glyph" aria-hidden="true">${raw('&#10005;')}</span>${S.error}</p>` : ''}
       ${orderingHtml()}
-      ${stale ? html`<p class="ig-stale"><span class="ig-dot ig-dot-warn" aria-hidden="true"></span>The package, the workbook, the mode set or your inputs changed since these ideas were made. Choose Generate ideas to update them.</p>` : ''}
+      ${stale ? html`<p class="ig-stale"><span class="ig-dot ig-dot-warn" aria-hidden="true"></span>The package, the workbook, ${isTrap() ? 'the traps in the project' : 'the mode set'} or your inputs changed since these ideas were made. Choose Generate ideas to update them.</p>` : ''}
       ${r && r.notes.length ? html`<ul class="ig-notes">${r.notes.map(n => html`<li>${noteText(n)}</li>`)}</ul>` : ''}
       ${!r && !S.error ? html`<p class="ig-empty">${emptyText()}</p>` : ''}`;
   }
@@ -224,9 +235,10 @@
   }
 
   const STATUS_DOT = {anchored: 'ig-dot-solid', 'needs-evidence': 'ig-dot-hollow', overlap: 'ig-dot-warn', covered: 'ig-dot-warn'};
-  function overlapHtml(idea) {
+  /* The status tag above is the model's fixed wording; the sentences the page owns name what the idea overlaps in the project's own terms. */
+  function overlapHtml(idea, trap) {
     if (idea.status !== 'overlap' && idea.status !== 'covered') return '';
-    return html`<div class="ig-sec ig-overlap"><p class="ig-warn-line"><span class="ig-dot ig-dot-warn" aria-hidden="true"></span>${idea.status === 'covered' ? 'A current mode already covers this idea.' : 'A current mode overlaps this idea.'} ${cap('adding it may count one failure twice.')}</p>
+    return html`<div class="ig-sec ig-overlap"><p class="ig-warn-line"><span class="ig-dot ig-dot-warn" aria-hidden="true"></span>${trap ? 'A trap in the project' : 'A current mode'} ${idea.status === 'covered' ? 'already covers' : 'overlaps'} this idea. ${cap('adding it may count one failure twice.')}</p>
       <ul class="ig-plain">${idea.overlapWith.slice(0, 3).map(o => html`<li>${o.modeId ? o.modeId + ' ' : ''}${o.title}: ${o.why}</li>`)}</ul></div>`;
   }
   function attachHtml(idea) {
@@ -239,45 +251,45 @@
     if (!S.result || !S.result.libraryUsed || !idea.precedents.length) return '';
     return html`<div class="ig-sec"><h4 class="ig-h4">${LBL.precedents}</h4><ul class="ig-prec">${idea.precedents.slice(0, 3).map(p => html`<li><span class="ig-prec-text">${p.workflow}, ${p.trap}</span><span class="ig-score">${LBL.recorded} ${p.scoreText === '' ? 'not given' : p.scoreText}</span></li>`)}</ul></div>`;
   }
-  function actionsHtml(idea) {
+  function actionsHtml(idea, trap) {
     const done = S.added[idea.id], editor = W.FinanceDashboard && typeof W.FinanceDashboard.openEditor === 'function';
     return html`<div class="ig-actions">${done
-      ? html`<p class="ig-added" role="status"><span class="ig-dot ig-dot-solid" aria-hidden="true"></span>${cap('added to the project as a net-new mode.')}${editor ? '' : ' It is on the Root design page of the task editor.'}</p>${editor ? html`<button type="button" data-ig="open-editor" data-key="open-${idea.id}" aria-describedby="ig-title-${idea.id}">${LBL.openEditor}</button>` : ''}`
-      : html`<button type="button" data-ig="add" data-idea="${idea.id}" data-key="add-${idea.id}" aria-describedby="ig-title-${idea.id}">${LBL.add}</button>`}
+      ? html`<p class="ig-added" role="status"><span class="ig-dot ig-dot-solid" aria-hidden="true"></span>${cap(trap ? 'added to the project as a trap.' : 'added to the project as a net-new mode.')}${editor ? '' : ' It is on the Root design page of the task editor.'}</p>${editor ? html`<button type="button" data-ig="open-editor" data-key="open-${idea.id}" aria-describedby="ig-title-${idea.id}">${LBL.openEditor}</button>` : ''}`
+      : html`<button type="button" data-ig="add" data-idea="${idea.id}" data-key="add-${idea.id}" aria-describedby="ig-title-${idea.id}">${trap ? LBL.addTrap : LBL.add}</button>`}
       <button type="button" data-ig="copy" data-idea="${idea.id}" data-key="copy-${idea.id}" aria-describedby="ig-title-${idea.id}">${LBL.copy}</button></div>`;
   }
-  function cardHtml(idea) {
+  function cardHtml(idea, trap) {
     return html`<li><article class="ig-card" id="ig-card-${idea.id}" tabindex="-1" aria-labelledby="ig-title-${idea.id}" data-ig-idea="${idea.id}">
       <header class="ig-card-head"><p class="ig-tags"><span class="ig-status ig-status-${idea.status}"><span class="ig-dot ${STATUS_DOT[idea.status] || 'ig-dot-hollow'}" aria-hidden="true"></span>${idea.statusWords}</span>${idea.lead ? html`<span class="ig-lead">${LBL.leadTag}</span>` : ''}</p>
         <h3 class="ig-card-title" id="ig-title-${idea.id}">${idea.title}</h3><p class="ig-summary">${idea.summary}</p></header>
-      ${overlapHtml(idea)}
+      ${overlapHtml(idea, trap)}
       <div class="ig-sec"><h4 class="ig-h4">${LBL.why}</h4><p>${idea.whyItHolds}</p></div>
       <details class="ig-sec ig-build" data-key="build-${idea.id}"><summary class="ig-h4">${LBL.build}</summary><ol class="ig-moves">${idea.buildMoves.map(m => html`<li>${m}</li>`)}</ol></details>
       ${attachHtml(idea)}${precedentsHtml(idea)}
-      <p class="ig-honest">${idea.honesty || TEXT.honesty}</p>${actionsHtml(idea)}</article></li>`;
+      <p class="ig-honest">${idea.honesty || TEXT.honesty}</p>${actionsHtml(idea, trap)}</article></li>`;
   }
   function cardsHtml() {
     if (!S.result) return '';
-    const list = visibleIdeas(), shown = list.slice(0, S.shown), left = list.length - shown.length;
+    const list = visibleIdeas(), shown = list.slice(0, S.shown), left = list.length - shown.length, trap = isTrap();
     if (!S.result.ideas.length) return html`<p class="ig-empty">No ideas were produced from these inputs.</p>`;
     return html`<p class="ig-count" id="ig-count">${countText(list)}</p>
-      ${list.length ? html`<ol class="ig-list" role="list" aria-label="Ideas">${shown.map(cardHtml)}</ol>` : html`<div class="ig-empty"><p>No ideas match these filters. Clear the search or turn off ${LBL.lead}.</p><button type="button" data-ig="clear-filters">${LBL.clear}</button></div>`}
+      ${list.length ? html`<ol class="ig-list" role="list" aria-label="Ideas">${shown.map(idea => cardHtml(idea, trap))}</ol>` : html`<div class="ig-empty"><p>No ideas match these filters. Clear the search or turn off ${LBL.lead}.</p><button type="button" data-ig="clear-filters">${LBL.clear}</button></div>`}
       ${left > 0 ? html`<div class="ig-more"><button type="button" id="ig-more" data-ig="more">${moreLabel(Math.min(PAGE, left))}</button><span class="ig-meta">${plural(left, 'idea')} not shown yet.</span></div>` : ''}`;
   }
   function dialogHtml() {
     const d = S.dialog;
     if (!d) return '';
-    const idea = S.result && S.result.ideas.find(i => i.id === d.ideaId), modes = modeInfo();
+    const idea = S.result && S.result.ideas.find(i => i.id === d.ideaId), modes = modeInfo(), trap = modes ? modes.trap : isTrap();
     if (!idea) return '';
-    const overlap = idea.status === 'overlap' || idea.status === 'covered';
+    const overlap = idea.status === 'overlap' || idea.status === 'covered', gates = modes && modes.addressed > 0;
     return html`<div class="ig-backdrop" data-ig="backdrop"><div class="ig-dialog" role="dialog" aria-modal="true" aria-labelledby="ig-dialog-h" aria-describedby="ig-dialog-d" tabindex="-1" data-ig-dialog>
-      <h2 id="ig-dialog-h" class="ig-dialog-title">Add this idea as a net-new mode?</h2>
+      <h2 id="ig-dialog-h" class="ig-dialog-title">${trap ? 'Add this idea as a trap?' : 'Add this idea as a net-new mode?'}</h2>
       <div id="ig-dialog-d" class="ig-dialog-body"><p class="ig-dialog-idea">${idea.title}</p>
-        <p>A derivative task locks five failure modes: three historical and two net-new.</p>
-        ${modes ? html`<p>This project has ${plural(modes.roots, 'mode')}, ${modes.netNew} of them net-new, so ${slotsText(modes.open)}.${modes.open <= 0 ? ' ' + cap('adding this idea goes past the net-new slots, and the task editor will flag the set for review.') : ''}</p>` : html`<p>The open project could not be read, so the open net-new slots are not known.</p>`}
-        ${overlap ? html`<p>This idea overlaps a current mode, so adding it may count one failure twice${idea.overlapWith.length ? ': ' + idea.overlapWith.slice(0, 3).map(o => o.title).join('; ') : ''}.</p>` : ''}
-        <p>It is added as a pending hypothesis. You edit and review it in the task editor.${modes && modes.addressed > 0 ? ' ' + LINE.gatesReset : ''}</p></div>
-      <div class="ig-dialog-actions"><button type="button" data-ig="cancel" id="ig-dialog-cancel">${LBL.cancel}</button><button type="button" data-ig="confirm-add" id="ig-dialog-confirm">${LBL.add}</button></div></div></div>`;
+        ${trap ? html`<p>${LINE.trapWritten}</p><p>${LINE.trapYours}</p>` : html`<p>A derivative task locks five failure modes: three historical and two net-new.</p>
+        ${modes ? html`<p>This project has ${plural(modes.roots, 'mode')}, ${modes.netNew} of them net-new, so ${slotsText(modes.open)}.${modes.open <= 0 ? ' ' + cap('adding this idea goes past the net-new slots, and the task editor will flag the set for review.') : ''}</p>` : html`<p>The open project could not be read, so the open net-new slots are not known.</p>`}`}
+        ${overlap ? html`<p>This idea overlaps ${trap ? 'a trap already in the project' : 'a current mode'}, so adding it may count one failure twice${idea.overlapWith.length ? ': ' + idea.overlapWith.slice(0, 3).map(o => o.title).join('; ') : ''}.</p>` : ''}
+        ${trap ? html`<p>You edit and review it in the task editor.${gates ? ' ' + LINE.gatesResetTrap : ''}</p>` : html`<p>It is added as a pending hypothesis. You edit and review it in the task editor.${gates ? ' ' + LINE.gatesReset : ''}</p>`}</div>
+      <div class="ig-dialog-actions"><button type="button" data-ig="cancel" id="ig-dialog-cancel">${LBL.cancel}</button><button type="button" data-ig="confirm-add" id="ig-dialog-confirm">${trap ? LBL.addTrap : LBL.add}</button></div></div></div>`;
   }
 
   function modalHost() {
@@ -450,14 +462,14 @@
     if (!editor || typeof editor.addCandidate !== 'function') return notify('The task editor is not loaded, so the idea was not added.', true);
     try {
       const pkg = S.result && S.result.gen.mode === 'existing' ? currentPackage() : null;
-      const project = editor.getProject();
+      const project = editor.getProject(), as = isTrap(project) ? 'a trap' : 'a net-new mode';
       const authoringProject = M.toAuthoringProject(idea, {pkg, project});
       const rootId = editor.addCandidate(pkg, {id: idea.id, title: idea.title, authoringProject});
       S.added[idea.id] = {rootId};
       const canOpen = W.FinanceDashboard && typeof W.FinanceDashboard.openEditor === 'function';
-      notify(cap('added "') + idea.title + '" as a net-new mode. ' + (canOpen ? 'Open the task editor to review it.' : 'It is on the Root design page of the task editor.'));
+      notify(cap('added "') + idea.title + '" as ' + as + '. ' + (canOpen ? 'Open the task editor to review it.' : 'It is on the Root design page of the task editor.'));
       paintCards(); refreshStale();
-      say(cap('added as a net-new mode.'));
+      say(cap('added as ' + as + '.'));
       focusSelector(canOpen ? '[data-key="open-' + idea.id + '"]' : '#ig-card-' + idea.id);
     } catch (error) {
       notify('The idea could not be added: ' + message(error), true);

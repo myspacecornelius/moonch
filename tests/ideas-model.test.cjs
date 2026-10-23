@@ -63,7 +63,9 @@ const RUNLOG = () => txt('Run_Log.txt', ['subsidiary perimeter and consolidated 
 const AUDITED = () => txt('Audit_Review.txt', ['external link to a named range on a hidden sheet'], {role: 'audit'});
 const PROMPT = () => txt('Task_Request.txt', ['Please update the bridge and recommend whether the payment can proceed.'], {role: 'prompt'});
 const PKG = () => pkg([SUMMARY(), FACTS(), MODEL(), NOTES(), RUNLOG(), AUDITED(), PROMPT()]);
-const PROJECT = (roots = []) => ({...C.blank(), title: 'Atlas project', roots: roots.map((r, i) => ({...C.root(), id: 'root-' + i, causalGroup: 'cg-' + i, ...r}))});
+/* C.blank() is a trap ledger now. These fixtures keep the failure-mode set, whose net-new slots the earlier tests count; TRAP_PROJECT is the trap ledger. */
+const PROJECT = (roots = [], framework = 'failure-mode-set') => ({...C.blank(), framework, title: 'Atlas project', roots: roots.map((r, i) => ({...C.root(), id: 'root-' + i, causalGroup: 'cg-' + i, ...r}))});
+const TRAP_PROJECT = roots => PROJECT(roots, 'trap-ledger');
 
 /* Every string a model call emits, except the user's own data shown as a quote (a recorded score cell, package quotes, file names, locators, current mode titles). The words of a precedent are checked like any other generated text. */
 const USER_PATHS = /(?:^|\.)(?:precedents\.\d+\.scoreText|lowestScoreText|applicability\.\d+\.(?:documentName|locator|quote)|overlapWith\.\d+\.title|overlapWith\.\d+\.modeId|overlapWith\.\d+\.rootId)$/;
@@ -851,6 +853,37 @@ test('toAuthoringProject: anchors that do not verify, evaluator evidence and a m
   assert.throws(() => M.toAuthoringProject({}, {}), /needs an id and a title/);
   assert.throws(() => M.toAuthoringProject(null), /needs an id and a title/);
 });
+test('a trap ledger: coverage counts no net-new slot and buildIdeas prints no slot note; what the roots cover reads the same', () => {
+  const roots = [{title: 'Cut-off', lane: 'net-new', causalGroup: 'cg-ia-03'}, {title: 'Rounded', lane: 'net-new', governingRule: 'The rounded inputs are used as shown.', mechanism: 'rounding_calibration'}, {title: 'Quillon work', lane: 'net-new'}];
+  const trap = M.coverage(TRAP_PROJECT(roots), ARCHETYPES), set = M.coverage(PROJECT(roots), ARCHETYPES);
+  assert.equal(trap.openNetNewSlots, null, 'a trap ledger has no slot limit');
+  assert.equal(set.openNetNewSlots, -1);
+  assert.deepEqual({...trap, openNetNewSlots: -1}, set, 'everything else is read the same way');
+  const out = build({project: TRAP_PROJECT(roots)}), legacy = build({project: PROJECT(roots)});
+  assert.ok(!out.notes.some(n => /slot/i.test(n)), 'no slot note: ' + out.notes.join(' | '));
+  assert.ok(legacy.notes.includes('Open net-new slots in the current project: -1.'));
+  assert.deepEqual(out.ideas.map(i => [i.archetypeId, i.status]), legacy.ideas.map(i => [i.archetypeId, i.status]));
+  assert.equal(M.coverage(TRAP_PROJECT([]), ARCHETYPES).openNetNewSlots, null);
+  assertClean(out, 'trap ledger');
+});
+test('toAuthoringProject into a trap ledger: no duplicate-check note; the decoy, the superseded version and the margin stay the author\'s', () => {
+  const idea = anchoredIdea('ia-04'), roots = [{title: 'Reconciling item missing from the bridge schedule', mechanism: 'cross_document_bridge'}];
+  const ap = M.toAuthoringProject(idea, {pkg: PKG(), project: TRAP_PROJECT(roots)}), legacy = M.toAuthoringProject(idea, {pkg: PKG(), project: PROJECT(roots)});
+  assert.deepEqual(C.parseProject(ap), ap, 'parseProject accepts it and changes nothing');
+  assert.deepEqual([ap.framework, legacy.framework], ['trap-ledger', 'failure-mode-set'], 'the project carries the framework it is made for');
+  const r = ap.roots[0];
+  assert.equal(r.duplicateCheck, '');
+  assert.equal(legacy.roots[0].duplicateCheck, 'To confirm: nearest current modes: Reconciling item missing from the bridge schedule.');
+  assert.deepEqual([r.decoy, r.superseded, r.margin], ['', '', '']);
+  assert.equal(r.lane, 'net-new', 'the lane is kept; a trap ledger ignores it');
+  const strip = p => ({...p, framework: '', roots: p.roots.map(x => ({...x, duplicateCheck: ''}))});
+  assert.deepEqual(strip(ap), strip(legacy), 'nothing else differs');
+  const named = M.toAuthoringProject({...idea, overlapWith: [{rootId: 'root-0', modeId: 'MODE-7', title: 'Bridge work', why: 'x'}]}, {pkg: PKG(), project: TRAP_PROJECT([])});
+  assert.equal(named.roots[0].duplicateCheck, '', 'not even when the idea names an overlap');
+  const codes = new Set(C.audit(ap).map(x => x.code));
+  assert.ok(codes.has('trap-decoy') && !codes.has('duplicate-check'), 'the audit asks the author for the decoy');
+  assert.equal(M.toAuthoringProject(idea, {pkg: PKG()}).framework, 'failure-mode-set', 'without a project the earlier reading holds');
+});
 test('toAuthoringProject writes no recorded score and no precedent text anywhere', () => {
   const rows = [['Zephyr line', 'quillon vellum mortise tale', 'quillon vellum built with zephyr', 'quillon fell text', '0.4137'], ['Zephyr line', 'amendment supersede effective date zephyr', 'zephyr built', 'zephyr fell', '0.0731']];
   const library = libFrom(rows);
@@ -863,20 +896,23 @@ test('toAuthoringProject writes no recorded score and no precedent text anywhere
 });
 test('the real FinanceAuthoring.addCandidate accepts an idea unchanged and keeps every field the idea carries', () => {
   const win = loadApp(), idea = anchoredIdea('ia-04'), project = win.FinanceAuthoring.getProject();
+  assert.equal(project.framework, 'trap-ledger', 'a new editor holds a trap ledger');
   const ap = M.toAuthoringProject(idea, {pkg: PKG(), project});
   const id = win.FinanceAuthoring.addCandidate(PKG(), {id: idea.id, title: idea.title, authoringProject: ap});
   const merged = win.FinanceAuthoring.getProject();
   assert.equal(merged.roots.length, 2);
   const root = merged.roots.find(r => r.id === id), src = ap.roots[0];
   assert.notEqual(id, idea.id, 'the editor assigns its own id');
-  for (const k of ['title', 'lane', 'mechanism', 'causalGroup', 'governingRule', 'facts', 'triggeringCondition', 'correctInterpretation', 'wrongInterpretation', 'detectionMethod', 'headlineWrong', 'duplicateCheck', 'expectedBehavior', 'classification', 'ambiguity', 'assumptions', 'resolution', 'acceptableVariations', 'toleranceRationale', 'headlineCorrect', 'modeId', 'libraryRecord', 'reviewStatus']) assert.equal(root[k], src[k], k + ' survives the add path');
+  for (const k of ['title', 'lane', 'mechanism', 'causalGroup', 'governingRule', 'facts', 'triggeringCondition', 'correctInterpretation', 'wrongInterpretation', 'detectionMethod', 'headlineWrong', 'duplicateCheck', 'expectedBehavior', 'classification', 'ambiguity', 'assumptions', 'resolution', 'acceptableVariations', 'toleranceRationale', 'headlineCorrect', 'modeId', 'libraryRecord', 'reviewStatus', 'decoy', 'superseded', 'margin']) assert.equal(root[k], src[k], k + ' survives the add path');
+  assert.deepEqual([root.duplicateCheck, root.decoy, root.superseded, root.margin], ['', '', '', ''], 'no duplicate-check note in a trap ledger, and the decoy, the superseded version and the margin are the author\'s');
   assert.equal(root.correctiveAction, src.correctiveAction, 'the corrective action is kept, not replaced by the fallback');
   assert.equal(root.sourceIds.length, 3);
   assert.deepEqual(root.sourceIds.map(sid => merged.sources.find(s => s.id === sid).cell), ['Row 2', 'Row 3', 'Bridge!A3']);
   assert.deepEqual(merged.sources.map(s => s.version), ap.sources.map(s => s.version));
   assert.ok(merged.sources.every(s => s.suppliedToSolver && s.excerpt && s.authority));
   const mine = C.audit(merged).filter(x => x.rootId === id), codes = new Set(mine.map(x => x.code));
-  assert.deepEqual([...codes].sort(), ['anchor-incomplete', 'human-review', 'missing-acceptableVariations', 'missing-classification', 'missing-expectedBehavior', 'missing-headlineCorrect', 'missing-toleranceRationale', 'outputs-empty', 'source-unreviewed'].sort(), 'only what the author must still supply');
+  // The project starts as a trap ledger (C.blank()), so the confident decoy is the author's to name as well.
+  assert.deepEqual([...codes].sort(), ['anchor-incomplete', 'human-review', 'missing-acceptableVariations', 'missing-classification', 'missing-expectedBehavior', 'missing-headlineCorrect', 'missing-toleranceRationale', 'outputs-empty', 'source-unreviewed', 'trap-decoy'].sort(), 'only what the author must still supply');
   for (const never of ['group-empty', 'missing-governingRule', 'missing-facts', 'missing-correctInterpretation', 'missing-wrongInterpretation', 'missing-triggeringCondition', 'missing-detectionMethod', 'missing-correctiveAction', 'missing-headlineWrong', 'anchors-empty', 'source-unavailable', 'ambiguity', 'assumptions', 'scaffold-unedited', 'duplicate-check', 'same-root', 'mode-id-empty', 'mode-id-unlisted']) assert.ok(!codes.has(never), never);
   assert.ok(!mine.some(x => x.code.startsWith('manual-')));
   const p2 = JSON.parse(JSON.stringify(merged)); p2.business = {objective: 'funding headroom for the planned payment', deliverable: 'an updated liquidity schedule', decision: 'whether the payment proceeds', prompt: ''};
@@ -889,10 +925,24 @@ test('the real FinanceAuthoring.addCandidate accepts an idea unchanged and keeps
   const again = build({project: merged});
   assert.equal(again.ideas.find(i => i.archetypeId === 'ia-04').status, 'covered');
   assert.equal(again.ideas.find(i => i.archetypeId === 'ia-04').overlapWith[0].why, 'Same causal group as this idea.');
-  assert.ok(again.notes.includes('Open net-new slots in the current project: 0.'), 'the blank first root and the added root are both net-new');
+  assert.ok(!again.notes.some(n => /slot/i.test(n)), 'a trap ledger has no net-new slots to count');
   const second = win.FinanceAuthoring.addCandidate(PKG(), {id: idea.id, title: idea.title, authoringProject: ap});
   assert.notEqual(second, id);
   assert.equal(win.FinanceAuthoring.getProject().sources.length, 3, 'identical anchors merge instead of repeating');
+});
+test('into a failure-mode set the real addCandidate gets the duplicate-check note as before, and the slots are counted', () => {
+  const win = loadApp(), idea = anchoredIdea('ia-04');
+  win.FinanceAuthoring.loadProject({...C.blank(), framework: 'failure-mode-set'});
+  const project = win.FinanceAuthoring.getProject();
+  assert.equal(project.framework, 'failure-mode-set');
+  const ap = M.toAuthoringProject(idea, {pkg: PKG(), project});
+  assert.equal(ap.framework, 'failure-mode-set');
+  const id = win.FinanceAuthoring.addCandidate(PKG(), {id: idea.id, title: idea.title, authoringProject: ap});
+  const merged = win.FinanceAuthoring.getProject(), root = merged.roots.find(r => r.id === id);
+  assert.equal(root.duplicateCheck, 'To confirm: nearest current modes: none found by keyword comparison.');
+  const codes = new Set(C.audit(merged).filter(x => x.rootId === id).map(x => x.code));
+  assert.deepEqual([...codes].sort(), ['anchor-incomplete', 'human-review', 'missing-acceptableVariations', 'missing-classification', 'missing-expectedBehavior', 'missing-headlineCorrect', 'missing-toleranceRationale', 'outputs-empty', 'source-unreviewed'].sort(), 'only what the author must still supply, and no decoy');
+  assert.ok(build({project: merged}).notes.includes('Open net-new slots in the current project: 0.'), 'the blank first root and the added root are both net-new');
 });
 test('a new-task idea (no package) goes through the same path and leaves only the author items', () => {
   const win = loadApp(), idea = build({mode: 'new'}).ideas[0];
@@ -915,7 +965,7 @@ test('leak sweep: no percent sign and no forbidden word in anything the model ge
   const runs = [
     M.buildIdeas({mode: 'existing', task: {workflow: 'Atlas 100%', description: 'a 45% case'}, pkg: tainted, project, library, archetypes: ARCHETYPES, now: 'x', limit: 100}),
     M.buildIdeas({mode: 'new', task: {workflow: 'Atlas', description: 'The amendment has an effective date and supersedes the schedule. Bridge to the opening balance.'}, pkg: null, project, library, archetypes: ARCHETYPES, now: 'x', limit: 100}),
-    build(), build({pkg: null}), build({mode: 'new'})
+    build(), build({pkg: null}), build({mode: 'new'}), build({project: TRAP_PROJECT([{title: 'Amendment supersedes the pricing schedule'}])})
   ];
   for (const out of runs) {
     assertClean(out, 'buildIdeas');
