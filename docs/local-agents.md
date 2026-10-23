@@ -434,7 +434,7 @@ The Pipeline page (`pipeline.js`, `pipeline.css`) and the orchestrator (`backend
    - **Calibration.** The golden answer is graded against its guideline and must score at least 0.90.
    - **Fairness.** A tool-less review must list no guideline item that a solver could not know from the prompt and the files. A missing or unreadable answer counts as a failure.
 
-   A failed check gets one repair turn (cap USD 1.00), then rejects the attempt (`outcome: 'rejected'`, `rejection.reasons`), which uses a redesign. A public reason never names a file. The exact detail reaches only the repair prompt and `attempts/<n>/feedback.md`.
+   A failed check gets one repair turn (cap USD 1.00), then rejects the attempt (`outcome: 'rejected'`, `rejection.reasons`), which uses a redesign. A public reason never names a file, a trap or a fingerprint, because a name the designer chose can carry a figure. The exact detail reaches only the repair prompt, `attempts/<n>/feedback.md` and, on a safety stop, the private `error.log`.
 6. **Screen and test.** Rounds are made through the agent service with `gafVisible: true`. The pilots' packet is the only copy under `<tmpRoot>/finance-studio-pipelines/<id>/work/filesystem`, and it is checked by sha256 and name before every round.
    - The grader reads the final message plus the text of the run's output files (xlsx and docx extracted), up to 59,000 characters. Its effort is at least medium.
    - A score in [0.40, 0.50] is graded a second time and the two scores are averaged.
@@ -448,6 +448,7 @@ The Pipeline page (`pipeline.js`, `pipeline.css`) and the orchestrator (`backend
    - each trap's title, files, mechanism, decoy and values;
    - the edited files' names, reasons, diffs, hashes and sizes, and the hashes and sizes of every imported and packet file;
    - the calibration, the fairness review, the guideline diff, `rubricChanges` and every grader reason.
+   - every rejection reason, and the stage message, summary and error when they quote one (`quotesRejection: true`).
 
    `POST /api/pipeline/:id/export` answers 409 while a round runs. Otherwise it returns `<label>_pipeline_PRIVATE.zip` with the exported design and a README that names its attempt.
 10. **Cleanup.** Every end removes `<tmpRoot>/finance-studio-pipelines/<id>/`. At startup, leftover folders of known pipelines are removed and unknown folders are left alone. Stop and the import timeout wait up to 10 s for the link loader to close its browser before the stage ends.
