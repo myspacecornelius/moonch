@@ -403,3 +403,72 @@ Follows section 18. The public tree still names no platform, contractor or proje
 5. **Ship bar (rounds.cjs, constants.cjs).** The freeze body and record take an optional `shipBar {wrong, of}` (whole numbers, 1 <= wrong <= of <= `SHIP_BAR.maxRuns` = 20; anything else is a 400). The content hash is `hashFreeze({gold, fingerprints, shipBar})` when a bar is set and `hashFreeze({gold, fingerprints})` otherwise, so every earlier freeze keeps its hash. A post-hoc version keeps the original bar and a refreeze that asks for another bar is refused (409). *Start next round* carries it in `carried.content`. The approval summary adds `Ship bar, frozen with the gold and covered by the content sha256: at least W wrong of N completed runs` only when a bar is set. `carryChanges` gains `shipBar` (true, false, or null before the freeze) only when either round has a bar, and `freezeContent` then compares gold and fingerprints alone. Redaction removes the bar with the gold while a round runs.
 6. **Pilot gate (agents.js).** Card 7, `#ag-pilot-gate`, after Runs. `FinanceAgents.pilotGate(runs, shipBar)` is the pure computation (counts, correct in a row by `endedAt`, ship bar met when total >= N and wrong × N >= W × total, the range, and P(C <= 5) for C ~ beta-binomial(10, correct + 1, wrong + 1)); the instrument constants (correct 0.82 to 0.90, point 0.86; wrong 0.13 to 0.32, point 0.25) are documented in the code as measured on the writer's own earlier tasks. The card pools the listed rounds whose packet hash, prompt hash, original-freeze content hash, gaf setting (`packet.gafVisible`, which the packet hash does not cover), model and effort match the selected round (the round view decides; the pilot count, spending cap and concurrency do not matter), shows only *Waiting for the round to end.* while any round runs, writes decimals only, and never says pass rate, success rate or failure rate. The Runs card and its directional statement are unchanged.
 7. **Simulated grader (rounds.cjs, agents.js, constants.cjs).** The prompt says the JSON may also carry `score` (0 to 1) and `items` (`[{item, met, reason}]`). `parseGraderOutput` returns `score` (a number from 0 to 1, with 1e-9 of slack at either end, else null: 85 or 9.5 is no score and is never clamped to a perfect one) and `items` (objects only, at most 20, item text cut to 300 characters and reason to 600, `met` true, false or null). `graderSim` returns them at the top level for a single answer. `MODELS` adds `claude-opus-4-8`; `GRADER_MODEL` is `claude-opus-4-8` and `GET /api/status` reports it as `graderModel`; the pilot default stays `claude-opus-5-5`. The dialog opens before any run on *Reference answer (paste)*, labels that result *calibration*, and warns below 0.95, compared on the rounded score it shows. It says the guidance reads the reference as meeting it only when the verdict is `meets-guidance` and that score is at or above 0.95; a high score with another verdict gets a notice that the two disagree.
+
+## 20. Pipeline: from a task link to a tested design
+
+The Pipeline page (`pipeline.js`, `pipeline.css`) and the orchestrator (`backend/pipeline/`) chain the steps of sections 3 to 9 into one approved run. The run makes no request that sections 3 to 9 do not already allow, and it uses the same runtime, pilot folders, path audit and simulated grader. The README's *Pipeline* section describes it for the writer. This section is the contract.
+
+1. **Approval.** One `POST /api/pipeline/start` approves the whole run. The body is `{url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, designCapUsd?, graderModel?, label?, acceptMissing?}`, and all four acknowledgements are required (shell access, network use, isolation by audit, model reads the task). The answer is `{id}`, `pln-` followed by 12 hex characters.
+   - Before it opens a link or makes a folder, start() refuses with 409 when Claude Code is not found, and with 400 when `capUsd` is below the worst case of one full attempt: the ceiling to the cent of `headroom × (fixedUsd + pilots × (pilotCapUsd + perPilotUsd))`. `GET /api/pipeline` reports the parts as `config.minCap`.
+   - `capUsd` defaults to 50 and may be up to 200. Only one pipeline runs at a time.
+2. **Stages.** `import`, `classify`, `design`, `screen`, `grade-screen`, (`redesign`), `test`, `grade-test`, then `done`, `failed`, `stopped` or `budget`. Every stage is stored in `private/pipelines/<id>/state.json`. After a companion restart, an attempt that was running is marked `failed` with a note.
+3. **Import.** From a link through the link loader (section 21), or from a folder outside the project. Both are copied to `private/pipelines/<id>/original/` with a streamed hash. Files the loader could not download appear in `import.skipped`.
+4. **Classify.** One tool-less run returns the prompt, the guideline, the golden answer, the world files, the task files and the files to withhold. The rules after it fail closed:
+   - A file whose name, group or label names a golden, reference, model or gold answer, a solution, an answer key, an answer or response file, a rubric, grading or a grader is withheld whatever the model said. A guideline is withheld under the narrower rule of section 19.3.
+   - A file is also withheld when its text holds an 80-character window (step 30) of the original guideline or golden answer. Plain text and the text of docx, xlsx and pptx are scanned. Files that cannot be read are listed in `classification.unscanned`.
+   - The run stops before the designer in three cases: no golden answer was identified but a file looks like one; a world or task file would be withheld (unless `acceptMissing`); or the packet would pass the agent limits (150 files, 100 MB, depth 4).
+5. **Design.** The designer is an agent with the pilots' tools, working in `private/pipelines/<id>/designer/`. It reads `task/`, `prompt.txt`, `guideline.md`, `golden-answer.md` and `ideas.txt`, and writes `out/`:
+   - new files go under `out/new/`, which is preferred;
+   - edited copies of world or task files go under `out/edited/`, each listed with a reason;
+   - it also writes `prompt.txt`, `guideline.md`, `golden-answer.md` and `traps.json`.
+   `out/`, `out/new` and `out/edited` must be real folders with regular files only. Originals are never changed. The edited copy replaces the original only in the pilots' packet.
+   `readDesign` refuses:
+   - an edit that shrinks a file by more than a fifth;
+   - a guideline more than 1.5 times the original's length without `rubricChanges`;
+   - a gold figure missing from the guideline or the golden answer;
+   - a figure or decision phrase of the golden answer in the prompt or in a new file's name (when it is not in the original prompt or packet);
+   - a trap that lists a file the pilots do not get;
+   - a new or edited file that holds a guideline or golden-answer passage.
+
+   Two gates follow:
+   - **Calibration.** The golden answer is graded against its guideline and must score at least 0.90.
+   - **Fairness.** A tool-less review must list no guideline item that a solver could not know from the prompt and the files. A missing or unreadable answer counts as a failure.
+
+   A failed check gets one repair turn (cap USD 1.00), then rejects the attempt (`outcome: 'rejected'`, `rejection.reasons`), which uses a redesign. A public reason never names a file. The exact detail reaches only the repair prompt and `attempts/<n>/feedback.md`.
+6. **Screen and test.** Rounds are made through the agent service with `gafVisible: true`. The pilots' packet is the only copy under `<tmpRoot>/finance-studio-pipelines/<id>/work/filesystem`, and it is checked by sha256 and name before every round.
+   - The grader reads the final message plus the text of the run's output files (xlsx and docx extracted), up to 59,000 characters. Its effort is at least medium.
+   - A score in [0.40, 0.50] is graded a second time and the two scores are averaged.
+   - A pilot without a usable score gets a replacement round, unless the result is already decided (`replacementSkipped`).
+   - The screen passes when both pilots score below 0.45. The test passes when at least 4 of 5 do.
+   - A failed screen or test, or a rejected design, goes to `redesign`, at most 3 times.
+7. **Budget.** Before each step, the run reserves the step's worst case times 1.15 and ends in `budget` if spent plus reserved would pass `capUsd`. The fixed caps are: classifier 0.50, designer 5.00, repair 1.00, fairness review 0.25, each grader call 0.50. A pilot round reserves `count × (pilotCapUsd + 2 × 0.50)`.
+8. **Locks.** While a pipeline runs, `POST /api/agents/rounds/:id/launch`, `/api/agents/grader-sim` and `/api/agents/author-review` answer 409 "A pipeline is running". A grader call refused for its input leaves that pilot without a score; if every call of a step is refused, the step fails.
+9. **Redaction.** While any round runs, every pipeline answer passes through `redactPipelineData`. The following become `{withheld: true}` and the answer carries `redacted: true`:
+   - the prompt, the guideline, the golden answer, the gold and the fingerprints;
+   - each trap's title, files, mechanism, decoy and values;
+   - the edited files' names, reasons, diffs, hashes and sizes, and the hashes and sizes of every imported and packet file;
+   - the calibration, the fairness review, the guideline diff, `rubricChanges` and every grader reason.
+
+   `POST /api/pipeline/:id/export` answers 409 while a round runs. Otherwise it returns `<label>_pipeline_PRIVATE.zip` with the exported design and a README that names its attempt.
+10. **Cleanup.** Every end removes `<tmpRoot>/finance-studio-pipelines/<id>/`. At startup, leftover folders of known pipelines are removed and unknown folders are left alone. Stop and the import timeout wait up to 10 s for the link loader to close its browser before the stage ends.
+
+Files: `backend/pipeline/` (`service.cjs` the stage machine, `intake.cjs`, `classify.cjs`, `design.cjs`, `gates.cjs`, `safety.cjs`, `budget.cjs`, `models.cjs`, `extract.cjs`, `diff.cjs`, `redact.cjs`, `export.cjs`, `constants.cjs`, `util.cjs`). Tests: `tests/pipeline.test.cjs`, `tests/pipeline-page.test.cjs`, `tests/pipeline-browser.cjs`. All of them use the stub; none calls a model.
+
+## 21. Link loader
+
+`backend/links/` is part of the companion and calls no model. `createLinkLoader({root, chromePath, spawnFn, clock, headless, signIn, timeouts, limits})` returns `start(url) -> id`, `get(id)`, `continue(id)`, `cancel(id)`, `waitFor(id)` and `shutdown()`, and throws `LinkError` with `.status` and `.code`.
+
+1. **Chrome.** It uses a dedicated profile in `private/link-profile/`, with mode 0700, and the first Chrome or Chromium found from `FINANCE_STUDIO_CHROME`, `CHROME_BIN`, the `Applications` folders (macOS) and the usual Linux binaries. The profile is seeded so that downloads are refused before the first navigation and sign-in to the browser itself is off.
+   - Chrome is driven over `--remote-debugging-pipe`, never a port, with an environment allow list, in an isolated world and without `Runtime.enable`.
+   - The link and its query reach Chrome only through the pipe. They are never on a command line, in a log, in the state or in `page.json`.
+2. **Sign-in** (`signIn: 'window'`, the default). When the page asks for a sign-in, the loader closes its Chrome and opens a plain Chrome on the same profile with only the site's origin. The owner signs in there and presses *Continue*, or closes that window. The loader stops the window (SIGINT, then SIGTERM, then the process group, because only SIGINT makes Chrome write its session cookies), relaunches on the pipe and opens the full link. If the page still asks, it repeats once, then fails with the folder-import hint. `signIn: 'piped'` keeps one controlled window instead.
+3. **All files.** The loader finds the platform's show-all-files switch by label, role or a learned key, and turns it on. The label or key is stored per host in `private/link-mappings.json`. If no switch is found, the state is `needs-person`, with the message "Turn on the option that shows all files in the Chrome window, then press Continue."
+4. **Expansion.** Before the final snapshot, and again after the switch, it opens details, aria-expanded expanders and every tab, presses *Load more* or *Show more* on every tab, scrolls long lists, and reads same-origin frames. Snapshots are unioned and re-taken until two in a row agree. A page that kept changing is reported as `settled: false`.
+5. **Downloads.** Files are saved to `private/links/<id>/files/` with mode 0600, and the page text to `page.json`.
+   - Each file is identified by its row label and group, so identical *Download* buttons stay distinct.
+   - A file that cannot be downloaded goes to `skipped: [{label, group, reason}]`, and the state becomes `needs-person`. The owner either downloads it by hand and imports a folder, or presses *Continue* to go on without it.
+   - Five failures in a row stop early, and the files not tried are listed too.
+   - Controls that look like actions (submit, delete, publish) are never pressed. When such a control is passed over, it is listed in `skipped`.
+6. **States.** `starting`, `loading`, `needs-sign-in`, `needs-person`, `downloading`, then `done`, `failed` or `cancelled`. A cancel shows "Cancelling..." until Chrome is closed and the profile's history scrubbed. Closing the task window ends the load with "You closed the Chrome window before the load finished. Start again." When the profile is already in use, the message is "Quit the loader's Chrome (Cmd+Q) and try again."
+
+Not verified: real macOS Chrome behaviour (the Dock, Cmd+Q, finding the `.app` bundle, the synced-folder warning) and a human signing in to the real platform. The browser suite drives a real headless Chromium against local fixture pages, including a sign-in with a two-step check, and plays the person with a second headless Chromium.
