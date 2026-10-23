@@ -104,6 +104,11 @@ async function intakeFromLoader({ state, root, original, shouldStop }) {
     if (typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256)) throw new IntakeError(`The loaded file ${oneLine(item.name, 200)} has no hash`);
     entries.push({ name: item.name, abs, bytes: stat.size, sha256: item.sha256, group: oneLine(item.group, 200), label: oneLine(item.label, 300) });
   }
+  /* Files the loader could not download (the person pressed Continue to go on without them) stay visible in the view. */
+  for (const item of Array.isArray(state.skipped) ? state.skipped.slice(0, 200) : []) {
+    if (!isObject(item)) continue;
+    skipped.push({ name: oneLine(item.label, 200) || '(no label)', why: `not downloaded: ${oneLine(item.reason, 300) || 'no reason given'}` });
+  }
   const page = readPageFile(path.join(folder, 'page.json'), true);
   const files = await copyAll(entries, original, shouldStop);
   const toggle = isObject(state.toggle) ? {

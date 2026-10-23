@@ -12,12 +12,14 @@ const { PassThrough } = require('node:stream');
 const { Cdp, CdpError, sleep } = require('../backend/links/cdp.cjs');
 const { classifyPage } = require('../backend/links/auth-wall.cjs');
 const { sanitizeFileName, uniqueName, insideDir, collisionKey } = require('../backend/links/names.cjs');
-const { chromeArgs, browserEnv, findChromeBinary, usableBinary, prepareProfile, scrubProfile } = require('../backend/links/chrome.cjs');
+const chrome = require('../backend/links/chrome.cjs');
+const { chromeArgs, browserEnv, findChromeBinary, usableBinary, prepareProfile, scrubProfile } = chrome;
 const { gateTab, attachmentHeader } = require('../backend/links/gate.cjs');
-const { fileCandidates, findAllFilesToggle, TOGGLE_LABEL_RE, NEVER_TEXT_RE, NEVER_HREF_RE } = require('../backend/links/page.cjs');
+const { fileCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, NEVER_TEXT_RE, NEVER_HREF_RE } = require('../backend/links/page.cjs');
+const discover = require('../backend/links/discover.cjs');
 const { validateLink, fileUrlAllowed, hostProblem } = require('../backend/links/url.cjs');
 const store = require('../backend/links/store.cjs');
-const { Tab, safeUrl, safeText } = require('../backend/links/tab.cjs');
+const { Tab, safeUrl, safeText, cleanLabel } = require('../backend/links/tab.cjs');
 const { DownloadManager, pickName } = require('../backend/links/downloads.cjs');
 const { createLinkLoader, LinkError, changedToggle, findAllFilesToggle: exportedFinder, TOGGLE_LABEL_RE: exportedRe } = require('../backend/links/index.cjs');
 
@@ -350,10 +352,10 @@ test('fileUrlAllowed: https to a public name, the task host itself, never number
 });
 
 /* ---------------------------------------------------------------- the show-all-files switch */
-test('toggle label: the words that say "all files", and nothing else', () => {
-  for (const yes of ['Show all files', 'show ALL files', 'All files', 'Include all files', 'Include world files', 'World files', 'Show all', 'Show all attachments', 'Include all', 'All attachments', 'all downloads', 'Display world  files', 'Show all\nfiles']) assert.ok(TOGGLE_LABEL_RE.test(yes), yes);
-  for (const no of ['Advanced view', 'Dark mode', 'Notify me', 'Show files', 'Showall', 'All', 'Callfiles', 'overall filesystem usage?', 'Download', 'Show details', 'Remember me', '', 'worldfiles', 'Include archived']) assert.ok(!TOGGLE_LABEL_RE.test(no), no);
-  assert.ok(TOGGLE_LABEL_RE.test('x'.repeat(100000) + ' all files') && !TOGGLE_LABEL_RE.test('all '.repeat(20000)), 'no catastrophic backtracking');
+test('toggle label: files, attachments, documents or downloads with all, world, show or include; and nothing else', () => {
+  for (const yes of ['Show all files', 'show ALL files', 'All files', 'Include all files', 'Include world files', 'World files', 'Show attachments', 'Show all attachments', 'View all documents', 'Display world  files', 'all downloads', 'Show the files', 'Show all\nfiles']) assert.ok(TOGGLE_LABEL_RE.test(yes), yes);
+  for (const no of ['Advanced view', 'Dark mode', 'Notify me', 'Show all', 'Include all', 'Showall', 'All', 'Callfiles', 'overall filesystem usage?', 'Download', 'Show details', 'Show only added files', 'Show only task files', 'Remember me', '', 'worldfiles', 'Include archived', 'Notify me about new files']) assert.ok(!TOGGLE_LABEL_RE.test(no), no);
+  assert.ok(TOGGLE_LABEL_RE.test('x'.repeat(100000) + ' all files') && !TOGGLE_LABEL_RE.test('show all '.repeat(20000)), 'no catastrophic backtracking');
   assert.equal(exportedRe, TOGGLE_LABEL_RE);
   assert.equal(exportedFinder, findAllFilesToggle);
 });
@@ -366,7 +368,7 @@ test('findAllFilesToggle: an unchecked, enabled switch whose label matches; the 
   assert.equal(findAllFilesToggle([t('Advanced view')], null), null);
   assert.equal(findAllFilesToggle([t('Show all files')], 'Gone from the page').label, 'Show all files', 'a learned label that is no longer there falls back to the words');
   assert.equal(findAllFilesToggle([t('Advanced view', true), t('Show all files')], 'Advanced view').label, 'Show all files', 'a learned switch that is already on is not clicked again');
-  assert.equal(findAllFilesToggle([t('Include all'), t('Show all files')], null).label, 'Include all', 'first match in page order');
+  assert.equal(findAllFilesToggle([t('Include all files'), t('Show all files')], null).label, 'Include all files', 'first match in page order');
   assert.equal(findAllFilesToggle([], null), null);
   assert.equal(findAllFilesToggle(null, null), null);
   assert.equal(findAllFilesToggle([null, { label: 5 }, t('World files')], '').label, 'World files');
@@ -438,7 +440,7 @@ test('extractPage: self-contained (it is sent to the page as text); sections at 
   const { extractPage, LIMITS } = require('../backend/links/page.cjs');
   const doc = fakeDocument();
   const sandbox = { document: doc, location: { href: 'https://tasks.atlas.example/t/1', origin: 'https://tasks.atlas.example' }, performance: { now: () => 0 }, CSS: { escape: (s) => s }, URL, URLSearchParams };
-  const out = vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS })})`, sandbox);
+  const out = vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS, toggleRe: TOGGLE_LABEL_RE.source })})`, sandbox);
   const result = JSON.parse(JSON.stringify(out));
   assert.deepEqual(result.sections.map((s) => s.heading), ['Atlas task', 'Business prompt', 'Notes', 'Task files']);
   const by = Object.fromEntries(result.sections.map((s) => [s.heading, s.text]));
@@ -456,6 +458,200 @@ test('extractPage: self-contained (it is sent to the page as text); sections at 
   assert.deepEqual([result.signals.hasPasswordField, result.signals.hasOtpField, result.signals.hasCaptcha, result.linkCount, result.title, result.url], [true, false, false, 3, 'Atlas', 'https://tasks.atlas.example/t/1']);
   assert.ok(result.controlCount >= 1);
   assert.equal(typeof result.signals.bodyTextChars, 'number');
+});
+
+/* A richer fake document: sibling-labelled switch, <select>, radio in a label, tab, "Download" button in a table row, blob link, iframe, bidi text. */
+function richDocument() {
+  const doc = {};
+  const text = (nodeValue) => ({ nodeType: 3, nodeValue });
+  const el = (tagName, attrs = {}, children = [], fields = {}) => {
+    const node = {
+      nodeType: 1, tagName, attrs, childNodes: children, shadowRoot: null, parentElement: null, previousElementSibling: null, nextElementSibling: null, id: attrs.id || '', name: attrs.name || '', autocomplete: attrs.autocomplete || '', title: '', labels: undefined,
+      getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }, hasAttribute(name) { return name in this.attrs; }, getRootNode: () => doc, querySelector: () => null, querySelectorAll: () => [], cloneNode() { return this; },
+      closest(sel) { for (let n = this; n; n = n.parentElement) if (sel.split(',').some((q) => (q.startsWith('[role=') ? n.attrs.role === q.slice(6, -1) : n.tagName === q.toUpperCase()))) return n; return null; }, ...fields,
+    };
+    Object.defineProperty(node, 'textContent', { get: () => children.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join(''), configurable: true });
+    children.forEach((c, i) => { if (c.nodeType === 1) { c.parentElement = node; c.previousElementSibling = children.slice(0, i).filter((x) => x.nodeType === 1).pop() || null; c.nextElementSibling = children.slice(i + 1).find((x) => x.nodeType === 1) || null; } });
+    return node;
+  };
+  const flat = (node) => node.childNodes.filter((c) => c.nodeType === 1).flatMap((c) => [c, ...flat(c)]);
+  const option = (label, selected) => ({ textContent: label, selected, disabled: false });
+  const innerLink = el('A', { href: '/files/inner' }, [text('Inner_Report.pdf')], { href: 'https://tasks.atlas.example/files/inner' });
+  const innerBody = el('BODY', {}, [el('H3', {}, [text('Inside')]), innerLink]);
+  const innerDoc = { documentElement: innerBody, body: innerBody, querySelectorAll: (sel) => (sel === '*' ? flat(innerBody) : []) };
+  [innerBody, innerLink].forEach((n) => { n.getRootNode = () => innerDoc; });
+  innerBody.childNodes.forEach((c) => { if (c.nodeType === 1) c.getRootNode = () => innerDoc; });
+  const row = el('TR', {}, [el('TD', {}, [text('Atlas_Rows.csv ')]), el('TD', {}, [text('1 KB ')]), el('TD', {}, [el('BUTTON', { id: 'rowdl', 'data-url': '/files/rows' }, [text('Download')], { form: null })])]);
+  const body = el('BODY', {}, [
+    el('H2', {}, [text('Files\u202e')]),
+    el('DIV', {}, [el('SPAN', {}, [text('Show all files')]), el('DIV', { role: 'switch', 'aria-checked': 'false', id: 'sw1', 'data-testid': 'all-switch' }, [])]),
+    el('DIV', {}, [el('DIV', { role: 'switch', 'aria-checked': 'false', id: 'sw2' }, []), el('DIV', { id: 'more' }, [text('World files Notes.txt')], { querySelector: () => ({}) })], { querySelector: () => ({}) }),
+    el('SELECT', { id: 'view' }, [], { type: 'select-one', options: [option('Added files', true), option('All files', false)], selectedOptions: [option('Added files', true)], value: 'a' }),
+    el('LABEL', {}, [el('INPUT', { type: 'radio', id: 'r1' }, [], { type: 'radio', checked: false, labels: [] }), text(' World files')]),
+    el('BUTTON', { role: 'tab', 'aria-selected': 'false', id: 't1' }, [text('Everything')]),
+    el('BUTTON', { id: 'plain' }, [text('Show all files')]),
+    el('BUTTON', { id: 'dlall' }, [text('Download all files')], { form: null }),
+    el('TABLE', {}, [row]),
+    el('UL', {}, [el('LI', {}, [el('A', { href: 'blob:x', download: 'Atlas_Blob.txt' }, [text('Blob file')], { href: 'blob:https://tasks.atlas.example/0a1b2c' })]), el('LI', {}, [el('A', { href: '/files' }, [text('Files')], { href: 'https://tasks.atlas.example/files' })]), el('LI', {}, [el('A', { href: '/assets/' }, [text('Assets')], { href: 'https://tasks.atlas.example/assets/' })]), el('LI', {}, [el('A', { href: '/files/12' }, [text('Numbered')], { href: 'https://tasks.atlas.example/files/12' })])]),
+    el('TEXTAREA', { id: 'a1', name: 'author_notes' }, [], { type: 'textarea', value: 'keep this', labels: [] }),
+    el('TEXTAREA', { id: 'a2', name: 'passage' }, [], { type: 'textarea', value: 'and this', labels: [] }),
+    el('INPUT', { id: 'a3', name: 'scorecard' }, [], { type: 'text', value: 'and this too', labels: [] }),
+    el('INPUT', { id: 'a4', name: 'accessToken' }, [], { type: 'text', value: 'SECRET1', labels: [] }),
+    el('INPUT', { id: 'a5', name: 'user[password]' }, [], { type: 'text', value: 'SECRET2', labels: [] }),
+    el('INPUT', { id: 'a6', name: 'x', autocomplete: 'cc-number' }, [], { type: 'text', value: 'SECRET3', labels: [], autocomplete: 'cc-number' }),
+    el('IFRAME', { id: 'frame' }, [], { contentDocument: innerDoc }),
+  ]);
+  Object.assign(doc, { body, documentElement: body, title: 'Atlas', readyState: 'complete', querySelectorAll: (sel) => (sel === '*' ? flat(body) : []), querySelector: () => null });
+  return doc;
+}
+const runExtract = (doc) => {
+  const { extractPage, LIMITS } = require('../backend/links/page.cjs');
+  const sandbox = { document: doc, location: { href: 'https://tasks.atlas.example/t/1', origin: 'https://tasks.atlas.example' }, performance: { now: () => 0 }, CSS: { escape: (s) => s }, URL, URLSearchParams };
+  return JSON.parse(JSON.stringify(vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS, toggleRe: TOGGLE_LABEL_RE.source })})`, sandbox)));
+};
+
+test('extractPage: label fallbacks (the text beside a switch), <select> options, radio, tab and "show all files" button as controls, each with a stable key', () => {
+  const out = runExtract(richDocument());
+  const by = (kind, label) => out.toggles.find((t) => t.kind === kind && t.label === label);
+  assert.deepEqual([by('switch', 'Show all files').checked, by('switch', 'Show all files').key], [false, 'id:sw1'], 'the label is the text beside the empty switch');
+  assert.equal(out.toggles.find((t) => t.key === 'id:sw2').label, '', 'what the switch reveals (a block with links) is not its label');
+  assert.deepEqual(out.toggles.filter((t) => t.kind === 'option').map((t) => [t.label, t.checked, t.option]), [['Added files', true, 0], ['All files', false, 1]]);
+  assert.equal(by('radio', 'World files').checked, false, 'a radio in a label takes the label');
+  assert.deepEqual([by('tab', 'Everything').checked, by('button', 'Show all files').kind], [false, 'button']);
+  assert.ok(!out.toggles.some((t) => /Download all/.test(t.label)), 'a "Download all files" button is a download, not the switch');
+  assert.equal(findAllFilesToggle(out.toggles, null).key, 'id:sw1', 'the first label that says so');
+  assert.equal(findAllFilesToggle(out.toggles, { label: '', key: 'id:t1' }).kind, 'tab', 'a learned key finds a control by its id');
+  assert.equal(findAllFilesToggle(out.toggles, 'all files').kind, 'option', 'a learned label finds a select option');
+  assert.equal(findAllFilesState(out.toggles.map((t) => ({ ...t, checked: true })), null).on, true, 'a control that is already on is found');
+});
+test('extractPage: a blob link, a plain "Download" button with its row\'s text as label, /files and /assets pages are not files, bidi controls stripped, secret words only as whole words, a same-origin iframe is read', () => {
+  const out = runExtract(richDocument());
+  assert.equal(out.headings[0].text, 'Files', 'the bidi control is gone from the heading');
+  assert.ok(!JSON.stringify(out).includes('\u202e'));
+  assert.deepEqual(out.links.map((l) => [l.text, l.scheme]), [['Blob file', 'blob:'], ['Numbered', 'https:'], ['Inner_Report.pdf', 'https:']], '/files and /assets/ are pages; /files/12 is a file; the iframe\'s link is read');
+  assert.equal(out.links[2].path, null, 'an element inside an iframe cannot be clicked from the task page');
+  assert.deepEqual(out.buttons.map((b) => [b.text, b.label, b.nameHint, b.dataUrl]), [['Download all files', 'Download all files', 'Download all files', null], ['Download', 'Atlas_Rows.csv 1 KB', 'Atlas_Rows.csv', '/files/rows']]);
+  const cands = fileCandidates({ ...out, url: 'https://tasks.atlas.example/t/1' });
+  assert.deepEqual(cands.map((c) => [c.mode, c.label]), [['click', 'Blob file'], ['navigate', 'Numbered'], ['navigate', 'Inner_Report.pdf'], ['click', 'Atlas_Rows.csv 1 KB']], 'blob links are clicked; the "Download all" button is dropped when files are listed');
+  assert.equal(cands[3].href, 'https://tasks.atlas.example/files/rows');
+  assert.equal(cands[3].nameHint, 'Atlas_Rows.csv');
+  const only = fileCandidates({ url: 'https://x.example/', links: [], buttons: [{ text: 'Download all files', label: 'Download all files', fileLike: true, path: 'b' }] });
+  assert.deepEqual(only.map((c) => c.text), ['Download all files'], 'with nothing else it stays');
+  const text = JSON.stringify(out.sections);
+  for (const kept of ['keep this', 'and this', 'and this too', 'Inside']) assert.ok(text.includes(kept), kept);
+  for (const secret of ['SECRET1', 'SECRET2', 'SECRET3']) assert.ok(!JSON.stringify(out).includes(secret), secret);
+});
+
+function opsSandbox(elements) {
+  const clicks = []; const events = [];
+  const mk = (id, extra = {}) => ({ id, tagName: 'BUTTON', textContent: id, value: '', title: '', disabled: false, attrs: {}, getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; }, click() { clicks.push(id); }, dispatchEvent(e) { events.push([id, e.type]); }, querySelector: () => null, getRootNode: () => doc, ...extra });
+  const nodes = Object.fromEntries(Object.entries(elements).map(([id, extra]) => [id, mk(id, extra)]));
+  const doc = { querySelector: (sel) => nodes[sel.replace(/^#/, '')] || null, querySelectorAll: () => [], scrollingElement: null };
+  return { nodes, clicks, events, sandbox: { document: doc, window: { innerHeight: 800 }, Event: class { constructor(type) { this.type = type; } }, getComputedStyle: () => ({ overflowY: 'visible' }), CSS: { escape: (s) => s } } };
+}
+test('pageOps activate: clicks the element it was told to, but not one that is gone, changed, or destructive; a <select> option is chosen with input and change events', () => {
+  const { pageOps, NEVER_TEXT_RE } = require('../backend/links/page.cjs');
+  const run = (box, arg) => vm.runInNewContext(`(${pageOps.toString()})(${JSON.stringify({ op: 'activate', never: NEVER_TEXT_RE.source, ...arg })})`, box.sandbox);
+  const box = opsSandbox({ ok: { textContent: ' Atlas_Notes.txt ' }, del: { textContent: 'Delete file' }, sel: { tagName: 'SELECT', textContent: 'Added files All files', selectedIndex: 0 }, empty: { textContent: '' } });
+  assert.deepEqual(JSON.parse(JSON.stringify(run(box, { path: '#ok', label: 'Atlas_Notes.txt' }))), { ok: true });
+  assert.deepEqual(box.clicks, ['ok']);
+  assert.equal(run(box, { path: '#ok', label: 'Something else' }).ok, false, 'the element is no longer the one that was listed');
+  assert.match(run(box, { path: '#ok', label: 'Something else' }).why, /no longer/);
+  assert.match(run(box, { path: '#del' }).why, /destructive/);
+  assert.match(run(box, { path: '#gone' }).why, /gone/);
+  assert.match(run(box, { path: null }).why, /gone/);
+  assert.equal(run(box, { path: '#empty', label: '' }).ok, true, 'no label to check: a switch without a name');
+  assert.deepEqual(box.clicks, ['ok', 'empty']);
+  assert.equal(run(box, { path: '#sel', option: 1 }).ok, true);
+  assert.equal(box.nodes.sel.selectedIndex, 1);
+  assert.deepEqual(box.events, [['sel', 'input'], ['sel', 'change']]);
+  assert.equal(vm.runInNewContext(`(${pageOps.toString()})(${JSON.stringify({ op: 'nothing' })})`, box.sandbox).ok, false);
+});
+
+/* ---------------------------------------------------------------- several looks at a page */
+test('discover: sections merge by heading and line, candidates by address; a signature changes when the page does', () => {
+  const a = [{ heading: 'Files', text: 'row 1\nrow 2' }, { heading: 'Notes', text: 'one' }, { heading: 'Files', text: 'second list' }];
+  const b = [{ heading: 'Files', text: 'row 2\nrow 3' }, { heading: 'Notes', text: 'one' }, { heading: 'Files', text: 'second list\nmore' }, { heading: 'New', text: 'x' }];
+  assert.deepEqual(discover.mergeSections([a, b]), [{ heading: 'Files', text: 'row 1\nrow 2\nrow 3' }, { heading: 'Notes', text: 'one' }, { heading: 'Files', text: 'second list\nmore' }, { heading: 'New', text: 'x' }]);
+  assert.equal(discover.mergeSections([a, b], { sections: 2 }).length, 2);
+  assert.equal(discover.mergeSections([[{ heading: 'H', text: 'x'.repeat(50) }]], { sectionChars: 10 })[0].text.length, 10);
+  const c = (mode, href, path, text) => ({ mode, href, path, text });
+  assert.deepEqual(discover.unionCandidates([[c('navigate', 'https://x.example/a'), c('click', null, 'b#1', 'B')], [c('navigate', 'https://x.example/a'), c('navigate', 'https://x.example/c'), c('click', null, 'b#1', 'B'), c('click', null, 'b#2', 'B')]]).map((x) => x.href || x.path), ['https://x.example/a', 'b#1', 'https://x.example/c', 'b#2']);
+  const snap = { sections: [{ heading: 'H', text: 'text' }], links: [{ href: 'u' }], buttons: [{ path: 'p', text: 't' }], toggles: [{ label: 'L', checked: false, path: 'p' }] };
+  assert.equal(discover.signature(snap), discover.signature(JSON.parse(JSON.stringify(snap))));
+  for (const change of [(x) => { x.sections[0].text = 'texT'; }, (x) => { x.links.push({ href: 'v' }); }, (x) => { x.toggles[0].checked = true; }, (x) => { x.buttons[0].text = 'u'; }]) {
+    const other = JSON.parse(JSON.stringify(snap)); change(other);
+    assert.notEqual(discover.signature(other), discover.signature(snap));
+  }
+});
+
+function scriptedTab(script) {
+  const { extractPage, pageOps } = require('../backend/links/page.cjs');
+  const log = []; const snaps = [];
+  const tab = {
+    net: { inflight: new Map(), lastActivityAt: 0 },
+    evalIsolated: async () => ({ readyState: 'complete', quiet: 99999, count: 0 }),
+    evalFn: async (fn, arg) => {
+      if (fn === extractPage) { const snap = script.snapshot(log.length); snaps.push(snap); return snap; }
+      assert.equal(fn, pageOps);
+      log.push(arg);
+      return script.op(arg, log);
+    },
+  };
+  return { tab, log, snaps };
+}
+const fileSnap = (...names) => ({ url: 'https://x.example/t', sections: [{ heading: 'Files', text: names.join('\n') }], links: names.map((n) => ({ text: n, href: `https://x.example/f/${n}`, rawHref: `/f/${n}`, scheme: 'https:', fileLike: true, nameHint: n, ext: 'txt', path: `a-${n}`, group: 'Files' })), buttons: [], toggles: [] });
+
+test('discover stabilize: looks again after each wait and stops as soon as two looks in a row are the same', async () => {
+  let n = 0;
+  const { tab } = scriptedTab({ snapshot: () => { n += 1; return fileSnap(...['a', 'b', 'c'].slice(0, Math.min(n + 1, 3))); }, op: () => ({}) });
+  const first = fileSnap('a');
+  const t0 = Date.now();
+  const snaps = await discover.stabilize(tab, first, { waits: [20, 20] });
+  assert.equal(snaps.length, 3, 'the page was still growing at the second look, so there was a third');
+  assert.ok(Date.now() - t0 >= 35);
+  n = 5;
+  const same = await discover.stabilize(tab, fileSnap('a', 'b', 'c'), { waits: [10, 10] });
+  assert.equal(same.length, 2, 'identical to the first look: stop');
+  await assert.rejects(discover.stabilize(tab, first, { waits: [5000], signal: AbortSignal.abort() }), (e) => e.code === 'CANCELLED');
+});
+test('discover gather: tabs one at a time (the open one is put back), "Load more" while it adds files, scrolling until two steps add nothing, never past its steps; everything is a snapshot', async () => {
+  let scrolls = 0; let more = 2;
+  const script = {
+    snapshot: (step) => fileSnap('home', ...Array.from({ length: Math.min(step, 4) }, (_, i) => `n${i}`)),
+    op: (arg) => {
+      if (arg.op === 'controls') return { tabs: [{ label: 'Files', path: 'tab1', selected: true }, { label: 'Other', path: 'tab2', selected: false }], more: more > 0 ? [{ label: 'Load more', path: 'more' }] : [] };
+      if (arg.op === 'activate') { if (arg.path === 'more') more -= 1; return { ok: true }; }
+      if (arg.op === 'scroll') { if (arg.reset) return { moved: false }; scrolls += 1; return { moved: scrolls <= 6 }; }
+      return {};
+    },
+  };
+  const { tab, log } = scriptedTab(script);
+  const snaps = [fileSnap('home')];
+  const did = await discover.gather(tab, snaps, {});
+  const activated = log.filter((a) => a.op === 'activate').map((a) => a.path);
+  assert.deepEqual(activated, ['tab2', 'tab1', 'more', 'more'], 'the other tab, then the first one again, then Load more until it is gone');
+  assert.equal(did.tabs, 1);
+  assert.equal(did.more, 2);
+  assert.ok(did.scrolls >= 1 && did.scrolls <= 6, 'scrolling stopped when nothing new came');
+  assert.ok(log.some((a) => a.op === 'scroll' && a.reset), 'the page is scrolled back to the top');
+  assert.ok(snaps.length > 4);
+  const capped = scriptedTab({ snapshot: (step) => fileSnap('x', `s${step}`), op: (arg) => (arg.op === 'scroll' ? { moved: true } : arg.op === 'controls' ? { tabs: [], more: [] } : {}) });
+  await discover.gather(capped.tab, [fileSnap('x')], { maxScroll: 5 });
+  assert.equal(capped.log.filter((a) => a.op === 'scroll' && !a.reset).length <= 5, true);
+  const timed = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'A', path: 'a', selected: false }], more: [] } : { ok: true }) });
+  await discover.gather(timed.tab, [fileSnap('x')], { budgetMs: -1 });
+  assert.deepEqual(timed.log.filter((a) => a.op === 'activate'), [], 'no time left: no tab is opened');
+});
+test('discover expand: opens details and expanders, and takes a new look only when it did something', async () => {
+  const none = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 0, expanded: 0 }) });
+  const s1 = [fileSnap('a')];
+  await discover.expand(none.tab, s1, {});
+  assert.equal(s1.length, 1);
+  const some = scriptedTab({ snapshot: () => fileSnap('a', 'b'), op: () => ({ opened: 1, expanded: 0 }) });
+  const s2 = [fileSnap('a')];
+  assert.deepEqual(await discover.expand(some.tab, s2, {}), { opened: 1, expanded: 0 });
+  assert.equal(s2.length, 2);
 });
 
 /* ---------------------------------------------------------------- launch arguments and environment */
@@ -484,7 +680,7 @@ test('chrome env: on Linux HOME and the XDG folders move inside the profile, and
   assert.equal(env.LC_ALL, 'C.UTF-8');
   assert.equal(browserEnv({ LANG: 'en_US.UTF-8' }).LC_ALL, undefined);
 });
-test('chrome binary: FINANCE_STUDIO_CHROME, then CHROME_BIN, absolute and executable and not writable by others; the macOS apps are on the list', () => {
+test('chrome binary: FINANCE_STUDIO_CHROME, then CHROME_BIN, absolute and executable and not writable by others; the macOS apps (also in ~/Applications) are on the list', () => {
   const dir = fresh('bin');
   const make = (name, mode) => { const f = path.join(dir, name); fs.writeFileSync(f, '#!/bin/sh\n'); fs.chmodSync(f, mode); return f; };
   const a = make('a', 0o755); const b = make('b', 0o755); const writable = make('w', 0o777); const noexec = make('n', 0o644);
@@ -493,8 +689,32 @@ test('chrome binary: FINANCE_STUDIO_CHROME, then CHROME_BIN, absolute and execut
   assert.notEqual(findChromeBinary({ FINANCE_STUDIO_CHROME: writable, CHROME_BIN: noexec }), writable, 'a world-writable binary is not used');
   assert.ok(![writable, noexec, 'relative/chrome', '', undefined, path.join(dir, 'missing'), dir].some((f) => usableBinary(f)));
   assert.equal(usableBinary(a), true);
-  const source = fs.readFileSync(path.join(__dirname, '..', 'backend', 'links', 'chrome.cjs'), 'utf8');
-  assert.ok(source.includes('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') && source.includes('/Applications/Chromium.app/Contents/MacOS/Chromium'));
+  const list = chrome.defaultCandidates('/Users/owner');
+  for (const want of ['/Applications/Google Chrome.app', '/Applications/Chromium.app', '/Users/owner/Applications/Google Chrome.app', '/Users/owner/Applications/Chromium.app', '/usr/bin/google-chrome']) assert.ok(list.includes(want), want);
+});
+test('chrome binary: a .app folder resolves to Contents/MacOS/<CFBundleExecutable>; why a candidate was passed over is reported', () => {
+  const dir = fresh('app');
+  const app = path.join(dir, 'Fake Browser.app');
+  fs.mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true });
+  fs.writeFileSync(path.join(app, 'Contents', 'Info.plist'), '<plist><dict><key>CFBundleName</key><string>Fake</string><key>CFBundleExecutable</key>\n<string>FakeBin</string></dict></plist>');
+  fs.writeFileSync(path.join(app, 'Contents', 'MacOS', 'FakeBin'), '#!/bin/sh\n', { mode: 0o755 });
+  fs.chmodSync(path.join(app, 'Contents', 'MacOS', 'FakeBin'), 0o755);
+  assert.equal(chrome.resolveBinary(app), path.join(app, 'Contents', 'MacOS', 'FakeBin'));
+  assert.equal(chrome.resolveBinary(app + '/'), path.join(app, 'Contents', 'MacOS', 'FakeBin'));
+  assert.equal(chrome.resolveBinary('/usr/bin/chromium'), '/usr/bin/chromium');
+  assert.equal(usableBinary(app), true);
+  assert.equal(findChromeBinary({ FINANCE_STUDIO_CHROME: app }), path.join(app, 'Contents', 'MacOS', 'FakeBin'));
+  const bare = path.join(dir, 'Plain.app');
+  fs.mkdirSync(path.join(bare, 'Contents', 'MacOS'), { recursive: true });
+  fs.writeFileSync(path.join(bare, 'Contents', 'MacOS', 'Plain'), '#!/bin/sh\n', { mode: 0o755 });
+  assert.equal(chrome.resolveBinary(bare), path.join(bare, 'Contents', 'MacOS', 'Plain'), 'no Info.plist: the app\'s own name');
+  const open = path.join(dir, 'open');
+  fs.writeFileSync(open, '#!/bin/sh\n'); fs.chmodSync(open, 0o775);
+  const none = chrome.findChrome({ FINANCE_STUDIO_CHROME: open, CHROME_BIN: path.join(dir, 'gone') }, dir);
+  assert.deepEqual(none.tried.map((t) => [t.path, t.why.replace(/ \(mode \d+\)/, '')]).slice(0, 2), [[open, 'other accounts can write to it'], [path.join(dir, 'gone'), 'it does not exist']]);
+  assert.match(chrome.missingChromeMessage(none.tried), /No Chrome or Chromium found.*FINANCE_STUDIO_CHROME.*open \(other accounts can write to it/);
+  assert.equal(chrome.checkBinary(dir).why, 'it is not a file');
+  assert.equal(chrome.checkBinary('x').why, 'it is not an absolute path');
 });
 
 /* ---------------------------------------------------------------- the profile */
@@ -797,15 +1017,15 @@ test('a launch that fails ends as failed with a plain message that holds no part
   const id = loader.start(link);
   assert.match(id, /^lnk-[0-9a-f]{12}$/);
   const first = loader.get(id);
-  assert.deepEqual(Object.keys(first).sort(), ['error', 'files', 'folder', 'id', 'message', 'page', 'sections', 'state', 'toggle']);
-  assert.deepEqual([first.state, first.page, first.error, first.files, first.sections], ['starting', { origin: 'https://tasks.atlas.example', path: '/t/1' }, null, [], []]);
+  assert.deepEqual(Object.keys(first).sort(), ['error', 'files', 'folder', 'id', 'message', 'page', 'sections', 'skipped', 'state', 'toggle']);
+  assert.deepEqual([first.state, first.page, first.error, first.files, first.skipped, first.sections], ['starting', { origin: 'https://tasks.atlas.example', path: '/t/1' }, null, [], [], []]);
   assert.deepEqual(first.toggle, { found: false, label: '', flipped: false, filesBefore: 0, filesAfter: 0, learned: false });
   assert.equal(first.folder, path.join(root, 'private', 'links', id));
   assert.equal(fs.statSync(first.folder).mode & 0o777, 0o700);
   assert.throws(() => loader.start(link), (e) => e.status === 409 && e.code === 'busy', 'one load at a time');
   const final = await loader.waitFor(id);
   assert.equal(final.state, 'failed');
-  assert.match(final.message, /already open/);
+  assert.match(final.message, /Quit the loader's Chrome \(Cmd\+Q\) and try again\./);
   assert.equal(final.error, final.message);
   for (const secret of ['CANARYSIG', 'CANARYFRAG', 'X-Signature']) assert.ok(!JSON.stringify(final).includes(secret) && !(log.args || []).join(' ').includes(secret), secret);
   assert.ok(!(log.args || []).includes('--headless=new') && !(log.args || []).includes('--no-sandbox'), 'visible by default, and the product never adds --no-sandbox');
@@ -855,9 +1075,12 @@ test('a spawn that throws is a failed load; cancel and shutdown on a load that i
   const slow = (binary, args) => { const child = fakeChrome(log)(binary, args); return child; };
   const loader = createLinkLoader({ root: fresh('root'), chromePath: exe(), spawnFn: slow });
   const id = loader.start('https://tasks.atlas.example/t/1');
-  const cancelled = loader.cancel(id);
-  assert.deepEqual([cancelled.state, cancelled.message, cancelled.error], ['cancelled', 'Cancelled.', null]);
-  assert.equal((await loader.waitFor(id)).state, 'cancelled', 'a cancel wins over the failure that follows');
+  const cancelling = loader.cancel(id);
+  assert.deepEqual([cancelling.state, cancelling.message, cancelling.error], ['loading', 'Cancelling...', null], 'not final until Chrome is closed');
+  assert.equal(loader.cancel(id).message, 'Cancelling...', 'cancelling twice is harmless');
+  assert.throws(() => loader.continue(id), (e) => e.status === 409, 'nothing waits while cancelling');
+  const done = await loader.waitFor(id);
+  assert.deepEqual([done.state, done.message, done.error], ['cancelled', 'Cancelled.', null], 'a cancel wins over the failure that follows');
   const id2 = loader.start('https://tasks.atlas.example/t/2');
   await loader.shutdown();
   assert.equal(loader.get(id2).state, 'cancelled');
@@ -870,6 +1093,211 @@ test('limits can only be lowered by a test, never raised; timeouts can be change
   assert.deepEqual([LIMITS.files, LIMITS.fileBytes, LIMITS.totalBytes, LIMITS.sections, LIMITS.sectionChars], [300, 200 * 1024 * 1024, 2 * 1024 * 1024 * 1024, 200, 20000]);
   assert.deepEqual([TIMEOUTS.signIn, TIMEOUTS.person, TIMEOUTS.navigation], [600000, 600000, 30000]);
   await loader.waitFor(loader.start('https://tasks.atlas.example/t/1'));
+});
+
+/* ---------------------------------------------------------------- the sign-in window, the profile, macOS */
+test('chrome args: the sign-in window has no debugging channel at all and opens only the origin; the headed flags are for visible windows only', () => {
+  const win = chromeArgs({ profileDir: '/p/q', headless: false, url: 'https://tasks.atlas.example/', pipe: false });
+  assert.ok(!win.some((a) => /remote-debugging/.test(a)), 'no pipe, no port');
+  assert.deepEqual(win.filter((a) => !a.startsWith('--')), ['https://tasks.atlas.example/']);
+  assert.ok(win.includes('--user-data-dir=/p/q') && win.includes('--restore-last-session'));
+  for (const flag of ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']) {
+    assert.ok(win.includes(flag) && chromeArgs({ profileDir: '/p', headless: false }).includes(flag), flag);
+    assert.ok(!chromeArgs({ profileDir: '/p', headless: true }).includes(flag), flag + ' only for a visible window');
+  }
+  assert.ok(chromeArgs({ profileDir: '/p', headless: true, pipe: false }).includes('--headless=new'));
+  assert.ok(!win.some((a) => /^--no-sandbox/.test(a)));
+});
+test('profile: the sign-in window cannot download (download_restrictions, a download folder inside the profile), no browser sign-in, no Safe Browsing', () => {
+  const profile = fresh('prefs');
+  prepareProfile(profile);
+  const prefs = JSON.parse(fs.readFileSync(path.join(profile, 'Default', 'Preferences'), 'utf8'));
+  assert.equal(prefs.download_restrictions, 3);
+  assert.equal(prefs.download.default_directory, path.join(profile, 'quarantine'));
+  assert.equal(prefs.download.prompt_for_download, false);
+  assert.deepEqual([prefs.signin.allowed, prefs.safebrowsing.enabled, prefs.safebrowsing.enhanced, prefs.session.restore_on_startup], [false, false, false, 1]);
+  assert.equal(fs.statSync(path.join(profile, 'quarantine')).mode & 0o777, 0o700);
+});
+test('profile: a lock left by a killed Chrome is removed, but only when no Chrome holds the profile', async () => {
+  const profile = fresh('locks');
+  const lock = () => { for (const n of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) { fs.rmSync(path.join(profile, n), { force: true }); fs.symlinkSync('host-12345', path.join(profile, n)); } };
+  lock();
+  assert.equal(chrome.holdsProfile(profile), false);
+  prepareProfile(profile);
+  for (const n of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) assert.throws(() => fs.lstatSync(path.join(profile, n)), /ENOENT/, n);
+  const { spawn } = require('node:child_process');
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)', '--', `--user-data-dir=${profile}`], { stdio: 'ignore' });
+  try {
+    await sleep(300);
+    assert.equal(chrome.holdsProfile(profile), true, 'a process with the profile on its command line holds it');
+    lock();
+    prepareProfile(profile);
+    assert.ok(fs.lstatSync(path.join(profile, 'SingletonLock')).isSymbolicLink(), 'a live Chrome\'s lock is left alone');
+  } finally { holder.kill('SIGKILL'); }
+});
+test('signalTree: a group is signalled through its leader; a test double without a pid through its own kill(); pid 0 and 1 never', () => {
+  const sent = [];
+  assert.equal(chrome.signalTree({ pid: undefined, kill: (sig) => sent.push(sig) }, 'SIGINT'), true);
+  assert.deepEqual(sent, ['SIGINT']);
+  assert.equal(chrome.signalTree({ pid: 1, kill: (sig) => sent.push(sig) }, 'SIGTERM'), true, 'pid 1 is treated as a double: its kill(), never process.kill');
+  assert.deepEqual(sent, ['SIGINT', 'SIGTERM']);
+  assert.equal(chrome.signalTree({ pid: 0 }, 'SIGTERM'), false);
+  assert.equal(chrome.signalTree({ pid: 2147483000 }, 'SIGTERM'), false, 'no such process');
+});
+function fakeWindowSpawn(log, behaviour = {}) {
+  return (binary, args, options) => {
+    const child = new EventEmitter();
+    child.stderr = new PassThrough();
+    child.pid = undefined;
+    child.signals = [];
+    child.kill = (signal) => {
+      child.signals.push(signal);
+      if (signal === (behaviour.exitsOn || 'SIGINT')) setImmediate(() => child.emit('exit', 0, signal));
+      return true;
+    };
+    log.push({ binary, args, options, child });
+    return child;
+  };
+}
+test('launchWindow: the same binary and profile, no pipe, only the origin on the command line, an allow-listed environment; stop() is SIGINT first (Chrome writes its cookies), then SIGTERM, then the kill', async () => {
+  const profile = fresh('win');
+  const log = [];
+  const secretEnv = { PATH: process.env.PATH, ANTHROPIC_API_KEY: 'sk-canary', HTTPS_PROXY: 'http://u:canary@proxy:3128' };
+  const win = chrome.launchWindow({ binary: '/opt/fake/chrome', profileDir: profile, headless: false, spawnFn: fakeWindowSpawn(log), env: secretEnv, url: 'https://tasks.atlas.example/' });
+  assert.equal(log[0].binary, '/opt/fake/chrome');
+  assert.ok(!log[0].args.some((a) => /remote-debugging/.test(a)) && log[0].args.includes(`--user-data-dir=${profile}`));
+  assert.equal(log[0].args[log[0].args.length - 1], 'https://tasks.atlas.example/');
+  assert.deepEqual(log[0].options.stdio, ['ignore', 'ignore', 'pipe']);
+  assert.equal(log[0].options.detached, true);
+  assert.ok(!JSON.stringify(log[0].options.env).includes('canary'));
+  assert.equal(win.hasExited(), false);
+  await win.stop({ graceMs: 500 });
+  assert.deepEqual(log[0].child.signals, ['SIGINT'], 'a window that exits on SIGINT is not signalled again');
+  assert.equal(win.hasExited(), true);
+  const stubborn = [];
+  const win2 = chrome.launchWindow({ binary: '/opt/fake/chrome', profileDir: profile, headless: true, spawnFn: fakeWindowSpawn(stubborn, { exitsOn: 'SIGTERM' }), url: 'https://tasks.atlas.example/' });
+  assert.ok(stubborn[0].args.includes('--headless=new'));
+  await win2.stop({ graceMs: 30 });
+  assert.deepEqual(stubborn[0].child.signals, ['SIGINT', 'SIGTERM']);
+  assert.throws(() => chrome.launchWindow({ binary: null, profileDir: profile, spawnFn: fakeWindowSpawn([]), url: 'x' }), /No Chrome or Chromium found/);
+  const failing = new EventEmitter(); failing.stderr = new PassThrough();
+  const win3 = chrome.launchWindow({ binary: '/nope', profileDir: profile, spawnFn: () => failing, url: 'https://tasks.atlas.example/' });
+  failing.emit('error', new Error('spawn ENOENT'));
+  assert.deepEqual([win3.hasExited(), win3.error()], [true, 'spawn ENOENT']);
+});
+test('macOS: a Studio folder in a synced place is warned about; Spotlight and Time Machine are kept away from the profile and the load folders, once, failures ignored', () => {
+  const home = '/Users/owner';
+  for (const synced of ['/Users/owner/Documents/studio', '/Users/owner/Desktop', '/Users/owner/Library/Mobile Documents/com~apple~CloudDocs/x', '/Users/owner/Library/CloudStorage/OneDrive-Atlas/x', '/Users/owner/Dropbox/studio', '/Volumes/Work/OneDrive - Borealis/studio']) {
+    assert.match(chrome.syncWarning(synced, home, 'darwin'), /may be synced or backed up/, synced);
+  }
+  for (const fine of ['/Users/owner/code/studio', '/Users/owner/DocumentsX/studio', '/Users/other/Documents/x']) assert.equal(chrome.syncWarning(fine, home, 'darwin'), '', fine);
+  assert.equal(chrome.syncWarning('/Users/owner/Documents/studio', home, 'linux'), '', 'macOS only');
+  assert.match(chrome.syncWarning('/Users/owner/Documents/studio', home, 'darwin'), /~\/Documents/);
+  const priv = fresh('mac');
+  const calls = [];
+  const run = (cmd, args) => { calls.push([cmd, ...args]); if (args[1].endsWith('bad')) throw new Error('tmutil missing'); };
+  assert.deepEqual(chrome.protectStorage({ privateDir: priv, paths: ['/x/profile-1', '/x/bad'], platform: 'linux', run }), []);
+  assert.deepEqual(calls, []);
+  assert.ok(!fs.existsSync(path.join(priv, '.metadata_never_index')));
+  assert.deepEqual(chrome.protectStorage({ privateDir: priv, paths: ['/x/profile-1', '/x/bad'], platform: 'darwin', run }), ['/x/profile-1']);
+  assert.deepEqual(calls, [['tmutil', 'addexclusion', '/x/profile-1'], ['tmutil', 'addexclusion', '/x/bad']]);
+  assert.ok(fs.existsSync(path.join(priv, '.metadata_never_index')));
+  chrome.protectStorage({ privateDir: priv, paths: ['/x/profile-1'], platform: 'darwin', run });
+  assert.equal(calls.length, 2, 'once per path');
+});
+
+/* ---------------------------------------------------------------- the sign-in classifier, more */
+test('classify: MFA, verification and magic-link steps are not the task page; the refusal page of an identity provider is named', () => {
+  const { LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('../backend/links/auth-wall.cjs');
+  for (const p of ['/mfa', '/auth/verify', '/2fa/', '/two-factor', '/challenge', '/otp', '/check-email', '/magic/abc', '/sessions/new', '/authenticator', '/login']) assert.ok(LOGIN_PATH_RE.test(p), p);
+  for (const p of ['/tasks/atlas-001', '/verification-report', '/files/mfa-notes.pdf', '/magical']) assert.ok(!LOGIN_PATH_RE.test(p), p);
+  for (const t of ['Enter the code we sent you', 'Approve this sign-in on your phone', 'Check your email', 'Use your authenticator app', 'MFA required', 'Click the magic link']) assert.ok(CHALLENGE_RE.test(t), t);
+  assert.ok(!CHALLENGE_RE.test('Quarterly bridge for Atlas'));
+  for (const t of ['This browser or app may not be secure.', 'Couldn\'t sign you in', 'Try using a different browser']) assert.ok(REFUSED_RE.test(t), t);
+  const mfa = classifyPage({ ...base, finalUrl: 'https://tasks.atlas.example/mfa', hops: [{ rawUrl: 'https://tasks.atlas.example/t/1', status: 302 }, { rawUrl: 'https://tasks.atlas.example/mfa', status: 200 }], snapshot: snap({ title: 'Enter the code', headings: [{ level: 1, text: 'Enter the code' }] }) });
+  assert.equal(mfa.state, 'needs-person');
+  const rejected = classifyPage({ ...base, finalUrl: 'https://accounts.google.com/signin/rejected?x=1', hops: [{ rawUrl: 'https://tasks.atlas.example/t/1', status: 302 }, { rawUrl: 'https://accounts.google.com/signin/rejected?x=1', status: 200 }], snapshot: snap({ title: 'Sign in', headings: [] }) });
+  assert.equal(rejected.state, 'needs-sign-in');
+  assert.ok(rejected.signals.includes('sign-in-refused') && /refused/.test(rejected.reason) && /separate Chrome window/.test(rejected.reason));
+  const worded = classifyPage({ ...base, snapshot: snap({ sections: [{ heading: '', text: 'Couldn\'t sign you in. This browser or app may not be secure.' }] }) });
+  assert.ok(worded.signals.includes('sign-in-refused') && worded.state === 'needs-sign-in');
+});
+test('cleanLabel: control, bidi and zero-width characters out, blanks folded, cut', () => {
+  assert.equal(cleanLabel('Re\u202eport\u200b  Q3\u0000.xlsx\n'), 'Re port Q3 .xlsx');
+  assert.equal(cleanLabel(null), '');
+  assert.equal(cleanLabel('x'.repeat(500), 20).length, 20);
+});
+
+/* ---------------------------------------------------------------- the store, with a key */
+test('mapping store: a control without a label is remembered by its id or data-testid; a label alone, a key alone, both; neither is refused', () => {
+  const file = path.join(fresh('mapkey'), 'm.json');
+  const iso = '2026-10-23T12:00:00.000Z';
+  assert.equal(store.learnToggle(file, 'a.example', '', iso, 'id:allFilesSwitch'), true);
+  assert.deepEqual(store.learnedToggleInfo(file, 'a.example'), { label: '', key: 'id:allFilesSwitch' });
+  assert.equal(store.learnedToggle(file, 'a.example'), null, 'no label to give');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hosts['a.example'], { updatedAt: iso, allFilesToggleKey: 'id:allFilesSwitch' });
+  assert.equal(store.learnToggle(file, 'b.example', 'Show all files', iso, 'testid:all'), true);
+  assert.deepEqual(store.learnedToggleInfo(file, 'b.example'), { label: 'Show all files', key: 'testid:all' });
+  assert.equal(store.learnToggle(file, 'c.example', 'Show all files', iso), true);
+  assert.deepEqual(store.learnedToggleInfo(file, 'c.example'), { label: 'Show all files', key: '' });
+  for (const bad of [['', ''], ['', 'class:x'], ['', 'id:'], ['', 'id:a b'], ['', 'id:' + 'x'.repeat(81)], ['', 'testid:a\u0000b']]) assert.equal(store.learnToggle(file, 'd.example', bad[0], iso, bad[1]), false, JSON.stringify(bad));
+  assert.equal(store.learnedToggleInfo(file, 'd.example'), null);
+  fs.writeFileSync(file, JSON.stringify({ schema: 'finance-link-mappings', version: 1, hosts: { 'e.example': { updatedAt: iso, allFilesToggleKey: 'javascript:alert(1)' } } }));
+  assert.equal(store.learnedToggleInfo(file, 'e.example'), null, 'a bad key on disk makes the whole store empty');
+  fs.writeFileSync(file, JSON.stringify({ schema: 'finance-link-mappings', version: 1, hosts: { 'e.example': { updatedAt: iso } } }));
+  assert.equal(store.learnedToggleInfo(file, 'e.example'), null, 'an entry that says nothing is invalid');
+});
+test('changedToggle: select options and tabs share a path, so the option number tells them apart', () => {
+  const o = (label, checked, option) => ({ label, checked, path: 'select#view', option, kind: 'option' });
+  assert.equal(changedToggle([o('Added', true, 0), o('All files', false, 1)], [o('Added', false, 0), o('All files', true, 1)]).label, 'All files');
+  assert.equal(changedToggle([o('Added', true, 0), o('All files', false, 1)], [o('Added', true, 0), o('All files', false, 1)]), null);
+});
+
+/* ---------------------------------------------------------------- downloads, more */
+test('downloads: a stall with every byte already there is Chrome holding the file as possibly unsafe; any other stall stays a stall', async () => {
+  const m = manager({ maxFileBytes: 10000, maxTotalBytes: 100000, idleMs: 100, pollMs: 10 });
+  const held = job({ guid: 'h1', received: 500, totalBytes: 500, lastGrowthAt: Date.now() - 1000, startedAt: Date.now() - 1000 });
+  m.dm.jobs.set('h1', held);
+  fs.writeFileSync(path.join(m.dm.stageDir, 'h1.crdownload'), Buffer.alloc(500));
+  await m.dm.waitTerminal(held);
+  assert.deepEqual(held.terminal, { state: 'held-by-chrome', detail: 'Chrome held the file as possibly unsafe' });
+  const half = job({ guid: 'h2', received: 100, totalBytes: 500, lastGrowthAt: Date.now() - 1000, startedAt: Date.now() - 1000 });
+  m.dm.jobs.set('h2', half);
+  fs.writeFileSync(path.join(m.dm.stageDir, 'h2.crdownload'), Buffer.alloc(100));
+  await m.dm.waitTerminal(half);
+  assert.equal(half.terminal.state, 'stalled');
+});
+test('downloads: five failures in a row stop the step with a reason and hand back what was not tried; a success resets the count; the whole step has a time budget', async () => {
+  const m = manager({ stopAfter: 5, phaseMs: 60000 });
+  const outcome = (name) => (name.startsWith('bad') ? { state: 'http-error', detail: null } : { state: 'done', name, size: 1, sha256: 'x' });
+  m.dm.fetchOne = async (c) => outcome(c.label);
+  const run = (names, extra) => m.dm.fetchAll(names.map((label) => ({ label })), extra);
+  const a = await run(['bad1', 'bad2', 'ok1', 'bad3', 'bad4', 'bad5', 'bad6', 'bad7', 'late1', 'late2']);
+  assert.equal(a.results.length, 8, 'the ok in the middle reset the count');
+  assert.match(a.stopped, /^5 files in a row could not be downloaded \(http-error\)$/);
+  assert.deepEqual(a.rest.map((c) => c.label), ['late1', 'late2']);
+  const b = await run(['ok1', 'ok2']);
+  assert.deepEqual([b.stopped, b.rest.length, b.results.length], [null, 0, 2]);
+  const seen = [];
+  await run(['ok1'], { onFile: (r, c) => seen.push([r.state, c.label]) });
+  assert.deepEqual(seen, [['done', 'ok1']]);
+  const ac = new AbortController(); ac.abort();
+  assert.equal((await run(['ok1'], { signal: ac.signal })).results.length, 0);
+  m.dm.limits.phaseMs = -1;
+  const t = await run(['ok1', 'ok2']);
+  assert.deepEqual([t.results.length, t.stopped, t.rest.length], [0, 'the time for the file step ran out', 2]);
+});
+test('downloads: a window a click opens is adopted so its download is tracked, and closed when the job ends; without a click job nothing is adopted', async () => {
+  const m = manager();
+  assert.equal(m.dm.adoptPopup('P1'), false);
+  m.dm.clickJob = job();
+  assert.equal(m.dm.adoptPopup('P1'), true);
+  assert.equal(m.dm.byFrame.get('P1'), m.dm.clickJob);
+  m.dm.onBegin({ guid: 'gp', frameId: 'P1', url: 'https://x.example/a', suggestedFilename: 'A.pdf' });
+  assert.equal(m.dm.clickJob.guid, 'gp', 'the download that began in the window belongs to the click');
+  await m.dm.closePopups();
+  assert.ok(m.sent.some((c) => c.method === 'Target.closeTarget' && c.params.targetId === 'P1'));
+  assert.equal(m.dm.popups.size, 0);
 });
 
 /* ---------------------------------------------------------------- source rules */

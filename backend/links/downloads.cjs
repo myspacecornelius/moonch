@@ -31,12 +31,15 @@ const { Tab, safeUrl, safeText } = require('./tab.cjs');
 const { gateTab } = require('./gate.cjs');
 const { sanitizeFileName, uniqueName, insideDir } = require('./names.cjs');
 const { LOGIN_PATH_RE } = require('./auth-wall.cjs');
+const { pageOp } = require('./page.cjs');
 const { sleep } = require('./cdp.cjs');
 
 const DEFAULT_LIMITS = {
   maxFileBytes: 200 * 1024 * 1024,
   maxTotalBytes: 2 * 1024 * 1024 * 1024,
   idleMs: 60000,          /* no growth for this long: stalled */
+  phaseMs: 15 * 60000,    /* the whole file step; what is left when it ends is skipped */
+  stopAfter: 5,           /* this many files in a row failed: something is wrong, stop asking */
   fileTimeoutMs: 600000,  /* wall clock for one file */
   beginTimeoutMs: 15000,  /* the click or navigation produced no download */
   navTimeoutMs: 30000,
@@ -63,18 +66,20 @@ async function sha256File(file) {
   return hash.digest('hex');
 }
 
-const clickPath = (selector) => { const el = selector ? document.querySelector(selector) : null; if (!el) return false; el.click(); return true; };
-
 class DownloadManager {
   /* cdp: the connection. stageDir: where Chrome writes (0700, private). destDir: where the kept files go (same file system).
-     options: { limits, isAllowed(URL) -> boolean, newWindow } */
-  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false } = {}) {
+     options: { limits, isAllowed(URL) -> boolean, newWindow, ensurePage() } ensurePage runs before every click in the task tab and
+     brings the tab back to the task page if it left it. */
+  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false, ensurePage = null } = {}) {
     this.cdp = cdp;
     this.stageDir = stageDir;
     this.destDir = destDir;
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     this.isAllowed = isAllowed;
     this.newWindow = newWindow;
+    this.ensurePage = ensurePage;
+    this.clickJob = null;        /* the click job in progress: a window it opens is adopted, not closed */
+    this.popups = new Set();
     this.jobs = new Map();       /* guid -> job */
     this.byFrame = new Map();    /* frameId -> job waiting for its download to begin */
     this.stray = 0;              /* downloads nobody asked for, cancelled */
@@ -113,6 +118,20 @@ class DownloadManager {
     job.lastGrowthAt = Date.now();
     this.jobs.set(p.guid, job);
     this.byFrame.delete(p.frameId);
+  }
+
+  /* A click can open a window that then starts the download. Its main frame has the target's id, so mapping that id to the job lets the
+     download be tracked like any other; the window is closed when the job ends. */
+  adoptPopup(targetId) {
+    if (!this.clickJob) return false;
+    this.popups.add(targetId);
+    this.byFrame.set(targetId, this.clickJob);
+    return true;
+  }
+
+  async closePopups() {
+    for (const id of this.popups) { this.byFrame.delete(id); await this.cdp.send('Target.closeTarget', { targetId: id }).catch(() => {}); }
+    this.popups.clear();
   }
 
   onProgress(p) {
@@ -183,8 +202,11 @@ class DownloadManager {
       } else {
         tab = candidate.pageTab;
         job.tab = tab;
+        if (this.ensurePage) await this.ensurePage();
         this.byFrame.set(tab.frameId, job);
-        if (!(await tab.evalFn(clickPath, candidate.path))) job.terminal = { state: 'failed', detail: 'the element is gone from the page' };
+        this.clickJob = job;
+        const clicked = await pageOp(tab, 'activate', { path: candidate.path, label: candidate.text });
+        if (!clicked.ok) job.terminal = { state: 'failed', detail: clicked.why };
       }
       await this.waitTerminal(job, signal);
       await this.finalize(job, result);
@@ -192,6 +214,8 @@ class DownloadManager {
       if (!job.terminal) job.terminal = { state: error.code === 'CANCELLED' ? 'cancelled' : error.code === 'TIMEOUT' ? 'timeout' : 'failed', detail: safeText(error.message, 120) };
       await this.cancelInBrowser(job);
     } finally {
+      this.clickJob = null;
+      await this.closePopups();
       this.byFrame.delete(tab ? tab.frameId : '');
       if (gate) await gate.stop().catch(() => {});
       if (ownTab && tab) await tab.close();
@@ -200,6 +224,11 @@ class DownloadManager {
     if (result.state === 'failed' && job.terminal) { result.state = job.terminal.state; result.detail = job.terminal.detail || null; }
     result.httpStatus = job.httpStatus;
     result.ms = Date.now() - started;
+    /* A file link that answers 401 or 403 to a bare navigation may want what a click carries (the page's referrer, its scripts): try the
+       click once. */
+    if (result.state === 'http-denied' && candidate.mode === 'navigate' && candidate.path && candidate.pageTab && !candidate.retried) {
+      return this.fetchOne({ ...candidate, mode: 'click', retried: true }, { signal });
+    }
     return result;
   }
 
@@ -217,7 +246,13 @@ class DownloadManager {
         if (size > job.received) { job.received = size; job.lastGrowthAt = now; }
         if (size > L.maxFileBytes) { job.terminal = { state: 'too-large', detail: `stopped at ${size} bytes, cap ${L.maxFileBytes}` }; await this.cancelInBrowser(job); return; }
         if (this.totalBytes + size > L.maxTotalBytes) { job.terminal = { state: 'total-cap', detail: 'the total cap was reached' }; await this.cancelInBrowser(job); return; }
-        if (now - job.lastGrowthAt > L.idleMs) { job.terminal = { state: 'stalled', detail: `no data for ${L.idleMs} ms` }; await this.cancelInBrowser(job); return; }
+        if (now - job.lastGrowthAt > L.idleMs) {
+          /* every byte is there and the file is still not finished: Chrome is holding it back as possibly unsafe */
+          const held = job.totalBytes > 0 && size >= job.totalBytes;
+          job.terminal = held ? { state: 'held-by-chrome', detail: 'Chrome held the file as possibly unsafe' } : { state: 'stalled', detail: `no data for ${L.idleMs} ms` };
+          await this.cancelInBrowser(job);
+          return;
+        }
       } else if (now - job.startedAt > L.beginTimeoutMs) {
         job.terminal = { state: 'no-download', detail: 'no download began' }; return;
       }
@@ -251,15 +286,25 @@ class DownloadManager {
     Object.assign(result, { state: 'done', name, size: stat.size, sha256: sha });
   }
 
+  /* Every candidate, one after the other. Stops early, and says why, when `stopAfter` files in a row failed or the time for the whole step
+     is spent. Returns { results, stopped: null | reason, rest: the candidates that were not tried }. */
   async fetchAll(candidates, { signal, onFile } = {}) {
     const results = [];
-    for (const candidate of candidates) {
+    const started = Date.now();
+    let failures = 0;
+    let stopped = null;
+    let index = 0;
+    for (; index < candidates.length; index += 1) {
       if (signal && signal.aborted) break;
+      if (Date.now() - started > this.limits.phaseMs) { stopped = 'the time for the file step ran out'; break; }
+      if (failures >= this.limits.stopAfter) { stopped = `${failures} files in a row could not be downloaded (${results[results.length - 1].detail || results[results.length - 1].state})`; break; }
+      const candidate = candidates[index];
       const r = await this.fetchOne(candidate, { signal });
       results.push({ ...r, candidate });
+      failures = r.state === 'done' ? 0 : failures + 1;
       if (onFile) onFile(r, candidate);
     }
-    return results;
+    return { results, stopped, rest: candidates.slice(index) };
   }
 }
 

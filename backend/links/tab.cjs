@@ -34,6 +34,11 @@ function safeUrl(text) {
 /* Any text that may have been built from a URL or a browser message, with every URL cut down to origin and path. */
 const safeText = (text, max = 300) => String(text == null ? '' : text).replace(/\b[a-z][a-z0-9+.-]{1,15}:\/\/[^\s"'`<>)\]}]+/gi, (m) => safeUrl(m)).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
 
+/* Text that came from a page and is shown or stored as a label, a group or a heading: no C0/C1 control, line or paragraph separator,
+   zero-width, bidi or invisible-operator character (they can reorder or hide what the owner reads), runs of blanks folded, cut at max. */
+const HIDDEN_CHARS = new RegExp('[' + ['\\u0000-\\u001f', '\\u007f-\\u009f', '\\u2028-\\u2029', '\\u200b-\\u200f', '\\u202a-\\u202e', '\\u2060-\\u2064', '\\u2066-\\u2069', '\\ufeff'].join('') + ']', 'g');
+const cleanLabel = (text, max = 160) => String(text == null ? '' : text).replace(HIDDEN_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
 const cap = (list, item, max = 50) => { if (list.length < max) list.push(item); };
 
 class Tab {
@@ -151,6 +156,12 @@ class Tab {
   /* A constant function and ONE JSON argument. Nothing from the page, the link or the person is ever spliced into code. */
   evalFn(fn, arg, options) { return this.evalIsolated(`(${fn.toString()})(${JSON.stringify(arg === undefined ? null : arg)})`, options); }
 
+  /* Bring this tab's window to the front (macOS opens Chrome behind the Studio's own window). Failures are ignored. */
+  async front() {
+    await this.s.send('Page.bringToFront', {}, { timeout: 3000 }).catch(() => {});
+    await this.cdp.send('Target.activateTarget', { targetId: this.targetId }, { timeout: 3000 }).catch(() => {});
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;
@@ -186,4 +197,4 @@ async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000,
   }
 }
 
-module.exports = { Tab, safeUrl, safeText, waitForSettled, WORLD };
+module.exports = { Tab, safeUrl, safeText, cleanLabel, waitForSettled, WORLD };

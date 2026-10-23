@@ -3,11 +3,12 @@
 
    ensurePrivateDir   a folder that is really a folder (not a symlink), owned by this account, mode 0700 (tightened if looser). Used for
                       <root>/private/links, <root>/private/links/<id> and the Chrome profile <root>/private/link-profile.
-   mapping store      <root>/private/link-mappings.json: { schema, version, hosts: { "<host>": { updatedAt, allFilesToggle } } }. It keeps
-                      WHERE to look (the switch's label), never what was found. Strict on read: an unknown key, a wrong type or an
+   mapping store      <root>/private/link-mappings.json: { schema, version, hosts: { "<host>": { updatedAt, allFilesToggle, allFilesToggleKey? } } }.
+                      It keeps WHERE to look (the switch's label, and for a switch without a label its id or data-testid), never what was
+                      found. Strict on read: an unknown key, a wrong type or an
                       over-limit value makes the whole file count as empty, so the store cannot carry content. Written atomically
                       (temp file then rename), mode 0600.
-   Exports: ensurePrivateDir, writeJsonAtomic, readMappings, learnedToggle, learnToggle, STORE_LIMITS. */
+   Exports: ensurePrivateDir, writeJsonAtomic, readMappings, learnedToggle, learnedToggleInfo, learnToggle, STORE_LIMITS. */
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -43,6 +44,8 @@ const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const emptyStore = () => ({ schema: 'finance-link-mappings', version: 1, hosts: Object.create(null) });
 
 function validLabel(label) { return typeof label === 'string' && label.length > 0 && label.length <= STORE_LIMITS.valueChars && !HIDDEN_RE.test(label); }
+const KEY_RE = /^(id|testid):[\x21-\x7e]{1,80}$/;
+const validKey = (key) => typeof key === 'string' && KEY_RE.test(key);
 
 /* The whole store, or an empty one when the file is missing or invalid in any way. */
 function readMappings(file) {
@@ -59,8 +62,10 @@ function readMappings(file) {
   const hosts = Object.create(null);
   for (const host of names) {
     const entry = input.hosts[host];
-    if (!HOST_RE.test(host) || !isObj(entry) || !keysOk(entry, ['updatedAt', 'allFilesToggle']) || typeof entry.updatedAt !== 'string' || !validLabel(entry.allFilesToggle)) return emptyStore();
-    hosts[host] = { updatedAt: entry.updatedAt, allFilesToggle: entry.allFilesToggle };
+    if (!HOST_RE.test(host) || !isObj(entry) || !keysOk(entry, ['updatedAt', 'allFilesToggle', 'allFilesToggleKey']) || typeof entry.updatedAt !== 'string') return emptyStore();
+    const label = entry.allFilesToggle === undefined ? '' : entry.allFilesToggle;
+    if ((label !== '' && !validLabel(label)) || (entry.allFilesToggleKey !== undefined && !validKey(entry.allFilesToggleKey)) || (label === '' && entry.allFilesToggleKey === undefined)) return emptyStore();
+    hosts[host] = { updatedAt: entry.updatedAt, ...(label ? { allFilesToggle: label } : {}), ...(entry.allFilesToggleKey ? { allFilesToggleKey: entry.allFilesToggleKey } : {}) };
   }
   return { schema: 'finance-link-mappings', version: 1, hosts };
 }
@@ -68,15 +73,23 @@ function readMappings(file) {
 /* The label taught for this host, or null. */
 function learnedToggle(file, host) {
   const entry = readMappings(file).hosts[host];
-  return entry ? entry.allFilesToggle : null;
+  return entry && entry.allFilesToggle ? entry.allFilesToggle : null;
 }
 
-/* Remember the label for the host. Returns false (and stores nothing) for a label the store would not accept back. The oldest host
-   is dropped when the store is full. */
-function learnToggle(file, host, label, iso) {
-  if (!HOST_RE.test(host) || !validLabel(label)) return false;
+/* What was taught for this host: { label, key } (either may be ''), or null. */
+function learnedToggleInfo(file, host) {
+  const entry = readMappings(file).hosts[host];
+  return entry ? { label: entry.allFilesToggle || '', key: entry.allFilesToggleKey || '' } : null;
+}
+
+/* Remember the label (and, for a control that has no label, its id or data-testid as `key`) for the host. Returns false, and stores
+   nothing, when neither is something the store would accept back. The oldest host is dropped when the store is full. */
+function learnToggle(file, host, label, iso, key = '') {
+  const labelOk = validLabel(label);
+  const keyOk = validKey(key);
+  if (!HOST_RE.test(host) || (!labelOk && !keyOk)) return false;
   const store = readMappings(file);
-  store.hosts[host] = { updatedAt: iso, allFilesToggle: label };
+  store.hosts[host] = { updatedAt: iso, ...(labelOk ? { allFilesToggle: label } : {}), ...(keyOk ? { allFilesToggleKey: key } : {}) };
   const names = Object.keys(store.hosts);
   if (names.length > STORE_LIMITS.hosts) {
     names.sort((a, b) => store.hosts[a].updatedAt.localeCompare(store.hosts[b].updatedAt));
@@ -87,4 +100,4 @@ function learnToggle(file, host, label, iso) {
   return true;
 }
 
-module.exports = { ensurePrivateDir, writeJsonAtomic, readMappings, learnedToggle, learnToggle, StoreError, STORE_LIMITS };
+module.exports = { ensurePrivateDir, writeJsonAtomic, readMappings, learnedToggle, learnedToggleInfo, learnToggle, StoreError, STORE_LIMITS };

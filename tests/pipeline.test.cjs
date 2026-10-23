@@ -710,7 +710,7 @@ function fakeLoader(root, options = {}) {
   const done = () => ({
     id: LINK_ID, state: 'done', message: 'Done.', page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle,
     files: Object.entries(files).map(([name, data]) => ({ name, size: Buffer.byteLength(data), sha256: sha(options.announce && options.announce[name] ? options.announce[name] : data), group: name === 'Atlas_Supplement.txt' ? 'Task files' : 'World files', label: name })),
-    sections: [], folder: options.folderReported || folder, error: null,
+    sections: [], folder: options.folderReported || folder, error: null, skipped: options.skipped || [],
   });
   return {
     calls,
@@ -767,6 +767,19 @@ test('a task link: the loader is started with the link, the page is followed, th
   assert.ok(everywhere.every(text => !text.includes('SECRET-TOKEN-123')));
   assert.ok(readJsonLines(w.argvLog).every(args => !JSON.stringify(args).includes('SECRET-TOKEN-123')), 'never on a command line');
   assert.ok(promptRuns(w).every(run => !run.prompt.includes('SECRET-TOKEN-123')));
+});
+
+test('files the loader could not download (the person went on without them) are listed in the import as skipped', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, { skipped: [{ label: 'Board_Pack.pdf', group: 'World files', reason: 'HTTP 403' }, { label: '', group: '', reason: '' }] });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const view = await service.whenDone(id);
+  assert.equal(view.import.fileCount, 3);
+  assert.deepEqual(view.import.skipped, [
+    { name: 'Board_Pack.pdf', why: 'not downloaded: HTTP 403' },
+    { name: '(no label)', why: 'not downloaded: no reason given' },
+  ]);
 });
 
 test('the loader waits for the person: sign-in, then the show-all-files switch; Continue goes to the loader; the message is the loader\'s', async t => {

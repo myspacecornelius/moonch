@@ -10,10 +10,12 @@
    needs-person; the loader handles both the same way (the person finishes them in the window). The score is a sum of weights with a
    threshold; there is no learned model. Exports: classifyPage, LOGIN_PATH_RE. */
 
-const LOGIN_PATH_RE = /\/(log-?in|sign-?in|sign_in|signin|logon|sso|saml2?|oauth2?|openid|authorize|authenticate|auth|idp|session\/new|account\/login|accounts\/login|users\/sign_in)(\/|$|\.|\?)/i;
+const LOGIN_PATH_RE = /\/(log-?in|sign-?in|sign_in|signin|logon|sso|saml2?|oauth2?|openid|authorize|authenticate|auth|idp|session\/new|sessions\/new|account\/login|accounts\/login|users\/sign_in|mfa|2fa|two-?factor|verify|challenge|otp|check-?email|magic|authenticator)(\/|$|\.|\?)/i;
 const LOGIN_HOST_RE = /^(login|signin|sign-in|accounts?|auth|sso|id|idp|identity|secure|sts|adfs)\./i;
 const LOGIN_WORDS_RE = /\b(sign[ -]?in|log[ -]?in|log on|sign on|authenticate|session (has )?expired|please (sign|log) in|welcome back)\b/i;
-const CHALLENGE_RE = /(verify (that )?you are (a )?human|are you a robot|checking your browser|just a moment|captcha|two[- ]?factor|2[- ]?step|verification code|one[- ]?time (code|password)|authenticator app|enter the (6|six)[- ]digit|security key|passkey|unusual traffic|access denied by|attention required)/i;
+const CHALLENGE_RE = /(verify (that )?you are (a )?human|are you a robot|checking your browser|just a moment|captcha|two[- ]?factor|2[- ]?step|\bmfa\b|\b2fa\b|verification code|one[- ]?time (code|password)|authenticator|enter the (6|six)[- ]digit|enter the code|approve (this )?sign-?in|check your e-?mail|magic link|security key|passkey|unusual traffic|access denied by|attention required)/i;
+/* Google (and some other identity providers) refuse a sign-in in a browser that announces it is automated. */
+const REFUSED_RE = /(may not be secure|couldn.?t sign you in|try (using )?a different browser)/i;
 const RETURN_PARAMS = ['next', 'redirect', 'redirect_to', 'redirect_uri', 'return', 'returnto', 'return_to', 'returnurl', 'continue', 'callback', 'service', 'relaystate', 'goto', 'url', 'target', 'destination', 'from'];
 
 function parse(text) { try { return new URL(text); } catch (e) { return null; } }
@@ -55,6 +57,7 @@ function classifyPage(input) {
   if (mainStatus === 403) signals.push('status-403');
   if ((input.api || []).some((a) => a.status === 401 || a.status === 419 || a.status === 440)) fire('api-401', 3);
 
+  if (final && final.hostname === 'accounts.google.com' && /\/signin\/rejected/.test(final.pathname)) signals.push('sign-in-refused');
   if (snap) {
     const heads = [snap.title || '', ...(snap.headings || []).slice(0, 3).map((h) => h.text)].join(' | ');
     const bodyHead = (snap.sections || []).map((s) => `${s.heading} ${s.text}`).join(' ').slice(0, 600);
@@ -64,8 +67,12 @@ function classifyPage(input) {
     if (snap.signals.hasOtpField) signals.push('otp-field');
     if (snap.signals.hasCaptcha) signals.push('captcha');
     if (!input.ignoreChallengeWords && CHALLENGE_RE.test(`${heads} ${bodyHead}`)) signals.push('challenge-words');
+    if (REFUSED_RE.test(`${heads} ${bodyHead}`)) signals.push('sign-in-refused');
   }
 
+  if (signals.includes('sign-in-refused')) {
+    return { state: 'needs-sign-in', score, signals, reason: 'The platform refused the sign-in in this automated window ("this browser may not be secure"). Sign in in the separate Chrome window instead.' };
+  }
   if (signals.includes('captcha') || signals.includes('otp-field') || signals.includes('challenge-words')) {
     return { state: 'needs-person', score, signals, reason: 'The page asks for something only you can do (a code, a CAPTCHA or a browser check). Finish it in the Chrome window.' };
   }
@@ -76,4 +83,4 @@ function classifyPage(input) {
   return { state: 'ready', score, signals, reason: 'The task page is open.' };
 }
 
-module.exports = { classifyPage, LOGIN_PATH_RE, LOGIN_HOST_RE, CHALLENGE_RE };
+module.exports = { classifyPage, LOGIN_PATH_RE, LOGIN_HOST_RE, CHALLENGE_RE, REFUSED_RE };
