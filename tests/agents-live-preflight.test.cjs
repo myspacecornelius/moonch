@@ -500,7 +500,7 @@ test('live-smoke S4: it is in `all` after S3, the usage names it, and it runs un
   return smoke.main(['--help'], line => lines.push(line)).then(code => {
     assert.equal(code, 0);
     assert.match(lines.join('\n'), /--stage S0\|S1\|S2\|S3\|S4\|all/);
-    assert.match(lines.join('\n'), /Exit code: 0 every check passed, 1 a check failed, 2 a stage was refused or the options were wrong, 3 nothing failed but S4's pilot declined the outside read/);
+    assert.match(lines.join('\n'), /Exit code: 0 every check passed, 1 a check failed, 2 a stage was refused or the options were wrong, 3 nothing failed but a pilot declined \(S3: it made no tool call; S4: no outside read\)/);
     assert.equal(smoke.EXIT_NOT_EXERCISED, 3);
     assert.equal(smoke.S4_MODEL, smoke.S2_MODEL);
     assert.equal(smoke.S4_BUDGET_USD, smoke.S2_BUDGET_USD);

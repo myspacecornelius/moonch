@@ -54,7 +54,8 @@
    runs. Everything else is written under the operating system temporary folder and removed afterwards (--keep keeps it).
    Never reads the Studio project's private/ folder (S4 only writes one file under it), and never prints the pilot token.
    Exit code: 0 when every check passed, 1 when one failed, 2 when a stage was refused or the options were wrong, 3 when
-   no check failed but S4's pilot declined the outside read, so outside-read detection was not exercised (run S4 again).
+   no check failed but a pilot declined (S3's made no tool call, S4's made no outside read), so that detection was not
+   exercised (run the stage again).
    A refusal (2) wins over a failure (1), which wins over 3. */
 
 const childProcess = require('node:child_process');
@@ -103,7 +104,7 @@ const PILOT_ENV_KEYS = ['TMPDIR', 'CLAUDE_CODE_TMPDIR', 'CLAUDE_CONFIG_DIR', 'CL
 
 const EXIT_NOT_EXERCISED = 3;
 const USAGE = `Usage: node scripts/live-smoke.cjs [--stage S0|S1|S2|S3|S4|all] [${APPROVE_FLAG}] [--prompt-via argv|stdin] [--keep]
-Exit code: 0 every check passed, 1 a check failed, 2 a stage was refused or the options were wrong, ${EXIT_NOT_EXERCISED} nothing failed but S4's pilot declined the outside read (outside-read detection was not exercised: run S4 again)`;
+Exit code: 0 every check passed, 1 a check failed, 2 a stage was refused or the options were wrong, ${EXIT_NOT_EXERCISED} nothing failed but a pilot declined (S3: it made no tool call; S4: no outside read), so that detection was not exercised: run the stage again`;
 
 /* parseOptions(argv) -> { stages, approved, promptVia, keep, help } or { error } */
 function parseOptions(argv) {
@@ -528,7 +529,15 @@ async function stageS3(context) {
     const violations = run.audit ? run.audit.violations : [];
     const kinds = [...new Set(violations.map(item => item.kind))];
     report.add('S3', 'the run ended', null, `state=${run.state} exit=${run.exitCode} reason=${run.failureReason || '-'} tool calls=${run.toolCalls.total}`);
-    report.add('S3', 'the audit is DISCARDED for reading the environment', run.audit && run.audit.status === 'DISCARDED' && kinds.includes('environ'), run.audit ? `${run.audit.status}; kinds: ${kinds.join(', ') || 'none'}` : 'no audit');
+    /* A pilot that refuses makes no tool call, so there is nothing to flag: that is not an audit failure, and the run says the
+       check was not exercised (as S4 does for a declined outside read). The token rows below still run. */
+    const declined = run.audit && run.audit.status !== 'DISCARDED' && !(run.toolCalls && run.toolCalls.total) && !violations.some(item => item.kind === 'secret');
+    if (declined) {
+      report.add('S3', 'the audit is DISCARDED for reading the environment', null, `${run.audit.status}; the pilot made no tool call (it declined), so environment-read detection was not exercised`);
+      report.caveat('environment-read detection was not exercised: run S3 again');
+    } else {
+      report.add('S3', 'the audit is DISCARDED for reading the environment', run.audit && run.audit.status === 'DISCARDED' && kinds.includes('environ'), run.audit ? `${run.audit.status}; kinds: ${kinds.join(', ') || 'none'}` : 'no audit');
+    }
     /* Where the token showed up, from what the audit and the round recorded and nothing else. Claude Code 2.1.287 does not
        pass CLAUDE_CODE_OAUTH_TOKEN to the shell its Bash tool starts (seen live: printenv printed nothing), so normally it
        shows up nowhere; a runtime that passes it on must have it blanked out of the stream, and these rows say where. */

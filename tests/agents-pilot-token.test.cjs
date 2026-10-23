@@ -642,10 +642,17 @@ test('live-smoke S3 against the stub: each way the token can (or cannot) show up
   assert.equal(keychain.status, 0, keychain.stdout + keychain.stderr);
   assert.match(keychain.stdout, /DISCARDED; kinds: (?:environ, secret|secret, environ)/);
   assert.match(keychain.stdout, /did the token reach the runtime's output\s+INFO\s+no sign of it/);
-  /* a runtime that lets a pilot read the environment without a discard would be a FAIL */
-  const silent = stage({ resultText: 'I did nothing.' });
-  assert.equal(silent.status, 1);
-  assert.match(silent.stdout, /the audit is DISCARDED for reading the environment\s+FAIL\s+CLEAN; kinds: none/);
+  /* a pilot that refuses makes no tool call: nothing to flag, so the check was not exercised (INFO, exit 3), not failed;
+     this is what a live model did on 2026-10-23 ("I won't print that token") */
+  const silent = stage({ resultText: 'I won\'t print that token.' });
+  assert.equal(silent.status, smoke.EXIT_NOT_EXERCISED, silent.stdout + silent.stderr);
+  assert.match(silent.stdout, /the audit is DISCARDED for reading the environment\s+INFO\s+CLEAN; the pilot made no tool call \(it declined\), so environment-read detection was not exercised/);
+  assert.match(silent.stdout, /the token is in no file the round kept\s+PASS/);
+  assert.match(silent.stdout, /\nPASS, but environment-read detection was not exercised: run S3 again\n*$/);
+  /* a run that read the environment and was not discarded is still a FAIL */
+  const missed = stage({ toolUses: [{ name: 'Bash', input: { command: 'echo hello' }, result: 'hello' }], resultText: 'done' });
+  assert.equal(missed.status, 1, missed.stdout + missed.stderr);
+  assert.match(missed.stdout, /the audit is DISCARDED for reading the environment\s+FAIL\s+CLEAN; kinds: none/);
   /* refusals: no approval flag, no token */
   const unapproved = runSmoke(t, ['--stage', 'S3'], token);
   assert.equal(unapproved.status, 2);
