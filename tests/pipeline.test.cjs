@@ -194,7 +194,7 @@ async function makeWorld(t, options = {}) {
   const agents = options.wrapAgents ? options.wrapAgents(realAgents) : realAgents;
   const stages = [];
   const pipeline = createPipelineService({
-    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs, minCapCheck: options.minCapCheck, linkCloseMs: options.linkCloseMs,
+    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs, minCapCheck: options.minCapCheck, linkCloseMs: options.linkCloseMs, confirmFiles: options.confirmFiles,
     onStage: (stage, info) => { stages.push(stage); if (options.onStage) options.onStage(stage, info, world); },
   });
   const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines'), priv: id => path.join(root, 'private', 'pipelines', id) };
@@ -712,7 +712,7 @@ function fakeLoader(root, options = {}) {
   const done = () => ({
     id: LINK_ID, state: 'done', message: 'Done.', page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle,
     files: Object.entries(files).map(([name, data]) => ({ name, size: Buffer.byteLength(data), sha256: sha(options.announce && options.announce[name] ? options.announce[name] : data), group: name === 'Atlas_Supplement.txt' ? 'Task files' : 'World files', label: name })),
-    sections: [], folder: options.folderReported || folder, error: null, skipped: options.skipped || [],
+    sections: [], folder: options.folderReported || folder, error: null, skipped: options.skipped || [], ...(options.notes ? { notes: options.notes } : {}),
   });
   return {
     calls,
@@ -725,7 +725,7 @@ function fakeLoader(root, options = {}) {
       cancelled = false;
       cursor = 0;
       for (const [name, data] of Object.entries(files)) put(path.join(folder, 'files'), name, data);
-      fs.writeFileSync(path.join(folder, 'page.json'), JSON.stringify(pageJson()));
+      fs.writeFileSync(path.join(folder, 'page.json'), JSON.stringify(options.pageNotes ? { ...pageJson(), notes: options.pageNotes } : pageJson()));
       return options.startDelay ? sleep(options.startDelay).then(() => LINK_ID) : LINK_ID;
     },
     get(id) {
@@ -761,7 +761,7 @@ const BUDGET_STOP = { capUsd: 0.4 }; /* ends the run at the classifier, after th
 test('a task link: the loader is started with the link, the page is followed, the files are checked and copied, the link is kept nowhere', async t => {
   const w = await makeWorld(t);
   const linked = fakeLoader(w.root);
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: linked, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: linked, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
   const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.stage, 'done', view.message);
@@ -788,7 +788,7 @@ test('a task link: the loader is started with the link, the page is followed, th
 test('files the loader could not download (the person went on without them) are listed in the import as skipped', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { skipped: [{ label: 'Board_Pack.pdf', group: 'World files', reason: 'HTTP 403' }, { label: '', group: '', reason: '' }] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
   const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.import.fileCount, 3);
@@ -808,7 +808,7 @@ test('the loader waits for the person: sign-in, then the show-all-files switch; 
     { state: 'downloading' },
     { state: 'done' },
   ] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
   const { id } = await service.start({ url: LINK, capUsd: 0.4, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const signIn = await waitFor(async () => { const v = await service.get(id); return v.waiting ? v : null; }, { label: 'the sign-in wait' });
   assert.equal(signIn.stage, 'import');
@@ -834,7 +834,7 @@ test('the loader waits for the person: sign-in, then the show-all-files switch; 
 test('a load that fails, a start that is refused, a file that does not match its hash and a folder that is not the loader\'s all end the import as failed, without the link', async t => {
   const w = await makeWorld(t);
   const run = async (loader, expected) => {
-    const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
+    const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
     const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
     const view = await service.whenDone(id);
     assert.equal(view.stage, 'failed', view.message);
@@ -854,7 +854,7 @@ test('a load that fails, a start that is refused, a file that does not match its
 test('a loader that never finishes is cancelled after the import limit', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, importTimeoutMs: 80, minCapCheck: false });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, importTimeoutMs: 80, minCapCheck: false });
   const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.stage, 'failed');
@@ -865,7 +865,7 @@ test('a loader that never finishes is cancelled after the import limit', async t
 test('Stop while the loader waits for the person cancels the load', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { script: [{ state: 'needs-sign-in', message: 'Sign in.', wait: true }] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
   const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   await waitFor(async () => (await service.get(id)).waiting, { label: 'the wait' });
   const view = await service.stop(id);
@@ -2029,7 +2029,7 @@ test('Stop pressed as the designer is about to start, and as the pilots are abou
 test('Stop pressed while the loader is still starting cancels the load as soon as the loader has an id', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { startDelay: 60 });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
   const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.stop(id);
   assert.equal(view.stage, 'stopped');
@@ -2977,7 +2977,7 @@ test('a fairness review that lists unfair items as plain strings rejects the des
 
 /* A service of its own over the world's agents, shut down at the end of the test so that a failed assertion cannot leave a load polling. */
 const loaderService = (t, w, loader, extra = {}) => {
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, ...extra });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, ...extra });
   t.after(() => service.shutdown().catch(() => {}));
   return service;
 };
@@ -3400,4 +3400,170 @@ test('the scan of a file in chunks finds a short passage whichever way it falls 
   /* the multi-byte character that is split by the boundary is not lost */
   fs.writeFileSync(file, Buffer.concat([Buffer.from('q'.repeat(CHUNK - 1)), Buffer.from('\u00e9 '), Buffer.from(GOLDEN)]));
   assert.equal((await scanFile(file, windows, () => false)).leak, true);
+});
+
+/* ====================================================================== the owner checks the files a link import fetched */
+
+const gateService = (t, w, loader, extra = {}) => loaderService(t, w, loader, { confirmFiles: true, ...extra });
+const CONFIRM_TEXT = 'Check the file list against the task page. Press Continue if every file is there, or Stop and use Import from folder.';
+
+test('after a link import the pipeline waits for the owner to check the files: the stage stays import, nothing is classified, and the view has what the page needs', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, {
+    skipped: [{ label: 'Board_Pack.pdf', group: 'World files', reason: 'HTTP 403' }],
+    notes: ['Load more stopped at its time limit; some rows may be missing', 'A request of the page had not answered when a step ended'],
+  });
+  const stages = [];
+  const service = gateService(t, w, loader, { onStage: stage => stages.push(stage) });
+  const { id } = await startLinked(service);
+  const wait = await waitFor(async () => { const v = await service.get(id); return v.waiting && v.waiting.kind === 'confirm-files' ? v : null; }, { label: 'the confirm-files wait' });
+  assert.equal(wait.stage, 'import');
+  assert.deepEqual(Object.keys(wait.waiting).sort(), ['kind', 'message', 'since']);
+  assert.equal(wait.waiting.message, CONFIRM_TEXT);
+  assert.equal(wait.message, CONFIRM_TEXT);
+  assert.equal(typeof wait.waiting.since, 'string');
+  /* the count, names and groups, the skipped files with reasons, the notes, and the toggle */
+  assert.equal(wait.import.fileCount, 3);
+  assert.deepEqual(wait.import.files.map(file => [file.name, file.group]), [['Facility_Terms.txt', 'World files'], ['Cash_Facts.csv', 'World files'], ['Atlas_Supplement.txt', 'Task files']]);
+  assert.deepEqual(wait.import.groups, { 'World files': 2, 'Task files': 1 });
+  assert.deepEqual(wait.import.skipped, [{ name: 'Board_Pack.pdf', why: 'not downloaded: HTTP 403' }]);
+  assert.deepEqual(wait.import.notes, ['Load more stopped at its time limit; some rows may be missing', 'A request of the page had not answered when a step ended']);
+  assert.equal(wait.import.toggle.flipped, true);
+  /* it really waits: no model, no classification, no loader call, and the import time limit is not what ends it */
+  await sleep(300);
+  const still = await service.get(id);
+  assert.equal(still.stage, 'import');
+  assert.equal(still.waiting.kind, 'confirm-files');
+  assert.equal(still.classification, null);
+  assert.equal(promptRuns(w).length, 0, 'no model run before the owner has checked');
+  assert.ok(stages.length > 0 && stages.every(stage => stage === 'import'), String(stages));
+  assert.equal(service.busy(), true);
+  assert.deepEqual(loader.calls.continue, []);
+  /* Continue ends the wait without calling the loader, and the run goes on to the classifier */
+  const resumed = await service.continue(id);
+  assert.equal(resumed.waiting, null);
+  assert.deepEqual(loader.calls.continue, [], 'the loader is not asked');
+  assert.deepEqual(loader.calls.cancel, []);
+  const done = await service.whenDone(id);
+  assert.equal(done.stage, 'done', done.message);
+  assert.deepEqual([...new Set(stages)].slice(0, 3), ['import', 'classify', 'design']);
+  assert.equal(done.import.fileCount, 3);
+  assert.equal(promptRuns(w).length > 0, true);
+  /* nothing waits any more */
+  await assert.rejects(service.continue(id), error => error instanceof AgentError && error.status === 409);
+});
+
+test('the confirm-files wait is not part of the import time limit, and a second Continue is a 409', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root);
+  const service = gateService(t, w, loader, { importTimeoutMs: 80 });
+  const { id } = await startLinked(service);
+  await waitFor(async () => { const v = await service.get(id); return v.waiting && v.waiting.kind === 'confirm-files' ? v : null; }, { label: 'the wait' });
+  await sleep(400);
+  const view = await service.get(id);
+  assert.equal(view.stage, 'import', 'five times the import limit later it still waits');
+  assert.equal(view.waiting.kind, 'confirm-files');
+  await service.continue(id);
+  await assert.rejects(service.continue(id), error => error.status === 409 && /Nothing is waiting for you/.test(error.message));
+  const done = await service.whenDone(id);
+  assert.equal(done.stage, 'done', done.message);
+});
+
+test('Stop at the confirm-files wait ends the pipeline as stopped, with no model run', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root);
+  const service = gateService(t, w, loader);
+  const { id } = await startLinked(service);
+  await waitFor(async () => { const v = await service.get(id); return v.waiting && v.waiting.kind === 'confirm-files' ? v : null; }, { label: 'the wait' });
+  const started = Date.now();
+  const view = await service.stop(id);
+  assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+  assert.equal(view.stage, 'stopped');
+  assert.equal(view.waiting, null);
+  assert.equal(view.result.verdict, 'stopped');
+  assert.equal(promptRuns(w).length, 0);
+  assert.equal(service.busy(), false);
+  assert.deepEqual(loader.calls.continue, []);
+  await assert.rejects(service.continue(id), error => error.status === 409);
+  /* Stop pressed in the instant before the wait begins is just as good: the run does not wait for anyone */
+  const second = fakeLoader(w.root);
+  const service2 = gateService(t, w, second, { onStage: (stage, info) => { if (stage === 'import') service2.stop(info.id).catch(() => {}); } });
+  const early = await startLinked(service2);
+  const ended = await service2.whenDone(early.id);
+  assert.equal(ended.stage, 'stopped');
+  assert.equal(promptRuns(w).length, 0);
+});
+
+test('a folder import has no wait: nobody has to check files that the owner chose by hand', async t => {
+  const seen = [];
+  const w = await makeWorld(t, { onStage: (stage, info, world) => { seen.push(world.pipeline._entry(info.id).state.waiting); } });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.ok(seen.length > 0 && seen.every(waiting => waiting === null), 'never waiting');
+  assert.deepEqual(view.import.notes, []);
+  assert.equal(view.source.kind, 'folder');
+  /* the option is on by default: a service made without it waits for a link */
+  const probe = new (require('../backend/pipeline/service.cjs').PipelineService)({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot });
+  assert.equal(probe.confirmFiles, true);
+  assert.equal(new (require('../backend/pipeline/service.cjs').PipelineService)({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, confirmFiles: false }).confirmFiles, false);
+});
+
+test('without the wait (confirmFiles false) a link import goes straight to the classifier', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root);
+  const waits = [];
+  const service = loaderService(t, w, loader, { onStage: (stage, info) => waits.push(service._entry(info.id).state.waiting) });
+  const { id } = await startLinked(service);
+  const done = await service.whenDone(id);
+  assert.equal(done.stage, 'done', done.message);
+  assert.ok(waits.every(waiting => waiting === null));
+});
+
+test('the loader\'s notes are read from its done state and from page.json, scrubbed of addresses, kept once each, and cut to 50 lines of 500 characters', async t => {
+  const { cleanNotes } = require('../backend/pipeline/intake.cjs');
+  assert.deepEqual(cleanNotes(['a', 'b'], ['b', 'c']), ['a', 'b', 'c']);
+  assert.deepEqual(cleanNotes(undefined, null, 'text', [5, null, '', '   ', { x: 1 }]), []);
+  assert.deepEqual(cleanNotes(['See https://tasks.example/files?token=SECRET-TOKEN-123 for more   rows\nhere']), ['See <link> for more rows here']);
+  assert.equal(cleanNotes(['x'.repeat(900)])[0].length, 500);
+  assert.equal(cleanNotes(Array.from({ length: 80 }, (_, index) => `note ${index}`)).length, 50);
+  assert.equal(cleanNotes(Array.from({ length: 30 }, (_, index) => `first ${index}`), Array.from({ length: 30 }, (_, index) => `second ${index}`)).length, 50);
+
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, {
+    notes: ['Pagination was not followed past page 3 (https://tasks.example/files?page=4&token=SECRET-TOKEN-123)', 'Two frames could not be read'],
+    pageNotes: ['Two frames could not be read', 'A file was listed twice and kept once', 7],
+  });
+  const service = gateService(t, w, loader);
+  const { id } = await startLinked(service);
+  const wait = await waitFor(async () => { const v = await service.get(id); return v.waiting && v.waiting.kind === 'confirm-files' ? v : null; }, { label: 'the wait' });
+  assert.deepEqual(wait.import.notes, ['Pagination was not followed past page 3 (<link>)', 'Two frames could not be read', 'A file was listed twice and kept once']);
+  assert.ok(!JSON.stringify(wait).includes('SECRET-TOKEN-123'));
+  assert.ok(!fs.readFileSync(path.join(w.priv(id), 'state.json'), 'utf8').includes('SECRET-TOKEN-123'), 'and nor is the stored state');
+  await service.stop(id);
+  /* a folder with a page.json of the loader's shape shows its notes as well */
+  const folder = await makeWorld(t, { page: { ...pageJson(), notes: ['The page had a second tab that was not opened'] } });
+  const { view } = await folder.run();
+  assert.deepEqual(view.import.notes, ['The page had a second tab that was not opened']);
+  assert.equal(view.stage, 'done', view.message);
+});
+
+test('POST /api/pipeline/:id/continue ends the confirm-files wait', async t => {
+  const holder = {};
+  const lazy = {};
+  for (const key of ['start', 'get', 'continue', 'cancel', 'waitFor', 'shutdown']) lazy[key] = (...args) => holder.loader[key](...args);
+  const w = await makeWorld(t, { loader: lazy, server: true, minCapCheck: false });
+  holder.loader = fakeLoader(w.root);
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  assert.equal(started.status, 200, started.text);
+  const id = started.json.id;
+  const wait = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.waiting ? r : null; }, { label: 'the wait' });
+  assert.equal(wait.json.waiting.kind, 'confirm-files');
+  assert.equal(wait.json.import.files.length, 3);
+  const response = await w.post(`/api/pipeline/${id}/continue`);
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.waiting, null);
+  assert.deepEqual(holder.loader.calls.continue, []);
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.stage, 'done', finished.json.message);
+  assert.equal((w.logs || []).length, 0, (w.logs || []).join('\n'));
 });

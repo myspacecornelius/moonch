@@ -61,6 +61,7 @@ const round6 = value => Math.round(value * 1e6) / 1e6;
 const money = value => `USD ${value.toFixed(2)}`;
 const isTerminal = stage => P.TERMINAL.includes(stage);
 const LOADER_MESSAGE_CHARS = 1000;
+const CONFIRM_FILES_MESSAGE = 'Check the file list against the task page. Press Continue if every file is there, or Stop and use Import from folder.';
 const HEADROOM_TEXT = `${Math.round((P.HEADROOM - 1) * 100)}% headroom`;
 
 /* The promise, or undefined after `ms` (the timer is cleared, so it never keeps the process alive). */
@@ -113,6 +114,9 @@ class PipelineService {
     this.linkCloseMs = Number.isFinite(options.linkCloseMs) && options.linkCloseMs >= 0 ? options.linkCloseMs : 10000;
     /* start() refuses a total cap that cannot pay for one full attempt. The tests of the budget stop turn that off to use tiny caps. */
     this.minCapCheck = options.minCapCheck !== false;
+    /* After a link import the pipeline waits for the owner to check the file list against the task page (the loader cannot be perfect on
+       an unknown page). The tests that are not about the gate turn it off. */
+    this.confirmFiles = options.confirmFiles !== false;
     this.onStage = typeof options.onStage === 'function' ? options.onStage : null; /* an observer for tests; errors are ignored */
     this.options = options;
     this._rt = null;
@@ -401,7 +405,17 @@ class PipelineService {
   /* The owner pressed Continue after signing in or turning on the option that shows all files. */
   async continue(id) {
     const { state: p, ctl } = this._entry(id);
-    if (isTerminal(p.stage) || !p.waiting || !ctl || !ctl.linkId) throw new AgentError(409, 'Nothing is waiting for you');
+    if (isTerminal(p.stage) || !p.waiting || !ctl) throw new AgentError(409, 'Nothing is waiting for you');
+    /* The owner has checked the files: this wait is the pipeline's own, the loader is not asked. */
+    if (p.waiting.kind === 'confirm-files') {
+      const resume = ctl.confirm;
+      ctl.confirm = null;
+      p.waiting = null;
+      this._save(p);
+      if (resume) resume();
+      return this._view(p);
+    }
+    if (!ctl.linkId) throw new AgentError(409, 'Nothing is waiting for you');
     if (!this.links || typeof this.links.continue !== 'function') throw new AgentError(409, 'The link loader cannot continue');
     try {
       await this.links.continue(ctl.linkId);
@@ -439,6 +453,7 @@ class PipelineService {
 
   async _cancelCurrent(ctl) {
     const tasks = [];
+    if (ctl.confirm) { const resume = ctl.confirm; ctl.confirm = null; resume(); } /* the wait for the owner ends; the run sees the stop */
     tasks.push(this._cancelLink(ctl));
     if (ctl.runner) { try { ctl.runner.cancel(); } catch { /* already over */ } }
     if (ctl.graderRunning) { for (const runner of this.rt.runners) { try { runner.cancel(); } catch { /* already over */ } } }
@@ -677,10 +692,26 @@ class PipelineService {
       toggle: intake.toggle,
       page: intake.page,
       skipped: intake.skipped,
+      notes: Array.isArray(intake.notes) ? intake.notes : [],
       files: intake.files,
     };
     p.waiting = null;
     this._save(p);
+    if (p.source.kind === 'url' && this.confirmFiles) await this._confirmFiles(p, ctl);
+  }
+
+  /* The owner checks what the loader fetched before any model is paid for. The stage stays import; continue() ends the wait without
+     asking the loader, stop() ends the pipeline. The wait is not part of the import time limit (that limit is the loader's). */
+  async _confirmFiles(p, ctl) {
+    this._checkStop(ctl);
+    const waited = new Promise(resolve => { ctl.confirm = resolve; });
+    p.waiting = { kind: 'confirm-files', message: CONFIRM_FILES_MESSAGE, since: this.now() };
+    this._note(p, CONFIRM_FILES_MESSAGE);
+    await waited;
+    ctl.confirm = null;
+    this._checkStop(ctl);
+    p.waiting = null;
+    this._note(p, 'Files confirmed');
   }
 
   _scrubLink(text, url, max = 300) {

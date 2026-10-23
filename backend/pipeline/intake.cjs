@@ -13,6 +13,28 @@ const { isObject, capText, oneLine, readJson, within, nameProblem, walkFiles, co
 
 class IntakeError extends Error {}
 
+const NOTES_MAX = 50;
+const NOTE_CHARS = 500;
+
+/* The loader's notes (what it could not follow or read: a cap it hit, pagination, requests still pending, frames it could not read, ...)
+   as a list of at most 50 lines of at most 500 characters. Any address in them is replaced by <link>: they are shown to the owner and
+   kept in the state. lists: any number of lists (the loader's done state, page.json); a note that is in two of them is kept once. */
+function cleanNotes(...lists) {
+  const out = [];
+  const seen = new Set();
+  for (const list of lists) {
+    for (const item of Array.isArray(list) ? list : []) {
+      if (typeof item !== 'string') continue;
+      const note = oneLine(item.replace(/https?:\/\/[^\s"'<>]+/gi, address => `<link>${(address.match(/[).,;:\]]+$/) || [''])[0]}`).replace(/\s+/g, ' ').trim(), NOTE_CHARS);
+      if (!note || seen.has(note)) continue;
+      seen.add(note);
+      out.push(note);
+      if (out.length >= NOTES_MAX) return out;
+    }
+  }
+  return out;
+}
+
 /* A page.json (the loader's: { sections: [{ heading, text }], fileList: [{ name, group, label }], page: { origin, path } }), cut to the caps. */
 function parsePage(value) {
   if (!isObject(value)) throw new IntakeError('page.json is not an object');
@@ -29,7 +51,7 @@ function parsePage(value) {
   const page = isObject(value.page) && typeof value.page.origin === 'string'
     ? { origin: oneLine(value.page.origin, 300), path: oneLine(value.page.path, 600) }
     : null;
-  return { sections, fileList, page };
+  return { sections, fileList, page, notes: cleanNotes(value.notes) };
 }
 
 function readPageFile(file, required) {
@@ -119,7 +141,7 @@ async function intakeFromLoader({ state, root, original, shouldStop }) {
     filesAfter: Number.isInteger(state.toggle.filesAfter) ? state.toggle.filesAfter : null,
     learned: state.toggle.learned === true,
   } : null;
-  return { files, sections: page.sections, page: isObject(state.page) && typeof state.page.origin === 'string' ? { origin: oneLine(state.page.origin, 300), path: oneLine(state.page.path, 600) } : page.page, toggle, skipped };
+  return { files, sections: page.sections, page: isObject(state.page) && typeof state.page.origin === 'string' ? { origin: oneLine(state.page.origin, 300), path: oneLine(state.page.path, 600) } : page.page, toggle, skipped, notes: cleanNotes(state.notes, page.notes) };
 }
 
 /* A folder of files (and optionally a page.json) -> original/. realDir comes from resolveSourceDir: absolute, real, outside the project. */
@@ -134,7 +156,7 @@ async function intakeFromFolder({ realDir, original, shouldStop }) {
   const described = new Map((page ? page.fileList : []).map(item => [item.name, item]));
   const entries = walked.files.map(file => ({ name: file.rel, abs: file.abs, bytes: file.bytes, group: (described.get(file.rel) || {}).group || '', label: (described.get(file.rel) || {}).label || '' }));
   const files = await copyAll(entries, original, shouldStop);
-  return { files, sections: page ? page.sections : [], page: page ? page.page : null, toggle: null, skipped: walked.skipped.map(item => ({ name: item.rel, why: item.why })) };
+  return { files, sections: page ? page.sections : [], page: page ? page.page : null, toggle: null, skipped: walked.skipped.map(item => ({ name: item.rel, why: item.why })), notes: page ? page.notes : [] };
 }
 
-module.exports = { IntakeError, parsePage, intakeFromLoader, intakeFromFolder };
+module.exports = { IntakeError, parsePage, cleanNotes, intakeFromLoader, intakeFromFolder };

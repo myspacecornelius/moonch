@@ -2,7 +2,7 @@
 /* The pipeline service (docs: README "Pipeline"). backend/server.cjs calls these methods and maps AgentError.status to the HTTP status.
    Every method is async, takes and returns plain JSON, and throws AgentError on a refusal.
 
-     createPipelineService({ root, agents, links, claudeBin, spawnFn, clock, tmpRoot, env, pollMs, importTimeoutMs, linkCloseMs, minCapCheck, onStage })
+     createPipelineService({ root, agents, links, claudeBin, spawnFn, clock, tmpRoot, env, pollMs, importTimeoutMs, linkCloseMs, minCapCheck, confirmFiles, onStage })
        root     the Studio project folder (state lives in <root>/private/pipelines)
        agents   the agent service (backend/agents/index.cjs): rounds and the simulated grader; its runtime() gives the pre-flight,
                 the environment and the runtime path for the classifier and the designer
@@ -13,12 +13,17 @@
        pollMs   how often the loader is asked for its state while a page loads (default 500)
        linkCloseMs   how long, after a cancel, the end of a pipeline waits for the loader to close its browser (default 10000)
        minCapCheck   false: start() accepts a total cap below the cost of one full attempt (for the tests of the budget stop; default true)
+       confirmFiles  false: a link import goes straight on to the classifier. Default true: it waits first (stage import, waiting kind
+                     'confirm-files') until the owner has checked the file list against the task page and pressed Continue (continue(id)
+                     ends this wait itself; the loader is not asked). A folder import never waits.
        onStage  an observer called with (stage, { id, attempt }) at every stage change; for tests, errors ignored
 
      start(body) -> { id }          list() -> { pipelines, running, config }       get(id) -> view      busy() -> true while one runs
        body: { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, designCapUsd?, graderModel?, label?, acceptMissing? }
        capUsd must pay for one full attempt (design, the 2-pilot screen and the 5-pilot test): list().config.minCap holds the parts
        { fixedUsd, perPilotUsd, pilots, headroom } of the least cap, ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd))
+     view.import: { fileCount, totalBytes, groups, sections, toggle, page, skipped, notes, files, facts }; notes are the loader's notes with
+       any address scrubbed (at most 50 of 500 characters).
      continue(id) -> view           stop(id) -> view                               export(id) -> { name, size, sha256, files, zipBase64 }
      whenDone(id) -> view (waits)   shutdown() (stops everything)                  */
 
