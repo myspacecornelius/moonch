@@ -15,8 +15,10 @@
   const OFFLINE_MESSAGE='The Pipeline needs the companion: run npm start.';
   const POLL_MS=2000;
   /* Display copies of backend/pipeline/constants.cjs (tests/pipeline-page.test.cjs checks that the two agree). The companion enforces its own. */
-  const RULES=Object.freeze({passBar:0.45,screenPilots:2,testPilots:5,testNeed:4,maxRedesigns:3,defaultCapUsd:30,maxCapUsd:200});
+  const RULES=Object.freeze({passBar:0.45,screenPilots:2,testPilots:5,testNeed:4,maxRedesigns:3,defaultCapUsd:50,maxCapUsd:200});
   const CAP_MIN_USD=1;
+  /* The total cap the form starts with: the companion's (GET /api/pipeline config.defaultCapUsd) once it has reported one, else RULES.defaultCapUsd. */
+  let defaultCap=RULES.defaultCapUsd;
   /* The golden answer, graded against the revised guideline, must score at least this (the companion's calibration rule). */
   const CALIBRATION_MIN=0.9;
   /* The spending cap of one pilot (the same range the Agents page and the companion use). */
@@ -87,7 +89,8 @@
                  rejection: { kind ('design' | 'checks'), reasons } | null, screen, test }] where
                  screen, test: { passed, replacementRound, replacementSkipped, pilots: [{ n, replacement, state, valid, score (the average when regraded),
                  regrade: { first, second, average } | null, outputs: { count, readable }, audit: { status } }] }
-       GET /api/pipeline: config: { classifyCapUsd, designCapUsd, repairCapUsd, fairnessCapUsd, graderCapUsd, goldenMin, regradeBand, headroom }
+       GET /api/pipeline: config: { defaultCapUsd, classifyCapUsd, designCapUsd, repairCapUsd, fairnessCapUsd, graderCapUsd, goldenMin, regradeBand, headroom,
+                 minCap: { fixedUsd, perPilotUsd, pilots, headroom } }
      Any private value may be { withheld: true } instead of its content (redact.cjs): trap titles and files, edited file names, reasons, diffs, calibration, fairness,
      rubric changes, the designer's notes. The page also copes with a marker in any other field named above. The view model keeps the marker (WITHHELD) wherever a
      text may be withheld; plain() turns it into the page's words. */
@@ -155,7 +158,7 @@
       createdAt:text(raw.createdAt),capUsd:num(raw.capUsd),spentUsd:num(raw.spentUsd)||0,pilotCapUsd:num(raw.pilotCapUsd),
       model:text(raw.model),effort:text(raw.effort),redesigns:num(raw.redesigns)||0,summary:text(raw.summary),
       error:isObj(raw.error)?text(raw.error.message):text(raw.error),waiting,acceptMissing:isObj(raw.config)&&raw.config.acceptMissing===true,
-      hasImport:isObj(raw.import),hasDesign:isObj(raw.design),
+      hasImport:isObj(raw.import),hasClassification:isObj(raw.classification),hasDesign:isObj(raw.design),
       source:{folder,origin:folder?'':text(src.origin)||text(page.origin),path:folder?'':text(src.origin)?text(src.path):text(page.path),name:text(src.name),pageOrigin:folder?text(page.origin):'',pagePath:folder?text(page.path):''},
       files:{total:num(imp.fileCount)??(Array.isArray(imp.files)?imp.files.length:null),world:count('world','worldFiles'),task:count('task','taskFiles'),withheld:count('withheld','withheld'),other:count('other','other')},
       skipped:arr(imp.skipped).map(x=>isObj(x)?{name:text(x.name),why:text(x.why)}:{name:text(x),why:''}).filter(x=>x.name),
@@ -175,7 +178,11 @@
      headroom a reservation includes. */
   function adaptConfig(c){
     const o=isObj(c)?c:{},band=Array.isArray(o.regradeBand)&&o.regradeBand.length===2&&o.regradeBand.every(x=>num(x)!==null)?o.regradeBand.map(num):null;
-    return {classifyCapUsd:num(o.classifyCapUsd),designCapUsd:num(o.designCapUsd),repairCapUsd:num(o.repairCapUsd),fairnessCapUsd:num(o.fairnessCapUsd),graderCapUsd:num(o.graderCapUsd),goldenMin:num(o.goldenMin),regradeBand:band,headroom:num(o.headroom)};
+    const m=isObj(o.minCap)?o.minCap:{},parts=[num(m.fixedUsd),num(m.perPilotUsd),num(m.pilots),num(m.headroom)];
+    /* the minimum cap of one full attempt: every part a number, none negative, at least one pilot, a headroom of at least 1 */
+    const minCap=parts.every(x=>x!==null&&x>=0)&&parts[2]>=1&&parts[3]>=1?{fixedUsd:parts[0],perPilotUsd:parts[1],pilots:parts[2],headroom:parts[3]}:null;
+    const dflt=num(o.defaultCapUsd),defaultCapUsd=dflt!==null&&money(String(dflt),CAP_MIN_USD,RULES.maxCapUsd)!==null?dflt:null;
+    return {defaultCapUsd,classifyCapUsd:num(o.classifyCapUsd),designCapUsd:num(o.designCapUsd),repairCapUsd:num(o.repairCapUsd),fairnessCapUsd:num(o.fairnessCapUsd),graderCapUsd:num(o.graderCapUsd),goldenMin:num(o.goldenMin),regradeBand:band,headroom:num(o.headroom),minCap};
   }
   const adaptList=d=>(Array.isArray(d)?d:arr(isObj(d)?d.pipelines:null)).map(x=>adapt(x)).filter(v=>v&&ID_RE.test(v.id));
 
@@ -184,7 +191,7 @@
     phase:'idle',          // idle | checking | ready | offline
     offlineNote:'',
     status:null,           // {models, efforts} from /api/status
-    rules:adaptConfig(null),  // the caps, the golden minimum, the regrade band and the headroom GET /api/pipeline reports
+    rules:adaptConfig(null),  // the default cap, the caps, the golden minimum, the regrade band, the headroom and the minimum cap GET /api/pipeline reports
     form:blankForm(),
     formOpen:true,
     list:[],               // view models of every pipeline the companion holds, newest first
@@ -194,7 +201,7 @@
     timer:null,mounted:false,
     ctx:{download:null}
   };
-  function blankForm(){return {acceptMissing:false,source:'url',url:'',dir:'',cap:String(RULES.defaultCapUsd),pilotCap:PILOT_CAP.defaultUsd.toFixed(2),model:'',effort:'',acks:{}};}
+  function blankForm(){return {acceptMissing:false,capTouched:false,source:'url',url:'',dir:'',cap:String(defaultCap),pilotCap:PILOT_CAP.defaultUsd.toFixed(2),model:'',effort:'',acks:{}};}
 
   /* ---------- Small helpers ---------- */
   const isLocal=()=>{try{return location.protocol==='http:'&&location.hostname==='127.0.0.1';}catch{return false;}};
@@ -258,17 +265,32 @@
     stopped:[-1,'Stopped: you pressed Stop.'],
     budget:[-1,'Stopped: the next step would pass the total cap.']
   };
-  /* Where a run that ended early stopped: the last step it has results for. */
+  /* Where a run that ended early (a failure, Stop, the cap) ended, from what the view holds. The companion records the last attempt only as it goes:
+     - an attempt is pushed when the designer starts; its screen is set when the screen round starts, its test when the test round starts (before any pilot);
+     - the design is set (design.attempt) when an attempt passes its checks, so a design that was accepted and has no screen yet is waiting for the screen;
+     - the classification is stored before the checks that can still fail the classify step, and the import only when it is complete;
+     - redesigns counts a redesign from the moment its feedback is prepared, one ahead of the attempts until the next attempt starts. */
   function reachedStep(v){
-    if(v.test&&v.test.pilots.length)return 4;
-    if((v.screen&&v.screen.pilots.length)||v.attempts.length)return 3;
-    if(v.design.traps.length||v.design.attempt||v.design.newFiles.length)return 2;
-    return v.cls.any?1:0;
+    const n=v.attempts.length,last=n?v.attempts[n-1]:null;
+    if(last){
+      if(v.redesigns>=n)return 2;                                  // between attempts: the feedback for the next design
+      if(v.test)return 4;                                          // the test round started (even if no pilot is in yet)
+      if(v.screen)return v.screen.passed===true?4:3;               // a passed screen has the test next; a screen that is open or failed is the screen
+      return v.design.attempt!==null&&v.design.attempt===last.n?3:2; // an accepted design has the screen next; else the design itself
+    }
+    if(v.design.traps.length||v.design.attempt!==null||v.design.newFiles.length)return 2;
+    if(v.hasClassification||v.cls.any)return v.stage==='failed'?1:2; // a failed run with a classification failed in a classify check; Stop and the cap come after it
+    return v.hasImport?1:0;                                          // an import without a classification: the classify step was reached
   }
   function stepOf(v){const s=STAGES[v.stage];return s&&s[0]>=0?s[0]:reachedStep(v);}
   function stageLine(v){
     if(!v)return '';
-    if(v.waiting&&!v.ended)return 'Waiting for you: '+(v.waiting.message||'the task page needs your help in the Chrome window.');
+    if(v.waiting&&!v.ended){
+      /* the bar stays in view and is read out: a short message is carried whole, a long one is shown whole in the card below and the bar points to it */
+      const m=v.waiting.message;
+      return 'Waiting for you: '+(!m?'the task page needs your help in the Chrome window.':m.length<=STAGE_MESSAGE_MAX?m:waitTitle(v.waiting.kind)+'. The whole message is in the card below.');
+    }
+    if(v.stage==='budget')return 'Stopped at the cap, in the '+STEPS[stepOf(v)][1]+' step: the next call would pass the total cap, so it was not started.';
     const known=STAGES[v.stage],line=known?known[1]:'Working ('+v.stage+').';
     return line+(v.redesigns>0&&!v.ended?' Redesign '+v.redesigns+' of '+RULES.maxRedesigns+'.':'');
   }
@@ -284,6 +306,12 @@
   }
   const STEP_CAPTION={done:'Done',active:'In progress',waiting:'Waiting for you',stopped:'Stopped here',todo:'Not reached yet'};
   const STEP_MARK={done:'✓',active:'●',waiting:'●',stopped:'!'};
+  /* The caption under a step: the redesign count while the design step is open, and for the step a run ended in, why (the cap, or Stop or a failure). */
+  function stepCaption(v,s){
+    if(s.s==='stopped')return v.stage==='budget'?'Stopped at the cap':'Stopped here';
+    if(s.id==='design'&&v.redesigns>0&&s.s!=='todo')return s.s==='done'?'Done':'Redesign '+v.redesigns+' of '+RULES.maxRedesigns;
+    return STEP_CAPTION[s.s];
+  }
   /* The state of one stage result is the companion's verdict (res.passed) and nothing else: until it has decided, the stage is in progress, whatever the scores so
      far say (a pilot without a usable score gets a replacement round before the stage is decided). The count below the bar is worked out from the scores. */
   const endedWithoutScore=p=>p.audit==='DISCARDED'||['failed','cancelled'].includes(p.state);
@@ -293,8 +321,8 @@
     return {status:res.passed===true?'passed':res.passed===false?'failed':'running',below,need,of};
   }
   const scoresText=res=>res&&res.pilots.length?res.pilots.map(p=>p.score===null?'no score':p.score.toFixed(2)).join(', '):'';
-  const STATUS_LABEL={passed:'passed',failed:'failed',running:'in progress'};
-  const STATUS_KIND={passed:'green',failed:'red',running:'violet'};
+  const STATUS_LABEL={passed:'passed',failed:'failed',running:'in progress',stopped:'stopped'};
+  const STATUS_KIND={passed:'green',failed:'red',running:'violet',stopped:'amber'};
 
   /* ---------- Painting ---------- */
   /* Replace an element's markup only when it changed, and put keyboard focus back on the same control afterwards. */
@@ -346,6 +374,19 @@
     const head=r.headroom!==null&&r.headroom>1?' Before each step the run reserves its worst case with '+Math.round((r.headroom-1)*100)+'% headroom on top, and stops when that would pass the total cap.':'';
     return 'Each pilot is capped at '+usd(pilot)+', so a '+RULES.screenPilots+'-pilot screen can cost up to '+usd(pilot*RULES.screenPilots)+' and a '+RULES.testPilots+'-pilot test up to '+usd(pilot*RULES.testPilots)+(others.length?'. The other calls are capped too: '+others.join(', ')+'.':', before the classifier, designer and grader runs.')+' The total cap of '+usd(cap)+' covers everything.'+head;
   }
+  /* The least total cap that lets one full attempt start: the companion's formula (config.minCap) with the pilot cap typed in the form, rounded up to the cent.
+     Null when the companion reported no minCap or the pilot cap is not a valid amount. */
+  function minTotalCap(){
+    const m=S.rules.minCap,pilot=pilotCapValue();
+    if(!m||pilot===null)return null;
+    const cents=m.headroom*(m.fixedUsd+m.pilots*(pilot+m.perPilotUsd))*100;
+    return Math.ceil(Math.round(cents*1e6)/1e6)/100;
+  }
+  const capMinText=()=>{const m=minTotalCap();return m===null?'':'A full attempt with these caps can cost up to '+usd(m)+'.';};
+  function paintCapMin(){
+    const el=$('#pl-cap-min'),t=capMinText();
+    if(el&&el.textContent!==t)el.textContent=t;
+  }
   function startWhy(){
     const f=S.form;
     if(isActive())return 'A pipeline is running. Start another when it has ended.';
@@ -359,6 +400,8 @@
     if(capValue()===null)return 'The total cap must be from '+usd(CAP_MIN_USD)+' to '+usd(RULES.maxCapUsd)+', in whole cents.';
     if(pilotCapValue()===null)return 'The cap per pilot must be from '+usd(PILOT_CAP.minUsd)+' to '+usd(PILOT_CAP.maxUsd)+', in whole cents.';
     if(capValue()<pilotCapValue())return 'The total cap must be at least the cap of one pilot.';
+    const least=minTotalCap();
+    if(least!==null&&capValue()<least)return least>RULES.maxCapUsd?'One full attempt with these caps can cost up to '+usd(least)+', more than the largest total cap of '+usd(RULES.maxCapUsd)+'. Lower the cap per pilot.':'The total cap must be at least '+usd(least)+' for one full attempt with these caps.';
     if(!f.model||!f.effort)return 'Choose a model and an effort.';
     if(!ACKNOWLEDGEMENTS.every(a=>f.acks[a.id]))return 'Tick all four acknowledgements to enable the button.';
     return '';
@@ -379,7 +422,7 @@
         ?html`<label class="field">Task link (https)<input type="text" inputmode="url" id="pl-url" data-pl-in="url" data-pl-key="url" value="${f.url}" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="Paste the task link" aria-describedby="pl-url-hint"><small id="pl-url-hint">The link goes to the companion only. It is not saved in this browser and it is not shown again once the run has started.</small></label>`
         :html`<label class="field">Folder path<input type="text" id="pl-dir" data-pl-in="dir" data-pl-key="dir" value="${f.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/Users/you/Downloads/task" aria-describedby="pl-dir-hint"><small id="pl-dir-hint">Paste the full path (Finder: select the folder, Option-Command-C). Unzip a task ZIP outside this project first.</small></label>`}
       <div class="field-row three">
-        <label class="field">Total cap (USD)<input type="text" inputmode="decimal" id="pl-cap" data-pl-in="cap" data-pl-key="cap" value="${f.cap}" maxlength="6" autocomplete="off" spellcheck="false" aria-describedby="pl-cap-hint"><small id="pl-cap-hint">The run stops before a step that could pass it. ${usd(CAP_MIN_USD)} to ${usd(RULES.maxCapUsd)}.</small></label>
+        <label class="field">Total cap (USD)<input type="text" inputmode="decimal" id="pl-cap" data-pl-in="cap" data-pl-key="cap" value="${f.cap}" maxlength="6" autocomplete="off" spellcheck="false" aria-describedby="pl-cap-hint pl-cap-min"><small id="pl-cap-hint">The run stops before a step that could pass it. ${usd(CAP_MIN_USD)} to ${usd(RULES.maxCapUsd)}.</small><small id="pl-cap-min" class="pl-cap-min">${capMinText()}</small></label>
         <label class="field">Model<select data-pl-in="model" data-pl-key="model">${st.models.map(m=>html`<option value="${m}" ${m===f.model?'selected':''}>${m}</option>`)}</select></label>
         <label class="field">Effort<select data-pl-in="effort" data-pl-key="effort">${st.efforts.map(m=>html`<option value="${m}" ${m===f.effort?'selected':''}>${m}</option>`)}</select></label>
       </div>
@@ -417,10 +460,12 @@
     if(!v)return '';
     return html`${v.ended?'':html`<button type="button" class="danger" data-pl="stop" data-pl-key="stop" ${S.working==='stop'?'disabled':''}>Stop</button>`}${canExport(v)?html`<button type="button" data-pl="export" data-pl-key="export" ${S.working==='export'?'disabled':''}>Export private zip</button>`:''}`;
   }
+  const STAGE_MESSAGE_MAX=240;
+  const waitTitle=kind=>kind==='needs-sign-in'?'Sign in':kind==='needs-person'?'Your action is needed in the Chrome window':'The task page needs you';
   function waitHtml(){
     const v=S.run;
     if(!v||!v.waiting||v.ended)return '';
-    const w=v.waiting,title=w.kind==='needs-sign-in'?'Sign in in the Chrome window':w.kind==='needs-person'?'Turn on the option that shows all files':'The task page needs you';
+    const w=v.waiting,title=waitTitle(w.kind);
     return html`<div class="card-title"><div><div class="eyebrow">Waiting for you</div><h2>${title}</h2></div>${pill('Paused','amber')}</div>
       <p class="pl-wait-message">${w.message||'Finish what the Chrome window asks for, then press Continue.'}</p>
       <div class="actions"><button type="button" data-pl="continue" data-pl-key="continue" ${S.working==='continue'?'disabled':''}>Continue</button></div>`;
@@ -435,7 +480,7 @@
     const v=S.run;
     if(!v)return '';
     const states=stepStates(v);
-    return html`<ol class="pl-steps" aria-label="Pipeline stages">${states.map((s,i)=>html`<li class="pl-step is-${s.s}"${s.s==='active'||s.s==='waiting'||s.s==='stopped'?new Raw(' aria-current="step"'):''}><span class="pl-step-mark" aria-hidden="true">${STEP_MARK[s.s]||String(i+1)}</span><span class="pl-step-text"><strong>${s.label}</strong><small>${s.id==='design'&&v.redesigns>0&&s.s!=='todo'?(s.s==='done'?'Done':'Redesign '+v.redesigns+' of '+RULES.maxRedesigns):STEP_CAPTION[s.s]}</small></span></li>`)}</ol>`;
+    return html`<ol class="pl-steps" aria-label="Pipeline stages">${states.map((s,i)=>html`<li class="pl-step is-${s.s}"${s.s==='active'||s.s==='waiting'||s.s==='stopped'?new Raw(' aria-current="step"'):''}><span class="pl-step-mark" aria-hidden="true">${STEP_MARK[s.s]||String(i+1)}</span><span class="pl-step-text"><strong>${s.label}</strong><small>${stepCaption(v,s)}</small></span></li>`)}</ol>`;
   }
   function importHtml(){
     const v=S.run;
@@ -572,15 +617,16 @@
     if(isWithheld(o))return html`<small class="pl-outputs">${inline(o)}</small>`;
     return o&&o.count>0?html`<small class="pl-outputs">${plural(o.count,'file')}, ${o.readable===0?'none':o.readable} read</small>`:'';
   }
-  function scoreCell(p,decided){
+  function scoreCell(p,decided,cut){
     let main;
     if(p.score===null){
-      main=p.audit==='DISCARDED'?'No score (discarded)':['failed','cancelled'].includes(p.state)?'No score ('+p.state+')':decided?'No usable score':p.state==='completed'?'Waiting for the grader':p.state==='queued'?'Queued':'Running';
+      main=p.audit==='DISCARDED'?'No score (discarded)':['failed','cancelled'].includes(p.state)?'No score ('+p.state+')':cut?'No score (the run ended)':decided?'No usable score':p.state==='completed'?'Waiting for the grader':p.state==='queued'?'Queued':'Running';
     }else main=scoreFmt(p.score);
     if(isWithheld(p.regrade))return html`${main}<small class="pl-regraded">Graded twice: ${inline(p.regrade)}</small>`;
     return p.regrade?html`${main}<small class="pl-regraded">Graded twice: ${scoreFmt(p.regrade.first)}, ${scoreFmt(p.regrade.second)}</small>`:main;
   }
-  function belowHtml(p,decided){
+  function belowHtml(p,decided,cut){
+    if(p.score===null&&cut)return html`<span class="muted">Not counted</span>`;
     if(p.score!==null)return p.score<RULES.passBar?html`<span class="pl-yes"><span aria-hidden="true">✓</span> Yes</span>`:html`<span class="pl-no"><span aria-hidden="true">✕</span> No</span>`;
     if(decided)return html`<span class="pl-no"><span aria-hidden="true">✕</span> No, a pilot without a score counts against the design</span>`;
     return endedWithoutScore(p)?html`<span class="muted">Replacement pending</span>`:html`<span class="muted">Pending</span>`;
@@ -591,15 +637,18 @@
     const res=v[kind],isTest=kind==='test',title=isTest?RULES.testPilots+'-pilot test':RULES.screenPilots+'-pilot screen',label=isTest?'Test':'Screen';
     const rule=isTest?'The test succeeds when at least '+RULES.testNeed+' of '+RULES.testPilots+' pilots score below '+RULES.passBar.toFixed(2)+'.':'The screen passes when both pilots score below '+RULES.passBar.toFixed(2)+'.';
     const active=STAGES[v.stage]&&STAGES[v.stage][0]===(isTest?4:3)&&!v.ended;
-    if(!res&&!active)return '';
+    /* a run that ended in this step before its round started has no result to show: say that it did not start, and why */
+    const here=v.ended&&v.stage!=='done'&&stepOf(v)===(isTest?4:3);
+    if(!res&&!active&&!here)return '';
+    if(!res&&!active)return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill('Not started','amber')}</div><p class="muted">${rule}</p><p class="pl-not-started">${v.stage==='budget'?'The '+kind+' was not started: the next call would have passed the total cap'+(v.capUsd?' of '+usd(v.capUsd):'')+', and '+usd(v.spentUsd)+' was spent.':v.stage==='stopped'?'The run was stopped before the '+kind+' started.':'The run ended before the '+kind+' started.'}</p>`;
     if(!res)return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill('In progress','violet')}</div><p class="muted">${rule}</p><p>The pilots are starting.</p>`;
-    const sv=stageVerdict(res,kind);
-    return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill(label+' '+STATUS_LABEL[sv.status],STATUS_KIND[sv.status])}</div>
+    const sv=stageVerdict(res,kind),cut=v.ended&&res.passed===null,status=cut?'stopped':sv.status;
+    return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill(label+' '+STATUS_LABEL[status],STATUS_KIND[status])}</div>
       <p class="muted">${rule} Scores come from the simulated grader, run against the revised grader guideline.</p>
-      ${res.pilots.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">${title}: score of each pilot against the bar of ${RULES.passBar.toFixed(2)}</caption><thead><tr><th scope="col">Pilot</th><th scope="col">Score</th><th scope="col">Below ${RULES.passBar.toFixed(2)}</th><th scope="col">Audit</th></tr></thead><tbody>${res.pilots.map(p=>html`<tr><th scope="row">Pilot ${p.n}${p.replacement?' (replacement)':''}${outputsNote(p)}</th><td data-label="Score">${scoreCell(p,res.passed!==null)}</td><td data-label="Below ${RULES.passBar.toFixed(2)}">${belowHtml(p,res.passed!==null)}</td><td data-label="Audit">${auditPill(p)}</td></tr>`)}</tbody></table></div>
+      ${res.pilots.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">${title}: score of each pilot against the bar of ${RULES.passBar.toFixed(2)}</caption><thead><tr><th scope="col">Pilot</th><th scope="col">Score</th><th scope="col">Below ${RULES.passBar.toFixed(2)}</th><th scope="col">Audit</th></tr></thead><tbody>${res.pilots.map(p=>html`<tr><th scope="row">Pilot ${p.n}${p.replacement?' (replacement)':''}${outputsNote(p)}</th><td data-label="Score">${scoreCell(p,res.passed!==null,cut)}</td><td data-label="Below ${RULES.passBar.toFixed(2)}">${belowHtml(p,res.passed!==null,cut)}</td><td data-label="Audit">${auditPill(p)}</td></tr>`)}</tbody></table></div>
         <p class="pl-tally">${sv.below} of ${sv.of} below ${RULES.passBar.toFixed(2)}${isTest?'; '+sv.need+' needed':'; both needed'}.</p>
         ${res.replacementRound?html`<p class="muted pl-stage-note">A replacement round ran for the pilots without a usable score.</p>`:''}${res.replacementSkipped?html`<p class="muted pl-stage-note">No replacement round was run because it could not change the result.</p>`:''}
-        ${S.rules.regradeBand!==null&&res.pilots.some(p=>p.regrade!==null)?html`<p class="muted pl-stage-note">A score from ${S.rules.regradeBand[0].toFixed(2)} to ${S.rules.regradeBand[1].toFixed(2)} is graded a second time and the two scores are averaged.</p>`:''}`:html`<p>The pilots are starting.</p>`}`;
+        ${S.rules.regradeBand!==null&&res.pilots.some(p=>p.regrade!==null)?html`<p class="muted pl-stage-note">A score from ${S.rules.regradeBand[0].toFixed(2)} to ${S.rules.regradeBand[1].toFixed(2)} is graded a second time and the two scores are averaged.</p>`:''}${cut?html`<p class="muted pl-stage-note">The ${kind} ended before it was decided, so it has no result.</p>`:''}`:cut?html`<p class="pl-not-started">The ${kind} ended before any pilot finished, so it has no result.</p>`:html`<p>The pilots are starting.</p>`}`;
   }
   /* Every outcome service.cjs records; one it does not know is shown as sent. */
   const OUTCOMES={'in-progress':'In progress',passed:'Passed','screen-failed':'Screen failed','test-failed':'Test failed',rejected:'Rejected before any pilot',stopped:'Stopped',budget:'Stopped at the cap',failed:'Failed'};
@@ -620,7 +669,7 @@
   function redesignsHtml(){
     const v=S.run;
     if(!v||(v.attempts.length<2&&!v.redesigns))return '';
-    const sum=(res,kind)=>{if(!res||(!res.pilots.length&&res.passed===null))return 'Not run';const sv=stageVerdict(res,kind);return (sv.status==='passed'?'Passed':sv.status==='failed'?'Failed':'In progress')+(res.pilots.length?' ('+scoresText(res)+')':'');};
+    const sum=(res,kind)=>{if(!res||(!res.pilots.length&&res.passed===null))return 'Not run';const sv=stageVerdict(res,kind);return (sv.status==='passed'?'Passed':sv.status==='failed'?'Failed':v.ended?'Stopped':'In progress')+(res.pilots.length?' ('+scoresText(res)+')':'');};
     return html`<div class="card-title"><div><div class="eyebrow">Redesigns</div><h2>Redesign attempts</h2></div>${pill(v.redesigns+' of '+RULES.maxRedesigns+' used',v.redesigns>=RULES.maxRedesigns?'amber':'violet')}</div>
       <p class="muted">When a screen or a test does not pass, or the design fails a check before any pilot runs, the designer is told what was wrong, strengthens or swaps traps, and tries again. At most ${RULES.maxRedesigns} redesigns.</p>
       ${v.attempts.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">Every design attempt with its screen and test results</caption><thead><tr><th scope="col">Attempt</th><th scope="col">Traps</th><th scope="col">Screen</th><th scope="col">Test</th><th scope="col">Outcome</th><th scope="col">Design checks</th></tr></thead><tbody>${v.attempts.map(a=>html`<tr><th scope="row">Attempt ${a.n}${a.current?' (latest)':''}</th><td data-label="Traps">${a.traps.length?a.traps.map(plain).join(', '):'Not recorded'}</td><td data-label="Screen">${sum(a.screen,'screen')}</td><td data-label="Test">${sum(a.test,'test')}</td><td data-label="Outcome">${outcomeCell(a)}</td><td data-label="Design checks">${checksCell(a)}</td></tr>`)}</tbody></table></div>`:''}`;
@@ -639,8 +688,10 @@
     /* The companion names its start option in its message (acceptMissing); the page says it with the words of the box. */
     const friendly=t=>String(t).replace(/with acceptMissing/g,'with the box \u201CStart even if a world or task file has to be withheld\u201D ticked').replace(/\bacceptMissing\b/g,'the \u201CStart even if a world or task file has to be withheld\u201D box');
     const needsAccept=v.stage==='failed'&&/acceptMissing/.test(v.summary+' '+v.error);
+    /* The step the cap stopped in, what was spent, and what to do: the companion's sentence says what the next call would have cost. */
+    const capNote=v.stage==='budget'?html`<p class="pl-budget-note">Stopped in the ${STEPS[stepOf(v)][1]} step${v.capUsd?' with '+usd(v.spentUsd)+' of '+usd(v.capUsd)+' spent':''}. To go further, start a new pipeline with a higher total cap.</p>`:'';
     return html`<div class="card-title"><div><div class="eyebrow">Result</div><h2>${data[0]}</h2></div>${pill(data[1],data[2])}</div>
-      <p>${friendly(v.summary||data[3])}</p>${v.error&&v.error!==v.summary?html`<p class="pl-error">Reason: ${friendly(v.error)}</p>`:''}
+      <p>${friendly(v.summary||data[3])}</p>${capNote}${v.error&&v.error!==v.summary?html`<p class="pl-error">Reason: ${friendly(v.error)}</p>`:''}
       ${needsAccept?html`<div class="notice pl-accept-note" role="note"><strong>Some files would be withheld from the pilots.</strong> To go on without them, tick \u201C${ACCEPT_LABEL}\u201D in the start form, then start again. <button type="button" class="small" data-pl="accept-form" data-pl-key="accept-form">Open the start form</button></div>`:''}
       <p class="muted">Spent ${usd(v.spentUsd)}${v.capUsd?' of '+usd(v.capUsd):''}. Redesigns used: ${v.redesigns} of ${RULES.maxRedesigns}.</p>`;
   }
@@ -698,7 +749,11 @@
   async function loadList(){
     const answer=await get('/api/pipeline');
     const list=adaptList(answer);
-    if(isObj(answer)&&isObj(answer.config))S.rules=adaptConfig(answer.config);
+    if(isObj(answer)&&isObj(answer.config)){
+      S.rules=adaptConfig(answer.config);
+      defaultCap=S.rules.defaultCapUsd!==null?S.rules.defaultCapUsd:RULES.defaultCapUsd;
+      if(!S.form.capTouched)S.form.cap=String(defaultCap);   /* the form follows the companion's default until a cap has been typed */
+    }
     list.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
     if(S.run&&!list.some(v=>v.id===S.run.id))list.unshift(S.run);
     S.list=S.run?list.map(v=>v.id===S.run.id?S.run:v):list;
@@ -825,8 +880,8 @@
     },
     url(el){S.form.url=String(el.value==null?'':el.value).slice(0,2048);paint('start-foot');},
     dir(el){S.form.dir=String(el.value==null?'':el.value).slice(0,1024);paint('start-foot');},
-    cap(el){S.form.cap=String(el.value==null?'':el.value).trim().slice(0,6);paint('start-foot');},
-    pilotCap(el){S.form.pilotCap=String(el.value==null?'':el.value).trim().slice(0,6);paint('start-foot');},
+    cap(el){S.form.cap=String(el.value==null?'':el.value).trim().slice(0,6);S.form.capTouched=true;paint('start-foot');paintCapMin();},
+    pilotCap(el){S.form.pilotCap=String(el.value==null?'':el.value).trim().slice(0,6);paint('start-foot');paintCapMin();},
     model(el){if(S.status&&S.status.models.includes(el.value)){S.form.model=el.value;paint('start-foot');}},
     effort(el){if(S.status&&S.status.efforts.includes(el.value)){S.form.effort=el.value;paint('start-foot');}},
     ack(el){S.form.acks[el.dataset.id]=!!el.checked;paint('start-foot');},

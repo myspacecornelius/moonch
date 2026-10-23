@@ -258,12 +258,12 @@ test('the module registers its document listeners once and only reacts to its ow
 
 /* ====================================================================== the start card */
 
-test('the start card: link or folder, total cap 30, model and effort from the companion, per-pilot cap, four acknowledgements, one yellow button', async t => {
+test('the start card: link or folder, total cap 50, model and effort from the companion, per-pilot cap, four acknowledgements, one yellow button', async t => {
   const { page } = await bootWith(t);
   const form = page.region('start-form');
   assert.match(form, /Task link \(https\)/);
   assert.match(form, /Folder on this computer/);
-  assert.match(form, /id="pl-cap"[^>]*value="30"/, 'the total cap starts at 30');
+  assert.match(form, /id="pl-cap"[^>]*value="50"/, 'the total cap starts at 50');
   assert.match(form, /id="pl-pilot-cap"[^>]*value="3\.00"/);
   for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) assert.ok(form.includes(`<option value="${model}"`), model);
   for (const effort of ['low', 'medium', 'high']) assert.ok(form.includes(`<option value="${effort}"`), effort);
@@ -339,6 +339,148 @@ test('Approve and start stays disabled, with its reason in words, until the sour
   assert.equal(page.enabled('start'), true);
 });
 
+/* ---- the total cap: the default, and the least cap for one full attempt (GET /api/pipeline config.defaultCapUsd and config.minCap) ---- */
+
+const CFG = { classifyCapUsd: 0.5, designCapUsd: 5, repairCapUsd: 1, fairnessCapUsd: 0.25, graderCapUsd: 0.5, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.15 };
+const MIN_CAP = { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 };
+const whyOf = page => page.region('start-foot').match(/<p id="pl-why" class="pl-why">([^<]*)<\/p>/)[1];
+const capMinInForm = page => (page.region('start-form').match(/<small id="pl-cap-min" class="pl-cap-min">([^<]*)<\/small>/) || [])[1];
+const ready = async page => { await page.fillLink(); await page.ackAll(); };
+
+test('the total cap starts at USD 50, or at the default the companion reports, and a cap the person typed is kept', async t => {
+  const { page } = await bootWith(t);
+  assert.match(page.region('start-form'), /id="pl-cap"[^>]*value="50"/);
+  const { page: reported } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
+  assert.match(reported.region('start-form'), /id="pl-cap"[^>]*value="40"/, 'the companion\'s default');
+  const { page: fraction } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 37.5 } });
+  assert.match(fraction.region('start-form'), /id="pl-cap"[^>]*value="37\.5"/);
+  for (const junk of [250, 0.5, 'many', null, -1, 12.345, { withheld: true }, [30]]) {
+    const { page: odd } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: junk } });
+    assert.match(odd.region('start-form'), /id="pl-cap"[^>]*value="50"/, 'a default of ' + JSON.stringify(junk) + ' is not used');
+  }
+  /* the person's own cap stays when the rules are read again (a refused start reads them); a cap nobody typed follows the companion */
+  const refuse = async (companion, page) => { companion.fail('POST /api/pipeline/start', 409, 'Another pipeline is running.'); await page.click('start'); assert.equal(page.status(), 'Failed: Another pipeline is running.'); };
+  const { companion, page: typed } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
+  assert.match(typed.region('start-form'), /id="pl-cap"[^>]*value="40"/);
+  await typed.type('cap', { value: '25' });
+  companion.config = { ...CFG, defaultCapUsd: 60 };
+  await ready(typed);
+  await refuse(companion, typed);
+  assert.match(typed.region('start-form'), /id="pl-cap"[^>]*value="25"/, 'what was typed is kept');
+  const { companion: other, page: untouched } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
+  other.config = { ...CFG, defaultCapUsd: 60 };
+  await ready(untouched);
+  await refuse(other, untouched);
+  assert.match(untouched.region('start-form'), /id="pl-cap"[^>]*value="60"/, 'a cap nobody typed follows the companion\'s default');
+  /* a start sends the cap that is in the box */
+  const { companion: c2, page: p2 } = await bootWith(t);
+  await p2.startFromLink();
+  assert.equal(c2.calls.find(c => c.method === 'POST' && c.url === '/api/pipeline/start').body.capUsd, 50);
+});
+
+test('config.minCap: the least total cap of one full attempt is shown by the cap field and moves with the pilot cap', async t => {
+  /* 1.15 x (6.25 + 7 x (3 + 1.5)) = 43.4125, up to the cent */
+  const { page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
+  assert.equal(capMinInForm(page), 'A full attempt with these caps can cost up to USD 43.42.');
+  assert.match(page.region('start-form'), /id="pl-cap"[^>]*aria-describedby="pl-cap-hint pl-cap-min"/, 'the cap field is described by the figure');
+  await page.type('pilotCap', { value: '5' });   // 1.15 x (6.25 + 7 x 6.5) = 59.5125
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 59.52.');
+  await page.type('pilotCap', { value: '0.05' });   // 1.15 x (6.25 + 7 x 1.55) = 19.665
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 19.67.');
+  await page.type('pilotCap', { value: 'x' });
+  assert.equal(page.element('pl-cap-min').textContent, '', 'no figure while the pilot cap is not an amount');
+  await page.type('pilotCap', { value: '3' });
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42.');
+  /* a sum that is exactly on a cent is not rounded up by floating point error: 1.1 x 5 x (0.30 + 0.5) = 4.40 */
+  const { page: exact } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 0, perPilotUsd: 0.5, pilots: 5, headroom: 1.1 } } });
+  await exact.type('pilotCap', { value: '0.30' });
+  assert.equal(exact.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 4.40.');
+});
+
+test('config.minCap: Start is blocked below the least cap, with the reason in startWhy, and allowed at it', async t => {
+  const { companion, page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
+  await ready(page);
+  assert.equal(page.enabled('start'), true, 'the default of 50 covers 43.42');
+  await page.type('cap', { value: '43.41' });
+  assert.equal(page.enabled('start'), false);
+  assert.equal(whyOf(page), 'The total cap must be at least USD 43.42 for one full attempt with these caps.');
+  await page.click('start');
+  assert.equal(companion.calls.filter(c => c.method === 'POST').length, 0, 'a click on the blocked button starts nothing');
+  await page.type('cap', { value: '43.42' });
+  assert.equal(page.enabled('start'), true);
+  assert.equal(whyOf(page), '');
+  /* a larger pilot cap raises the least cap, and the same total cap is no longer enough */
+  await page.type('pilotCap', { value: '4' });   // 1.15 x (6.25 + 7 x 5.5) = 51.4625
+  assert.equal(page.enabled('start'), false);
+  assert.equal(whyOf(page), 'The total cap must be at least USD 51.47 for one full attempt with these caps.');
+  await page.type('cap', { value: '51.47' });
+  assert.equal(page.enabled('start'), true);
+  await page.click('start');
+  const post = companion.calls.find(c => c.method === 'POST' && c.url === '/api/pipeline/start');
+  assert.equal(post.body.capUsd, 51.47);
+  assert.equal(post.body.pilotCapUsd, 4);
+  /* the cent edge */
+  const { page: exact } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 0, perPilotUsd: 0.5, pilots: 5, headroom: 1.1 } } });
+  await ready(exact);
+  await exact.type('pilotCap', { value: '0.30' });
+  await exact.type('cap', { value: '4.39' });
+  assert.equal(whyOf(exact), 'The total cap must be at least USD 4.40 for one full attempt with these caps.');
+  await exact.type('cap', { value: '4.4' });
+  assert.equal(exact.enabled('start'), true, 'exactly the least cap is enough');
+});
+
+test('config.minCap: the range of the fields is checked first, and a least cap above the largest total cap says to lower the pilot cap', async t => {
+  const { page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
+  await ready(page);
+  await page.type('cap', { value: '10' });
+  assert.equal(whyOf(page), 'The total cap must be at least USD 43.42 for one full attempt with these caps.');
+  await page.type('cap', { value: '2' });
+  assert.equal(whyOf(page), 'The total cap must be at least the cap of one pilot.', 'the older checks come first');
+  await page.type('cap', { value: '0' });
+  assert.match(whyOf(page), /The total cap must be from USD 1\.00 to USD 200\.00/);
+  await page.type('cap', { value: '50' });
+  await page.type('pilotCap', { value: '0.04' });
+  assert.match(whyOf(page), /The cap per pilot must be from USD 0\.05 to USD 20\.00/, 'no minimum can be worked out from a pilot cap that is not valid');
+  /* 1.15 x (6.25 + 7 x 21.5) = 177.6 stays under 200; a heavier fixed cost goes over */
+  const { page: heavy } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 150, perPilotUsd: 5, pilots: 7, headroom: 1.15 } } });
+  await ready(heavy);
+  await heavy.type('cap', { value: '200' });
+  await heavy.type('pilotCap', { value: '20' });   // 1.15 x (150 + 7 x 25) = 373.75
+  assert.equal(heavy.enabled('start'), false);
+  assert.equal(whyOf(heavy), 'One full attempt with these caps can cost up to USD 373.75, more than the largest total cap of USD 200.00. Lower the cap per pilot.');
+  await heavy.type('pilotCap', { value: '1' });   // 1.15 x (150 + 7 x 6) = 220.8
+  assert.match(whyOf(heavy), /Lower the cap per pilot/);
+  await heavy.type('pilotCap', { value: '0.05' });   // 1.15 x (150 + 7 x 5.05) = 213.1525
+  assert.match(whyOf(heavy), /Lower the cap per pilot/);
+});
+
+test('config.minCap missing or unusable: the page says nothing about it and does not block', async t => {
+  const odd = [
+    undefined, null, {}, [], 'cap', 7, { withheld: true },
+    { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7 },                 // no headroom
+    { fixedUsd: 6.25, perPilotUsd: 1.5, headroom: 1.15 },            // no pilots
+    { fixedUsd: -1, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 },   // negative
+    { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 0, headroom: 1.15 }, // no pilot at all
+    { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 0.5 },  // less than the plain sum
+    { fixedUsd: 'six', perPilotUsd: 1.5, pilots: 7, headroom: 1.15 },
+    { fixedUsd: { withheld: true }, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 },
+  ];
+  for (const minCap of odd) {
+    const { page } = await bootWith(t, [], { config: { ...CFG, minCap } });
+    assert.equal(capMinInForm(page), '', 'no figure for ' + JSON.stringify(minCap));
+    assert.doesNotMatch(page.region('start-form'), /A full attempt with these caps/);
+    await ready(page);
+    await page.type('cap', { value: '1' });
+    await page.type('pilotCap', { value: '0.05' });
+    assert.equal(page.enabled('start'), true, 'a cap of USD 1.00 is not blocked for ' + JSON.stringify(minCap));
+    assert.equal(whyOf(page), '');
+    assert.equal(page.element('pl-cap-min').textContent, '');
+  }
+  const { page: none } = await bootWith(t, [], { config: {} });
+  assert.equal(capMinInForm(none), '');
+  assert.doesNotMatch(none.html(), /full attempt/);
+});
+
 test('a click on the disabled button starts nothing', async t => {
   const { companion, page } = await bootWith(t);
   await page.click('start');
@@ -393,7 +535,7 @@ test('starting from a folder sends sourceDir and no link', async t => {
   assert.equal(page.enabled('start'), true);
   await page.click('start');
   const post = companion.calls.find(c => c.method === 'POST');
-  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
+  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 50, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
   assert.match(page.stage(), /^Import:/);
 });
 
@@ -474,7 +616,7 @@ test('the stage line says what is happening in words, adds the redesign count, a
     await page.tick();
     assert.ok(page.stage().startsWith(start), `${stage}: ${page.stage()}`);
   }
-  const ended = { done: 'Done:', failed: 'Failed:', stopped: 'Stopped: you pressed Stop.', budget: 'Stopped: the next step would pass the total cap.' };
+  const ended = { done: 'Done:', failed: 'Failed:', stopped: 'Stopped: you pressed Stop.', budget: 'Stopped at the cap, in the Import step: the next call would pass the total cap, so it was not started.' };
   for (const [stage, start] of Object.entries(ended)) {
     const { page: done } = await bootWith(t, [baseState({ stage })]);
     assert.ok(done.stage().startsWith(start), `${stage}: ${done.stage()}`);
@@ -595,18 +737,54 @@ test('when the loader needs the person, the message and a Continue button show; 
   assert.equal(page.status(), 'Continuing.');
 });
 
-test('the sign-in wait names the Chrome window, and a wait of another kind gets a plain title', async t => {
+test('a wait is titled by its kind: sign in, your action in the Chrome window, or a plain title for a kind the page does not know', async t => {
   const { companion, page } = await bootWith(t, [baseState({ waiting: { kind: 'needs-sign-in', message: 'Sign in to the task site in the Chrome window.', since: '2026-10-23T10:01:00.000Z' } })]);
-  assert.match(page.region('wait'), /Sign in in the Chrome window/);
+  assert.match(page.region('wait'), /<h2>Sign in<\/h2>/);
+  assert.doesNotMatch(page.region('wait'), /Your action is needed/);
   assert.match(page.region('wait'), /Sign in to the task site in the Chrome window\./);
   assert.equal(page.enabled('continue'), true);
   companion.update('pl-atlas-0001', { waiting: { kind: 'something-new', message: 'Please check the window.' } });
   await page.tick();
   assert.match(page.region('wait'), /The task page needs you/);
   assert.match(page.region('wait'), /Please check the window\./);
+  assert.match(page.region('wait'), /<h2>The task page needs you<\/h2>/);
   companion.update('pl-atlas-0001', { waiting: { kind: 'needs-person' } });
   await page.tick();
+  assert.match(page.region('wait'), /<h2>Your action is needed in the Chrome window<\/h2>/);
   assert.match(page.region('wait'), /Finish what the Chrome window asks for, then press Continue\./, 'a wait with no message still says what to do');
+});
+
+test('a needs-person wait is not called a sign-in, whatever it asks (the toggle, no files found, files that did not download)', async t => {
+  const asks = [
+    'Turn on the option that shows all files in the Chrome window, then press Continue.',
+    'The Studio found no files. Open the view that lists the files in the Chrome window, then press Continue.',
+    '3 files could not be downloaded: Atlas_Amendment_2.txt, Meridian_Note.txt, Borealis_Terms.txt. Download them yourself into a folder and use Import a folder.',
+  ];
+  const { companion, page } = await bootWith(t, [baseState({ waiting: { kind: 'needs-person', message: asks[0] } })]);
+  for (const message of asks) {
+    companion.update('pl-atlas-0001', { waiting: { kind: 'needs-person', message } });
+    await page.tick();
+    const wait = page.region('wait');
+    assert.match(wait, /<h2>Your action is needed in the Chrome window<\/h2>/);
+    assert.doesNotMatch(wait, /Sign in/);
+    assert.doesNotMatch(wait, /Turn on the option that shows all files<\/h2>/, 'the heading does not claim one cause');
+    assert.ok(wait.includes(message), 'the loader\'s own message carries the detail');
+  }
+});
+
+test('a long loader message is shown whole in the wait card (a thousand characters and more); the bar carries a short one and points to the card for a long one', async t => {
+  const base = 'Open the view that lists the files, then press Continue. Atlas_Amendment_2.txt, Meridian_Note.txt. ';
+  for (const size of [200, 300, 1000, 1200, 4000]) {
+    const message = base.repeat(50).slice(0, size - 4) + ' END';
+    assert.equal(message.length, size);
+    const { page } = await bootWith(t, [baseState({ waiting: { kind: 'needs-person', message } })]);
+    assert.ok(page.region('wait').includes(message), size + ' characters, not cut, in the card');
+    assert.ok(page.text().includes(message.replace(/\s+/g, ' ')), size + ' characters on the page');
+    if (size <= 240) assert.equal(page.stage(), 'Waiting for you: ' + message, 'a short message is in the stage line');
+    else assert.equal(page.stage(), 'Waiting for you: Your action is needed in the Chrome window. The whole message is in the card below.', 'a long one is in the card, and the bar stays short');
+  }
+  const { page: signIn } = await bootWith(t, [baseState({ waiting: { kind: 'needs-sign-in', message: 'x'.repeat(1000) } })]);
+  assert.equal(signIn.stage(), 'Waiting for you: Sign in. The whole message is in the card below.');
 });
 
 test('a failed Continue is shown in words and the button works again', async t => {
@@ -1111,14 +1289,14 @@ test('when the pipeline stopped because files would be withheld, the result says
 test('the cost line uses the companion\'s caps and says reservations include the headroom; without its rules it says only what the page knows', async t => {
   const { page } = await bootWith(t);
   const limits = () => page.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 30.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
+  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 50.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
   const { page: custom } = await bootWith(t, [], { config: { classifyCapUsd: 0.75, designCapUsd: 8, repairCapUsd: 2, fairnessCapUsd: 0.4, graderCapUsd: 0.6, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.25 } });
   const text = custom.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(text, /the classifier USD 0\.75, the designer USD 8\.00 and one repair turn USD 2\.00, the fairness review USD 0\.40, each grader call USD 0\.60/);
   assert.match(text, /with 25% headroom on top/, 'the headroom is the companion\'s');
   const { page: bare } = await bootWith(t, [], { config: {} });
   const old = bare.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00, before the classifier, designer and grader runs. The total cap of USD 30.00 covers everything.');
+  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00, before the classifier, designer and grader runs. The total cap of USD 50.00 covers everything.');
   const { page: partial } = await bootWith(t, [], { config: { fairnessCapUsd: 0.25, headroom: 1 } });
   const some = partial.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(some, /The other calls are capped too: the fairness review USD 0\.25\./);
@@ -1391,10 +1569,159 @@ test('a run that ended early marks the stage it reached as stopped here', async 
   const { page } = await bootWith(t, [baseState({ stage: 'budget', design: designFacts(), screen: { passed: true, pilots: pilots([0.1, 0.2]) }, test: { passed: null, pilots: pilots([0.1]) } })]);
   const steps = stepsOf(page.region('timeline'));
   assert.deepEqual(steps.map(s => s.s), ['done', 'done', 'done', 'done', 'stopped', 'todo']);
-  assert.equal(steps[4].caption, 'Stopped here');
+  assert.equal(steps[4].caption, 'Stopped at the cap', 'a stop at the cap says so under the step');
   assert.equal(steps[4].mark, '!');
   const { page: early } = await bootWith(t, [baseState({ id: 'pl-atlas-0009', stage: 'failed', error: 'The link could not be opened.' })]);
   assert.deepEqual(stepsOf(early.region('timeline')).map(s => s.s), ['stopped', 'todo', 'todo', 'todo', 'todo', 'todo']);
+  assert.equal(stepsOf(early.region('timeline'))[0].caption, 'Stopped here');
+});
+
+/* ---- where a run that ended early ended: the step it was in, from what the view holds (a stage that ended is not a step) ---- */
+
+const ended = (stage, over = {}) => baseState({ stage, running: false, import: importFacts(), classification: classification(), ...over });
+const rejected = n => attemptOf({ n, outcome: 'rejected', traps: [], rejection: { kind: 'checks', reasons: ['The golden answer scored 0.50 against the revised guideline.'] } });
+const where = async (t, state) => {
+  const { page } = await bootWith(t, [state]);
+  const steps = stepsOf(page.region('timeline'));
+  assert.equal(steps.filter(x => x.current).length, 1, 'exactly one step is marked');
+  assert.equal(steps.filter(x => x.s === 'stopped').length, 1, 'exactly one step is marked stopped');
+  return { page, at: steps.findIndex(x => x.s === 'stopped'), steps };
+};
+const STEP_NAMES = ['Import', 'Classify', 'Design', 'Screen', 'Test', 'Done'];
+
+test('the timeline marks the step a run ended in: import and classify', async t => {
+  /* the link loader failed: nothing was imported */
+  assert.equal((await where(t, baseState({ stage: 'failed', error: 'The link loader failed.' }))).at, 0);
+  /* the import is complete and the classifier's answer could not be used: no classification is kept (service.cjs _classify throws before it saves one) */
+  const { at, steps } = await where(t, baseState({ stage: 'failed', import: importFacts(), error: 'Could not tell which part of the page is the grader guideline.' }));
+  assert.equal(at, 1, 'the classification failed, not the import');
+  assert.deepEqual(steps.map(x => x.s), ['done', 'stopped', 'todo', 'todo', 'todo', 'todo']);
+  assert.equal(steps[1].caption, 'Stopped here');
+  /* Stop while the classifier ran */
+  assert.equal((await where(t, baseState({ stage: 'stopped', import: importFacts() }))).at, 1);
+  /* the cap stopped the run before the classifier */
+  const cap = await where(t, baseState({ stage: 'budget', import: importFacts() }));
+  assert.equal(cap.at, 1);
+  assert.equal(cap.steps[1].caption, 'Stopped at the cap');
+  /* the classification is kept when a check after it fails (a file that looks like the golden answer, withheld files, a packet that does not fit) */
+  assert.equal((await where(t, ended('failed', { error: 'The page has a file that looks like the golden answer.' }))).at, 1, 'a failed classify check');
+});
+
+test('the timeline marks the step a run ended in: design, including a stop or a failure in the first design and designs that were all rejected', async t => {
+  /* classified, and Stop or the cap came before the designer started an attempt */
+  assert.equal((await where(t, ended('stopped'))).at, 2);
+  assert.equal((await where(t, ended('budget'))).at, 2);
+  /* Stop during the first design: the attempt is already in the list, with no screen */
+  const first = await where(t, ended('stopped', { attempts: [attemptOf({ outcome: 'stopped' })], attempt: 1 }));
+  assert.equal(first.at, 2, 'not the screen');
+  assert.deepEqual(first.steps.map(x => x.s), ['done', 'done', 'stopped', 'todo', 'todo', 'todo']);
+  assert.equal((await where(t, ended('failed', { attempts: [attemptOf({ outcome: 'failed' })], attempt: 1, error: 'The trap designer could not be started.' }))).at, 2);
+  assert.equal((await where(t, ended('budget', { attempts: [attemptOf({ outcome: 'budget' })], attempt: 1 }))).at, 2, 'the cap before the repair turn or the fairness review');
+  /* all four designs were rejected before any pilot: the stage failed, nothing was run */
+  const all = await where(t, ended('failed', { redesigns: 3, attempt: 4, attempts: [1, 2, 3, 4].map(rejected), summary: 'Stopped after 3 redesigns: the design of attempt 4 was rejected before any pilot ran.' }));
+  assert.equal(all.at, 2, 'the design step, not the screen');
+  assert.deepEqual(all.steps.map(x => x.s), ['done', 'done', 'stopped', 'todo', 'todo', 'todo']);
+  assert.match(all.page.region('redesigns'), /Rejected before any pilot/);
+  /* a screen failed, the next design was rejected, and the run was stopped while the feedback was prepared */
+  const failedScreen = attemptOf({ n: 1, outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) });
+  assert.equal((await where(t, ended('stopped', { redesigns: 1, attempt: 1, attempts: [failedScreen], design: designFacts() }))).at, 2, 'between two attempts the run is in the design step');
+  assert.equal((await where(t, ended('failed', { redesigns: 1, attempt: 2, attempts: [failedScreen, rejected(2)], design: designFacts() }))).at, 2, 'a later attempt was rejected while the design of the first is the one the view holds');
+  assert.equal((await where(t, ended('stopped', { redesigns: 1, attempt: 2, attempts: [failedScreen, attemptOf({ n: 2, outcome: 'stopped' })], design: designFacts() }))).at, 2, 'a stop in the second design');
+});
+
+test('the timeline marks the step a run ended in: screen', async t => {
+  /* the design was accepted and the run ended before the screen round began */
+  const door = await where(t, ended('stopped', { attempts: [attemptOf({ outcome: 'stopped' })], attempt: 1, design: designFacts({ attempt: 1 }) }));
+  assert.equal(door.at, 3);
+  assert.match(door.page.region('screen'), /<span class="pill amber">Not started<\/span>/);
+  assert.match(door.page.region('screen'), /The run was stopped before the screen started\./);
+  assert.equal((await where(t, ended('budget', { attempts: [attemptOf({ outcome: 'budget' })], attempt: 1, design: designFacts({ attempt: 1 }) }))).at, 3);
+  /* Stop while the two screen pilots ran: the round is in the list with no pilot yet */
+  const round = await where(t, ended('stopped', { design: designFacts(), attempts: [attemptOf({ outcome: 'stopped', screen: stageOf('screen', [], null) })], attempt: 1 }));
+  assert.equal(round.at, 3);
+  assert.match(round.page.region('screen'), /<span class="pill amber">Screen stopped<\/span>/);
+  assert.match(round.page.region('screen'), /The screen ended before any pilot finished, so it has no result\./);
+  assert.doesNotMatch(round.page.region('screen'), /The pilots are starting/, 'an ended run does not say its pilots are starting');
+  /* the last redesign's screen failed: that is where the run ended */
+  const last = await where(t, ended('failed', { redesigns: 3, attempt: 4, design: designFacts({ attempt: 4 }), attempts: [1, 2, 3].map(rejected).concat([attemptOf({ n: 4, outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) })]) }));
+  assert.equal(last.at, 3);
+  assert.match(last.page.region('screen'), /<span class="pill red">Screen failed<\/span>/);
+});
+
+test('the timeline marks the step a run ended in: test, including a stop in the test round and the cap before it', async t => {
+  const passedScreen = stageOf('screen', [0.2, 0.3], true);
+  /* Stop while the five test pilots ran: the round is in the list (service.cjs sets it before the pilots start) with no pilot in it */
+  const round = await where(t, ended('stopped', { design: designFacts(), attempt: 1, attempts: [attemptOf({ outcome: 'stopped', screen: passedScreen, test: stageOf('test', [], null) })] }));
+  assert.equal(round.at, 4, 'not the screen, which passed');
+  assert.deepEqual(round.steps.map(x => x.s), ['done', 'done', 'done', 'done', 'stopped', 'todo']);
+  assert.match(round.page.region('test'), /<span class="pill amber">Test stopped<\/span>/);
+  assert.match(round.page.region('test'), /The test ended before any pilot finished, so it has no result\./);
+  assert.doesNotMatch(round.page.region('test'), /The pilots are starting/);
+  assert.match(round.page.region('screen'), /Screen passed/, 'the screen card still says it passed');
+  /* the same, with two pilots in and three not scored */
+  const some = await where(t, ended('stopped', { design: designFacts(), attempt: 1, attempts: [attemptOf({ outcome: 'stopped', screen: passedScreen, test: stageOf('test', [0.2, 0.3, null], null, [{}, {}, { state: 'cancelled', valid: false, belowBar: null }]) })] }));
+  assert.equal(some.at, 4);
+  assert.match(some.page.region('test'), /Test stopped/);
+  assert.match(some.page.region('test'), /The test ended before it was decided, so it has no result\./);
+  assert.doesNotMatch(some.page.region('test'), /Pending|Running|Queued/, 'no pilot of an ended run is shown as pending');
+  /* the redesign table does not call an ended run's open test 'in progress' */
+  const twice = await where(t, ended('stopped', { redesigns: 1, attempt: 2, design: designFacts({ attempt: 2 }), attempts: [attemptOf({ n: 1, outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) }), attemptOf({ n: 2, outcome: 'stopped', screen: passedScreen, test: stageOf('test', [0.2, 0.3], null) })] }));
+  assert.equal(twice.at, 4);
+  assert.match(twice.page.region('redesigns').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '), /Stopped \(0\.20, 0\.30\)/);
+  assert.doesNotMatch(twice.page.region('redesigns'), /In progress/);
+  /* the test failed on the last redesign */
+  const failed = await where(t, ended('failed', { redesigns: 3, attempt: 4, design: designFacts({ attempt: 4 }), attempts: [1, 2, 3].map(rejected).concat([attemptOf({ n: 4, outcome: 'test-failed', screen: passedScreen, test: stageOf('test', [0.2, 0.7, 0.8, 0.9, 0.3], false) })]) }));
+  assert.equal(failed.at, 4);
+  assert.match(failed.page.region('test'), /<span class="pill red">Test failed<\/span>/);
+});
+
+test('the cap reached before the test: Test is marked, says it was not started, and the result gives a plain reason', async t => {
+  const passedScreen = stageOf('screen', [0.2, 0.3], true);
+  const state = ended('budget', {
+    design: designFacts(), attempt: 1, spentUsd: 17.4, capUsd: 20, attempts: [attemptOf({ outcome: 'budget', screen: passedScreen })],
+    summary: 'Stopped before the test: USD 17.40 spent, the step could cost up to USD 20.70 (with a 15% reserve), and the cap is USD 20.00.', result: { verdict: 'budget', message: 'x' },
+  });
+  const { page, at, steps } = await where(t, state);
+  assert.equal(at, 4);
+  assert.deepEqual(steps.map(x => x.s), ['done', 'done', 'done', 'done', 'stopped', 'todo']);
+  assert.equal(steps[3].caption, 'Done', 'the screen passed');
+  assert.equal(steps[4].caption, 'Stopped at the cap');
+  assert.equal(page.stage(), 'Stopped at the cap, in the Test step: the next call would pass the total cap, so it was not started.');
+  /* the Test card */
+  const test = page.region('test');
+  assert.match(test, /<h2>5-pilot test<\/h2>/);
+  assert.match(test, /<span class="pill amber">Not started<\/span>/);
+  assert.match(test, /The test was not started: the next call would have passed the total cap of USD 20\.00, and USD 17\.40 was spent\./);
+  /* the result card: the companion's sentence, the step, and what to do */
+  const v = page.region('verdict');
+  assert.match(v, /<h2>Stopped at the cap<\/h2>/);
+  assert.match(v, /Stopped before the test: USD 17\.40 spent, the step could cost up to USD 20\.70/);
+  assert.match(v, /<p class="pl-budget-note">Stopped in the Test step with USD 17\.40 of USD 20\.00 spent\. To go further, start a new pipeline with a higher total cap\.<\/p>/);
+  /* without the companion's sentence the page's own words say why */
+  const { page: bare } = await bootWith(t, [{ ...state, summary: '' }]);
+  assert.match(bare.region('verdict'), /The worst case of the next step would have passed the total cap of USD 20\.00, so it was not started\./);
+  assert.match(bare.region('verdict'), /Stopped in the Test step/);
+  /* the cap before the screen, and during the classify and design steps, names those steps */
+  const early = await bootWith(t, [ended('budget', { attempts: [attemptOf({ outcome: 'budget' })], attempt: 1, design: designFacts({ attempt: 1 }), capUsd: 5, spentUsd: 4 })]);
+  assert.equal(early.page.stage(), 'Stopped at the cap, in the Screen step: the next call would pass the total cap, so it was not started.');
+  assert.match(early.page.region('verdict'), /Stopped in the Screen step with USD 4\.00 of USD 5\.00 spent\./);
+  assert.match(early.page.region('screen'), /The screen was not started: the next call would have passed the total cap of USD 5\.00, and USD 4\.00 was spent\./);
+  const design = await bootWith(t, [ended('budget', { attempts: [attemptOf({ outcome: 'budget' })], attempt: 1, capUsd: 5, spentUsd: 4 })]);
+  assert.match(design.page.stage(), /in the Design step/);
+  const classify = await bootWith(t, [baseState({ stage: 'budget', import: importFacts(), capUsd: 0.4 })]);
+  assert.match(classify.page.stage(), /in the Classify step/);
+  assert.doesNotMatch(classify.page.region('test') + classify.page.region('screen'), /not started/i, 'a stage the run never reached shows no card');
+});
+
+test('a run that is still going is not marked as ended: the stage decides the step, and a redesign counts as design', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'import', import: importFacts(), classification: classification() })]);
+  for (const [stage, index] of [['design', 2], ['redesign', 2], ['screen', 3], ['grade-screen', 3], ['test', 4], ['grade-test', 4]]) {
+    companion.update('pl-atlas-0001', { stage, running: true, attempts: [attemptOf({ screen: stageOf('screen', [], null) })], redesigns: stage === 'redesign' ? 1 : 0 });
+    await page.tick();
+    const steps = stepsOf(page.region('timeline'));
+    assert.equal(steps.findIndex(x => x.current), index, stage);
+    assert.equal(steps.filter(x => x.s === 'stopped').length, 0, stage + ' is not stopped');
+  }
 });
 
 test('Stop is visible while the pipeline runs (in any stage), posts once with the nonce, and the page shows the stopped state', async t => {
@@ -1738,7 +2065,9 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
   assert.equal(RULES.testPilots, k.TEST_PILOTS);
   assert.equal(RULES.testNeed, k.TEST_NEED);
   assert.equal(RULES.maxRedesigns, k.MAX_REDESIGNS);
-  assert.equal(RULES.defaultCapUsd, k.DEFAULT_CAP_USD);
+  /* The default total cap is USD 50. The companion may report its own (GET /api/pipeline config.defaultCapUsd) and the page follows that: see the cap tests. */
+  assert.equal(RULES.defaultCapUsd, 50);
+  if (k.DEFAULT_CAP_USD === 50) assert.equal(RULES.defaultCapUsd, k.DEFAULT_CAP_USD);
   assert.equal(RULES.maxCapUsd, k.MAX_CAP_USD);
   if (k.GOLDEN_MIN !== undefined) assert.equal(makeAdapter().CALIBRATION_MIN, k.GOLDEN_MIN, 'the calibration the page says is needed is the one the companion enforces');
   const { ACKNOWLEDGEMENTS } = makeAdapter();
@@ -1749,7 +2078,7 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
 
 test('the display constants are the spec numbers', () => {
   const { RULES } = makeAdapter();
-  assert.deepEqual(plain(RULES), { passBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 30, maxCapUsd: 200 });
+  assert.deepEqual(plain(RULES), { passBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 50, maxCapUsd: 200 });
 });
 
 test('a message that answers the person stays until the stage changes; an error from an action stays until the next action', async t => {
@@ -1813,7 +2142,7 @@ const GUIDELINE_MARK = 'DESIGNER-GUIDELINE-MARK', GOLDEN_MARK = 'DESIGNER-GOLDEN
 
 /* A real companion (backend/server.cjs) with the real agent service and pipeline service on a temporary project, a downloaded task in a folder and
    the stub for every model run. rules: the stub's rules (default: the whole run, screen passes and test succeeds); hang: every model run hangs. */
-async function makeRealWorld(t, { hang = false } = {}) {
+async function makeRealWorld(t, { hang = false, unclassifiable = false } = {}) {
   const os = require('node:os');
   const { cleanEnv } = require('./fixtures/clean-env.cjs');
   const { createServer } = require('../backend/server.cjs');
@@ -1857,6 +2186,11 @@ async function makeRealWorld(t, { hang = false } = {}) {
     { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: 'PV1', scenario: scores.map((score, i) => ({ resultText: `ANS-1-${i + 1} Cash is 3,050 because the available facility counted as cash. Proceed.`, costUsd: 0.1 })) },
     ...scores.map((score, i) => ({ cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nANS-1-${i + 1}\\b`, scenario: { resultText: JSON.stringify({ verdict: 'does-not-meet-guidance', reason: `Synthetic grader reason for ${score.toFixed(2)}`, score }), costUsd: 0.02 } })),
   ];
+  if (unclassifiable) {
+    /* a page that names no prompt or guideline, and a classifier that has nothing to add: the classify step fails and keeps no classification */
+    put('page.json', JSON.stringify({ sections: [{ heading: 'Notes', text: 'Atlas notes, synthetic.' }], fileList: [{ name: 'Facility_Terms.txt', group: 'World files', label: 'Facility terms' }], page: { origin: 'https://tasks.example', path: '/review/atlas-4821' } }));
+    rules[0].scenario.resultText = '{}';
+  }
   const env = { ...cleanEnv(), FINANCE_STUB_SCENARIO: JSON.stringify(hang ? { rules: [], default: { hang: true } } : { rules, default: {} }) };
   const agents = createAgentService({ root, env, claudeBin: STUB, tmpRoot, limits: { timeoutMs: 60000, killGraceMs: 300, drainMs: 100 } });
   const pipeline = createPipelineService({ root, agents, links: null, claudeBin: STUB, env, tmpRoot, pollMs: 5 });
@@ -1952,4 +2286,24 @@ test('the page against the real companion: Stop ends a pipeline that is working,
   assert.match(page.region('verdict'), /<h2>Stopped by you<\/h2>/);
   assert.equal(page.has('stop'), false);
   assert.equal(page.enabled('new'), true, 'another pipeline can be started');
+  assert.deepEqual(stepsOf(page.region('timeline')).map(x => x.s), ['done', 'stopped', 'todo', 'todo', 'todo', 'todo'], 'the real view of a run stopped while the classifier ran: Classify is where it stopped');
+});
+
+test('the page against the real companion: a classification that fails marks the Classify step, not Import', { skip: HAS_BACKEND ? false : 'backend/pipeline is not there yet' }, async t => {
+  const { source, origin } = await makeRealWorld(t, { unclassifiable: true });
+  const page = makePage(t, null, { origin });
+  await page.boot();
+  await page.type('source', { value: 'dir' });
+  await page.type('dir', { value: source });
+  await page.type('cap', { value: '30' });
+  await page.type('pilotCap', { value: '1' });
+  await page.ackAll();
+  await page.click('start');
+  assert.match(page.status(), /^Started\./);
+  await waitFor(async () => { await page.tick(); return /^Failed:/.test(page.stage()); }, { timeout: 30000, label: 'the run to fail ' + page.stage() + ' | ' + page.status() });
+  const steps = stepsOf(page.region('timeline'));
+  assert.deepEqual(steps.map(x => x.s), ['done', 'stopped', 'todo', 'todo', 'todo', 'todo'], 'the import finished and the classify step failed');
+  assert.equal(steps[1].label, 'Classify');
+  assert.match(page.region('verdict'), /<h2>No passing design<\/h2>/);
+  assert.match(page.region('verdict'), /Could not tell which part of the page is/);
 });

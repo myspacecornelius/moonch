@@ -47,6 +47,8 @@ const design = (withheld = false) => ({
   fingerprints: withheld ? { withheld: true } : [{ id: 'fp-alpha', label: 'Counts available credit as cash', tokens: ['available facility counted'], figures: ['1,900'] }],
 });
 const ZIP = Buffer.from('PK synthetic zip bytes');
+/* the rules GET /api/pipeline reports: the default total cap and the least total cap of one full attempt (1.15 x (6.25 + 7 x (3 + 1.5)) = 43.42 with the pilot cap of 3) */
+const CONFIG = { defaultCapUsd: 50, headroom: 1.15, minCap: { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 } };
 function handleApi(req, res, url, body) {
   const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
   if (req.method === 'POST') {
@@ -54,7 +56,7 @@ function handleApi(req, res, url, body) {
     if (req.headers['x-finance-local'] !== NONCE) return send(403, { error: 'Bad session code' });
   } else gets.push(url);
   if (url === '/api/status') return send(200, { nonce: NONCE, agents: { models: ['claude-opus-5-5', 'claude-sonnet-5-5'], efforts: ['low', 'medium', 'high'], maxPilotsPerRound: 5, runtime: { found: true } } });
-  if (req.method === 'GET' && url === '/api/pipeline') return send(200, { pipelines: [...pipelines.values()].map(p => ({ id: p.id, label: p.label, createdAt: p.createdAt, stage: p.stage, running: !ENDED.includes(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.capUsd, attempt: p.attempts.length, redesigns: p.redesigns })), running: null, config: {} });
+  if (req.method === 'GET' && url === '/api/pipeline') return send(200, { pipelines: [...pipelines.values()].map(p => ({ id: p.id, label: p.label, createdAt: p.createdAt, stage: p.stage, running: !ENDED.includes(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.capUsd, attempt: p.attempts.length, redesigns: p.redesigns })), running: null, config: CONFIG });
   if (req.method === 'POST' && url === '/api/pipeline/start') {
     if ([...pipelines.values()].some(p => !ENDED.includes(p.stage))) return send(409, { error: 'A pipeline is already running.' });
     const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
@@ -209,7 +211,8 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await text('[data-pl=start]'), 'Approve and start');
     assert.match(await text('#pl-why'), /Enter the task link/);
     assert.equal(await count('#pl-root button.primary'), 1, 'one yellow primary');
-    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '30');
+    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '50', 'the companion\'s default total cap');
+    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 43.42.');
     assert.equal(await count('#pl-start-form input[data-pl-in=ack]'), 4);
     assert.equal(await count('#pl-start-form input[type=checkbox]'), 5, 'the four acknowledgements and the withheld-files choice');
     assert.equal(await evaluate('document.querySelectorAll("#pl-root [role=status][aria-live=polite]").length >= 3'), true, 'live regions for the message, the stage and the wait');
@@ -227,6 +230,27 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await call('Input.insertText', { text: TASK_LINK });
     await delay(80);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/);
+    /* the least total cap, typed live: the figure follows the pilot cap, and Start waits for a cap that covers it */
+    await evaluate('document.querySelector("#pl-cap").focus();document.querySelector("#pl-cap").select()');
+    await call('Input.insertText', { text: '40' });
+    await delay(80);
+    assert.equal(await text('#pl-why'), 'The total cap must be at least USD 43.42 for one full attempt with these caps.');
+    assert.equal(await evaluate('document.querySelector("[data-pl=start]").disabled'), true);
+    await evaluate('document.querySelector("#pl-cap").select()');
+    await call('Input.insertText', { text: '50' });
+    await evaluate('document.querySelector("#pl-pilot-cap").focus();document.querySelector("#pl-pilot-cap").select()');
+    await call('Input.insertText', { text: '5' });
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 59.52.', 'the figure follows the pilot cap as it is typed');
+    assert.equal(await text('#pl-why'), 'The total cap must be at least USD 59.52 for one full attempt with these caps.');
+    assert.equal(await evaluate('document.querySelector("#pl-cap").getAttribute("aria-describedby")'), 'pl-cap-hint pl-cap-min');
+    await evaluate('document.querySelector("#pl-pilot-cap").select()');
+    await call('Input.insertText', { text: '3' });
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 43.42.');
+    assert.match(await text('#pl-why'), /Tick all four acknowledgements/, 'a cap that covers it: the next reason is the acknowledgements');
+    await shot('01b-min-cap-1440', 1440, 1000);
+    await evaluate('document.querySelector("#pl-url").focus()');
     const order = [];
     for (let i = 0; i < 6; i++) { await press('Tab'); order.push(await focused()); }
     assert.deepEqual(order, ['cap', 'model', 'effort', 'pilot-cap', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
@@ -249,21 +273,36 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const start = posts.find(p => p.url === '/api/pipeline/start');
     assert.ok(start, 'the page posted a start');
     assert.equal(start.nonce, NONCE);
-    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
+    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 50, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
     assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 1);
     assert.equal(await focused(), 'pl-stage', 'the keyboard moves to the stage line');
     assert.equal(await evaluate('document.body.innerHTML.includes("SECRET-TOKEN-123")'), false, 'the link is nowhere in the page');
     assert.equal(await exists('[data-pl=start]'), false);
     assert.match(await text('#pl-start-form'), /A pipeline is running/);
     assert.equal(await exists('[data-pl=stop]'), true, 'Stop is visible while it runs');
-    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 30\.00/);
+    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 50\.00/);
     pass('Enter on the button posts once with the nonce and the exact body; the link leaves the page; the keyboard lands on the stage line; Stop and the spend line show');
     await noHorizontalOverflow('running');
 
     /* ---------- the loader needs the person ---------- */
+    set({ waiting: { kind: 'needs-sign-in', message: 'Sign in to the task site in the Chrome window, then press Continue.' } });
+    await waitFor(stageIs('^Waiting for you'), 'the sign-in wait', POLL_WAIT);
+    assert.equal(await text('#pl-wait h2'), 'Sign in');
     set({ waiting: { kind: 'needs-person', message: 'Turn on the option that shows all files in the Chrome window, then press Continue.' } });
-    await waitFor(stageIs('^Waiting for you'), 'the waiting message', POLL_WAIT);
+    await waitFor('document.querySelector("#pl-wait h2")&&document.querySelector("#pl-wait h2").textContent!=="Sign in"', 'the wait to change kind', POLL_WAIT);
+    assert.equal(await text('#pl-wait h2'), 'Your action is needed in the Chrome window', 'a needs-person wait is not called a sign-in');
     assert.match(await text('#pl-wait'), /Turn on the option that shows all files in the Chrome window, then press Continue\./);
+    /* a thousand characters and more of the loader's message are shown whole, wrapped, without a sideways scroll */
+    const longMessage = ('3 files could not be downloaded: Atlas_Amendment_2.txt, Meridian_Note.txt, Borealis_Terms.txt. Download them yourself into a folder and use Import a folder. ').repeat(8).slice(0, 1196) + ' END';
+    set({ waiting: { kind: 'needs-person', message: longMessage } });
+    await waitFor('document.querySelector("#pl-wait .pl-wait-message")&&document.querySelector("#pl-wait .pl-wait-message").textContent.length>1000', 'the long message', POLL_WAIT);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-wait-message").textContent'), longMessage, 'the whole message');
+    assert.equal(await text('#pl-stage'), 'Waiting for you: Your action is needed in the Chrome window. The whole message is in the card below.', 'the sticky bar stays short');
+    await viewport(390, 844);
+    assert.ok(await evaluate('document.querySelector("#pl-bar").getBoundingClientRect().height') < 160, 'and the bar stays compact on a phone');
+    await shot('02b-waiting-long-390', 390, 844);
+    await viewport(1440, 1000);
+    await noHorizontalOverflow('long wait message');
     assert.equal(await evaluate('document.querySelector("#pl-wait").getAttribute("aria-live")'), 'polite');
     await shot('02-waiting-1440', 1440, 900);
     await viewport(1440, 1000);
@@ -278,7 +317,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await waitFor(stageIs('^Classify:'), 'classify', POLL_WAIT);
     assert.match(await text('#pl-import'), /9 files in all · 5 world · 3 task · 2 withheld · 1 other/);
     assert.match(await text('#pl-import'), /Found and turned on \(“Show all files”\)\. 4 files offered before, 9 after\./);
-    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 30\.00/);
+    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 50\.00/);
     assert.equal(await evaluate('document.querySelector("#pl-timeline [aria-current=step] strong").textContent'), 'Classify');
     assert.match(await text('#pl-spend'), /Classifying what was captured/, 'the companion\'s progress message shows under the stage');
     set({ stage: 'design', classification: { prompt: { kind: 'section', section: 'Business request', number: 2 }, guideline: { kind: 'file', file: 'Atlas_Grader_Guide.docx' }, goldenAnswer: { kind: 'file', file: 'Atlas_Reference_Answer.docx' }, worldFiles: ['Atlas_Facility_Schedule.csv', 'Meridian_Ledger.xlsx'], taskFiles: ['Atlas_Brief.txt'], other: [], withheld: [{ name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }, { name: 'Atlas_Reference_Answer.docx', why: 'it is the golden answer' }], notes: [], warnings: [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline or the golden answer' }] }, design: design(), attempt: 1, attempts: [attempt()] });
@@ -405,6 +444,30 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await count('#pl-start-form input[type=checkbox]:checked'), 0);
     pass('after a run the form opens empty: nothing is ticked and the link field is clear');
 
+    /* ---------- the cap stops the run before the test: the timeline marks Test, with the reason ---------- */
+    await evaluate('document.querySelector("#pl-url").focus()');
+    await call('Input.insertText', { text: TASK_LINK });
+    for (const id of ACK_IDS) await click('#pl-start-form input[data-id="' + id + '"]');
+    await click('[data-pl=start]');
+    await waitFor(stageIs('^Import:'), 'the second pipeline', 5000);
+    assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 2, 'a second start was posted');
+    set({ stage: 'budget', running: false, spentUsd: 17.4, capUsd: 20, summary: 'Stopped before the test: USD 17.40 spent, the step could cost up to USD 20.70, and the cap is USD 20.00.', result: { verdict: 'budget', message: 'x' } });
+    setAttempt({ outcome: 'budget', screen: stageOf('screen', [0.31, 0.12], true), test: null });
+    await waitFor(stageIs('^Stopped at the cap'), 'the stop at the cap', POLL_WAIT);
+    assert.equal(await text('#pl-stage'), 'Stopped at the cap, in the Test step: the next call would pass the total cap, so it was not started.');
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-timeline .pl-step")].map(li=>li.className.replace("pl-step is-","")).join()'), 'done,done,done,done,stopped,todo', 'Screen is done and Test is where it stopped');
+    assert.equal(await evaluate('document.querySelector("#pl-timeline [aria-current=step] strong").textContent'), 'Test');
+    assert.equal(await text('#pl-timeline .is-stopped small'), 'Stopped at the cap');
+    assert.match(await text('#pl-test'), /Not started[\s\S]*The test was not started: the next call would have passed the total cap of USD 20\.00, and USD 17\.40 was spent\./);
+    assert.match(await text('#pl-screen'), /Screen passed/);
+    assert.match(await text('#pl-verdict'), /Stopped at the cap[\s\S]*Stopped before the test: USD 17\.40 spent[\s\S]*Stopped in the Test step with USD 17\.40 of USD 20\.00 spent\. To go further, start a new pipeline with a higher total cap\./);
+    assert.equal(await exists('[data-pl=stop]'), false);
+    await noHorizontalOverflow('stopped at the cap');
+    await shot('04b-budget-1440', 1440, 1000);
+    await shot('04b-budget-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('a stop at the cap before the test marks Test as where it stopped, the Test card says it was not started, and the result says why in plain words');
+
     /* ---------- leaving and coming back ---------- */
     await click('[data-dash-tab="overview"]');
     await waitFor('window.FinanceDashboard.getView()==="overview"', 'the overview');
@@ -412,7 +475,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await delay(2600);
     assert.equal(gets.length, getsAway, 'no request while another page shows');
     await click('[data-dash-tab="pipeline"]');
-    await waitFor('/^Done:/.test(document.querySelector("#pl-stage").textContent)', 'the page to come back with the finished pipeline');
+    await waitFor('/^Stopped at the cap/.test(document.querySelector("#pl-stage").textContent)', 'the page to come back with the finished pipeline');
     pass('leaving the page stops its requests, and coming back shows the pipeline again');
 
     /* ---------- no outside requests, no errors ---------- */
