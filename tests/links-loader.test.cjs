@@ -302,6 +302,11 @@ test('names: Chrome\'s placeholder "download" is replaced by the page\'s name, a
   assert.equal(pickName('download', { nameHint: 'download', label: 'Grader Guideline.pdf' }, 'application/pdf').name, 'Grader Guideline.pdf', 'not download.pdf');
   assert.equal(pickName('21', { nameHint: '21', label: 'Atlas_Rows.csv 1 KB', text: 'Download' }, 'text/csv').name, '21.csv', 'no name with an extension anywhere: the content type is the last resort');
   assert.equal(pickName('', { nameHint: 'download', label: 'Row 3', text: 'Board_Memo.docx' }, 'application/octet-stream').name, 'Board_Memo.docx', 'the text counts too');
+  assert.equal(pickName('download.zip', { nameHint: 'download', label: 'Archive_Pack.zip', text: 'Archive_Pack.zip' }, 'application/zip').name, 'Archive_Pack.zip', 'the extension Chrome added from the content type does not make "download" a name');
+  assert.equal(pickName('download (2).pdf', { nameHint: 'x', label: 'Board Memo.pdf' }, 'application/pdf').name, 'Board Memo.pdf');
+  assert.equal(pickName('download.pdf', { nameHint: 'download', label: 'Row 3', text: 'Download' }, 'application/pdf').name, 'download.pdf', 'no better name on the page: it stays');
+  assert.equal(pickName('Report.pdf', { nameHint: 'Other.pdf', label: 'Other.pdf' }, 'application/pdf').name, 'Report.pdf', 'a real name from the server wins');
+  assert.equal(pickName('downloads.zip', { nameHint: 'Other.zip' }, 'application/zip').name, 'downloads.zip', '"downloads" is a name');
   assert.equal(bestName({ nameHint: 'download', label: 'Q3.pdf', text: 'Download' }), 'Q3.pdf');
   assert.equal(bestName({ nameHint: 'doc42', label: 'no extension', text: 'x' }), 'doc42');
   assert.equal(bestName({}), '');
@@ -637,6 +642,24 @@ test('extractPage: more controls are files - a "#" link or a link without an add
     ['Download', false], ['Download', true], ['Download', true], ['Download', true], ['Download', false], ['Download', false]], 'type=button and reset cannot submit; a default button, a submit input and a formaction can');
   assert.ok(!out.buttons.some((b) => b.text === 'evil.pdf'));
 });
+test('extractPage: the file name of a row is the whole phrase up to the extension, not its last word; a row with no table, list or row role is the nearest ancestor with more text; a container of several buttons is not a row', () => {
+  const { extractPage, LIMITS } = require('../backend/links/page.cjs');
+  const { doc, el, text, flat } = tinyDom();
+  const button = (extra = {}) => el('BUTTON', {}, [text('Download')], extra);
+  const divRow = (name) => { const b = button(); const row = el('DIV', { class: 'row' }, [el('SPAN', {}, [text(name)]), text(' '), b], { innerText: `${name} Download`, querySelectorAll: () => [b] }); return row; };
+  const tableButton = button({ closest: () => ({ innerText: 'Entity 02 Budget.txt\t1 KB\tDownload', textContent: 'Entity 02 Budget.txt 1 KB Download' }) });
+  const tarButton = button({ closest: () => ({ innerText: 'archive.tar.gz\tDownload', textContent: 'archive.tar.gz Download' }) });
+  const lone = button(); const other = button();
+  const container = el('DIV', {}, [lone, other], { innerText: 'Download Download', querySelectorAll: () => [lone, other] });
+  const wrapped = (() => { const b = button(); const actions = el('DIV', { class: 'actions' }, [b], { innerText: 'Download', querySelectorAll: () => [b] }); return el('DIV', { class: 'row' }, [el('SPAN', {}, [text('Wrapped One.pdf')]), actions], { innerText: 'Wrapped One.pdf Download', querySelectorAll: () => [b] }); })();
+  const body = el('BODY', {}, [divRow('Entity 01 Budget.txt'), tableButton, tarButton, container, wrapped]);
+  Object.assign(doc, { body, documentElement: body, title: 'T', readyState: 'complete', querySelectorAll: (sel) => (sel === '*' ? flat(body) : []), querySelector: () => null });
+  const sandbox = { document: doc, location: { href: 'https://tasks.atlas.example/t/1', origin: 'https://tasks.atlas.example' }, performance: { now: () => 0 }, CSS: { escape: (x) => x }, URL, URLSearchParams };
+  const out = JSON.parse(JSON.stringify(vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS, toggleRe: TOGGLE_LABEL_RE.source })})`, sandbox)));
+  assert.deepEqual(out.buttons.map((b) => [b.label, b.nameHint]), [
+    ['Entity 01 Budget.txt', 'Entity 01 Budget.txt'], ['Entity 02 Budget.txt 1 KB', 'Entity 02 Budget.txt'], ['archive.tar.gz', 'archive.tar.gz'],
+    ['Download', 'Download'], ['Download', 'Download'], ['Wrapped One.pdf', 'Wrapped One.pdf']], 'whole phrase; a bare container gives no row; a wrapper that holds only the button is climbed through');
+});
 function opsDom(setup) {
   const { doc, el, text, flat } = tinyDom();
   const clicks = [];
@@ -721,6 +744,68 @@ test('discover: a button is the same button when the heading above it changed be
   assert.equal(set.add([b('A'), b('A', 'Other.txt')]), 1, 'add() tells how many are new');
   assert.equal(set.size, 2);
 });
+test('discover: the tab is part of a candidate\'s identity (one name in two tabs is two files); a tab is the same tab when its count changes; rows that look different but were merged are counted', () => {
+  const b = (tab, label, extra = {}) => ({ mode: 'click', kind: 'button', text: 'Download', label, nameHint: extra.nameHint || label, href: null, group: 'Files', path: 'p', view: tab ? { tab: { label: tab, path: 't' }, more: 0, scroll: 0 } : null });
+  const two = discover.unionCandidates([[b('Task', 'Data.csv')], [b('Reference', 'Data.csv')], [b('Reference (3)', 'Notes.txt')], [b('Reference (9)', 'Notes.txt')]]);
+  assert.deepEqual(two.map((c) => [c.view.tab.label, c.label]), [['Task', 'Data.csv'], ['Reference', 'Data.csv'], ['Reference (3)', 'Notes.txt']], 'a count in a tab name does not make a new tab');
+  assert.equal(discover.tabKey('Reference (12) 3'), 'Reference (#) #');
+  const ok = discover.unionWithCheck([[b(null, 'Entity 01 Budget.txt 1 KB'), b(null, 'Entity 02 Budget.txt 2 KB')]]);
+  assert.deepEqual([ok.list.length, ok.merged], [2, 0]);
+  const volatile = discover.unionWithCheck([[b(null, 'report.xlsx 12 KB Updated 3 minutes ago', { nameHint: 'report.xlsx' })], [b(null, 'report.xlsx 12 KB Updated 4 minutes ago', { nameHint: 'report.xlsx' })]]);
+  assert.deepEqual([volatile.list.length, volatile.merged], [1, 0], 'text after the name that changes is the same row');
+  const collapsed = discover.unionWithCheck([[b(null, 'Entity 01 Budget.txt', { nameHint: 'Budget.txt' }), b(null, 'Entity 02 Budget.txt', { nameHint: 'Budget.txt' })]]);
+  assert.deepEqual([collapsed.list.length, collapsed.merged], [2, 0], 'two rows with one name phrase are two candidates (the k-th occurrence)');
+  const across = discover.unionWithCheck([[b(null, 'Entity 01 Budget.txt', { nameHint: 'Budget.txt' })], [b(null, 'Entity 02 Budget.txt', { nameHint: 'Budget.txt' })]]);
+  assert.deepEqual([across.list.length, across.merged], [1, 1], 'seen in two looks they merge; the check says one row was swallowed');
+});
+test('downloads: the same file listed twice (same name, same bytes) is kept once and said so; the same name with other bytes is another file', async () => {
+  const m = manager({ gapMs: 0 });
+  const stage = (guid, body) => { fs.writeFileSync(path.join(m.dm.stageDir, guid), body); };
+  const finish = async (guid, body, name) => {
+    stage(guid, body);
+    const j = job({ guid, suggested: name, contentType: 'text/plain', completed: { filePath: path.join(m.dm.stageDir, guid) }, totalBytes: body.length, candidate: { nameHint: name, label: name } });
+    const result = {};
+    await m.dm.finalize(j, result);
+    return result;
+  };
+  const a = await finish('g1', 'same bytes', 'Data.csv');
+  const b = await finish('g2', 'same bytes', 'Data.csv');
+  const c = await finish('g3', 'other bytes', 'Data.csv');
+  assert.deepEqual([a.name, a.duplicate], ['Data.csv', undefined]);
+  assert.deepEqual([b.state, b.name, b.duplicate], ['done', 'Data.csv', true]);
+  assert.deepEqual([c.name, c.duplicate], ['Data (2).csv', undefined]);
+  assert.deepEqual(fs.readdirSync(m.dm.destDir).sort(), ['Data (2).csv', 'Data.csv']);
+  assert.equal(fs.readdirSync(m.dm.stageDir).length, 0, 'the duplicate is removed from the stage folder');
+});
+test('waitForSettled: a request that answered and sends nothing (a beacon) or never answers (a long poll) is idle and never makes the page unsettled; a slow answer is waited for; other things stuck still do', async () => {
+  const { waitForSettled } = require('../backend/links/tab.cjs');
+  const fake = (entries) => ({ net: { inflight: new Map(entries), quiet: new Set(), lastActivityAt: 0 }, evalIsolated: async () => ({ readyState: 'complete', quiet: 99999, count: 0 }) });
+  const ago = (ms) => Date.now() - ms;
+  const beacon = fake([['b', { type: 'Fetch', startedAt: ago(4000), responded: true, lastDataAt: ago(4000) }]]);
+  assert.deepEqual((({ settled }) => ({ settled }))(await waitForSettled(beacon, { maxMs: 3000 })), { settled: true }, 'answered, no data for 4 s: idle');
+  assert.ok(beacon.net.quiet.has('b'), 'and remembered as idle');
+  const streaming = fake([['s', { type: 'Fetch', startedAt: ago(9000), responded: true, lastDataAt: Date.now() }]]);
+  streaming.net.inflight.get('s').lastDataAt = Date.now();
+  const t0 = Date.now();
+  setTimeout(() => { streaming.net.inflight.get('s').lastDataAt = ago(5000); }, 250);
+  assert.equal((await waitForSettled(streaming, { maxMs: 3000, pollMs: 20 })).settled, true);
+  assert.ok(Date.now() - t0 >= 240, 'a response that is still sending data is waited for');
+  const slow = fake([['a', { type: 'Fetch', startedAt: ago(1000), responded: false, lastDataAt: ago(1000) }]]);
+  setTimeout(() => slow.net.inflight.delete('a'), 300);
+  const waitedFor = Date.now();
+  assert.equal((await waitForSettled(slow, { maxMs: 3000, pollMs: 20 })).settled, true);
+  assert.ok(Date.now() - waitedFor >= 280, 'an API that has not answered yet is waited for (up to stalledApiMs)');
+  const poll = fake([['p', { type: 'Fetch', startedAt: ago(1000), responded: false, lastDataAt: ago(1000) }]]);
+  const r = await waitForSettled(poll, { maxMs: 400, pollMs: 20 });
+  assert.deepEqual([r.settled, r.apiPending], [true, 1], 'at the deadline a request that never answered is not held against the page');
+  assert.ok(poll.net.quiet.has('p'));
+  const again = Date.now();
+  assert.equal((await waitForSettled(poll, { maxMs: 400, pollMs: 20 })).settled, true);
+  assert.ok(Date.now() - again < 200, 'the next settle does not wait for it again');
+  const stuck = fake([['x', { type: 'Script', startedAt: ago(1000), responded: false, lastDataAt: ago(1000) }]]);
+  assert.equal((await waitForSettled(stuck, { maxMs: 300, pollMs: 20, stalledMs: 5000 })).settled, false, 'a stuck script is a real unsettled page');
+});
+
 function scriptedTab(script) {
   const { extractPage, pageOps } = require('../backend/links/page.cjs');
   const log = []; const snaps = [];
@@ -829,7 +914,12 @@ test('discover replay: the tab, the "Load more" presses, then the scroll steps, 
   const gone = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'A', path: 'a', selected: true }], more: [] } : arg.op === 'activate' ? { ok: false, why: 'the element is gone from the page' } : {}) });
   const failed = await discover.replay(gone.tab, { tab: { label: 'B', path: 'b' }, more: 0, scroll: 0 }, null, {});
   assert.equal(failed.ok, false);
-  assert.match(failed.why, /tab "B" could not be opened again/);
+  assert.match(failed.why, /tab "B" is no longer on the page/);
+  const stuck = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'A', path: 'a', selected: true }, { label: 'B', path: 'b', selected: false }], more: [] } : arg.op === 'activate' ? { ok: false, why: 'the element is gone from the page' } : {}) });
+  assert.match((await discover.replay(stuck.tab, { tab: { label: 'B', path: 'b' }, more: 0, scroll: 0 }, null, {})).why, /tab "B" could not be opened again/);
+  const counted = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'Files (12)', path: 'a', selected: true }, { label: 'Reference (9)', path: 'b', selected: false }], more: [] } : arg.op === 'activate' ? { ok: true } : {}) });
+  await discover.replay(counted.tab, { tab: { label: 'Reference (3)', path: 'b' }, more: 0, scroll: 0 }, null, {});
+  assert.deepEqual(counted.log.filter((a) => a.op === 'activate').map((a) => [a.path, a.label]), [['b', 'Reference (9)']], 'a tab whose count changed is the same tab, and is pressed under the label it has now');
 });
 test('discover expandAll: repeats until nothing new opens (a folder inside a folder), at most `passes` times, every pass a stamped snapshot', async () => {
   let n = 0;

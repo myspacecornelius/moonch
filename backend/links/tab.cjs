@@ -50,7 +50,7 @@ class Tab {
     this.s = cdp.session(sessionId);
     this.closed = false;
     this.dialogs = [];
-    this.net = { inflight: new Map(), lastActivityAt: Date.now(), requestCount: 0, hops: [], mainResponse: null, lifecycle: {}, apiErrors: [] };
+    this.net = { inflight: new Map(), quiet: new Set(), lastActivityAt: Date.now(), requestCount: 0, hops: [], mainResponse: null, lifecycle: {}, apiErrors: [] };
     this.navStartedAt = Date.now();
     this.unsubscribe = [];
     this.wire();
@@ -89,15 +89,18 @@ class Tab {
     /* Only fixed shapes are kept: ids, types, status codes, safe URLs (and the raw URL of a redirect hop, in memory, for the classifier). */
     on('Network.requestWillBeSent', (p) => {
       touch();
-      net.inflight.set(p.requestId, { type: p.type, startedAt: Date.now() });
+      net.inflight.set(p.requestId, { type: p.type, startedAt: Date.now(), responded: false, lastDataAt: Date.now() });
       net.requestCount += 1;
       if (p.type === 'Document' && p.frameId === this.frameId) {
         if (p.redirectResponse && net.hops.length) net.hops[net.hops.length - 1].status = p.redirectResponse.status;
         net.hops.push({ rawUrl: p.request.url, status: null });
       }
     });
+    on('Network.dataReceived', (p) => { const entry = net.inflight.get(p.requestId); if (entry) entry.lastDataAt = Date.now(); });   /* a transfer that is still going */
     on('Network.responseReceived', (p) => {
       touch();
+      const entry = net.inflight.get(p.requestId);
+      if (entry) { entry.responded = true; entry.lastDataAt = Date.now(); }
       if (p.type === 'Document' && p.frameId === this.frameId) {
         net.mainResponse = { status: p.response.status };
         const last = net.hops[net.hops.length - 1];
@@ -105,8 +108,8 @@ class Tab {
       }
       if ((p.type === 'XHR' || p.type === 'Fetch') && p.response.status >= 400) cap(net.apiErrors, { status: p.response.status });
     });
-    on('Network.loadingFinished', (p) => { touch(); net.inflight.delete(p.requestId); });
-    on('Network.loadingFailed', (p) => { touch(); net.inflight.delete(p.requestId); });
+    on('Network.loadingFinished', (p) => { touch(); net.inflight.delete(p.requestId); net.quiet.delete(p.requestId); });
+    on('Network.loadingFailed', (p) => { touch(); net.inflight.delete(p.requestId); net.quiet.delete(p.requestId); });
     on('Page.lifecycleEvent', (p) => { if (p.frameId === this.frameId) net.lifecycle[p.name] = Date.now() - this.navStartedAt; });
     /* A dialog freezes the page's script until somebody answers. Never accept anything but the "leave this page?" question. */
     on('Page.javascriptDialogOpening', (p) => {
@@ -173,9 +176,11 @@ class Tab {
 
 /* "Is the page finished?" There is no event for that. A single-page app fetches its data AFTER the HTML has loaded, renders, and then
    often fetches more. So wait for TWO quiet signals at once and give up after a hard deadline:
-     network idle   no request in flight (long-running ones are ignored after `stalledMs`, or `stalledApiMs` for XHR and fetch: the data
-                    of a single-page app can be slow, a long poll never ends and costs at most maxMs) and nothing
-                    finished for `idleMs`, from the tab's own request log;
+     network idle   nothing in flight that is still doing something, and nothing finished for `idleMs`, from the tab's own request log.
+                    A request counts as busy while it is waiting for its response (`stalledMs`, or `stalledApiMs` for XHR and fetch:
+                    the data of a single-page app can be slow) or, once its response has begun, while data keeps arriving (`stalledMs`
+                    without a byte). A request that is past that is idle: a beacon or keepalive fetch nobody reads, a long poll. It is
+                    remembered as idle (tab.net.quiet), so only the first settle pays for it, and it never makes the page "unsettled";
      DOM stable     the MutationObserver installed at document start has seen nothing for `quietMs`, and readyState is "complete".
    A page that never settles (a ticker, a poll) is not an error: the result says settled:false and the loader goes on with what is there. */
 const IGNORED_TYPES = new Set(['WebSocket', 'EventSource', 'Ping', 'Prefetch', 'CSPViolationReport']);
@@ -183,18 +188,35 @@ const SETTLE_DOM = '({ readyState: document.readyState, quiet: performance.now()
 
 async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000, pollMs = 80, stalledMs = 2500, stalledApiMs = 20000, signal } = {}) {
   const started = Date.now();
+  const quiet = tab.net.quiet || (tab.net.quiet = new Set());
   let lastDom = { readyState: '?', quiet: 0, count: 0 };
   for (;;) {
     if (signal && signal.aborted) throw new CdpError('Cancelled.', { code: 'CANCELLED' });
     const now = Date.now();
-    let busy = 0;
-    for (const entry of tab.net.inflight.values()) if (!IGNORED_TYPES.has(entry.type) && now - entry.startedAt <= (entry.type === 'XHR' || entry.type === 'Fetch' ? stalledApiMs : stalledMs)) busy += 1;   /* the data of a single-page app can take a while; a long poll costs at most maxMs */
+    let busy = 0;      /* requests that still count */
+    let waiting = 0;   /* of those, XHR and fetch that have not answered yet (the only ones a deadline does not hold against the page) */
+    for (const [id, entry] of tab.net.inflight) {
+      if (IGNORED_TYPES.has(entry.type) || quiet.has(id)) continue;
+      const api = entry.type === 'XHR' || entry.type === 'Fetch';
+      const live = entry.responded ? now - entry.lastDataAt <= stalledMs : now - entry.startedAt <= (api ? stalledApiMs : stalledMs);
+      if (!live) { quiet.add(id); continue; }
+      busy += 1;
+      if (api && !entry.responded) waiting += 1;
+    }
     try { lastDom = await tab.evalIsolated(SETTLE_DOM, { timeout: 1500, retries: 0 }); }
     catch (e) { lastDom = { readyState: 'loading', quiet: 0, count: lastDom.count }; }   /* the document is being replaced: not stable yet */
     const networkIdle = busy === 0 && now - tab.net.lastActivityAt >= idleMs;
     const domStable = lastDom.readyState === 'complete' && lastDom.quiet >= quietMs;
     if (networkIdle && domStable) return { settled: true, ms: Date.now() - started };
-    if (now - started >= maxMs) return { settled: false, ms: Date.now() - started };
+    if (now - started >= maxMs) {
+      /* at the deadline an API request that is still waiting is not held against the page: it may be a long poll. It is forgotten
+         from now on, so the next settle does not wait for it again. */
+      if (domStable && busy === waiting) {
+        for (const [id, entry] of tab.net.inflight) if ((entry.type === 'XHR' || entry.type === 'Fetch') && !entry.responded) quiet.add(id);
+        return { settled: true, ms: Date.now() - started, apiPending: waiting };
+      }
+      return { settled: false, ms: Date.now() - started };
+    }
     await sleep(pollMs);
   }
 }

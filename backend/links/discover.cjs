@@ -12,16 +12,17 @@
                  steps), so a button that only exists there can be found and pressed later
 
    Every snapshot gather takes is stamped with its view { tab, more, scroll } (snap.view); fileCandidates copies it into each
-   candidate. A click candidate is identified by what it IS (the file name or the text of its row, its group, its text), not by where it
-   sat, so the same row seen twice is one candidate and two rows with the same words are two (the k-th occurrence in a snapshot is the
-   k-th). Nothing is capped without saying so: gather returns capped: [text] for a limit that ended a step while files were still
+   candidate. A click candidate is identified by what it IS (the whole file-name phrase or the text of its row, its group, the tab it
+   was seen in, its text), not by where it sat, so the same row seen twice is one candidate and two rows with the same words are two
+   (the k-th occurrence in a snapshot is the k-th). As a backstop the set also counts the distinct rows it has seen (tab, text and
+   name phrase of the row text); more rows than candidates means rows were taken for one another, and the loader says so in a note. Nothing is capped without saying so: gather returns capped: [text] for a limit that ended a step while files were still
    appearing, or a tab it could not open.
 
    Every click goes through pageOps' activate (which refuses a destructive or a changed element), and the person's page is put back
    (scrolled to the top, the first tab selected). Exports: stabilize, expand, expandAll, gather, replay, signature, CandidateSet,
    unionCandidates, unionDropped, mergeSections, candidateKey, nap. */
 
-const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey } = require('./page.cjs');
+const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey, namePhrase } = require('./page.cjs');
 const { waitForSettled } = require('./tab.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
 
@@ -47,24 +48,32 @@ function signature(snap) {
   ]);
 }
 
+/* A tab is known by its label with the numbers taken out: "Reference (3)" becomes "Reference (9)" when the list grows. */
+const tabKey = (label) => String(label || '').replace(/\d+/g, '#');
 const hasExtension = (name) => /\.[A-Za-z0-9]{1,8}$/.test(String(name || ''));
 const GENERIC_TEXT = /^(download|export)\b/i;
-/* The identity of a candidate: a file link is its address without the signature; a click candidate is the file name (or the text of its
-   row), its group, the text of the control and its address. A bare "Download" with no row text says nothing, so its position counts.
-   withGroup:false is the same without the heading above it (a heading can change when a switch adds a section above the file). */
-function candidateKey(c, { withGroup = true } = {}) {
+/* The identity of a candidate: a file link is its address without the signature; a click candidate is the file name phrase (or the text
+   of its row), its group, the tab it was seen in, the text of the control and its address. A bare "Download" with no row text says
+   nothing, so its position counts. withGroup:false and withTab:false leave out the heading above it (it can change when a switch adds
+   a section above the file) and the tab (the live page shows only one). */
+function candidateKey(c, { withGroup = true, withTab = true } = {}) {
   if (c.mode === 'navigate') return navigateKey(c.href || '', c.label || '');
   const name = hasExtension(c.nameHint) ? c.nameHint : (c.label || '');
   const generic = (c.label || '') === (c.text || '') && GENERIC_TEXT.test(c.text || '');
-  return `c|${name}|${withGroup ? c.group || '' : ''}|${c.text || ''}|${c.href || ''}${generic ? `|${c.path || ''}` : ''}`;
+  const tab = withTab && c.view && c.view.tab ? tabKey(c.view.tab.label) : '';
+  return `c|${name}|${withGroup ? c.group || '' : ''}|${tab}|${c.text || ''}|${c.href || ''}${generic ? `|${c.path || ''}` : ''}`;
 }
+/* A row as the reader sees it, independent of how the name was cut: the tab, the control's text and the name phrase of the row text.
+   Used only to count: if more distinct rows were seen than candidates kept, some rows were merged. */
+const rowSignature = (c) => `${c.view && c.view.tab ? tabKey(c.view.tab.label) : ''}|${c.text || ''}|${namePhrase(c.label || c.text || '')}`;
 
 /* Candidates from several snapshots as one list, in order of first appearance. Each candidate gets occ, its occurrence number among
    the candidates with the same key in the snapshot it first appeared in. A file link seen again keeps its place and takes the newest
    address (an older signature may have expired). A button whose heading changed between two snapshots (a switch added a section above
-   it) is the same button: when the earlier one is gone from the newer snapshot and only the group differs, the group is updated. */
+   it) is the same button: when the earlier one is gone from the newer snapshot and only the group differs, the group is updated.
+   rows counts the distinct rows seen (see rowSignature); merged() is how many more rows than click candidates there are. */
 class CandidateSet {
-  constructor() { this.items = []; this.index = new Map(); this.loose = new Map(); }
+  constructor() { this.items = []; this.index = new Map(); this.loose = new Map(); this.rows = new Set(); }
   add(list) {
     const seen = new Map();
     const entries = list.map((c) => {
@@ -82,17 +91,24 @@ class CandidateSet {
         if (old && !here.has(old.key)) { item = old.item; item.c.group = e.c.group; this.index.set(e.key, item); }
       }
       if (!item) { item = { c: { ...e.c, occ: e.n } }; this.items.push(item); this.index.set(e.key, item); fresh += 1; } else if (e.c.mode === 'navigate') item.c.href = e.c.href;
-      if (e.loose) this.loose.set(e.loose, { key: e.key, item });
+      if (e.loose) { this.loose.set(e.loose, { key: e.key, item }); this.rows.add(rowSignature(e.c)); }
     }
     return fresh;
   }
   get size() { return this.items.length; }
   list() { return this.items.map((i) => i.c); }
+  merged() { return Math.max(0, this.rows.size - this.items.filter((i) => i.c.mode === 'click').length); }
 }
 function unionCandidates(lists) {
   const set = new CandidateSet();
   for (const list of lists) set.add(list);
   return set.list();
+}
+/* Like unionCandidates, with the number of rows that look different but were merged (0 when all is well). */
+function unionWithCheck(lists) {
+  const set = new CandidateSet();
+  for (const list of lists) set.add(list);
+  return { list: set.list(), merged: set.merged() };
 }
 /* The controls that look like files and were left out, once each. */
 function unionDropped(lists) {
@@ -167,9 +183,11 @@ async function replay(tab, view, home, { signal } = {}) {
   const want = (view && view.tab) || home || null;
   const controls = await pageOp(tab, 'controls');
   if (want && controls.tabs.length) {
-    const current = controls.tabs.find((t) => t.selected);
-    if (!current || current.label !== want.label) {
-      const r = await pageOp(tab, 'activate', { path: want.path, label: want.label });
+    const wantKey = tabKey(want.label);
+    const fresh = controls.tabs.find((t) => tabKey(t.label) === wantKey && t.path === want.path) || controls.tabs.find((t) => tabKey(t.label) === wantKey);
+    if (!fresh) return { ok: false, why: `the tab "${want.label}" is no longer on the page` };
+    if (!fresh.selected) {
+      const r = await pageOp(tab, 'activate', { path: fresh.path, label: fresh.label });
       if (!r.ok) return { ok: false, why: `the tab "${want.label}" could not be opened again (${r.why})` };
       await quick(tab, signal);
     }
@@ -271,4 +289,4 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
   return did;
 }
 
-module.exports = { stabilize, expand, expandAll, gather, replay, signature, CandidateSet, unionCandidates, unionDropped, mergeSections, candidateKey, nap, droppedCandidates };
+module.exports = { stabilize, expand, expandAll, gather, replay, signature, CandidateSet, unionCandidates, unionWithCheck, unionDropped, mergeSections, candidateKey, tabKey, nap, droppedCandidates };

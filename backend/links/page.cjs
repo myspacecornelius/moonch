@@ -18,7 +18,7 @@
    "load more" buttons, scroll the scrollable boxes one step, and activate ONE element (a click, or choosing a <select> option) after
    checking that it is still the element that was listed and is not a destructive one.
 
-   Exports: extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, findAllFilesToggle,
+   Exports: extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, namePhrase, findAllFilesToggle,
    findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE. */
 
 const LIMITS = {
@@ -133,6 +133,24 @@ function extractPage(opts) {
   const FILE_EXT = /^(pdf|docx?|xlsx?|xlsm|xlsb|csv|tsv|txt|md|json|zip|7z|tar|gz|tgz|rar|rtf|pptx?|odt|ods|odp|png|jpe?g|gif|svg|eml|msg|xml|parquet)$/i;
   const WEB_EXT = /^(html?|xhtml|shtml|php\d?|aspx?|jsp|cfm|cgi|pl|do|action|js|mjs|css|map|com|org|net|io)$/i;
   const extOf = (name) => { const m = /\.([A-Za-z0-9]{1,8})$/.exec(name || ''); return m ? m[1].toLowerCase() : null; };
+  const EXTS = FILE_EXT.source.slice(2, -2);
+  /* the file-name phrase at the start of a line of row text: everything up to the end of the first extension ("Entity 01 Budget.txt", "archive.tar.gz") */
+  const NAME_RE = new RegExp('^(.*?\\.(?:' + EXTS + ')(?:\\.(?:' + EXTS + '))*)(?![A-Za-z0-9])', 'i');
+  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')), 160);
+  /* The row of a control: its table row, list item or row-role ancestor; else the nearest ancestor whose text is more than the control's
+     own (a wrapper that holds only the control does not count) and that does not hold a second control with the same text (that would
+     be a container of several rows). null when there is none. */
+  const rowOf = (el, text) => {
+    const hard = el.closest ? el.closest('tr,li,[role=row]') : null;
+    if (hard) return hard;
+    for (let n = el.parentElement, depth = 0; n && depth < 8 && n.tagName !== 'BODY' && n.tagName !== 'HTML'; n = n.parentElement, depth += 1) {
+      if (norm(n.innerText || n.textContent) === text) continue;
+      let same = 0;
+      for (const c of n.querySelectorAll('button,a,[role=button],input')) { if (controlText(c) === text) same += 1; if (same > 1) return null; }
+      return n;
+    }
+    return null;
+  };
   const dispositionName = (u) => { const d = u.searchParams.get('response-content-disposition') || u.searchParams.get('filename') || ''; const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(d); if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } } return d && !/=/.test(d) ? d : ''; };
 
   out.headings = []; out.links = []; out.buttons = []; out.toggles = [];
@@ -210,10 +228,15 @@ function extractPage(opts) {
       const btype = String(el.getAttribute('type') || '').toLowerCase();
       const submitsForm = el.hasAttribute('formaction') || (Boolean(el.form) && (tag === 'BUTTON' ? btype !== 'button' && btype !== 'reset' : tag === 'INPUT' && /^(submit|image)$/.test(btype)));
       let label = text; let nameHint = text;
-      if (!ext) {   /* "Download" says nothing: the text of its table row or list item says which file */
-        const row = el.closest ? el.closest('tr,li,[role=row]') : null;
+      if (!ext) {   /* "Download" says nothing: the text of its row says which file */
+        const row = rowOf(el, text);
         const rowText = row ? norm(norm(row.innerText || row.textContent).replace(text, ' ')) : '';   /* innerText puts a space between table cells */
-        if (rowText) { label = clip(rowText, 160); const m = /[^\s"'<>:|?*\\/]+\.([A-Za-z0-9]{1,8})\b/.exec(rowText); if (m && FILE_EXT.test(m[1])) nameHint = m[0]; }
+        if (rowText) {
+          label = clip(rowText, 160);
+          /* the full name phrase of the first line or cell that holds a file name, not its last word */
+          const lines = String(row.innerText || '').split(/[\t\n\r]+/).map(norm).filter(Boolean);
+          for (const line of lines.length ? lines : [rowText]) { const m = NAME_RE.exec(line.replace(text, ' ').trim()); if (m) { nameHint = m[1]; break; } }
+        }
       }
       out.buttons.push({ text, label, nameHint: clip(nameHint, 160), fileLike, ext, dataUrl: dataUrl ? clip(dataUrl, 500) : null, disabled: Boolean(el.disabled), inForm: submitsForm, path: cssPath(el), group });
       continue;
@@ -345,6 +368,18 @@ function pageOps(opts) {
   };
   const every = (selector) => roots().flatMap((r) => Array.from(r.querySelectorAll(selector)));
   const textOf = (el) => clip(norm(el.tagName === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.title) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
+  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')), 160);
+  const rowOf = (el, text) => {   /* the same rule as extractPage */
+    const hard = el.closest ? el.closest('tr,li,[role=row]') : null;
+    if (hard) return hard;
+    for (let n = el.parentElement, depth = 0; n && depth < 8 && n.tagName !== 'BODY' && n.tagName !== 'HTML'; n = n.parentElement, depth += 1) {
+      if (norm(n.innerText || n.textContent) === text) continue;
+      let same = 0;
+      for (const c of n.querySelectorAll('button,a,[role=button],input')) { if (controlText(c) === text) same += 1; if (same > 1) return null; }
+      return n;
+    }
+    return null;
+  };
   /* a link that goes somewhere is not a button: pressing it would leave the page */
   const pressable = (el) => el.tagName !== 'A' || !el.hasAttribute('href') || /^\s*(#.*)?$|^\s*javascript:\s*(void\s*\(\s*0?\s*\)|undefined|;)?\s*;?\s*$/i.test(el.getAttribute('href') || '');
   if (opts.op === 'expand') {
@@ -390,7 +425,7 @@ function pageOps(opts) {
     if (never.test(text)) return { ok: false, why: 'the element is a destructive action' };
     if (typeof opts.label === 'string' && opts.label !== '' && text !== opts.label) return { ok: false, why: 'the element is no longer the one that was listed' };
     if (typeof opts.row === 'string' && opts.row !== '' && opts.row !== text) {   /* a "Download" button: which row is it in? */
-      const rowEl = el.closest ? el.closest('tr,li,[role=row]') : null;
+      const rowEl = rowOf(el, text);
       const rowText = rowEl ? clip(norm(norm(rowEl.innerText || rowEl.textContent).replace(text, ' ')), 160) : '';
       if (rowText !== opts.row && !(typeof opts.name === 'string' && opts.name !== '' && rowText.includes(opts.name))) return { ok: false, why: 'the row of the element is no longer the one that was listed' };
     }
@@ -414,6 +449,10 @@ const pageOp = (tab, op, extra = {}) => tab.evalFn(pageOps, { op, never: NEVER_T
 const ALL_BUTTON_RE = /^(download|export)\s+(all|everything|zip|archive|bundle)\b/i;
 const FILE_NAME_END = /\.([A-Za-z0-9]{1,8})$/;
 const FILE_EXTENSIONS = /^(pdf|docx?|xlsx?|xlsm|xlsb|csv|tsv|txt|md|json|zip|7z|tar|gz|tgz|rar|rtf|pptx?|odt|ods|odp|png|jpe?g|gif|svg|eml|msg|xml|parquet)$/i;
+/* The file-name phrase at the start of a text: everything up to the end of the first extension ("Entity 01 Budget.txt 1 KB" gives
+   "Entity 01 Budget.txt"); the whole text when there is no extension. */
+const NAME_PHRASE_RE = new RegExp(`^(.*?\\.(?:${FILE_EXTENSIONS.source.slice(2, -2)})(?:\\.(?:${FILE_EXTENSIONS.source.slice(2, -2)}))*)(?![A-Za-z0-9])`, 'i');
+const namePhrase = (text) => { const m = NAME_PHRASE_RE.exec(String(text || '')); return m ? m[1] : String(text || ''); };
 const endsInFileExtension = (text) => { const m = FILE_NAME_END.exec(String(text || '')); return Boolean(m && FILE_EXTENSIONS.test(m[1])); };
 
 /* The address of a file link without what changes each time it is issued (a signature, an expiry): two copies of the same file that were
@@ -512,4 +551,4 @@ function findAllFilesState(toggles, learned) {
   return hit ? { toggle: hit, on: true } : null;
 }
 
-module.exports = { extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE };
+module.exports = { extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, namePhrase, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE };

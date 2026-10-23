@@ -284,7 +284,7 @@ async function launchBrowser({ binary, profileDir, headless = true, spawnFn = sp
     }
     const left = await handle.kill();
     if (!left.length && !holdsProfile(profileDir)) scrubProfile(profileDir);
-    const tail = safeText(stderr.slice(-300), 200);
+    const tail = safeText(stderr, 4000).slice(-200).trim();   /* the END of the output: the last lines say why it stopped */
     /* a pipe that closed before the browser answered: it never started (no display, a missing library, a refused sandbox ...) */
     if (error.code === 'PIPE_CLOSED' || exitInfo !== null) throw new CdpError(`Chrome did not start. ${tail}`.trim(), { code: 'LAUNCH' });
     error.message += ` Browser output: ${tail}`;

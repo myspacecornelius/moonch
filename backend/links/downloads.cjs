@@ -61,9 +61,17 @@ function bestName(candidate) {
   const names = [candidate.nameHint, candidate.label, candidate.text].map((n) => String(n || '').trim()).filter(Boolean);
   return names.find((n) => HAS_EXT.test(n)) || names[0] || '';
 }
+/* "download", "download (2)" with or without an extension: the name Chrome makes when the server gave none (it adds the extension of the
+   content type itself, so "Archive_Pack.zip" arrives as "download.zip"). */
+const GENERIC_BASE = /^download(?: \(\d+\))?$/i;
 function pickName(suggested, candidate, contentType) {
   let name = suggested;
-  if (!name || name === 'download' || !HAS_EXT.test(name)) { const hint = bestName(candidate); if (HAS_EXT.test(hint) || !name) name = hint || name || 'download'; }
+  const generic = !name || GENERIC_BASE.test(String(name).replace(HAS_EXT, ''));
+  if (generic || !HAS_EXT.test(name)) {
+    const hint = bestName(candidate);
+    if (HAS_EXT.test(hint) && !GENERIC_BASE.test(hint.replace(HAS_EXT, ''))) name = hint;
+    else if (!name) name = hint || 'download';
+  }
   const picked = sanitizeFileName(name);
   if (!HAS_EXT.test(picked.name) && EXT_BY_TYPE[contentType]) picked.name += EXT_BY_TYPE[contentType];
   return picked;
@@ -95,6 +103,7 @@ class DownloadManager {
     this.byFrame = new Map();    /* frameId -> job waiting for its download to begin */
     this.stray = 0;              /* downloads nobody asked for, cancelled */
     this.taken = new Set();
+    this.seenFiles = new Map();   /* sha256|name -> the name it was kept under */
     this.lastEndedAt = 0;
     this.totalBytes = 0;
     this.nextId = 1;
@@ -302,6 +311,14 @@ class DownloadManager {
     if (job.totalBytes > 0 && stat.size !== job.totalBytes) { job.terminal = { state: 'size-mismatch', detail: `${stat.size} bytes on disk, ${job.totalBytes} announced` }; fs.rmSync(src, { force: true }); return; }
     const sha = await sha256File(src);
     const picked = pickName(job.suggested, job.candidate, job.contentType || '');
+    /* The same file listed twice (the same name and the very same bytes, say in a tab that shows everything and in the tab of its
+       group) is kept once. A name with different bytes is another file and gets its own name. */
+    const sameAs = this.seenFiles.get(`${sha}|${picked.name.toLowerCase()}`);
+    if (sameAs) {
+      fs.rmSync(src, { force: true });
+      Object.assign(result, { state: 'done', name: sameAs, size: stat.size, sha256: sha, duplicate: true });
+      return;
+    }
     const name = uniqueName(picked.name, this.taken);
     const dst = path.join(this.destDir, name);
     if (!insideDir(this.destDir, dst)) { job.terminal = { state: 'failed', detail: 'the safe name was not inside the destination' }; return; }
@@ -310,6 +327,7 @@ class DownloadManager {
     }
     fs.chmodSync(dst, 0o600);
     this.totalBytes += stat.size;
+    this.seenFiles.set(`${sha}|${picked.name.toLowerCase()}`, name);
     Object.assign(result, { state: 'done', name, size: stat.size, sha256: sha });
   }
 

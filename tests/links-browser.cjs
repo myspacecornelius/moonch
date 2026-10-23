@@ -344,6 +344,62 @@ setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend
 const names = Array.from({ length: 14 }, (_, i) => 'Burst_' + String(i + 1).padStart(2, '0') + '.txt');
 document.getElementById('tb').innerHTML = names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('');
 document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });</script>`),
+    /* DIV rows (no table, list item or row role): the name in a span, a bare Download button, 24 rows virtualised */
+    'divrows-091': () => doc('Div rows task', `<div id="box" style="height:240px;overflow-y:auto;position:relative"><div id="spacer" style="height:960px"></div><div id="tb" style="position:absolute;top:0;left:0;width:100%"></div></div><script>${BLOB}
+const N = 24, ROW = 40, VIS = 6; const names = Array.from({ length: N }, (_, i) => 'Div_' + String(i + 1).padStart(2, '0') + '.txt');
+const box = document.getElementById('box'), tb = document.getElementById('tb');
+function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW)); tb.style.top = (first * ROW) + 'px';
+  tb.innerHTML = names.slice(first, first + VIS).map((n) => '<div class="row" style="height:' + ROW + 'px"><span>' + n + '</span> <button class="dl" data-n="' + n + '">Download</button></div>').join('');
+  tb.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+box.addEventListener('scroll', draw); draw();</script>`),
+    /* two tabs that BOTH list Data.csv and Notes.txt, with different content */
+    'twotabs-092': () => doc('Two tabs task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>
+const DATA = { t1: ['Data.csv', 'Notes.txt'], t2: ['Data.csv', 'Notes.txt', 'Extra.txt'] }; let cur = 't1';
+function render(k) { cur = k; document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
+  const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([cur + ' content of ' + b.dataset.n])); a.download = b.dataset.n; document.body.appendChild(a); a.click(); a.remove(); }; }); }
+document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* names with spaces that end in the same word, in two tabs */
+    'tabnames-093': () => doc('Tab names task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>${BLOB}
+const DATA = { t1: ['Task Budget.xlsx', 'Task Notes.txt'], t2: ['Reference Budget.xlsx', 'Reference Notes.txt'] };
+function render(k) { document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
+  const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* a virtualised table whose names share their last words: "Entity 01 Budget.txt" ... "Entity 24 Budget.txt" */
+    'entity-094': () => doc('Entity task', `<div id="box" style="height:240px;overflow-y:auto;position:relative"><div id="spacer" style="height:960px"></div><table id="tb" style="position:absolute;top:0;left:0;width:100%"><tbody></tbody></table></div><script>${BLOB}
+const N = 24, ROW = 40, VIS = 6; const names = Array.from({ length: N }, (_, i) => 'Entity ' + String(i + 1).padStart(2, '0') + ' Budget.txt');
+const box = document.getElementById('box'), tb = document.querySelector('#tb tbody');
+function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW)); document.getElementById('tb').style.top = (first * ROW) + 'px';
+  tb.innerHTML = names.slice(first, first + VIS).map((n) => '<tr style="height:' + ROW + 'px"><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('');
+  tb.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+box.addEventListener('scroll', draw); draw();</script>`),
+    /* a plain "Show all files" button without aria-pressed; it fetches something when pressed. idem: pressing again changes nothing */
+    'button-095': () => doc('Button task', `<button id="all">Show all files</button><div id="list"></div><script>${BLOB}
+let on = false;
+function render() { const names = ['Button_Task.txt'].concat(on ? ['Button_A.txt', 'Button_B.txt', 'Button_C.txt', 'Button_D.txt', 'Button_E.txt'] : []);
+  document.getElementById('list').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('all').onclick = () => { fetch('/hit/idem'); on = true; render(); }; render();</script>`),
+    /* the same button FLIPS the view each time it is pressed (all / mine), its label never changes */
+    'flip-096': () => doc('Flip task', `<button id="all">Show all files</button><div id="list"></div><script>${BLOB}
+let on = false;
+function render() { const names = ['Flip_Task.txt'].concat(on ? ['Flip_A.txt', 'Flip_B.txt', 'Flip_C.txt', 'Flip_D.txt', 'Flip_E.txt'] : []);
+  document.getElementById('list').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('all').onclick = () => { fetch('/hit/flip'); on = !on; render(); }; render();</script>`),
+    /* links to files with no Content-Disposition, an opaque address and a MIME type that Chrome turns into "download.<ext>" */
+    'mime-097': () => doc('Mime task', `<ul>${['11:Variance_Bridge.xlsx', '12:Board_Memo.docx', '13:Archive_Pack.zip', '14:Old_Budget.xls', '15:Deck.pptx', '16:Photo.png', '17:Notes.json'].map((x) => `<li><a href="/mime/${x.split(':')[0]}/download">${x.split(':')[1]}</a></li>`).join('')}</ul>`),
+    /* an "All" tab that lists everything and a "Task" tab that lists the same file again (same name, same bytes), plus one file only in All */
+    'dups-100': () => doc('Duplicates task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">All</button><button role="tab" aria-selected="false" id="t2">Task</button></div><div id="panel"></div><script>${BLOB}
+const DATA = { t1: ['Same.csv', 'OnlyAll.txt'], t2: ['Same.csv'] };
+function render(k) { document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
+  const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* a fire-and-forget beacon (keepalive fetch whose body nobody reads) and a long poll that never answers */
+    'beacon-098': () => doc('Beacon task', `<ul><li><a href="/data/Beacon_A.txt">Beacon_A.txt</a></li></ul><script>fetch('/beacon', { method: 'POST', body: 'x', keepalive: true });</script>`),
+    'hang-099': () => doc('Long poll task', `<ul><li><a href="/data/Hang_A.txt">Hang_A.txt</a></li></ul><script>fetch('/api/hang').then((r) => r.text());</script>`),
     /* 60 files, five more per "Load more" press (more than the old limit of ten presses) */
     'more60-086': () => doc('Many files task', `<ul id="l"></ul><button id="more">Load more</button><script>
 let shown = 0; const N = 60, PER = 5; const names = Array.from({ length: N }, (_, i) => 'M_' + String(i + 1).padStart(3, '0') + '.txt');
@@ -394,6 +450,16 @@ box.addEventListener('scroll', draw); draw();</script>`),
     if (dataFile) {
       const name = decodeURIComponent(dataFile[1]);
       return send(res, 200, 'text/plain', `content of ${name}`, { 'content-disposition': `attachment; filename="${name}"` });
+    }
+    if (u.pathname.startsWith('/hit/')) return send(res, 200, 'text/plain', 'ok');
+    if (u.pathname === '/beacon') return send(res, 200, 'text/plain', 'ok');
+    if (u.pathname === '/api/hang') return undefined;   /* a long poll: no answer, ever */
+    const mime = /^\/mime\/(\d+)\/download$/.exec(u.pathname);
+    if (mime) {
+      const XL = 'application/vnd.openxmlformats-officedocument';
+      const [name, type] = { 11: ['Variance_Bridge.xlsx', `${XL}.spreadsheetml.sheet`], 12: ['Board_Memo.docx', `${XL}.wordprocessingml.document`], 13: ['Archive_Pack.zip', 'application/zip'], 14: ['Old_Budget.xls', 'application/vnd.ms-excel'],
+        15: ['Deck.pptx', `${XL}.presentationml.presentation`], 16: ['Photo.png', 'image/png'], 17: ['Notes.json', 'application/json'] }[mime[1]];
+      return send(res, 200, type, `content of ${name}`);
     }
     const opaque = /^\/opaque\/(\d+)\/download$/.exec(u.pathname);
     if (opaque) {
@@ -1052,6 +1118,48 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     const burst = (await batch([{ slug: 'burst-090' }]))[0];
     clean(burst, range('Burst_', 14), 'burst');
     ok('14 buttons pressed one after the other (Chrome silently drops the 11th download of a quick burst): all 14 are saved, because downloads are paced and a click that began nothing is tried once more');
+
+    /* 11c. Round 3: the general case of row identity, a plain button that must not be pressed twice, names Chrome makes up, settling. */
+    const seventh = await batch([
+      { slug: 'divrows-091' }, { slug: 'twotabs-092' }, { slug: 'tabnames-093' }, { slug: 'entity-094' }, { slug: 'button-095' }, { slug: 'flip-096' },
+    ]);
+    clean(get(seventh, 'divrows-091'), range('Div_', 24), 'div rows');
+    ok('rows made of divs (no table row, list item or row role) with the name in a span and a bare Download button, virtualised: the nearest ancestor with more text is the row, all 24 are saved with their own content');
+    const twoTabs = get(seventh, 'twotabs-092');
+    assert.equal(twoTabs.final.state, 'done', JSON.stringify(twoTabs.final));
+    assert.deepEqual(twoTabs.final.skipped, []);
+    assert.deepEqual(twoTabs.final.files.map((f) => fs.readFileSync(path.join(twoTabs.final.folder, 'files', f.name), 'utf8')).sort(),
+      ['t1 content of Data.csv', 't1 content of Notes.txt', 't2 content of Data.csv', 't2 content of Extra.txt', 't2 content of Notes.txt'], 'each tab\'s Data.csv and Notes.txt is its own file, with its own bytes');
+    ok('the same file name in two tabs (Data.csv and Notes.txt in both, with different content) is two files: the tab is part of the identity and the page is put on the right tab before each press');
+    clean(get(seventh, 'tabnames-093'), ['Task Budget.xlsx', 'Task Notes.txt', 'Reference Budget.xlsx', 'Reference Notes.txt'], 'tab names');
+    clean(get(seventh, 'entity-094'), Array.from({ length: 24 }, (_, i) => `Entity ${String(i + 1).padStart(2, '0')} Budget.txt`), 'entities');
+    assert.ok(get(seventh, 'entity-094').final.message.indexOf('taken for another') < 0, 'and the check for merged rows stays quiet');
+    ok('names with spaces that end in the same words ("Entity 01 Budget.txt" ... "Entity 24 Budget.txt", "Task Budget.xlsx" / "Reference Budget.xlsx"): the whole name phrase is the identity, not its last word, so none of the 24 and none of the 4 is lost');
+    const idem = get(seventh, 'button-095');
+    clean(idem, ['Button_Task.txt', 'Button_A.txt', 'Button_B.txt', 'Button_C.txt', 'Button_D.txt', 'Button_E.txt'], 'button idem');
+    assert.equal(platform.count('/hit/idem'), 1, 'the plain "Show all files" button was pressed once');
+    const flip = get(seventh, 'flip-096');
+    clean(flip, ['Flip_Task.txt', 'Flip_A.txt', 'Flip_B.txt', 'Flip_C.txt', 'Flip_D.txt', 'Flip_E.txt'], 'button flip');
+    assert.equal(platform.count('/hit/flip'), 1, 'a button that flips the view was pressed once, not before every file');
+    ok('a plain "Show all files" button (it never says whether it is on) is pressed once per load, not again before each of the 6 files: an idempotent one and one that flips the view each press both give all 6 files and exactly one request');
+    for (const r of seventh) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+    const dups = (await batch([{ slug: 'dups-100' }]))[0];
+    assert.equal(dups.final.state, 'done', JSON.stringify(dups.final));
+    assert.deepEqual(fileNames(dups.final), ['OnlyAll.txt', 'Same.csv'], 'the file both tabs list is kept once');
+    assert.deepEqual(dups.final.skipped, []);
+    assert.match(dups.final.message, /1 file that was listed more than once \(same name, same content\) kept once/);
+    ok('a file that two tabs both list (same name, same bytes) is kept once and the done message says so; nothing is lost and nothing is silent');
+    const mimes = (await batch([{ slug: 'mime-097' }]))[0];
+    clean(mimes, ['Variance_Bridge.xlsx', 'Board_Memo.docx', 'Archive_Pack.zip', 'Old_Budget.xls', 'Deck.pptx', 'Photo.png', 'Notes.json'], 'mime');
+    ok('files with no Content-Disposition whose content type Chrome turns into "download.zip" or "download.xlsx" are saved under the name on the page (Archive_Pack.zip), for 7 content types');
+    for (const [slug, label, files, loaderTimeouts] of [['beacon-098', 'a beacon (a keepalive fetch whose answer nobody reads)', ['Beacon_A.txt'], { settle: 15000 }], ['hang-099', 'a long poll that never answers', ['Hang_A.txt'], { settle: 4000 }]]) {
+      const t0 = Date.now();
+      const quietRun = (await batch([{ slug, loader: { timeouts: loaderTimeouts } }]))[0];
+      clean(quietRun, files, slug);
+      assert.doesNotMatch(quietRun.final.message, /settled:false/, `${label} does not make the page unsettled: ${quietRun.final.message}`);
+      if (slug === 'beacon-098') assert.ok(Date.now() - t0 < 14000, `a beacon is not waited for until the 15 s deadline (${Date.now() - t0} ms)`);
+    }
+    ok('a beacon that nobody reads, and a long poll that never answers, are idle requests: the load is not held to the 15 s deadline for the beacon, and neither makes the done message say "settled:false"');
     platform.flags.openAccess = false;
     for (const r of [...first5, ...second5]) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
 

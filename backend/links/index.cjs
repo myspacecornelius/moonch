@@ -53,7 +53,7 @@ const { Tab, safeText, cleanLabel, waitForSettled } = require('./tab.cjs');
 const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE } = require('./page.cjs');
 const { classifyPage, LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('./auth-wall.cjs');
 const { DownloadManager } = require('./downloads.cjs');
-const { stabilize, expandAll, gather, replay, candidateKey, unionCandidates, unionDropped, mergeSections } = require('./discover.cjs');
+const { stabilize, expandAll, gather, replay, candidateKey, tabKey, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
 const { validateLink, fileUrlAllowed } = require('./url.cjs');
 const store = require('./store.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
@@ -219,7 +219,9 @@ function createLinkLoader(options = {}) {
       set(job, 'starting', `Chrome ${first.version && first.version.product ? first.version.product : ''} is open (${binary}). Opening the task page.${warning ? ` ${warning}` : ''}`);
 
       /* One load: navigate, settle, read the page, classify it. */
+      let loads = 0;   /* how many times the task link has been opened: a plain button that turns the files on is pressed once per load */
       const loadOnce = async () => {
+        loads += 1;
         const tab = job.tab;
         let nav;
         try { nav = await tab.navigate(href, { timeout: timeouts.navigation }); }
@@ -326,7 +328,7 @@ function createLinkLoader(options = {}) {
 
       /* What it took to build the list of files, for when the page has to be rebuilt (it was reloaded, or a download click left it): the
          switch, and the home tab. A candidate's own tab, "Load more" presses and scroll steps are in its view. */
-      const recipe = { toggle: null, home: null, afterClick: 0 };
+      const recipe = { toggle: null, home: null, afterClick: 0, appliedAt: -1 };
       const growWait = async (than) => {   /* a page may take a few seconds to add the files */
         const end = Date.now() + timeouts.grow;
         let latest = await takePage(job.tab);
@@ -355,6 +357,7 @@ function createLinkLoader(options = {}) {
           stamp([snap], BASE);
           snaps.push(snap);
           recipe.afterClick = fileCandidates(snap).length;
+          recipe.appliedAt = loads;
           const now2 = snap.toggles.find((t) => t.path === pick.path && t.option === pick.option && t.label === pick.label);
           await expandAll(job.tab, snaps, { signal, view: BASE });
           snap = snaps[snaps.length - 1];
@@ -367,20 +370,29 @@ function createLinkLoader(options = {}) {
         stamp([snap], BASE);
         snaps.push(snap);
         recipe.afterClick = fileCandidates(snap).length;
+        recipe.appliedAt = loads;
         await expandAll(job.tab, snaps, { signal, view: BASE });
         snap = snaps[snaps.length - 1];
         list = fileCandidates(snap);
         st.toggle.filesAfter = list.length;
       }
 
-      /* The switch is on again, the way it was when the list was built (a reload, or a page that forgot it). */
+      /* The switch is on again, the way it was when the list was built (a reload, or a page that forgot it). A control that shows its
+         state (a switch, a checkbox, a pressed-button, a choice) is pressed only when it is off. A plain button never says whether it is
+         on, and pressing it again may turn the files off: it is pressed once per load of the task link, and after a reload only when the
+         list is shorter than it was after the first press. Never twice in one load. */
       const ensureToggle = async (current) => {
         const want = recipe.toggle;
         if (!want || want.kind === 'tab') return current;   /* a tab is a view: each candidate brings its own */
         const t = current.toggles.find((x) => sameControl(want, x)) || current.toggles.find((x) => x.label === want.label && x.option === want.option);
-        if (!t || t.checked || t.disabled || !t.path) return current;
+        if (!t || t.disabled || !t.path) return current;
+        if (want.kind === 'button') {
+          if (recipe.appliedAt === loads) return current;
+          if (fileCandidates(current).length >= recipe.afterClick) { recipe.appliedAt = loads; return current; }
+        } else if (t.checked) return current;
         const r = await pageOp(job.tab, 'activate', { path: t.path, option: t.option });
         if (!r.ok) return current;
+        recipe.appliedAt = loads;
         await settle();
         return growWait(Math.max(0, recipe.afterClick - 1));
       };
@@ -401,21 +413,26 @@ function createLinkLoader(options = {}) {
         const mode = c.retried ? 'navigate' : 'click';
         const there = fileCandidates(current).filter((x) => x.mode === mode && x.path);
         const pick = (hits) => (hits.length ? hits[Math.min(Math.max(1, c.occ || 1), hits.length) - 1] : null);
-        const want = candidateKey(c.retried ? { ...c, mode: 'navigate' } : c);
-        return pick(there.filter((x) => candidateKey(x) === want))
-          || (c.retried ? null : pick(there.filter((x) => candidateKey(x, { withGroup: false }) === candidateKey(c, { withGroup: false }))));   /* its heading may have changed */
+        /* the live page shows one tab, the one the view put it on: the tab is not part of this comparison */
+        const live = { withTab: false };
+        const want = candidateKey(c.retried ? { ...c, mode: 'navigate' } : c, live);
+        return pick(there.filter((x) => candidateKey(x, live) === want))
+          || (c.retried ? null : pick(there.filter((x) => candidateKey(x, { withGroup: false, withTab: false }) === candidateKey(c, { withGroup: false, withTab: false }))));   /* its heading may have changed */
       };
       const locate = async (c) => {
         await backToPage();
         let current = await ensureToggle(await takePage(job.tab));
-        let hit = findOn(current, c);
+        /* the live page is trusted only when it shows the tab the candidate was seen in: the same name can be in two tabs */
+        const wantTab = c.view && c.view.tab ? c.view.tab.label : null;
+        const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
+        let hit = !wantTab || (open && tabKey(open.label) === tabKey(wantTab)) ? findOn(current, c) : null;
         if (!hit) {
           const r = await replay(job.tab, c.view || BASE, recipe.home, { signal });
           if (!r.ok) return { ok: false, why: r.why };
           current = await takePage(job.tab);
           hit = findOn(current, c);
-          /* the view was not exact (the page changed its mind): every tab, one after the other */
-          if (!hit) {
+          /* a candidate with no tab on record (the page has none, or the view was not exact): every tab, one after the other */
+          if (!hit && !wantTab) {
             for (const t of (await pageOp(job.tab, 'controls')).tabs) {
               const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal });
               if (!r2.ok) continue;
@@ -447,6 +464,7 @@ function createLinkLoader(options = {}) {
           Object.assign(st.toggle, { found: true, label: changed.label, flipped: true });
           recipe.toggle = { key: changed.key, label: changed.label, path: changed.path, option: changed.option, kind: changed.kind };
           recipe.afterClick = Math.max(0, list.length - 1);
+          recipe.appliedAt = loads;
           if (list.length > before.length && store.learnToggle(mappingsFile, job.host, changed.label, new Date(now()).toISOString(), changed.key)) st.toggle.learned = true;
         }
       }
@@ -456,7 +474,7 @@ function createLinkLoader(options = {}) {
       const capNotes = [];
       const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand }); recipe.home = info.home; capNotes.push(...info.capped); };
       await explore();
-      let candidatesAll = unionCandidates(snaps.map(fileCandidates));
+      let { list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates));
       if (!candidatesAll.length && !snaps.some((s) => droppedCandidates(s).length)) {
         set(job, 'needs-person', NO_FILES_MESSAGE);
         if (!headless) await job.tab.front();
@@ -469,10 +487,12 @@ function createLinkLoader(options = {}) {
         snaps.push(...again);
         await expandAll(job.tab, snaps, { signal, view: BASE });
         await explore();
-        candidatesAll = unionCandidates(snaps.map(fileCandidates));
+        ({ list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates)));
         st.toggle.filesAfter = Math.max(st.toggle.filesAfter, candidatesAll.length);
       }
       const droppedAll = unionDropped(snaps.map(droppedCandidates));
+      /* the backstop: more distinct rows were seen than files kept, so some rows that look different were taken for one file */
+      if (mergedRows > 0) capNotes.push(`${mergedRows} row${mergedRows === 1 ? '' : 's'} that look different on the page were taken for another file's row, so ${mergedRows === 1 ? 'a file' : 'files'} may be missing`);
       const merged = mergeSections(snaps.map((s) => s.sections), limits);
       const sections = merged.map((s) => ({ heading: cleanLabel(s.heading, 160), text: s.text }));
       st.sections = sections.map((s) => ({ heading: s.heading, chars: s.text.length }));
@@ -498,14 +518,16 @@ function createLinkLoader(options = {}) {
       });
       job.dl = dl;
       let stopped = null;
+      let duplicates = 0;
       if (candidates.length) {
         await dl.start();
         const out = await dl.fetchAll(candidates, {
           signal,
-          onFile: (r, c) => { if (r.state === 'done') st.files.push({ name: r.name, size: r.size, sha256: r.sha256, group: cleanLabel(c.group, 120), label: cleanLabel(c.label, 160) }); },
+          onFile: (r, c) => { if (r.duplicate) { duplicates += 1; return; } if (r.state === 'done') st.files.push({ name: r.name, size: r.size, sha256: r.sha256, group: cleanLabel(c.group, 120), label: cleanLabel(c.label, 160) }); },
         });
         check();
         stopped = out.stopped;
+        if (duplicates) capNotes.push(`${duplicates} file${duplicates === 1 ? ' that was' : 's that were'} listed more than once (same name, same content) kept once`);
         for (const r of out.results) if (r.state !== 'done') st.skipped.push({ label: cleanLabel(r.candidate.label, 160), group: cleanLabel(r.candidate.group, 120), reason: r.detail ? `${r.state}: ${r.detail}` : r.state });
         for (const c of out.rest) st.skipped.push({ label: cleanLabel(c.label, 160), group: cleanLabel(c.group, 120), reason: `not tried: ${stopped}` });
       }
