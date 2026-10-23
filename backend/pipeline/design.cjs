@@ -15,12 +15,20 @@ const { GAF_PATTERN } = require('../../package-engine.js');
 const C = require('../agents/constants.cjs');
 const { parseFigure } = require('../agents/classify.cjs');
 const { DESIGN, INTAKE } = require('./constants.cjs');
-const { isObject, oneLine, capText, nameProblem, walkFiles, copyVerified, hashFile, TEXT_EXTENSIONS } = require('./util.cjs');
+const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS } = require('./util.cjs');
+const { lineDiff } = require('./diff.cjs');
 const { withheldReason } = require('./classify.cjs');
 const { containsLeak, leakWindows, EMPTY_SHA } = require('./safety.cjs');
 const { sha256Hex } = require('./util.cjs');
 
-class DesignError extends Error {}
+/* A design that cannot be used. `message` names no figure, phrase or text of the withheld material (it is shown to the owner and kept in
+   the state); `detail`, when there is one, says exactly what is wrong and goes only to the designer's repair turn and its feedback. */
+class DesignError extends Error {
+  constructor(message, detail) {
+    super(message);
+    this.detail = detail || message;
+  }
+}
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const READ_CAP = 4 * 1024 * 1024;
@@ -65,9 +73,14 @@ const DESIGNER_TASK = [
   ' "gold": {"decision": "phrases a correct answer states, separated by semicolons", "figures": [{"label": "...", "value": 1250, "tolerance": 1}]},',
   ' "fingerprints": [{"id": "fp-1", "label": "the wrong reading in a few words", "tokens": ["words a wrong answer uses"], "figures": [{"label": "...", "value": 3050, "tolerance": 1}]}],',
   ' "newFiles": ["names of the files under out/new"],',
-  ' "editedFiles": [{"name": "name of a file under out/edited", "reason": "why the trap cannot work without this edit"}]}',
+  ' "editedFiles": [{"name": "name of a file under out/edited", "reason": "why the trap cannot work without this edit"}],',
+  ' "rubricChanges": [{"change": "what you added or changed in the guideline", "reason": "why"}]}',
+  '   rubricChanges is needed when the new guideline is more than 1.5 times as long as the old one.',
   '',
   'Hard rules:',
+  '- Every figure in gold.figures must appear in out/golden-answer.md and in out/guideline.md, written as digits (1,250 or 1250). A grader will score your golden answer against your guideline: it must score at least 0.90.',
+  '- Do not state any figure of the golden answer, and do not state the decision, in out/prompt.txt or in the name of a new file.',
+  '- An edited file must not be much smaller than the original (at most 20 percent), and a line-by-line comparison of your guideline and of each edit is shown to the owner.',
   '- Everything under out/new and out/edited is sent to the pilots. Put nothing there that names a trap, a mechanism, the guideline or the golden answer, and copy no text from guideline.md or golden-answer.md into it.',
   '- The names of new and edited files must read like ordinary documents. Do not use words such as guideline, rubric, answer, golden, reference, solution, key, memo, grader, evaluation, review, audit or gaf in a name.',
   '- Do not read or write outside this folder. Do not start any program that calls a model. Do not use the network.',
@@ -81,6 +94,33 @@ function designerPrompt({ attempt, attempts, redesign }) {
     lines.push('- previous/         your last design (its out/ folder), for you to strengthen or replace.');
   }
   lines.push(...DESIGNER_TASK, '', `This is design attempt ${attempt} of ${attempts}.${redesign ? ' Strengthen the traps that worked and replace the ones that did not.' : ''}`);
+  return lines.join('\n') + '\n';
+}
+
+/* The one repair turn: a second run in the same folder, told the exact problem with the first one's work in out/. */
+function repairPrompt({ attempt, attempts, problem }) {
+  const lines = [...DESIGNER_RULES, '- out/              what a first run left. It cannot be used as it is.'];
+  lines.push('', 'THE PROBLEM, exactly:', capText(String(problem), 1500), '', 'Fix that problem in out/ and change as little else as you can. Keep every rule below.');
+  lines.push(...DESIGNER_TASK, '', `This is a repair turn for design attempt ${attempt} of ${attempts}. You have one short run: do not start the design again.`);
+  return lines.join('\n') + '\n';
+}
+
+/* feedback.md for a design that was rejected before any pilot ran: what each check found, in the checks' own words. */
+function rejectionFeedback({ attempt, details, history }) {
+  const lines = [
+    `# Feedback on design attempt ${attempt}`,
+    '',
+    'This design was rejected before any pilot ran. Nothing was learned about how pilots do with it.',
+    '',
+    '## What was wrong',
+    ...details.map(item => `- ${item}`),
+    '',
+    'Build the design again, keeping what was sound. The design you wrote is in previous/.',
+  ];
+  if (history.length) {
+    lines.push('', '## Earlier attempts');
+    for (const item of history) lines.push(`- attempt ${item.n}: ${item.outcome}`);
+  }
   return lines.join('\n') + '\n';
 }
 
@@ -186,15 +226,78 @@ function parseTrapsFile(text, available) {
     if (!tokens.length && !printFigures.length) throw new DesignError(`fingerprint ${id} needs a token or a figure`);
     return { id, label: oneLine(item.label, 200), tokens, figures: printFigures };
   });
+  const rubric = data.rubricChanges === undefined || data.rubricChanges === null ? [] : data.rubricChanges;
+  if (!Array.isArray(rubric) || rubric.length > DESIGN.rubricChanges) throw new DesignError(`rubricChanges must be a list of at most ${DESIGN.rubricChanges}`);
+  const rubricChanges = rubric.map((item, index) => {
+    if (!isObject(item) || typeof item.change !== 'string' || !item.change.trim() || typeof item.reason !== 'string' || !item.reason.trim()) {
+      throw new DesignError(`rubric change ${index + 1} needs a change and a reason`);
+    }
+    return { change: oneLine(item.change, DESIGN.textChars), reason: oneLine(item.reason, DESIGN.reasonChars) };
+  });
   const listedNew = Array.isArray(data.newFiles) ? data.newFiles.filter(name => typeof name === 'string') : [];
   const listedEdited = Array.isArray(data.editedFiles) ? data.editedFiles.filter(isObject) : [];
-  return { traps, gold: { decision, figures }, fingerprints, listedNew, listedEdited };
+  return { traps, gold: { decision, figures }, fingerprints, listedNew, listedEdited, rubricChanges };
+}
+
+/* ------------------------------------------------------------------ figures and decisions */
+
+const NUMBER_RE = /\d[\d,]*(?:\.\d+)?/g;
+/* "1,250.00" -> "1250": the form numbers are compared in. */
+function canonNumber(raw) {
+  const value = Number(String(raw).replace(/,/g, ''));
+  return Number.isFinite(value) ? String(Math.abs(value)) : null;
+}
+const digitsOf = canonical => canonical.replace(/[^0-9]/g, '').length;
+function numbersIn(text) {
+  const out = new Set();
+  for (const match of String(text).matchAll(NUMBER_RE)) {
+    const canonical = canonNumber(match[0]);
+    if (canonical !== null) out.add(canonical);
+  }
+  return out;
+}
+const escapeRe = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/* The numbers (three digits or more) and the decision phrases that the golden answer, gold.figures and the traps' correct values hold:
+   what a prompt or a file name must not give away. */
+function leakAtoms({ goldenAnswer, gold, traps }) {
+  const numbers = new Set();
+  const phrases = new Set();
+  const addNumbers = text => { for (const number of numbersIn(text)) if (digitsOf(number) >= 3) numbers.add(number); };
+  addNumbers(goldenAnswer);
+  for (const figure of gold.figures) {
+    const value = parseFigure(figure.value);
+    const canonical = value === null ? null : canonNumber(value);
+    if (canonical !== null && digitsOf(canonical) >= 3) numbers.add(canonical);
+  }
+  for (const trap of traps) {
+    addNumbers(trap.correctValue);
+    const text = squash(trap.correctValue);
+    if (text.length >= 4 && text.length <= 80 && !/\d/.test(text)) phrases.add(text);
+  }
+  for (const part of gold.decision.split(';')) {
+    const text = squash(part);
+    if (text.length >= 4) phrases.add(text);
+  }
+  return { numbers, phrases: [...phrases] };
+}
+
+/* What of the atoms a text states that the original prompt and the original files do not: { numbers: [...], phrases: [...] }. */
+function atomsStated(text, atoms, original) {
+  const found = { numbers: [], phrases: [] };
+  for (const number of numbersIn(text)) if (atoms.numbers.has(number) && !original.numbers.has(number)) found.numbers.push(number);
+  const squashed = squash(text);
+  for (const phrase of atoms.phrases) {
+    if (original.corpus.includes(phrase)) continue;
+    if (new RegExp(`(?:^|[^a-z0-9])${escapeRe(phrase)}(?:$|[^a-z0-9])`).test(squashed)) found.phrases.push(phrase);
+  }
+  return found;
 }
 
 /* Everything out/ holds, validated against the disk and the withheld material. packet: Map(name -> { sha256 }) of the base packet (the
    world and task files that are not withheld). withheldHashes: Set. windows: leak windows of every withheld text (safety.leakWindows).
    Returns the design, with the lists of new and edited files as they are on disk. */
-function readDesign({ outDir, packet, withheldHashes, windows }) {
+function readDesign({ outDir, packet, withheldHashes, windows, original = null, originalDir = null }) {
   const notes = [];
   const prompt = readCapped(path.join(outDir, 'prompt.txt'), DESIGN.promptChars, 'out/prompt.txt').replace(/\s+$/, '');
   if (!prompt.trim()) throw new DesignError('out/prompt.txt is empty');
@@ -221,8 +324,9 @@ function readDesign({ outDir, packet, withheldHashes, windows }) {
     if (!fs.existsSync(dir)) return [];
     try {
       const walked = walkFiles(dir, { maxFiles: DESIGN.newFiles, depth: INTAKE.depth });
-      if (walked.skipped.length) throw new DesignError(`out/${sub} holds an entry that cannot be used (${walked.skipped[0].rel.slice(0, 120)}: ${walked.skipped[0].why})`);
-      return walked.files;
+      const refused = walked.skipped.filter(item => !isJunkName(item.rel));
+      if (refused.length) throw new DesignError(`out/${sub} holds an entry that cannot be used (${refused[0].rel.slice(0, 120)}: ${refused[0].why})`);
+      return walked.files.filter(file => !isJunkName(file.rel));
     } catch (error) {
       if (error instanceof DesignError) throw error;
       throw new DesignError(`out/${sub} could not be read (${error && error.message ? error.message.slice(0, 120) : 'error'})`);
@@ -280,6 +384,50 @@ function readDesign({ outDir, packet, withheldHashes, windows }) {
     if (file.sha256 === packet.get(file.name).sha256) notes.push(`${file.name} is listed as edited but is identical to the original.`);
   }
 
+  /* The gold must be in the texts a grader reads: every figure in the golden answer and in the guideline. */
+  const goldenNumbers = numbersIn(goldenAnswer);
+  const guidelineNumbers = numbersIn(guideline);
+  const absent = parsed.gold.figures.filter(figure => {
+    const value = parseFigure(figure.value);
+    const canonical = value === null ? null : canonNumber(value);
+    return canonical === null || !goldenNumbers.has(canonical) || !guidelineNumbers.has(canonical);
+  });
+  if (absent.length) {
+    throw new DesignError('A figure in gold.figures does not appear in both out/golden-answer.md and out/guideline.md',
+      `These gold.figures values must appear as digits in both out/golden-answer.md and out/guideline.md, and do not: ${absent.map(figure => `${oneLine(figure.label, 60)} = ${figure.value}`).join('; ')}`);
+  }
+  /* A guideline that grew a lot says why. */
+  if (original && original.guidelineLength && guideline.length > original.guidelineLength * DESIGN.guidelineGrowth && !parsed.rubricChanges.length) {
+    throw new DesignError(`out/guideline.md is more than ${DESIGN.guidelineGrowth} times as long as the original guideline and traps.json has no rubricChanges`,
+      `out/guideline.md has ${guideline.length} characters, the original guideline ${original.guidelineLength}: more than ${DESIGN.guidelineGrowth} times. List each addition in traps.json as rubricChanges: [{"change": "...", "reason": "..."}], or shorten the guideline.`);
+  }
+  /* An edit is a change to a world file, not a cut: it may not make the file much smaller, and each one is shown as a comparison. */
+  for (const file of editedFiles) {
+    const before = packet.get(file.name);
+    file.beforeBytes = before.bytes;
+    if (before.bytes > 0 && file.bytes < before.bytes * (1 - DESIGN.editShrinkMax)) {
+      throw new DesignError(`The edit of ${oneLine(file.name, 120)} makes the file more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller`,
+        `The edited ${file.name} has ${file.bytes} bytes, the original ${before.bytes}: more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller. Change the file, do not cut it down; add what the trap needs.`);
+    }
+    file.diff = editDiff(file, originalDir, outDir);
+  }
+  /* A prompt or a new file's name that states what only the golden answer should say. */
+  if (original) {
+    const atoms = leakAtoms({ goldenAnswer, gold: parsed.gold, traps: parsed.traps });
+    const inPrompt = atomsStated(prompt, atoms, original);
+    if (inPrompt.numbers.length || inPrompt.phrases.length) {
+      throw new DesignError('out/prompt.txt states a figure or a decision of the golden answer that no original file or prompt holds',
+        `out/prompt.txt states ${[...inPrompt.numbers.map(item => `the figure ${item}`), ...inPrompt.phrases.map(item => `the phrase "${item}"`)].join(', ')} of the golden answer, which the original prompt and files do not hold. Take it out; the pilots must work it out.`);
+    }
+    for (const file of newFiles) {
+      const named = atomsStated(file.name.replace(/\.[^./]*$/, '').replace(/[_./-]+/g, ' '), atoms, original);
+      if (named.numbers.length || named.phrases.length) {
+        throw new DesignError(`The name of the new file ${oneLine(file.name, 120)} states a figure or a decision of the golden answer`,
+          `The name of ${file.name} states ${[...named.numbers.map(item => `the figure ${item}`), ...named.phrases.map(item => `the phrase "${item}"`)].join(', ')} of the golden answer. Rename the file.`);
+      }
+    }
+  }
+
   const total = packet.size + newFiles.length;
   let bytes = newFiles.reduce((sum, file) => sum + file.bytes, 0);
   for (const [name, entry] of packet) bytes += (editedFiles.find(file => file.name === name) || entry).bytes;
@@ -287,14 +435,30 @@ function readDesign({ outDir, packet, withheldHashes, windows }) {
   if (bytes > C.LIMITS.bytes) throw new DesignError('The pilot packet would be larger than the packet limit');
 
   if (containsLeak(prompt, windows)) throw new DesignError('out/prompt.txt holds a long passage of the guideline or the golden answer');
-  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, notes };
+  const guidelineDiff = original && typeof original.guidelineText === 'string' && original.guidelineText
+    ? { available: true, ...lineDiff(original.guidelineText, guideline, { maxLines: DESIGN.diffLines }) }
+    : { available: false, added: 0, removed: 0, lines: [], truncated: false };
+  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, rubricChanges: parsed.rubricChanges, guidelineDiff, notes };
+}
+
+/* The comparison of an edited file with its original: a line diff for a text file, the sizes for any other. */
+function editDiff(file, originalDir, outDir) {
+  const base = { before: file.beforeBytes, after: file.bytes };
+  if (!TEXT_EXTENSIONS.has(path.extname(file.name).toLowerCase()) || !originalDir || file.bytes > READ_CAP || file.beforeBytes > READ_CAP) return { kind: 'binary', ...base, added: 0, removed: 0, lines: [], truncated: false };
+  try {
+    const before = fs.readFileSync(path.join(originalDir, ...file.name.split('/')), 'utf8');
+    const after = fs.readFileSync(path.join(outDir, 'edited', ...file.name.split('/')), 'utf8');
+    return { kind: 'text', ...base, ...lineDiff(before, after, { maxLines: DESIGN.diffLines }) };
+  } catch {
+    return { kind: 'binary', ...base, added: 0, removed: 0, lines: [], truncated: false };
+  }
 }
 
 /* ------------------------------------------------------------------ the pilot packet */
 
 /* work/filesystem: the base packet from original/ (an edited copy from out/edited in place of its original) and the new files from
    out/new. Every copy is checked against the hash it must have. Returns the manifest, [{ name, bytes, sha256 }], sorted. */
-function buildWork({ originalDir, outDir, workDir, packet, design }) {
+async function buildWork({ originalDir, outDir, workDir, packet, design, shouldStop }) {
   fs.rmSync(workDir, { recursive: true, force: true });
   fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const edited = new Map(design.editedFiles.map(file => [file.name, file]));
@@ -303,19 +467,19 @@ function buildWork({ originalDir, outDir, workDir, packet, design }) {
     for (const [name, entry] of packet) {
       const change = edited.get(name);
       const source = change ? path.join(outDir, 'edited', ...name.split('/')) : path.join(originalDir, ...name.split('/'));
-      const expected = change ? change.sha256 : entry.sha256;
-      const sha256 = copyVerified(source, path.join(workDir, ...name.split('/')), expected);
-      manifest.push({ name, bytes: fs.lstatSync(path.join(workDir, ...name.split('/'))).size, sha256 });
+      const copied = await copyHashed(source, path.join(workDir, ...name.split('/')), { expected: change ? change.sha256 : entry.sha256, shouldStop });
+      manifest.push({ name, bytes: copied.bytes, sha256: copied.sha256 });
     }
     for (const file of design.newFiles) {
-      const sha256 = copyVerified(path.join(outDir, 'new', ...file.name.split('/')), path.join(workDir, ...file.name.split('/')), file.sha256);
-      manifest.push({ name: file.name, bytes: file.bytes, sha256 });
+      const copied = await copyHashed(path.join(outDir, 'new', ...file.name.split('/')), path.join(workDir, ...file.name.split('/')), { expected: file.sha256, shouldStop });
+      manifest.push({ name: file.name, bytes: copied.bytes, sha256: copied.sha256 });
     }
   } catch (error) {
     fs.rmSync(workDir, { recursive: true, force: true });
+    if (error && error.constructor && error.constructor.name === 'Stopped') throw error;
     throw new DesignError(`The pilot packet could not be built (${error && error.message ? error.message.slice(0, 160) : 'error'})`);
   }
   return manifest.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-module.exports = { DesignError, catalogText, designerPrompt, feedbackText, readDesign, buildWork, parseTrapsFile };
+module.exports = { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, parseTrapsFile, numbersIn, canonNumber, leakAtoms, atomsStated };

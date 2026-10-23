@@ -1,15 +1,17 @@
 'use strict';
 /* The pipeline orchestrator: link or folder -> classify -> design traps -> 2-pilot screen -> 5-pilot test, with redesigns, one total
    spending cap and one approval for the whole run. Pilots and the simulated grader are the agent service's (rounds, graderSim); the
-   classifier and the trap designer are runs of models.cjs. The link loader is only reached through createLinkLoader's API
-   (start, get, continue, cancel).
+   classifier, the trap designer and the fairness review are runs of models.cjs. The link loader is only reached through
+   createLinkLoader's API (start, get, continue, cancel).
 
-   One pipeline at a time, and none while a round runs. State lives in <root>/private/pipelines/<id>/state.json (atomic), the
-   design of each attempt in <root>/private/pipelines/<id>/attempts/<n>/out, and the working folders OUTSIDE the project in
-   <tmpRoot>/finance-studio-pipelines/<id>/ (original/, designer/, work/filesystem/ = the pilot packet, runs/).
+   One pipeline at a time, and none while a round runs. State lives in <root>/private/pipelines/<id>/state.json (atomic), with the
+   downloaded files (original/), the designer's folder (designer/), its runs (runs/) and the design of each attempt
+   (attempts/<n>/out). Only the pilot packet, work/filesystem, is OUTSIDE the project, in <tmpRoot>/finance-studio-pipelines/<id>/, and
+   that folder is removed when the pipeline ends.
 
    Stages: import -> classify -> design -> screen -> grade-screen -> (redesign -> design ...) -> test -> grade-test -> done,
-   or failed | stopped | budget at any point. See docs of each method below for the rules. */
+   or failed | stopped | budget at any point. A design is checked before any pilot runs (the golden answer must score well against its own
+   guideline, the guideline must be fair, nothing may leak into the prompt); a design that fails a check is rejected and uses a redesign. */
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -19,12 +21,14 @@ const C = require('../agents/constants.cjs');
 const { budgetText } = require('../agents/claude-runner.cjs');
 const { checkPilotsRoot, resolveSourceDir } = require('../agents/pilot-folder.cjs');
 const P = require('./constants.cjs');
-const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile } = require('./util.cjs');
+const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, TEXT_EXTENSIONS } = require('./util.cjs');
 const { IntakeError, intakeFromLoader, intakeFromFolder } = require('./intake.cjs');
 const { buildClassifierPrompt, classify } = require('./classify.cjs');
-const { DesignError, catalogText, designerPrompt, feedbackText, readDesign, buildWork } = require('./design.cjs');
-const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows } = require('./safety.cjs');
-const { runtimeOf, runToolLess, runDesigner } = require('./models.cjs');
+const { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, numbersIn, canonNumber } = require('./design.cjs');
+const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak } = require('./safety.cjs');
+const { extractText, textHoldsWindows, ZIP_EXTENSIONS } = require('./extract.cjs');
+const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort } = require('./gates.cjs');
+const { runtimeOf, runToolLess, runDesigner, NOT_FOUND } = require('./models.cjs');
 const { buildExport } = require('./export.cjs');
 
 const SCHEMA = 'finance-pipeline';
@@ -33,16 +37,29 @@ const MAX_LABEL = 60;
 const GRADER_FOOTER = '\n\nScoring scale for this rehearsal: report "score" as a number from 0 to 1, the share of the points the guidance names that the answer earns (1 means every point is met, 0 means none), and list each point in "items".';
 const MAX_ANSWER_FOR_GRADER = 59000;
 const MAX_REASON = 1500;
+const MAX_OUTPUT_FILES = 50;
+const MAX_CORPUS_CHARS = 24 * 1024 * 1024;
+const UNREADABLE_FINAL_CHARS = 600; /* a final message shorter than this, with files written and none readable, is not gradable */
 
 class StopSignal extends Error {}
 class BudgetStop extends Error {}
 /* A failure whose message is safe to show the owner as it is. */
 class Failure extends Error {}
+/* A design that failed a check before any pilot ran. reasons are safe to show; details go to the designer's feedback only. */
+class AttemptRejected extends Error {
+  constructor(kind, reasons, details) {
+    super(reasons[0]);
+    this.kind = kind;
+    this.reasons = reasons;
+    this.details = details || reasons;
+  }
+}
 
 const bad = message => new AgentError(400, message);
 const round6 = value => Math.round(value * 1e6) / 1e6;
 const money = value => `USD ${value.toFixed(2)}`;
 const isTerminal = stage => P.TERMINAL.includes(stage);
+const HEADROOM_TEXT = `${Math.round((P.HEADROOM - 1) * 100)}% headroom`;
 
 /* The promise, or undefined after `ms` (the timer is cleared, so it never keeps the process alive). */
 function withTimeout(promise, ms) {
@@ -111,9 +128,15 @@ class PipelineService {
 
   /* -------------------------------------------------------------- loading and saving */
 
-  _stateFile(id) { return path.join(this.dir, id, 'state.json'); }
-  _attemptDir(id, n) { return path.join(this.dir, id, 'attempts', String(n)); }
+  _priv(id) { return path.join(this.dir, id); }
+  _stateFile(id) { return path.join(this._priv(id), 'state.json'); }
+  _attemptDir(id, n) { return path.join(this._priv(id), 'attempts', String(n)); }
+  _origDir(id) { return path.join(this._priv(id), 'original'); }
+  _designerDir(id) { return path.join(this._priv(id), 'designer'); }
+  /* The only folder outside the project: <tmpRoot>/finance-studio-pipelines/<id>/work/filesystem is the pilot packet. */
   _workspace(id) { return path.join(this.workRoot, id); }
+  _packetDir(id) { return path.join(this._workspace(id), 'work', 'filesystem'); }
+  _removeWorkspace(id) { try { fs.rmSync(this._workspace(id), { recursive: true, force: true }); } catch { /* a folder in use is removed by the next start */ } }
 
   /* A pipeline that was running when the companion stopped has nothing behind it any more: it is closed as failed. */
   _load() {
@@ -123,6 +146,9 @@ class PipelineService {
       try {
         const state = readJson(this._stateFile(name));
         if (!isObject(state) || state.id !== name || state.schema !== SCHEMA || !isObject(state.config) || !Array.isArray(state.attempts)) continue;
+        for (const attempt of state.attempts) {
+          if (isObject(attempt) && attempt.outcome === 'in-progress') { attempt.outcome = 'failed'; attempt.note = 'The companion stopped while this attempt was running.'; }
+        }
         if (!isTerminal(state.stage)) {
           state.stage = 'failed';
           state.waiting = null;
@@ -131,8 +157,9 @@ class PipelineService {
           state.endedAt = this.now();
           state.updatedAt = state.endedAt;
           state.result = { verdict: 'failed', message: state.message };
-          writeJsonAtomic(this._stateFile(name), state);
         }
+        writeJsonAtomic(this._stateFile(name), state);
+        this._removeWorkspace(name); /* a working folder left by an earlier start (or by a version that kept more there) */
         this.pipelines.set(name, { state, ctl: null });
       } catch {
         /* A damaged record is left alone on disk and not offered. */
@@ -160,12 +187,19 @@ class PipelineService {
     if (this.onStage) { try { this.onStage(stage, { id: p.id, attempt: p.attempt }); } catch { /* an observer never changes a run */ } }
   }
 
+  /* The line the page shows, changed without a change of stage. */
+  _note(p, message) {
+    p.message = message;
+    this._save(p);
+  }
+
   /* -------------------------------------------------------------- budget */
 
-  /* Stops before a step whose worst case does not fit under the cap. */
+  /* Stops before a step whose worst case, with P.HEADROOM on top (a run can end a little over its cap), does not fit under the cap. */
   _reserve(p, what, usd) {
-    if (round6(p.spentUsd + usd) > p.config.capUsd + 1e-9) {
-      throw new BudgetStop(`Stopped before ${what}: ${money(p.spentUsd)} spent, the step could cost up to ${money(usd)}, and the cap is ${money(p.config.capUsd)}.`);
+    const need = round6(usd * P.HEADROOM);
+    if (round6(p.spentUsd + need) > p.config.capUsd + 1e-9) {
+      throw new BudgetStop(`Stopped before ${what}: ${money(p.spentUsd)} spent, the step could cost up to ${money(need)} (with ${HEADROOM_TEXT}), and the cap is ${money(p.config.capUsd)}.`);
     }
   }
 
@@ -213,6 +247,7 @@ class PipelineService {
       passBar: P.PASS_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS,
       defaultCapUsd: P.DEFAULT_CAP_USD, maxCapUsd: P.MAX_CAP_USD, defaultPilotCapUsd: C.BUDGET_USD.pilotDefault,
       minPilotCapUsd: C.BUDGET_USD.minUsd, maxPilotCapUsd: C.BUDGET_USD.maxUsd, designCapUsd: P.CAPS.designUsd, classifyCapUsd: P.CAPS.classifyUsd, graderCapUsd: P.CAPS.graderUsd,
+      repairCapUsd: P.CAPS.repairUsd, fairnessCapUsd: P.CAPS.fairnessUsd, goldenMin: P.GOLDEN_MIN, regradeBand: P.REGRADE_BAND.slice(), headroom: P.HEADROOM,
       stages: P.STAGES.slice(), acknowledgements: P.ACKNOWLEDGEMENTS.slice(), linksAvailable: Boolean(this.links),
       models: C.MODELS.slice(), efforts: C.EFFORTS.slice(), defaultModel: C.DEFAULT_MODEL, defaultEffort: C.DEFAULT_EFFORT, graderModel: C.GRADER_MODEL,
     };
@@ -230,7 +265,12 @@ class PipelineService {
     return this._view(this._entry(id).state);
   }
 
-  /* start(body): { url | sourceDir, capUsd, model, effort, pilotCapUsd, designCapUsd?, graderModel?, label?, acknowledgements } -> { id }.
+  /* Is a pipeline running? The companion refuses other launches and the simulated grader while one is (backend/server.cjs). */
+  busy() {
+    return this.active !== null;
+  }
+
+  /* start(body): { url | sourceDir, capUsd, model, effort, pilotCapUsd, designCapUsd?, graderModel?, label?, acceptMissing?, acknowledgements } -> { id }.
      Everything is checked here, in one synchronous block, before anything is created or started. */
   async start(body) {
     if (!isObject(body)) throw bad('The request body must be an object');
@@ -254,6 +294,7 @@ class PipelineService {
     const designCapUsd = body.designCapUsd === undefined || body.designCapUsd === null ? Math.min(P.CAPS.designUsd, Math.max(0.5, Math.round(capUsd * 20) / 100)) : body.designCapUsd;
     if (budgetText(designCapUsd) === null) throw bad(`The spending cap for the designer must be a number of US dollars from ${C.BUDGET_USD.minUsd.toFixed(2)} to ${C.BUDGET_USD.maxUsd.toFixed(2)}, in whole cents`);
     if (body.label !== undefined && body.label !== null && typeof body.label !== 'string') throw bad('label must be text');
+    if (body.acceptMissing !== undefined && body.acceptMissing !== null && typeof body.acceptMissing !== 'boolean') throw bad('acceptMissing must be true or false');
     let source;
     let url = null;
     let realDir = null;
@@ -281,12 +322,15 @@ class PipelineService {
     try {
       const rows = await this.agents.listRounds();
       if (!Array.isArray(rows) || rows.some(row => isObject(row) && row.status === 'running')) throw new AgentError(409, 'A round of pilots is running. Start the pipeline when it has ended');
+      /* Before Chrome is opened for a link: is there a Claude Code to run the classifier? */
+      const runtime = await this.rt.detect(true);
+      if (!runtime || !runtime.found) throw new AgentError(409, NOT_FOUND);
       const createdAt = this.now();
       const label = oneLine(body.label, MAX_LABEL) || `Pipeline ${id.slice(4, 10)}`;
       const state = {
         schema: SCHEMA, schemaVersion: SCHEMA_VERSION, id, label, createdAt, updatedAt: createdAt, endedAt: null,
         stage: 'import', message: 'Starting', error: null, waiting: null, source,
-        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, passBar: P.PASS_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
+        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, graderEffort: graderEffort(effort), acceptMissing: body.acceptMissing === true, passBar: P.PASS_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
         acknowledgements: P.ACKNOWLEDGEMENTS.slice(),
         loader: null, spentUsd: 0, ledger: [], import: null, classification: null, attempt: 0, redesigns: 0, design: null, attempts: [], result: null,
       };
@@ -309,7 +353,8 @@ class PipelineService {
     return id;
   }
 
-  /* <tmpRoot>/finance-studio-pipelines/<id> and its folders, outside the project; a link or a foreign owner is refused. */
+  /* The private folders of the pipeline, and <tmpRoot>/finance-studio-pipelines/<id>/work, outside the project: a link or a foreign owner
+     is refused. */
   _makeWorkspace(id) {
     try {
       fs.mkdirSync(this.workRoot, { recursive: true, mode: 0o700 });
@@ -319,7 +364,8 @@ class PipelineService {
       try { project = fs.realpathSync(this.root); } catch { /* the root exists in practice */ }
       if (within(real, project)) throw new AgentError(409, 'The working folder would be inside the Studio project. Choose another temporary folder');
       fs.mkdirSync(this._workspace(id), { mode: 0o700 });
-      for (const sub of ['original', 'designer', 'work', 'runs']) fs.mkdirSync(path.join(this._workspace(id), sub), { mode: 0o700 });
+      fs.mkdirSync(path.join(this._workspace(id), 'work'), { mode: 0o700 });
+      for (const sub of ['original', 'runs']) fs.mkdirSync(path.join(this._priv(id), sub), { recursive: true, mode: 0o700 });
     } catch (error) {
       if (error instanceof AgentError) throw error;
       if (error && error.name === 'PacketError') throw new AgentError(error.status, error.message);
@@ -427,10 +473,15 @@ class PipelineService {
       gold: clone(p.design.gold),
       fingerprints: clone(p.design.fingerprints),
       newFiles: p.design.newFiles.map(file => ({ name: file.name, bytes: file.bytes })),
-      editedFiles: p.design.editedFiles.map(file => ({ name: file.name, reason: file.reason, bytes: file.bytes })),
+      editedFiles: p.design.editedFiles.map(file => ({ name: file.name, reason: file.reason, bytes: file.bytes, beforeBytes: file.beforeBytes, diff: file.diff })),
       packet: clone(p.design.packet),
       audit: clone(p.design.audit),
       notes: p.design.notes.slice(),
+      repaired: p.design.repaired === true,
+      calibration: clone(p.design.calibration),
+      fairness: clone(p.design.fairness),
+      guidelineDiff: clone(p.design.guidelineDiff),
+      rubricChanges: clone(p.design.rubricChanges),
       prompt: texts.prompt,
       guideline: texts.guideline,
       goldenAnswer: texts.goldenAnswer,
@@ -455,8 +506,26 @@ class PipelineService {
       await this._import(p, ctl);
       await this._classify(p, ctl);
       for (;;) {
-        await this._design(p, ctl);
+        let rejection = null;
+        try {
+          await this._design(p, ctl);
+        } catch (error) {
+          if (!(error instanceof AttemptRejected)) throw error;
+          rejection = error;
+        }
         const attempt = p.attempts[p.attempts.length - 1];
+        if (rejection) {
+          /* The design failed a check before any pilot ran: it uses a redesign, and the designer is told what was wrong. */
+          attempt.outcome = 'rejected';
+          attempt.rejection = { kind: rejection.kind, reasons: rejection.reasons };
+          if (p.redesigns >= P.MAX_REDESIGNS) {
+            return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the design of attempt ${attempt.n} was rejected before any pilot ran (${rejection.reasons[0]}). Nothing from it was run.`, 'failed');
+          }
+          p.redesigns++;
+          this._setStage(p, 'redesign', `The design was rejected (${rejection.reasons[0]}). Preparing feedback for redesign ${p.redesigns} of ${P.MAX_REDESIGNS}.`);
+          this._prepareRejectionFeedback(p, ctl, attempt, rejection);
+          continue;
+        }
         const screen = await this._pilotStage(p, ctl, 'screen');
         if (screen.passed) {
           const test = await this._pilotStage(p, ctl, 'test');
@@ -486,15 +555,17 @@ class PipelineService {
     }
   }
 
+  /* Every end of a pipeline comes through here: the result is recorded and the pilot packet outside the project is removed. */
   _finish(p, stage, message, verdict) {
     p.waiting = null;
     p.endedAt = this.now();
     p.result = { verdict, message };
+    this._removeWorkspace(p.id);
     this._setStage(p, stage, message);
   }
 
   _fail(p, ctl, error) {
-    if (error instanceof StopSignal) {
+    if (error instanceof StopSignal || error instanceof Stopped) {
       const attempt = p.attempts[p.attempts.length - 1];
       if (attempt && attempt.outcome === 'in-progress') attempt.outcome = 'stopped';
       return this._finish(p, 'stopped', 'Stopped by the owner.', 'stopped');
@@ -521,7 +592,7 @@ class PipelineService {
 
   async _import(p, ctl) {
     this._setStage(p, 'import', p.source.kind === 'url' ? 'Opening the task page' : 'Reading the task folder');
-    const original = path.join(this._workspace(p.id), 'original');
+    const original = this._origDir(p.id);
     let intake;
     let loaderState = null;
     if (p.source.kind === 'url') {
@@ -535,9 +606,9 @@ class PipelineService {
       if (ctl.stop) { await this._cancelLink(ctl); throw new StopSignal('stopped'); }
       loaderState = await this._pollLoader(p, ctl);
       this._setStage(p, 'import', 'Copying the downloaded files');
-      intake = intakeFromLoader({ state: loaderState, root: this.root, original });
+      intake = await intakeFromLoader({ state: loaderState, root: this.root, original, shouldStop: () => ctl.stop });
     } else {
-      intake = intakeFromFolder({ realDir: ctl.realDir, original });
+      intake = await intakeFromFolder({ realDir: ctl.realDir, original, shouldStop: () => ctl.stop });
     }
     this._checkStop(ctl);
     ctl.sections = intake.sections;
@@ -555,7 +626,6 @@ class PipelineService {
       files: intake.files,
     };
     p.waiting = null;
-    writeJsonAtomic(path.join(this._workspace(p.id), 'page.json'), { sections: intake.sections, fileList: intake.files.map(file => ({ name: file.name, group: file.group, label: file.label })), page: intake.page });
     this._save(p);
   }
 
@@ -602,7 +672,7 @@ class PipelineService {
 
   /* -------------------------------------------------------------- classify */
 
-  _originalFile(p, name) { return path.join(this._workspace(p.id), 'original', ...name.split('/')); }
+  _originalFile(p, name) { return path.join(this._origDir(p.id), ...name.split('/')); }
 
   async _classify(p, ctl) {
     this._setStage(p, 'classify', 'Classifying what was captured');
@@ -610,7 +680,7 @@ class PipelineService {
     this._reserve(p, 'the classifier', P.CAPS.classifyUsd);
     const files = p.import.files;
     const sections = ctl.sections;
-    const folder = path.join(this._workspace(p.id), 'runs', 'classify');
+    const folder = path.join(this._priv(p.id), 'runs', 'classify');
     fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
     this._checkStop(ctl);
     const run = await runToolLess({
@@ -625,33 +695,86 @@ class PipelineService {
     if (settled.problems.length) {
       throw new Failure(`Could not tell which part of the page is ${settled.problems.join(' and ')}. Name them in the page text or the file names, or load the task by hand.`);
     }
-    /* A packet file that is byte for byte a withheld file is withheld too, whatever its name. */
+    delete settled.problems;
+    /* A file that looks like the golden answer, when none was named: stop rather than guess. */
+    if (!settled.goldenAnswer && settled.goldenSuspects.length) {
+      p.classification = settled;
+      this._save(p);
+      throw new Failure(`The page has a file that looks like the golden answer (${settled.goldenSuspects.slice(0, 3).map(name => oneLine(name, 80)).join(', ')}) but none was identified as the golden answer. Nothing was started. Check the page text and the file labels, then start again.`);
+    }
     const byName = new Map(files.map(file => [file.name, file]));
+    const withhold = (name, why) => {
+      if (!settled.withheld.some(item => item.name === name)) settled.withheld.push({ name, why });
+      if (!settled.warnings.some(item => item.name === name)) settled.warnings.push({ name, why });
+    };
+    /* A packet file that is byte for byte a withheld file is withheld too, whatever its name. */
     const withheldHashes = new Set(settled.withheld.map(item => byName.get(item.name)).filter(Boolean).map(file => file.sha256));
     const identical = list => list.filter(name => {
       const file = byName.get(name);
-      if (file && file.bytes > 0 && withheldHashes.has(file.sha256)) {
-        settled.withheld.push({ name, why: 'it is byte for byte the same as withheld material' });
-        return false;
-      }
+      if (file && file.bytes > 0 && withheldHashes.has(file.sha256)) { withhold(name, 'it is byte for byte the same as withheld material'); return false; }
       return true;
     });
     settled.worldFiles = identical(settled.worldFiles);
     settled.taskFiles = identical(settled.taskFiles);
+    ctl.texts = await this._loadOriginalTexts(p, ctl, settled);
+    /* ...and so is a file that holds a passage of the guideline or the golden answer, found in the file itself: plain text, and the text of a
+       word-processing, spreadsheet or slide file. What the other files say is kept to tell, later, what the original task already states. */
+    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || '')];
+    const original = { numbers: new Set(), corpus: '', guidelineLength: ctl.texts.guideline ? ctl.texts.guideline.length : null, guidelineText: ctl.texts.guideline || null };
+    const addText = text => {
+      for (const number of numbersIn(text)) if (number.replace(/[^0-9]/g, '').length >= 3) original.numbers.add(number);
+      if (original.corpus.length < MAX_CORPUS_CHARS) original.corpus += ' ' + squash(text);
+    };
+    addText(ctl.texts.prompt);
+    settled.unscanned = [];
+    const survivors = { worldFiles: [], taskFiles: [] };
+    for (const kind of ['worldFiles', 'taskFiles']) {
+      for (const name of settled[kind]) {
+        this._checkStop(ctl);
+        const abs = this._originalFile(p, name);
+        const ext = path.extname(name).toLowerCase();
+        let leak = null;
+        let text = null;
+        if (TEXT_EXTENSIONS.has(ext)) {
+          leak = await textHoldsWindows(abs, windows, () => ctl.stop);
+          text = await extractText(abs, { maxChars: 1024 * 1024 });
+        } else if (ZIP_EXTENSIONS.has(ext)) {
+          text = await extractText(abs, { maxChars: 4 * 1024 * 1024 });
+          leak = text === null ? null : containsLeak(text, windows);
+        }
+        if (leak === null && text === null) settled.unscanned.push(name);
+        if (leak === true) { withhold(name, 'it holds a long passage of the guideline or the golden answer'); continue; }
+        if (text !== null) addText(text);
+        survivors[kind].push(name);
+      }
+    }
+    this._checkStop(ctl);
+    settled.worldFiles = survivors.worldFiles;
+    settled.taskFiles = survivors.taskFiles;
+    ctl.original = original;
     const packetNames = [...settled.worldFiles, ...settled.taskFiles];
-    if (!packetNames.length) throw new Failure('No world or task file is left after the withheld files were taken out.');
-    ctl.packet = new Map(packetNames.map(name => [name, { sha256: byName.get(name).sha256, bytes: byName.get(name).bytes }]));
-    ctl.texts = this._loadOriginalTexts(p, ctl, settled);
-    delete settled.problems;
     p.classification = settled;
     p.import.facts = { world: settled.worldFiles.length, task: settled.taskFiles.length, withheld: settled.withheld.length, other: settled.other.length };
     this._save(p);
+    if (!packetNames.length) throw new Failure('No world or task file is left after the withheld files were taken out.');
+    ctl.packet = new Map(packetNames.map(name => [name, { sha256: byName.get(name).sha256, bytes: byName.get(name).bytes }]));
+    /* The packet must fit what the agent service takes, before a designer is paid to add to it. */
+    const bytes = [...ctl.packet.values()].reduce((sum, entry) => sum + entry.bytes, 0);
+    const deepest = Math.max(...packetNames.map(name => name.split('/').length));
+    if (ctl.packet.size > C.LIMITS.files) throw new Failure(`The pilot packet would hold ${ctl.packet.size} files; the limit is ${C.LIMITS.files}. Take files out of the task, then start again.`);
+    if (bytes > C.LIMITS.bytes) throw new Failure(`The pilot packet would be ${Math.ceil(bytes / 1048576)} MB; the limit is ${Math.round(C.LIMITS.bytes / 1048576)} MB. Take files out of the task, then start again.`);
+    if (deepest > C.LIMITS.depth) throw new Failure(`A file of the pilot packet is nested ${deepest} levels deep; the limit is ${C.LIMITS.depth}. Flatten the task, then start again.`);
+    /* A file the classifier called a world or task file that the pilots would not get: stop unless the owner said that is fine. */
+    if (settled.warnings.length && !p.config.acceptMissing) {
+      const names = settled.warnings.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
+      throw new Failure(`${settled.warnings.length} file${settled.warnings.length === 1 ? '' : 's'} the classifier called world or task files ${settled.warnings.length === 1 ? 'is' : 'are'} withheld, so the pilots would not get ${settled.warnings.length === 1 ? 'it' : 'them'}: ${names}${settled.warnings.length > 5 ? `, and ${settled.warnings.length - 5} more` : ''}. If the pilots can do without ${settled.warnings.length === 1 ? 'it' : 'them'}, start again with acceptMissing.`);
+    }
   }
 
   /* The text of the prompt, the guideline and the golden answer: a page section, or a text file. A guideline or golden answer that is a
-     binary file (a spreadsheet, a document) is copied for the designer as it is and has no text here. */
-  _loadOriginalTexts(p, ctl, settled) {
-    const out = { prompt: '', guideline: '', goldenAnswer: '', binary: {} };
+     binary file (a spreadsheet, a document) is copied for the designer as it is; its text, when it can be read, only feeds the checks. */
+  async _loadOriginalTexts(p, ctl, settled) {
+    const out = { prompt: '', guideline: '', goldenAnswer: '', guidelineExtracted: null, goldenExtracted: null, binary: {} };
     for (const [role, ref] of [['prompt', settled.prompt], ['guideline', settled.guideline], ['goldenAnswer', settled.goldenAnswer]]) {
       if (!ref) continue;
       if (ref.kind === 'section') { out[role] = ctl.sections[ref.index].text; continue; }
@@ -659,6 +782,7 @@ class PipelineService {
       if (text === null) {
         if (role === 'prompt') throw new Failure('The business prompt is a file that is not text, so it cannot be used. Put the prompt on the page or in a text file.');
         out.binary[role] = ref.name;
+        out[`${role === 'goldenAnswer' ? 'golden' : role}Extracted`] = await extractText(this._originalFile(p, ref.name), { maxChars: 1024 * 1024 });
       } else {
         out[role] = text;
       }
@@ -690,60 +814,98 @@ class PipelineService {
 
   /* -------------------------------------------------------------- design */
 
+  /* One attempt at a design. Resolves when the design is accepted (p.design is the new design and the pilot packet is built) and throws
+     AttemptRejected when it is not: a designer that could not deliver even after a repair turn, or a design that failed a check. */
   async _design(p, ctl) {
     const n = p.attempt + 1;
     const total = P.MAX_REDESIGNS + 1;
     this._setStage(p, 'design', `Designing the traps (attempt ${n} of ${total})`);
     this._checkStop(ctl);
     this._reserve(p, 'the trap designer', p.config.designCapUsd);
-    const ws = this._workspace(p.id);
-    const designer = path.join(ws, 'designer');
+    const designer = this._designerDir(p.id);
     fs.rmSync(designer, { recursive: true, force: true });
     fs.mkdirSync(path.join(designer, 'out'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(designer, '.tmp'), { recursive: true, mode: 0o700 });
     const redesign = n > 1;
-    this._writeDesignerInputs(p, ctl, designer, redesign);
+    await this._writeDesignerInputs(p, ctl, designer, redesign);
     p.attempt = n;
-    const attempt = { n, startedAt: this.now(), traps: [], newFiles: 0, editedFiles: 0, screen: null, test: null, outcome: 'in-progress' };
+    const attempt = { n, startedAt: this.now(), traps: [], newFiles: 0, editedFiles: 0, screen: null, test: null, outcome: 'in-progress', repaired: false, rejection: null };
     p.attempts.push(attempt);
     this._save(p);
-
     const attemptDir = this._attemptDir(p.id, n);
     fs.mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
-    this._checkStop(ctl);
-    const run = await runDesigner({
-      rt: this.rt, folder: designer, prompt: designerPrompt({ attempt: n, attempts: total, redesign }), model: p.config.model, effort: p.config.effort,
-      capUsd: p.config.designCapUsd, transcriptPath: path.join(attemptDir, 'design.transcript.jsonl'), projectRoot: this.root,
-      onRunner: this._track(ctl),
-    });
-    this._spend(p, 'design', 'design', `attempt ${n}`, run.costUsd, p.config.designCapUsd, !run.summary.spawnError);
-    if (run.summary.state === 'cancelled' || ctl.stop) throw new StopSignal('stopped');
-    if (run.audit && run.audit.status !== 'CLEAN') {
-      const kinds = [...new Set(run.audit.violations.map(item => item.kind))].join(', ');
-      attempt.audit = { status: run.audit.status, violationCount: run.audit.violations.length };
-      throw new Failure(`The trap designer was DISCARDED by the audit (${run.audit.violations.length} violation${run.audit.violations.length === 1 ? '' : 's'}: ${kinds}). Its work was not used.`);
-    }
-    if (run.summary.state !== 'completed') {
-      throw new Failure(`The trap designer did not finish (${run.summary.failureReason || run.summary.state}). Its work was not used.`);
-    }
-    writeTextAtomic(path.join(attemptDir, 'design-summary.txt'), capText(run.answer, 20000) + '\n');
-
-    const sets = this._withheldSets(p, ctl);
-    const windows = [...leakWindows(ctl.texts.guideline), ...leakWindows(ctl.texts.goldenAnswer)];
     const outDir = path.join(designer, 'out');
-    const design = readDesign({ outDir, packet: ctl.packet, withheldHashes: sets.hashes, windows });
-    fs.cpSync(outDir, path.join(attemptDir, 'out'), { recursive: true, errorOnExist: true });
-    const manifest = buildWork({ originalDir: path.join(ws, 'original'), outDir, workDir: path.join(ws, 'work', 'filesystem'), packet: ctl.packet, design });
-    ctl.manifest = manifest;
-    const after = this._withheldSets(p, ctl);
-    verifyPacket({ dir: path.join(ws, 'work', 'filesystem'), manifest, withheldHashes: after.hashes, withheldNames: after.names });
 
-    const bytes = manifest.reduce((sum, file) => sum + file.bytes, 0);
+    /* The designer's run, and what is wrong with it, if anything. A problem with the work gets one repair turn in the same folder. */
+    let turn = await this._designerTurn(p, ctl, { prompt: designerPrompt({ attempt: n, attempts: total, redesign }), cap: p.config.designCapUsd, kind: 'design', ref: `attempt ${n}`, transcript: path.join(attemptDir, 'design.transcript.jsonl'), designer });
+    let problem = turn.problem;
+    let design = null;
+    const read = () => {
+      const sets = this._withheldSets(p, ctl);
+      const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || '')];
+      return readDesign({ outDir, packet: ctl.packet, withheldHashes: sets.hashes, windows, original: ctl.original, originalDir: this._origDir(p.id) });
+    };
+    const tryRead = () => {
+      try { design = read(); return null; } catch (error) {
+        if (error instanceof DesignError) return { message: error.message, detail: error.detail };
+        throw error;
+      }
+    };
+    if (!problem) problem = tryRead();
+    if (problem) {
+      attempt.repaired = true;
+      this._note(p, `Asking the trap designer to fix its work (attempt ${n} of ${total})`);
+      this._checkStop(ctl);
+      this._reserve(p, 'the repair turn', P.CAPS.repairUsd);
+      turn = await this._designerTurn(p, ctl, { prompt: repairPrompt({ attempt: n, attempts: total, problem: problem.detail }), cap: P.CAPS.repairUsd, kind: 'design-repair', ref: `attempt ${n}`, transcript: path.join(attemptDir, 'repair.transcript.jsonl'), designer });
+      design = null;
+      problem = turn.problem || tryRead();
+      if (problem) {
+        this._keepOut(outDir, path.join(attemptDir, 'out'));
+        throw new AttemptRejected('design', [problem.message], [problem.detail]);
+      }
+    }
+    attempt.audit = { status: 'CLEAN', violationCount: 0 };
+    writeTextAtomic(path.join(attemptDir, 'design-summary.txt'), capText(turn.answer, 20000) + '\n');
+    this._keepOut(outDir, path.join(attemptDir, 'out'));
     attempt.traps = design.traps.map(trap => ({ id: trap.id, title: trap.title }));
     attempt.newFiles = design.newFiles.length;
     attempt.editedFiles = design.editedFiles.length;
-    attempt.audit = { status: run.audit.status, violationCount: 0 };
     attempt.promptSha256 = sha256Hex(design.prompt);
+    this._save(p);
+
+    /* The checks before any pilot runs. */
+    this._note(p, `Checking the design of attempt ${n}: the golden answer against its guideline, and the fairness of the guideline`);
+    const reasons = [];
+    const details = [];
+    const calibration = await this._calibrate(p, ctl, design, n);
+    attempt.calibration = calibration;
+    if (calibration.score === null) {
+      reasons.push('The simulated grader gave the golden answer no usable score, so the guideline could not be checked against it');
+      details.push('The simulated grader could not score your golden answer against your guideline (no usable score). Make the guideline a clear list of points with how many each is worth, and make sure the golden answer meets every one.');
+    } else if (calibration.score < P.GOLDEN_MIN) {
+      reasons.push(`The golden answer scored ${calibration.score.toFixed(2)} against its own guideline; at least ${P.GOLDEN_MIN.toFixed(2)} is needed`);
+      details.push(`Your golden answer scored ${calibration.score.toFixed(2)}: ${calibration.reason || '(no reason given)'}. A golden answer must score at least ${P.GOLDEN_MIN.toFixed(2)} against your own guideline. Fix the golden answer or the guideline so that they agree.`);
+    }
+    const names = [...ctl.packet.keys(), ...design.newFiles.map(file => file.name)];
+    const fairness = await this._fairness(p, ctl, design, names, n, outDir);
+    attempt.fairness = { status: fairness.status, count: fairness.unfair.length };
+    if (fairness.status === 'unusable') {
+      reasons.push('The fairness review gave no usable answer');
+      details.push('The fairness review of your guideline gave no usable answer. Make each point of the guideline short and plain.');
+    } else if (fairness.unfair.length) {
+      reasons.push(`The fairness review found ${fairness.unfair.length} guideline item${fairness.unfair.length === 1 ? '' : 's'} that a solver could not know from the prompt and the files, or that no trap explains`);
+      details.push(`The fairness review found guideline items a solver could not know from the prompt and the files, or that are not tied to a trap: ${fairness.unfair.map(entry => `"${entry.item}" (${entry.why})`).join('; ')}. Take them out, or make the prompt and the files settle them.`);
+    }
+    if (reasons.length) throw new AttemptRejected('checks', reasons, details);
+
+    /* Accepted: the pilot packet. */
+    const manifest = await buildWork({ originalDir: this._origDir(p.id), outDir, workDir: this._packetDir(p.id), packet: ctl.packet, design, shouldStop: () => ctl.stop });
+    this._checkStop(ctl);
+    ctl.manifest = manifest;
+    const after = this._withheldSets(p, ctl);
+    verifyPacket({ dir: this._packetDir(p.id), manifest, withheldHashes: after.hashes, withheldNames: after.names });
+    const bytes = manifest.reduce((sum, file) => sum + file.bytes, 0);
     p.design = {
       attempt: n,
       traps: design.traps,
@@ -754,24 +916,95 @@ class PipelineService {
       packet: { fileCount: manifest.length, bytes, files: manifest },
       audit: attempt.audit,
       notes: design.notes,
+      repaired: attempt.repaired,
+      calibration,
+      fairness,
+      guidelineDiff: design.guidelineDiff,
+      rubricChanges: design.rubricChanges,
     };
     this._save(p);
   }
 
-  _writeDesignerInputs(p, ctl, designer, redesign) {
+  /* One run of the designer (the first, or the repair) with its cost counted. Returns { problem, answer }: problem is null when the run
+     finished and the audit cleared it, else { message, detail }. A designer that could not be started, or a stop, ends the pipeline. */
+  async _designerTurn(p, ctl, { prompt, cap, kind, ref, transcript, designer }) {
+    this._checkStop(ctl);
+    const run = await runDesigner({
+      rt: this.rt, folder: designer, prompt, model: p.config.model, effort: p.config.effort, capUsd: cap, transcriptPath: transcript, projectRoot: this.root,
+      onRunner: this._track(ctl),
+    });
+    this._spend(p, 'design', kind, ref, run.costUsd, cap, !run.summary.spawnError);
+    if (run.summary.state === 'cancelled' || ctl.stop) throw new StopSignal('stopped');
+    if (run.summary.spawnError && !run.summary.events.length) throw new Failure('The trap designer could not be started.');
+    if (run.audit && run.audit.status !== 'CLEAN') {
+      const kinds = [...new Set(run.audit.violations.map(item => item.kind))].join(', ');
+      const attempt = p.attempts[p.attempts.length - 1];
+      attempt.audit = { status: run.audit.status, violationCount: run.audit.violations.length };
+      const message = `The trap designer was DISCARDED by the audit (${run.audit.violations.length} violation${run.audit.violations.length === 1 ? '' : 's'}: ${kinds}). Its work was not used.`;
+      return { problem: { message, detail: `${message} Do not read or write outside this folder, do not use the network and do not start other programs that call a model.` }, answer: '' };
+    }
+    if (run.summary.state !== 'completed') {
+      const message = `The trap designer did not finish (${run.summary.failureReason || run.summary.state}). Its work was not used.`;
+      return { problem: { message, detail: `${message} The run stopped before it was done${run.summary.failureReason === 'budget' ? ' (it reached its spending cap)' : ''}: finish what is in out/ and keep it short.` }, answer: '' };
+    }
+    return { problem: null, answer: run.answer };
+  }
+
+  /* A copy of the designer's out/ next to the attempt, regular files only, for the feedback (previous/) and the export. */
+  _keepOut(outDir, target) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.cpSync(outDir, target, { recursive: true, filter: source => { const stat = fs.lstatSync(source); return (stat.isDirectory() || stat.isFile()) && !isJunkName(path.basename(source)); } });
+    } catch { /* what could not be copied is not kept */ }
+  }
+
+  /* The golden answer, scored by the simulated grader against the design's own guideline. One more call when the first gave no score. */
+  async _calibrate(p, ctl, design, n) {
+    const guideline = design.guideline + GRADER_FOOTER;
+    const answer = capText(design.goldenAnswer, MAX_ANSWER_FOR_GRADER);
+    let last = { score: null, verdict: null, reason: '' };
+    for (let attemptNo = 1; attemptNo <= 2; attemptNo++) {
+      this._checkStop(ctl);
+      this._reserve(p, 'the check of the golden answer', P.CAPS.graderUsd);
+      const result = await this._graderCall(p, ctl, { stage: 'design', kind: 'calibration', ref: `attempt ${n}`, guideline, answer });
+      last = { score: result.score, verdict: result.verdict, reason: result.reason };
+      if (result.score !== null) break;
+    }
+    return last;
+  }
+
+  /* The fairness review: one tool-less call (a second when the first gave nothing usable). Resolves { status: 'ok'|'unfair'|'unusable', unfair }. */
+  async _fairness(p, ctl, design, names, n, outDir) {
+    let trapsText = '';
+    try { trapsText = fs.readFileSync(path.join(outDir, 'traps.json'), 'utf8'); } catch { trapsText = ''; }
+    const prompt = buildFairnessPrompt({ prompt: design.prompt, files: names, originalGuideline: ctl.texts.guideline || ctl.texts.guidelineExtracted || '', guideline: design.guideline, trapsText });
+    for (let attemptNo = 1; attemptNo <= 2; attemptNo++) {
+      this._checkStop(ctl);
+      this._reserve(p, 'the fairness review', P.CAPS.fairnessUsd);
+      const folder = path.join(this._priv(p.id), 'runs', `fairness-${n}-${attemptNo}`);
+      fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+      const run = await runToolLess({ rt: this.rt, folder, prompt, model: p.config.model, effort: p.config.effort, capUsd: P.CAPS.fairnessUsd, onRunner: this._track(ctl) });
+      this._spend(p, 'design', 'fairness', `attempt ${n}`, run.costUsd, P.CAPS.fairnessUsd, !run.summary.spawnError);
+      if (run.summary.state === 'cancelled' || ctl.stop) throw new StopSignal('stopped');
+      if (run.summary.state !== 'completed' || run.toolCalls > 0) continue;
+      const parsed = parseFairness(run.summary.result.text);
+      if (parsed.ok) return { status: parsed.unfair.length ? 'unfair' : 'ok', unfair: parsed.unfair };
+    }
+    return { status: 'unusable', unfair: [] };
+  }
+
+  async _writeDesignerInputs(p, ctl, designer, redesign) {
     const put = (rel, text) => fs.writeFileSync(path.join(designer, rel), text, { mode: 0o600 });
+    const stop = () => ctl.stop;
     for (const name of ctl.packet.keys()) {
-      const target = path.join(designer, 'task', ...name.split('/'));
-      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      fs.copyFileSync(this._originalFile(p, name), target, fs.constants.COPYFILE_EXCL);
+      if (ctl.stop) throw new StopSignal('stopped');
+      await copyHashed(this._originalFile(p, name), path.join(designer, 'task', ...name.split('/')), { shouldStop: stop });
     }
     put('prompt.txt', ctl.texts.prompt);
     for (const [role, rel, label] of [['guideline', 'guideline.md', 'grader guideline'], ['goldenAnswer', 'golden-answer.md', 'golden answer']]) {
       const binary = ctl.texts.binary[role];
       if (binary) {
-        const target = path.join(designer, `${role}-original`, ...binary.split('/'));
-        fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-        fs.copyFileSync(this._originalFile(p, binary), target, fs.constants.COPYFILE_EXCL);
+        await copyHashed(this._originalFile(p, binary), path.join(designer, `${role}-original`, ...binary.split('/')), { shouldStop: stop });
         put(rel, `The ${label} is the file ${role}-original/${binary}. It is not plain text: open it with a tool (for example a script) to read it.\n`);
       } else {
         put(rel, ctl.texts[role] || `(The page has no ${label}.)\n`);
@@ -783,6 +1016,13 @@ class PipelineService {
       const previous = path.join(this._attemptDir(p.id, p.attempt), 'out');
       if (fs.existsSync(previous)) fs.cpSync(previous, path.join(designer, 'previous'), { recursive: true });
     }
+  }
+
+  /* feedback.md for the next design after a design that failed a check: what each check found. */
+  _prepareRejectionFeedback(p, ctl, attempt, rejection) {
+    const history = p.attempts.filter(item => item.n !== attempt.n).map(item => ({ n: item.n, outcome: this._outcomeLine(item) }));
+    ctl.feedback = rejectionFeedback({ attempt: attempt.n, details: rejection.details, history });
+    try { writeTextAtomic(path.join(this._attemptDir(p.id, attempt.n), 'feedback.md'), ctl.feedback); } catch { /* the copy in memory is what the designer gets */ }
   }
 
   /* feedback.md for the next design: every pilot's score, verdict, the grader's reason and the final answer. */
@@ -799,6 +1039,7 @@ class PipelineService {
   }
 
   _outcomeLine(attempt) {
+    if (attempt.rejection) return `${attempt.outcome} before any pilot ran: ${attempt.rejection.reasons.join('; ')}`;
     const scores = stage => (stage ? stage.pilots.map(pilot => (typeof pilot.score === 'number' ? pilot.score.toFixed(2) : 'none')).join(', ') : '');
     return `${attempt.outcome}; screen scores: ${scores(attempt.screen) || 'none'}${attempt.test ? `; test scores: ${scores(attempt.test)}` : ''}`;
   }
@@ -815,12 +1056,18 @@ class PipelineService {
     const result = {
       name: kind,
       rule: screen ? `both of the ${wanted} pilots score below ${P.PASS_BAR}` : `at least ${need} of the ${wanted} pilots score below ${P.PASS_BAR}`,
-      bar: P.PASS_BAR, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, passed: null, replacementRound: false, startedAt: this.now(), endedAt: null,
+      bar: P.PASS_BAR, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, passed: null, replacementRound: false, replacementSkipped: false, startedAt: this.now(), endedAt: null,
     };
     await this._pilotsAndGrades(p, ctl, kind, result, wanted, false);
-    if (result.counted < wanted) {
-      result.replacementRound = true;
-      await this._pilotsAndGrades(p, ctl, kind, result, wanted - result.counted, true);
+    const missing = wanted - result.counted;
+    if (missing > 0) {
+      /* A replacement round runs once per stage, and only when it could change the decision. */
+      if (result.belowBar >= need || result.belowBar + missing < need) {
+        result.replacementSkipped = true;
+      } else {
+        result.replacementRound = true;
+        await this._pilotsAndGrades(p, ctl, kind, result, missing, true);
+      }
     }
     result.passed = result.belowBar >= need;
     result.endedAt = this.now();
@@ -832,7 +1079,7 @@ class PipelineService {
     const gradeStage = kind === 'screen' ? 'grade-screen' : 'grade-test';
     const what = `the ${replacement ? 'replacement round of the ' : ''}${kind}`;
     this._checkStop(ctl);
-    this._reserve(p, what, count * (p.config.pilotCapUsd + P.CAPS.graderUsd));
+    this._reserve(p, what, count * (p.config.pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd));
     const attempt = p.attempts[p.attempts.length - 1];
     if (!attempt[kind]) attempt[kind] = result;
     this._setStage(p, kind, replacement ? `Running ${count} replacement pilot${count === 1 ? '' : 's'} for the ${kind}` : `Running ${count} pilot${count === 1 ? '' : 's'} for the ${kind}`);
@@ -855,12 +1102,11 @@ class PipelineService {
   async _runRound(p, ctl, kind, count, replacement, startIndex) {
     this._checkStop(ctl);
     const attempt = p.attempts[p.attempts.length - 1];
-    const ws = this._workspace(p.id);
     const texts = this._designTexts(p);
     if (sha256Hex(texts.prompt) !== attempt.promptSha256) throw new SafetyError('The prompt changed after it was checked');
     const sets = this._withheldSets(p, ctl);
-    verifyPacket({ dir: path.join(ws, 'work', 'filesystem'), manifest: ctl.manifest, withheldHashes: sets.hashes, withheldNames: sets.names });
-    const windows = [...leakWindows(ctl.texts.guideline), ...leakWindows(ctl.texts.goldenAnswer), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer)];
+    verifyPacket({ dir: this._packetDir(p.id), manifest: ctl.manifest, withheldHashes: sets.hashes, withheldNames: sets.names });
+    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer)];
     if (windows.length && windows.some(window => window && this._squashIncludes(texts.prompt, window))) throw new SafetyError('The prompt holds a long passage of the guideline or the golden answer');
 
     let roundId = null;
@@ -868,10 +1114,10 @@ class PipelineService {
       const created = await this.agents.createRound({
         label: `${p.label} attempt ${attempt.n} ${kind}${replacement ? ' replacement' : ''}`.slice(0, 120),
         task: `Pipeline ${p.id}`,
-        sourceDir: path.join(ws, 'work', 'filesystem'),
+        sourceDir: this._packetDir(p.id),
         include: ctl.manifest.map(file => file.name),
         promptText: texts.prompt,
-        gafVisible: false,
+        gafVisible: true, /* the production solver sees the gaf folder, so the pilots do too: the packet is delivered whole */
         config: { model: p.config.model, effort: p.config.effort, count, maxBudgetUsd: p.config.pilotCapUsd },
       });
       roundId = created.id;
@@ -897,10 +1143,10 @@ class PipelineService {
       const started = Boolean(row.startedAt);
       const usd = this._spend(p, kind, 'pilot', `${roundId}#${row.n}`, row.costUsd, p.config.pilotCapUsd, started);
       const clean = row.state === 'completed' && row.audit && row.audit.status === 'CLEAN';
-      let answer = '';
+      let collected = { text: '', gradable: false, outputs: { count: 0, readable: 0 } };
       if (clean) {
-        try { answer = String((await this.agents.getRun(roundId, row.n)).final.text || ''); } catch { answer = ''; }
-        ctl.answers.set(`${roundId}#${row.n}`, answer);
+        collected = await this._collectAnswer(roundId, row.n);
+        ctl.answers.set(`${roundId}#${row.n}`, collected.text);
       }
       records.push({
         n: startIndex + records.length + 1,
@@ -908,7 +1154,7 @@ class PipelineService {
         round: roundId, run: row.n, replacement, state: row.state,
         audit: row.audit ? { status: row.audit.status, violationCount: row.audit.violationCount } : null,
         costUsd: round6(usd), estimated: started && typeof row.costUsd !== 'number',
-        gradable: clean && Boolean(answer.trim()), score: null, verdict: null, reason: '', valid: false, belowBar: null,
+        outputs: collected.outputs, gradable: clean && collected.gradable, score: null, regrade: null, verdict: null, reason: '', valid: false, belowBar: null,
       });
     }
     this._checkStop(ctl);
@@ -919,38 +1165,93 @@ class PipelineService {
     return String(text).replace(/\s+/gu, ' ').trim().toLowerCase().includes(window);
   }
 
+  /* What the simulated grader reads for one clean pilot: its final message and the files it wrote as text (plain text files, and the text
+     of spreadsheets and documents), under "--- outputs/<name> ---", within the grader's limit. A pilot that wrote files but gave a final
+     message of under 600 characters and nothing readable cannot be graded. Resolves { text, gradable, outputs: { count, readable } }. */
+  async _collectAnswer(roundId, n) {
+    let detail;
+    try { detail = await this.agents.getRun(roundId, n); } catch { return { text: '', gradable: false, outputs: { count: 0, readable: 0 } }; }
+    const final = String((detail.final && detail.final.text) || '');
+    const listed = Array.isArray(detail.outputs) ? detail.outputs.filter(entry => isObject(entry) && typeof entry.name === 'string') : [];
+    const base = path.join(this.root, 'private', 'agent-rounds', roundId, 'runs', String(n), 'outputs');
+    const readable = [];
+    for (const entry of listed.slice(0, MAX_OUTPUT_FILES)) {
+      if (!entry.name || entry.name.includes('\0') || entry.name.split('/').some(part => part === '' || part === '.' || part === '..')) continue;
+      const abs = path.join(base, ...entry.name.split('/'));
+      if (!within(abs, base)) continue;
+      let stat;
+      try { stat = fs.lstatSync(abs); } catch { continue; }
+      if (!stat.isFile()) continue;
+      const text = await extractText(abs, { maxChars: 30000 });
+      if (text && text.trim()) readable.push({ name: entry.name, text });
+    }
+    const outputs = { count: listed.length, readable: readable.length };
+    const gradable = Boolean(final.trim()) && !(listed.length > 0 && final.length < UNREADABLE_FINAL_CHARS && readable.length === 0);
+    return { text: composeGraderInput({ final, outputs: readable, cap: MAX_ANSWER_FOR_GRADER }), gradable, outputs };
+  }
+
+  /* One call of the simulated grader. A call the service refuses or cannot take (400, 409, 413) gives no score and no failure of the
+     pipeline; anything else ends it. Resolves { ok, score, verdict, reason, error? }; score is null when there is none. */
+  async _graderCall(p, ctl, { stage, kind, ref, guideline, answer }) {
+    let res;
+    ctl.graderRunning = true;
+    try {
+      res = await this.agents.graderSim({ guidelineText: guideline, answerTexts: [answer], model: p.config.graderModel, effort: p.config.graderEffort });
+    } catch (error) {
+      if (ctl.stop) throw new StopSignal('stopped');
+      if (error instanceof AgentError && [400, 409, 413].includes(error.status)) return { ok: false, score: null, verdict: null, reason: '', error: oneLine(error.message, 200) };
+      throw error instanceof AgentError ? error : new Failure('The simulated grader could not be run');
+    } finally {
+      ctl.graderRunning = false;
+    }
+    const one = Array.isArray(res.results) && res.results.length ? res.results[0] : {};
+    this._spend(p, stage, kind, ref, one.costUsd, P.CAPS.graderUsd, typeof one.state === 'string');
+    if (ctl.stop || one.state === 'cancelled') throw new StopSignal('stopped');
+    const score = typeof res.score === 'number' && Number.isFinite(res.score) && !one.discarded ? res.score : null;
+    return { ok: true, score, verdict: typeof res.verdict === 'string' ? res.verdict : null, reason: capText(typeof res.reason === 'string' ? res.reason : '', MAX_REASON) };
+  }
+
   /* The simulated grader scores each clean answer against the design's guideline, one call per answer (so Stop is prompt). A call that
-     gives no usable score leaves the pilot without one; a call the service refuses fails the stage. */
+     gives no usable score leaves the pilot without one. A score in the regrade band is graded a second time and the two are averaged.
+     When no call at all could be made, the stage fails: that is the grader, not one answer. */
   async _grade(p, ctl, stage, records) {
     const todo = records.filter(record => record.gradable);
     if (!todo.length) return;
-    this._reserve(p, 'grading', todo.length * P.CAPS.graderUsd);
+    this._reserve(p, 'grading', todo.length * P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd);
     const guideline = this._designTexts(p).guideline + GRADER_FOOTER;
+    const [low, high] = P.REGRADE_BAND;
+    let refused = 0;
+    let firstError = '';
     for (const record of todo) {
       this._checkStop(ctl);
       const answer = capText(ctl.answers.get(`${record.round}#${record.run}`) || '', MAX_ANSWER_FOR_GRADER);
-      let res;
-      ctl.graderRunning = true;
-      try {
-        res = await this.agents.graderSim({ guidelineText: guideline, answerTexts: [answer], model: p.config.graderModel, effort: p.config.effort });
-      } catch (error) {
-        if (ctl.stop) throw new StopSignal('stopped');
-        throw error instanceof AgentError ? error : new Failure('The simulated grader could not be run');
-      } finally {
-        ctl.graderRunning = false;
+      const ref = `${record.round}#${record.run}`;
+      const first = await this._graderCall(p, ctl, { stage, kind: 'grader', ref, guideline, answer });
+      if (!first.ok) {
+        refused++;
+        firstError = firstError || first.error;
+        record.reason = 'The simulated grader could not take this answer.';
+        continue;
       }
-      const one = Array.isArray(res.results) && res.results.length ? res.results[0] : {};
-      this._spend(p, stage, 'grader', `${record.round}#${record.run}`, one.costUsd, P.CAPS.graderUsd, typeof one.state === 'string');
-      if (ctl.stop || one.state === 'cancelled') throw new StopSignal('stopped');
-      record.verdict = typeof res.verdict === 'string' ? res.verdict : null;
-      record.reason = capText(typeof res.reason === 'string' ? res.reason : '', MAX_REASON);
-      if (typeof res.score === 'number' && Number.isFinite(res.score) && !one.discarded) {
-        record.score = res.score;
+      record.verdict = first.verdict;
+      record.reason = first.reason;
+      let score = first.score;
+      if (score !== null && score >= low && score <= high) {
+        this._checkStop(ctl);
+        const second = await this._graderCall(p, ctl, { stage, kind: 'grader', ref, guideline, answer });
+        if (second.ok && second.score !== null) {
+          score = round6((first.score + second.score) / 2);
+          record.regrade = { first: first.score, second: second.score, average: score };
+        }
+      }
+      if (score !== null) {
+        record.score = score;
         record.valid = true;
-        record.belowBar = res.score < P.PASS_BAR;
+        record.belowBar = score < P.PASS_BAR;
       }
       this._save(p);
     }
+    if (refused === todo.length) throw new Failure(`The simulated grader could not be used: ${firstError}`);
   }
 }
 

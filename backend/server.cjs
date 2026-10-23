@@ -33,9 +33,12 @@
    The pipeline routes (backend/pipeline; the options.pipeline service) follow the same rules as /api/agents: the nonce, the Origin and
    the JSON type on every POST, the same body cap, the same error mapping. While ANY round runs (also a round the pipeline itself
    started) every pipeline answer is passed through redactPipelineData (pipeline/redact.cjs): the prompt, the guideline, the golden
-   answer, the gold, the fingerprints, each trap's mechanism, decoy and values and each grader reason become { withheld: true }, and the
-   answer carries redacted: true. The export is refused with 409 while any round runs.
-       POST /api/pipeline/start               { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements } -> { id }
+   answer, the gold, the fingerprints, each trap's title, files, mechanism, decoy and values, the edited files' names, reasons and diffs,
+   the design's calibration, fairness review and guideline diff and each grader reason become { withheld: true }, and the answer carries
+   redacted: true. The export is refused with 409 while any round runs. While a pipeline runs (pipeline.busy()) a launch through
+   /api/agents/rounds/:id/launch, /api/agents/grader-sim and /api/agents/author-review is refused with 409 "A pipeline is running": the
+   pipeline makes its own rounds and grader calls through the service, not through these routes.
+       POST /api/pipeline/start               { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, acceptMissing? } -> { id }
        GET  /api/pipeline                     { pipelines: [row], running, config }
        GET  /api/pipeline/:id                 the pipeline view
        POST /api/pipeline/:id/continue        the view (the owner signed in, or turned on the option that shows all files)
@@ -91,6 +94,7 @@ const LOCK_WAIT_MS = 10000; /* how long a start waits for another start that hol
 const COMPANION_ID = 'finance-task-studio';
 const KEEP_OPEN_LINE = 'Keep this window open while a round runs; closing it stops the companion and its pilots.';
 const TOOL_LESS_WHILE_RUNNING = 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started';
+const PIPELINE_RUNNING = 'A pipeline is running. Other launches, the simulated grader and the author review wait until it has ended, because a pipeline owns the pilots and the grader while it runs. Nothing was started';
 const PIPELINE_EXPORT_WHILE_RUNNING = 'A round of pilots is running. The pipeline export holds the grader guideline and the golden answer, so it waits until the round has ended. Nothing was exported';
 const LAUNCH_WHILE_TOOL_LESS = 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started';
 
@@ -484,7 +488,12 @@ function createServer(options = {}) {
   let toolLessInFlight = 0;
   let launchesInFlight = 0;
 
+  /* A pipeline starts its own rounds and grader calls through the service, never through these routes, so while one runs any launch, grader
+     call or author review that comes through HTTP is somebody else's and is refused. */
+  const pipelineRunning = () => Boolean(pipeline && typeof pipeline.busy === 'function' && pipeline.busy());
+
   async function toolLess(work) {
+    if (pipelineRunning()) throw new HttpError(409, PIPELINE_RUNNING);
     toolLessInFlight++;
     try {
       if (launchesInFlight || await anyRoundRunning()) throw new HttpError(409, TOOL_LESS_WHILE_RUNNING);
@@ -495,6 +504,7 @@ function createServer(options = {}) {
   }
 
   async function launching(work) {
+    if (pipelineRunning()) throw new HttpError(409, PIPELINE_RUNNING);
     launchesInFlight++;
     try {
       if (toolLessInFlight) throw new HttpError(409, LAUNCH_WHILE_TOOL_LESS);

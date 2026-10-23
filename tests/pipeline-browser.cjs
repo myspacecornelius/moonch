@@ -28,10 +28,18 @@ const ENDED = ['done', 'failed', 'stopped', 'budget'];
 const pilots = (scores, extra = {}) => scores.map((score, i) => ({ n: i + 1, id: 'p' + (i + 1), replacement: false, state: 'completed', audit: { status: 'CLEAN', violationCount: 0 }, score, valid: typeof score === 'number', belowBar: typeof score === 'number' ? score < 0.45 : null, reason: '', ...(extra[i] || {}) }));
 const stageOf = (name, scores, passed, extra) => ({ name, bar: 0.45, need: name === 'test' ? 4 : 2, of: name === 'test' ? 5 : 2, pilots: pilots(scores, extra), passed });
 const attempt = (over = {}) => ({ n: 1, traps: ['Superseded facility schedule'], newFiles: 2, editedFiles: 1, screen: null, test: null, outcome: 'in-progress', ...over });
+const W = { withheld: true };
+/* diffs in the companion's own shape: { available, kind, added, removed, before, after, truncated, lines: [{ op, text }] } */
+const DIFF = { available: true, kind: 'text', added: 1, removed: 1, before: 2000, after: 2120, truncated: false, lines: [{ op: ' ', text: 'Name,Value' }, { op: '-', text: 'Rate,4.00%' }, { op: '+', text: 'Rate,6.00%' }] };
+const GUIDELINE_DIFF = { available: true, kind: 'text', added: 1, removed: 1, before: null, after: null, truncated: false, lines: [{ op: ' ', text: 'Award full credit when the answer holds the borrowing.' }, { op: '-', text: 'Count the available facility as cash.' }, { op: '+', text: 'Do not count the available facility as cash.' }] };
 const design = (withheld = false) => ({
   attempt: 1,
-  traps: [{ id: 't1', title: 'Superseded facility schedule', mechanism: 'A later amendment replaces the schedule that stays in the folder.', files: ['Atlas_Amendment_2.txt'], decoy: 'Atlas_Facility_Schedule.csv', correctValue: withheld ? { withheld: true } : '1,250', wrongValue: withheld ? { withheld: true } : '1,900' }],
-  newFiles: [{ name: 'Atlas_Amendment_2.txt', bytes: 900 }, { name: 'Meridian_Note.txt', bytes: 400 }], editedFiles: [{ name: 'Atlas_Facility_Schedule.csv', reason: 'The decoy needs the old rate in column C.', bytes: 2000 }], notes: [],
+  calibration: withheld ? W : { score: 0.97, verdict: 'meets-guidance', reason: 'Matches every rubric line.' },
+  fairness: withheld ? W : { status: 'unfair', unfair: [{ item: 'The amended date is only in a footnote', why: 'A careful solver has no way to know which schedule governs.' }] },
+  guidelineDiff: withheld ? W : GUIDELINE_DIFF,
+  rubricChanges: withheld ? W : [{ change: 'Added a line about the amended facility date', reason: 'The new trap turns on that date.' }],
+  traps: [{ id: 't1', title: withheld ? W : 'Superseded facility schedule', mechanism: 'A later amendment replaces the schedule that stays in the folder.', files: withheld ? W : ['Atlas_Amendment_2.txt'], decoy: 'Atlas_Facility_Schedule.csv', correctValue: withheld ? { withheld: true } : '1,250', wrongValue: withheld ? { withheld: true } : '1,900' }],
+  newFiles: [{ name: 'Atlas_Amendment_2.txt', bytes: 900 }, { name: 'Meridian_Note.txt', bytes: 400 }], editedFiles: [withheld ? { name: W, reason: W, diff: W, sizeChange: W } : { name: 'Atlas_Facility_Schedule.csv', reason: 'The decoy needs the old rate in column C.', diff: DIFF, bytes: 2120, beforeBytes: 2000 }], notes: [],
   prompt: withheld ? { withheld: true } : 'Assess the Atlas liquidity position and recommend whether the borrowing can proceed.',
   guideline: withheld ? { withheld: true } : 'Award full credit when the answer holds the borrowing on 1,250 of usable cash.',
   goldenAnswer: withheld ? { withheld: true } : 'Usable cash is 1,250. Hold the borrowing.',
@@ -202,7 +210,8 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-why'), /Enter the task link/);
     assert.equal(await count('#pl-root button.primary'), 1, 'one yellow primary');
     assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '30');
-    assert.equal(await count('#pl-start-form input[type=checkbox]'), 4);
+    assert.equal(await count('#pl-start-form input[data-pl-in=ack]'), 4);
+    assert.equal(await count('#pl-start-form input[type=checkbox]'), 5, 'the four acknowledgements and the withheld-files choice');
     assert.equal(await evaluate('document.querySelectorAll("#pl-root [role=status][aria-live=polite]").length >= 3'), true, 'live regions for the message, the stage and the wait');
     await noHorizontalOverflow('start card');
     pass('the view opens in the shell with its own header, one yellow primary (disabled with its reason), four acknowledgements and no horizontal overflow at three sizes');
@@ -219,8 +228,9 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await delay(80);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/);
     const order = [];
-    for (let i = 0; i < 5; i++) { await press('Tab'); order.push(await focused()); }
-    assert.deepEqual(order, ['cap', 'model', 'effort', 'pilot-cap', 'ack-shell-access'], 'Tab walks the fields in reading order');
+    for (let i = 0; i < 6; i++) { await press('Tab'); order.push(await focused()); }
+    assert.deepEqual(order, ['cap', 'model', 'effort', 'pilot-cap', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
+    assert.equal(await evaluate('document.querySelector("[data-pl-key=accept-missing]").checked'), false, 'the withheld-files choice is off unless the person turns it on');
     for (let i = 0; i < 4; i++) {
       await press('Space');
       assert.equal(await focused(), 'ack-' + ACK_IDS[i], 'ticking an acknowledgement keeps the keyboard on it');
@@ -239,7 +249,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const start = posts.find(p => p.url === '/api/pipeline/start');
     assert.ok(start, 'the page posted a start');
     assert.equal(start.nonce, NONCE);
-    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acknowledgements: ACK_IDS });
+    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
     assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 1);
     assert.equal(await focused(), 'pl-stage', 'the keyboard moves to the stage line');
     assert.equal(await evaluate('document.body.innerHTML.includes("SECRET-TOKEN-123")'), false, 'the link is nowhere in the page');
@@ -271,7 +281,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-spend'), /USD 0\.40 of USD 30\.00/);
     assert.equal(await evaluate('document.querySelector("#pl-timeline [aria-current=step] strong").textContent'), 'Classify');
     assert.match(await text('#pl-spend'), /Classifying what was captured/, 'the companion\'s progress message shows under the stage');
-    set({ stage: 'design', classification: { prompt: { kind: 'section', section: 'Business request', number: 2 }, guideline: { kind: 'file', file: 'Atlas_Grader_Guide.docx' }, goldenAnswer: { kind: 'file', file: 'Atlas_Reference_Answer.docx' }, worldFiles: ['Atlas_Facility_Schedule.csv', 'Meridian_Ledger.xlsx'], taskFiles: ['Atlas_Brief.txt'], other: [], withheld: [{ name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }, { name: 'Atlas_Reference_Answer.docx', why: 'it is the golden answer' }], notes: [] }, design: design(), attempt: 1, attempts: [attempt()] });
+    set({ stage: 'design', classification: { prompt: { kind: 'section', section: 'Business request', number: 2 }, guideline: { kind: 'file', file: 'Atlas_Grader_Guide.docx' }, goldenAnswer: { kind: 'file', file: 'Atlas_Reference_Answer.docx' }, worldFiles: ['Atlas_Facility_Schedule.csv', 'Meridian_Ledger.xlsx'], taskFiles: ['Atlas_Brief.txt'], other: [], withheld: [{ name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }, { name: 'Atlas_Reference_Answer.docx', why: 'it is the golden answer' }], notes: [], warnings: [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline or the golden answer' }] }, design: design(), attempt: 1, attempts: [attempt()] });
     await waitFor(stageIs('^Design:'), 'design', POLL_WAIT);
     assert.match(await text('#pl-classify'), /Section “Business request”/);
     assert.match(await text('#pl-classify'), /File “Atlas_Grader_Guide\.docx”/);
@@ -282,6 +292,34 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-design .pl-edit'), /Edited world file/);
     pass('classify and design show the import facts, the classification by name, the traps and the highlighted world-file edit');
 
+    /* ---------- the designer's review: warnings, calibration, fairness, diffs ---------- */
+    assert.match(await text('#pl-classify .pl-warning'), /Warning: check this before you trust the classification[\s\S]*Meridian_Ledger\.xlsx: it holds a long passage of the guideline or the golden answer/);
+    assert.equal(await evaluate('document.querySelector("#pl-classify .pl-warning").getBoundingClientRect().top < document.querySelector("#pl-classify dl").getBoundingClientRect().top'), true, 'the warning is above the parts of the task');
+    assert.match(await text('#pl-classify .card-title'), /1 warning/);
+    assert.match(await text('#pl-design'), /Calibration passed\s*The golden answer scored 0\.97 against the revised grader guideline\. It needs 0\.90 or more\./);
+    assert.match(await text('#pl-design'), /Fairness review[\s\S]*1 unfair item[\s\S]*The amended date is only in a footnote/);
+    assert.match(await text('#pl-design'), /Size change: \+120 bytes/);
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-design details.pl-changes, #pl-design details.pl-diff-box")].map(d=>d.open).join()'), 'false,false', 'the guideline changes and the file diff start collapsed');
+    assert.equal(await evaluate('document.querySelector("#pl-design details.pl-changes pre").checkVisibility()'), false, 'and their text is not on screen');
+    /* open the guideline changes with the keyboard: Enter on the summary */
+    await evaluate('document.querySelector("#pl-design details.pl-changes > summary").focus()');
+    await press('Enter');
+    assert.equal(await evaluate('document.querySelector("#pl-design details.pl-changes").open'), true, 'Enter opens it');
+    assert.equal(await evaluate('document.querySelector("#pl-design details.pl-changes pre").checkVisibility()'), true, 'opened, the diff is on screen');
+    assert.match(await text('#pl-design details.pl-changes'), /Added a line about the amended facility date[\s\S]*Why: The new trap turns on that date\./);
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-design details.pl-changes .pl-diff-del")).color !== getComputedStyle(document.querySelector("#pl-design details.pl-changes .pl-diff-add")).color'), true, 'added and removed lines differ, and both carry + and - in the text');
+    assert.match(await text('#pl-design details.pl-changes .pl-diff-del'), /^-Count the available facility as cash\./);
+    assert.match(await text('#pl-design details.pl-changes .pl-diff-add'), /^\+Do not count the available facility as cash\./);
+    await click('#pl-design details.pl-diff-box > summary');
+    assert.match(await text('#pl-design details.pl-diff-box'), /-Rate,4\.00%[\s\S]*\+Rate,6\.00%/);
+    await evaluate('document.querySelector("#pl-classify").scrollIntoView()');
+    await shot('03a-warning-1440', 1440, 1000);
+    await evaluate('document.querySelector("#pl-design h3:nth-of-type(3)").scrollIntoView()');
+    await shot('03b-review-1440', 1440, 1000);
+    await evaluate('window.scrollTo(0,0)');
+    await viewport(1440, 1000);
+    pass('classification warnings sit above the task parts; calibration and the fairness review show in the traps card; the guideline changes and each file diff are collapsed details that open from the keyboard, with diff lines marked by + and - as well as colour');
+
     /* ---------- a round is running: values are withheld ---------- */
     set({ stage: 'screen', redacted: true, design: design(true) });
     setAttempt({ screen: stageOf('screen', [null, null], null, { 0: { state: 'running', audit: null }, 1: { state: 'running', audit: null } }) });
@@ -289,7 +327,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-withheld'), /A round is running, so this page does not show the prompt/);
     await evaluate('document.querySelectorAll("#pl-design details").forEach(d=>{d.open=true;})');
     await delay(60);
-    assert.equal(await evaluate('document.querySelector("#pl-design").innerText.split("Withheld while a round runs").length - 1'), 7, 'the correct and wrong value, the prompt, the guideline, the golden answer, the gold and the fingerprints each say so');
+    assert.equal(await evaluate('document.querySelector("#pl-design").innerText.split("Withheld while a round runs").length - 1'), 17, 'the trap title and files, the file name, size change, reason and diff, calibration, fairness, the rubric changes and the guideline diff, the correct and wrong value, the prompt, the guideline, the golden answer, the gold and the fingerprints each say so');
     assert.equal(await evaluate('document.body.innerText.includes("Usable cash is 1,250")'), false, 'the golden answer is not on the page');
     assert.equal(await exists('[data-pl=export]'), false);
     await shot('03-screen-withheld-1440', 1440, 1000);
@@ -323,11 +361,18 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await viewport(1440, 1000);
 
     /* ---------- done: result and export ---------- */
-    set({ stage: 'done', running: false, spentUsd: 17.4, redesigns: 1, summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 2). Export the private zip to take the design away.', attempts: [attempt({ n: 1, traps: ['Rounded inputs rebuilt into a total'], outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) }), attempt({ n: 2, outcome: 'passed', screen: stageOf('screen', [0.31, 0.12], true), test: stageOf('test', [0.1, 0.2, 0.9, 0.3, 0.44], true) })] });
+    set({ stage: 'done', running: false, spentUsd: 17.4, redesigns: 2, summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 3). Export the private zip to take the design away.', attempts: [
+      attempt({ n: 1, traps: [{ id: 't1', title: 'Rounded inputs rebuilt into a total' }], outcome: 'rejected', rejection: { kind: 'checks', reasons: ['The golden answer scored 0.62 against its own guideline; at least 0.90 is needed'] }, calibration: { score: 0.62, verdict: 'does-not-meet-guidance', reason: 'Missing the date.' }, fairness: { status: 'ok', count: 0 }, repaired: true }),
+      attempt({ n: 2, traps: [{ id: 't1', title: 'Rounded inputs rebuilt into a total' }], outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false), calibration: { score: 0.97, verdict: 'v', reason: 'r' }, fairness: { status: 'ok', count: 0 } }),
+      attempt({ n: 3, outcome: 'passed', screen: stageOf('screen', [0.31, 0.12], true), test: stageOf('test', [0.1, 0.2, 0.9, 0.3, 0.44], true), calibration: { score: 0.98, verdict: 'v', reason: 'r' }, fairness: { status: 'ok', count: 0 } })] });
     await waitFor(stageIs('^Done:'), 'done', POLL_WAIT);
     assert.match(await text('#pl-verdict'), /The test passed/);
-    assert.match(await text('#pl-verdict'), /The test passed: 4 of 5 pilots scored below 0\.45 \(design attempt 2\)\./);
-    assert.match(await text('#pl-redesigns'), /1 of 3 used/);
+    assert.match(await text('#pl-verdict'), /The test passed: 4 of 5 pilots scored below 0\.45 \(design attempt 3\)\./);
+    assert.match(await text('#pl-redesigns'), /2 of 3 used/);
+    assert.match(await text('#pl-redesigns'), /Rejected before any pilot[\s\S]*The design did not pass the calibration or the fairness check\.[\s\S]*The golden answer scored 0\.62 against its own guideline; at least 0\.90 is needed/);
+    assert.match(await text('#pl-redesigns'), /Calibration: 0\.62, failed[\s\S]*A repair turn was used/);
+    assert.equal(await count('#pl-redesigns tbody tr'), 3);
+    assert.ok(!(await text('#pl-verdict')).includes('%') && !(await text('#pl-spend')).includes('%'), 'no percentage in the result or the spend');
     assert.equal(await exists('[data-pl=stop]'), false);
     assert.equal(await exists('[data-pl=export]'), true, 'Export is offered when done');
     assert.equal(await evaluate('document.querySelector("[data-dash-tab=pipeline]").getAttribute("aria-current")'), 'page');

@@ -83,6 +83,8 @@ function makeCompanion(opts = {}) {
   const c = {
     nonce: 'nonce-fake-1', pipelines: new Map(), calls: [], failures: new Map(), startCount: 0, noPipelineSupport: !!opts.noPipelineSupport,
     models: opts.models || ['claude-opus-5-5', 'claude-sonnet-5-5'], efforts: opts.efforts || ['low', 'medium', 'high'],
+    /* the rules GET /api/pipeline reports (service.cjs _rules) */
+    config: opts.config || { classifyCapUsd: 0.5, designCapUsd: 5, repairCapUsd: 1, fairnessCapUsd: 0.25, graderCapUsd: 0.5, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.15 },
     put(state) { c.pipelines.set(state.id, state); return state; },
     update(id, patch) { c.pipelines.set(id, { ...c.pipelines.get(id), ...patch }); },
     /* change the current (last) attempt: its screen, its test, its outcome */
@@ -101,7 +103,7 @@ function makeCompanion(opts = {}) {
       if (method === 'POST' && nonce !== c.nonce) return { status: 403, body: { error: 'Bad session code' } };
       if (url === '/api/status') return { status: 200, body: { nonce: c.nonce, agents: { models: c.models, efforts: c.efforts, maxPilotsPerRound: 5, runtime: { found: true } } } };
       if (c.noPipelineSupport && url.startsWith('/api/pipeline')) return { status: 404, body: { error: 'Not found' } };
-      if (method === 'GET' && url === '/api/pipeline') return { status: 200, body: { pipelines: [...c.pipelines.values()].map(rowOf), running: null, config: {} } };
+      if (method === 'GET' && url === '/api/pipeline') return { status: 200, body: { pipelines: [...c.pipelines.values()].map(rowOf), running: null, config: c.config } };
       if (method === 'POST' && url === '/api/pipeline/start') {
         if ([...c.pipelines.values()].some(p => !ENDED_STAGES.includes(p.stage))) return { status: 409, body: { error: 'A pipeline is already running.' } };
         return { status: 200, body: { id: c.put(c.onStart(body)).id } };
@@ -268,7 +270,8 @@ test('the start card: link or folder, total cap 30, model and effort from the co
   assert.match(form, /<option value="claude-opus-5-5" selected>/, 'the default model comes from the companion list');
   assert.match(form, /<option value="medium" selected>/);
   for (const id of ACK_IDS) assert.ok(page.tagOf('data-id', id), 'a checkbox for ' + id);
-  assert.equal((form.match(/type="checkbox"/g) || []).length, 4);
+  assert.equal((form.match(/data-pl-in="ack"/g) || []).length, 4);
+  assert.equal((form.match(/type="checkbox"/g) || []).length, 5, 'the four acknowledgements and the withheld-files choice');
   assert.match(page.region('start-foot'), /<button type="button" class="primary" data-pl="start"/);
   assert.equal((page.html().match(/class="primary"/g) || []).length, 1, 'yellow is on exactly one button');
   assert.match(page.region('start-foot'), />Approve and start<\/button>/);
@@ -362,7 +365,7 @@ test('starting from a task link: one POST with the nonce, the link, the caps, mo
   assert.equal(posts.length, 1);
   assert.equal(posts[0].url, '/api/pipeline/start');
   assert.equal(posts[0].nonce, 'nonce-fake-1', 'the session code travels with the request');
-  assert.deepEqual(posts[0].body, { url: TASK_LINK, capUsd: 25.5, model: 'claude-sonnet-5-5', effort: 'high', pilotCapUsd: 2, acknowledgements: ACK_IDS });
+  assert.deepEqual(posts[0].body, { url: TASK_LINK, capUsd: 25.5, model: 'claude-sonnet-5-5', effort: 'high', pilotCapUsd: 2, acceptMissing: false, acknowledgements: ACK_IDS });
   assert.ok(!('sourceDir' in posts[0].body));
   /* the run is shown, the form is folded away and nothing keeps the link */
   assert.match(page.stage(), /^Import:/);
@@ -390,7 +393,7 @@ test('starting from a folder sends sourceDir and no link', async t => {
   assert.equal(page.enabled('start'), true);
   await page.click('start');
   const post = companion.calls.find(c => c.method === 'POST');
-  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acknowledgements: ACK_IDS });
+  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 30, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
   assert.match(page.stage(), /^Import:/);
 });
 
@@ -491,23 +494,26 @@ test('a stage the page does not know is shown as working, not as an error', asyn
   assert.equal(stepsOf(page.region('timeline')).filter(s => s.current).length, 1);
 });
 
-test('spent against the cap: dollars to two decimals, a percentage, a meter with a label, and the run facts', async t => {
+test('spent against the cap: dollars to two decimals, a meter with a label and no percentage, and the run facts', async t => {
   const { companion, page } = await bootWith(t, [baseState({ stage: 'design', spentUsd: 7.5, capUsd: 30 })]);
   const spend = page.region('spend');
-  assert.match(spend, /<strong>Spent<\/strong> USD 7\.50 of USD 30\.00 <span class="muted">\(25%\)<\/span>/);
-  assert.match(spend, /<progress class="pl-meter" max="30" value="7\.5" aria-label="Spent against the total cap">25%<\/progress>/);
+  assert.match(spend, /<strong>Spent<\/strong> USD 7\.50 of USD 30\.00<\/p>/);
+  assert.match(spend, /<progress class="pl-meter" max="30" value="7\.5" aria-label="Spent against the total cap"><\/progress>/);
   assert.match(spend, /Pipeline <code>pl-atlas-0001<\/code> · claude-opus-5-5 · medium · USD 3\.00 per pilot · started /);
+  assert.ok(!spend.includes('%'), 'no percentage in the copy');
   companion.update('pl-atlas-0001', { spentUsd: 12.345 });
   await page.tick();
   assert.match(page.region('spend'), /USD 12\.35 of USD 30\.00/);
   companion.update('pl-atlas-0001', { spentUsd: 31, capUsd: 30 });
   await page.tick();
-  assert.match(page.region('spend'), /\(100%\)/, 'the percentage never passes 100');
-  assert.match(page.region('spend'), /value="30"/);
+  assert.match(page.region('spend'), /value="30"/, 'the meter never passes the cap');
   companion.update('pl-atlas-0001', { capUsd: null, spentUsd: 1 });
   await page.tick();
   assert.doesNotMatch(page.region('spend'), /<progress/);
   assert.match(page.region('spend'), /USD 1\.00/);
+  companion.update('pl-atlas-0001', { capUsd: 30, config: { acceptMissing: true } });
+  await page.tick();
+  assert.match(page.region('spend'), /per pilot · withheld files accepted · started /, 'a run started with the withheld-files box ticked says so');
 });
 
 test('polling: every 2 seconds while the pipeline runs, repainting from each answer, and it stops by itself when the pipeline ends', async t => {
@@ -702,6 +708,458 @@ test('a redesign shows its attempt number on the traps card', async t => {
   assert.match(page.region('design'), /Attempt 3/);
 });
 
+/* ====================================================================== the designer's review: calibration, fairness, guideline changes, diffs, warnings */
+
+const DIFF = '--- Atlas_Facility_Schedule.csv\n+++ Atlas_Facility_Schedule.csv\n@@ -2,1 +2,1 @@\n-Rate,4.00%\n+Rate,6.00%\n';
+const GUIDELINE_DIFF = '@@ -1,2 +1,3 @@\n Award full credit when the answer holds the borrowing.\n-Count the available facility as cash.\n+Do not count the available facility as cash.\n';
+const review = (over = {}) => ({
+  calibration: { score: 0.97, verdict: 'meets-guidance', reason: 'Matches every rubric line.' },
+  fairness: { unfair: [] },
+  guidelineDiff: GUIDELINE_DIFF,
+  rubricChanges: [{ change: 'Added a line about the amended facility date', reason: 'The new trap turns on that date.' }],
+  ...over,
+});
+const withReview = (over = {}, designOver = {}) => baseState({ stage: 'screen', design: designFacts({ ...review(over), ...designOver }) });
+
+test('calibration: the golden answer\'s score against the revised guideline, the 0.90 it needs, passed or failed in words, the grader\'s verdict and reason', async t => {
+  const { companion, page } = await bootWith(t, [withReview()]);
+  let d = page.region('design');
+  assert.match(d, /<h3>Calibration<\/h3><p><span class="pill green">Calibration passed<\/span> The golden answer scored <strong>0\.97<\/strong> against the revised grader guideline\. It needs 0\.90 or more\.<\/p>/);
+  assert.match(d, /Grader verdict: <span>meets-guidance<\/span>\. Reason: <span>Matches every rubric line\.<\/span>/);
+  assert.ok(d.indexOf('<h3>Calibration</h3>') > d.indexOf('Edited world files'), 'it sits in the traps card after the files');
+  for (const [score, word, shown] of [[0.9, 'passed', '0.90'], [0.62, 'failed', '0.62'], [0.8996, 'failed', '0.90 (0.8996)'], [1, 'passed', '1.00']]) {
+    companion.update('pl-atlas-0001', { design: designFacts(review({ calibration: { score, verdict: 'v', reason: 'r' } })) });
+    await page.tick();
+    d = page.region('design');
+    assert.match(d, new RegExp(`Calibration ${word}</span> The golden answer scored <strong>${shown.replace(/[().]/g, '\\$&')}</strong>`), `score ${score}`);
+    assert.match(d, new RegExp(`pill ${word === 'passed' ? 'green' : 'red'}">Calibration ${word}`));
+  }
+  companion.update('pl-atlas-0001', { design: designFacts(review({ calibration: { score: null, verdict: '', reason: '' } })) });
+  await page.tick();
+  d = page.region('design');
+  assert.match(d, /The golden answer has not been graded against the revised grader guideline yet\./);
+  assert.doesNotMatch(d, /Grader verdict/, 'no verdict line without a verdict or a reason');
+});
+
+test('calibration, fairness, the guideline changes and the file diffs show nothing at all when the companion sent none of them', async t => {
+  const { page } = await bootWith(t, [baseState({ stage: 'screen', design: designFacts() })]);
+  const d = page.region('design');
+  for (const word of ['Calibration', 'Fairness review', 'What the designer changed in the grader guideline', 'What changed in', 'Size change', 'Rubric changes']) assert.ok(!d.includes(word), word + ' is absent');
+  assert.match(d, /Edited world files \(1\)/, 'the rest of the card is unchanged');
+  assert.doesNotMatch(page.region('classify'), /Warning/);
+});
+
+test('fairness review: nothing unfair, or each flagged item with its reason, the count in words', async t => {
+  const { companion, page } = await bootWith(t, [withReview()]);
+  assert.match(page.region('design'), /<h3>Fairness review<\/h3><p><span class="pill green">No unfair item<\/span> The fairness review found no unfair item\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ fairness: { unfair: [{ item: 'The amended date is only in a footnote', why: 'A careful solver has no way to know which schedule governs.' }, { item: 'Figures in thousands', why: 'The golden answer is in units.' }] } })) });
+  await page.tick();
+  const d = page.region('design');
+  assert.match(d, /<span class="pill amber">2 unfair items<\/span> The fairness review flagged these\./);
+  assert.match(d, /<li class="pl-unfair"><strong>The amended date is only in a footnote<\/strong><span class="pl-edit-reason">A careful solver has no way to know which schedule governs\.<\/span><\/li>/);
+  assert.match(d, /<strong>Figures in thousands<\/strong>/);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ fairness: { unfair: [{ item: 'One thing', why: '' }] } })) });
+  await page.tick();
+  assert.match(page.region('design'), /<span class="pill amber">1 unfair item<\/span>/);
+  assert.match(page.region('design'), /No reason was given\./);
+});
+
+test('the guideline changes sit in a collapsed details: the rubric changes with their reasons and the line diff, added and removed lines marked by their first character and a class', async t => {
+  const { page } = await bootWith(t, [withReview()]);
+  const d = page.region('design');
+  assert.match(d, /<details class="pl-changes"><summary>What the designer changed in the grader guideline<\/summary>/, 'collapsed: no open attribute');
+  assert.doesNotMatch(d, /<details[^>]*\sopen/);
+  assert.match(d, /<h3>Rubric changes \(1\)<\/h3><ul class="pl-names"><li>Added a line about the amended facility date <span class="muted">Why: The new trap turns on that date\.<\/span><\/li><\/ul>/);
+  assert.match(d, /<h3>Line changes<\/h3><pre class="pl-text pl-diff">/);
+  assert.match(d, /<span class="pl-diff-hunk">@@ -1,2 \+1,3 @@\n<\/span>/);
+  assert.match(d, /<span class="pl-diff-del">-Count the available facility as cash\.\n<\/span>/);
+  assert.match(d, /<span class="pl-diff-add">\+Do not count the available facility as cash\.<\/span><\/pre>/);
+  assert.match(d, /<span class="pl-diff-same"> Award full credit when the answer holds the borrowing\.\n<\/span>/);
+});
+
+test('the guideline changes: only the rubric list, only the diff, an empty diff, an empty list, and a diff that is too long', async t => {
+  const { companion, page } = await bootWith(t, [withReview({ guidelineDiff: undefined })]);
+  let d = page.region('design');
+  assert.match(d, /What the designer changed in the grader guideline/);
+  assert.doesNotMatch(d, /Line changes/);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ rubricChanges: undefined })) });
+  await page.tick();
+  d = page.region('design');
+  assert.match(d, /Line changes/);
+  assert.doesNotMatch(d, /Rubric changes/);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ rubricChanges: [], guidelineDiff: '' })) });
+  await page.tick();
+  d = page.region('design');
+  assert.match(d, /The designer listed no rubric change\./);
+  assert.match(d, /<h3>Line changes<\/h3><p class="muted">No line changed\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ guidelineDiff: '+' + 'x'.repeat(9000) })) });
+  await page.tick();
+  assert.match(page.region('design'), /\[shortened for this page\]/);
+});
+
+test('each edited world file may carry a diff in its own collapsed details, and a size change in words', async t => {
+  const edited = (extra) => designFacts({ editedFiles: [{ name: 'Atlas_Facility_Schedule.csv', reason: 'The decoy needs the old rate in column C.', bytes: 2000, ...extra }] });
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', design: edited({ diff: DIFF, sizeChange: 120 }) })]);
+  let d = page.region('design');
+  assert.match(d, /<li class="pl-edit"><span class="pill amber">Edited world file<\/span> <strong>Atlas_Facility_Schedule\.csv<\/strong> <span class="pl-edit-size">Size change: \+120 bytes<\/span><span class="pl-edit-reason">The decoy needs the old rate in column C\.<\/span><details class="pl-diff-box"><summary>What changed in Atlas_Facility_Schedule\.csv<\/summary>/);
+  assert.doesNotMatch(d, /pl-diff-box"[^>]*\sopen/, 'collapsed');
+  assert.match(d, /<span class="pl-diff-del">-Rate,4\.00%\n<\/span>/);
+  assert.match(d, /<span class="pl-diff-add">\+Rate,6\.00%<\/span><\/pre>/);
+  for (const [change, shown] of [[-35, '\u221235 bytes'], [0, '0 bytes'], [1234567, '+1,234,567 bytes'], ['+12 lines, -3 lines', '+12 lines, -3 lines'], [{}, null], [null, null]]) {
+    companion.update('pl-atlas-0001', { design: edited({ sizeChange: change }) });
+    await page.tick();
+    d = page.region('design');
+    if (shown) assert.ok(d.includes('Size change: ' + shown), shown);
+    else assert.ok(!d.includes('Size change'), 'a size change that is neither text nor a number is not shown: ' + JSON.stringify(change));
+  }
+  companion.update('pl-atlas-0001', { design: edited({ bytes: 2100, beforeBytes: 2000 }) });
+  await page.tick();
+  assert.match(page.region('design'), /Size change: \+100 bytes/, 'the companion\'s bytes and beforeBytes give the size change when it names none');
+  companion.update('pl-atlas-0001', { design: edited({ bytes: 1900, beforeBytes: 2000, sizeChange: 5 }) });
+  await page.tick();
+  assert.match(page.region('design'), /Size change: \+5 bytes/, 'a size change the companion names wins');
+  companion.update('pl-atlas-0001', { design: edited({ bytes: undefined }) });
+  await page.tick();
+  d = page.region('design');
+  assert.ok(!d.includes('pl-diff-box') && !d.includes('Size change'), 'neither a diff nor a size change: just the file and its reason');
+  companion.update('pl-atlas-0001', { design: edited({ diff: '' }) });
+  await page.tick();
+  assert.match(page.region('design'), /<details class="pl-diff-box"><summary>What changed in Atlas_Facility_Schedule\.csv<\/summary><p class="muted">No line changed\.<\/p>/);
+});
+
+test('while a round runs the new fields, trap titles and files and edited file names read "Withheld while a round runs", each in its place', async t => {
+  const W = { withheld: true };
+  const state = baseState({ stage: 'screen', redacted: true, design: {
+    attempt: 1,
+    traps: [{ id: 't1', title: W, mechanism: W, files: W, decoy: W, correctValue: W, wrongValue: W }, { id: 't2', title: W, mechanism: W, files: [W, W], decoy: W, correctValue: W, wrongValue: W }],
+    newFiles: ['Atlas_Amendment_2.txt'], editedFiles: [{ name: W, reason: W, diff: W, sizeChange: W }],
+    prompt: W, guideline: W, goldenAnswer: W, gold: W, fingerprints: W, notes: W,
+    calibration: W, fairness: W, guidelineDiff: W, rubricChanges: W,
+  }, attempts: [attemptOf({ n: 1, traps: [W, W], outcome: 'in-progress' }), attemptOf({ n: 2, traps: W })], redesigns: 1 });
+  const { page } = await bootWith(t, [state]);
+  const d = page.region('design');
+  const withheld = '<span class="pl-withheld">Withheld while a round runs</span>';
+  assert.match(d, new RegExp(`<li class="pl-trap"><strong>${withheld.replace(/[()]/g, '\\$&')}</strong> <span class="muted">Files: ${withheld}</span>`), 'a trap whose title and files are withheld');
+  assert.equal((d.match(/<li class="pl-trap"><strong><span class="pl-withheld">/g) || []).length, 2, 'both titles');
+  assert.match(d, new RegExp(`<li class="pl-edit"><span class="pill amber">Edited world file</span> <strong>${withheld}</strong> <span class="pl-edit-size">Size change: ${withheld}</span><span class="pl-edit-reason">${withheld}</span><details class="pl-diff-box"><summary>What changed in this file</summary><p class="pl-withheld">Withheld while a round runs</p></details>`));
+  assert.match(d, /<h3>Calibration<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(d, /<h3>Fairness review<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(d, /<summary>What the designer changed in the grader guideline<\/summary><h3>Rubric changes<\/h3><p class="pl-withheld">Withheld while a round runs<\/p><h3>Line changes<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(d, /<li>Atlas_Amendment_2\.txt<\/li>/, 'a name that is not withheld is shown');
+  assert.match(d, /<h3>Checks on the designer’s files<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/, 'the designer\'s notes are withheld as a whole');
+  assert.doesNotMatch(d, /\[object Object\]|undefined|>null</);
+  const r = page.region('redesigns');
+  assert.match(r, /<td data-label="Traps">Withheld while a round runs, Withheld while a round runs<\/td>/);
+  assert.match(r, /<th scope="row">Attempt 2 \(latest\)<\/th><td data-label="Traps">Withheld while a round runs<\/td>/);
+});
+
+test('a withheld list of edited files, of new files, a withheld calibration score and a withheld fairness list are each shown as withheld, not as empty', async t => {
+  const W = { withheld: true };
+  const { page } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, design: designFacts({ editedFiles: W, newFiles: W, calibration: { score: W, verdict: W, reason: W }, fairness: { unfair: W }, rubricChanges: W, guidelineDiff: undefined }) })]);
+  const d = page.region('design');
+  assert.match(d, /<h3>Edited world files<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(d, /<h3>New files<\/h3><ul class="pl-names"><li><span class="pl-withheld">Withheld while a round runs<\/span><\/li><\/ul>/);
+  assert.match(d, /<h3>Calibration<\/h3><p class="pl-withheld">Withheld while a round runs<\/p><p class="muted">Grader verdict: <span class="pl-withheld">Withheld while a round runs<\/span>\. Reason: <span class="pl-withheld">/);
+  assert.match(d, /<h3>Fairness review<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.doesNotMatch(d, /Line changes/, 'no diff was sent, so none is shown');
+});
+
+test('classification warnings are { name, why } and prominent: a notice with its own heading, "name: why" for each, a count pill, before the parts of the task', async t => {
+  const warnings = [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline or the golden answer' }, { name: 'Borealis_Notes.txt', why: 'it is byte for byte the same as withheld material' }];
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'design', classification: { ...classification(), warnings } })]);
+  const c = page.region('classify');
+  assert.match(c, /<span class="pill amber">2 warnings<\/span>/);
+  assert.match(c, /<div class="notice pl-warning" role="note"><strong>Warning: check this before you trust the classification<\/strong><p class="pl-warning-lead">The classifier called each of these a world or task file, but the pilots will not get it\.<\/p><ul class="pl-names"><li>Meridian_Ledger\.xlsx: it holds a long passage of the guideline or the golden answer<\/li><li>Borealis_Notes\.txt: it is byte for byte the same as withheld material<\/li><\/ul><\/div>/);
+  assert.ok(c.indexOf('pl-warning') < c.indexOf('<dl class="history-details">'), 'above the prompt, guideline and golden answer');
+  assert.match(page.text(), /Warning: check this before you trust the classification/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: [{ name: 'Only.txt', why: '' }] } });
+  await page.tick();
+  assert.match(page.region('classify'), /<span class="pill amber">1 warning<\/span>/);
+  assert.match(page.region('classify'), /<li>Only\.txt<\/li>/, 'no why, no colon');
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: ['Loose.txt', null, 3, {}] } });
+  await page.tick();
+  assert.match(page.region('classify'), /<span class="pill amber">1 warning<\/span>/, 'a plain name is a warning, junk is not');
+  assert.match(page.region('classify'), /<li>Loose\.txt<\/li>/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: [] } });
+  await page.tick();
+  assert.doesNotMatch(page.region('classify'), /Warning|pl-warning/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: 'not a list' } });
+  await page.tick();
+  assert.doesNotMatch(page.region('classify'), /pl-warning/);
+  const W = { withheld: true };
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: [{ name: W, why: W }, { name: 'Named.txt', why: W }] } });
+  await page.tick();
+  assert.match(page.region('classify'), /<li><span class="pl-withheld">Withheld while a round runs<\/span>: <span class="pl-withheld">Withheld while a round runs<\/span><\/li><li>Named\.txt: <span class="pl-withheld">/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), warnings: W } });
+  await page.tick();
+  assert.match(page.region('classify'), /<span class="pill amber">1 warning<\/span>/);
+  assert.match(page.region('classify'), /<li><span class="pl-withheld">Withheld while a round runs<\/span><\/li>/);
+});
+
+test('the golden answer suspects and the files whose text could not be checked are short notes, and nothing is said when there are none', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'design', classification: { ...classification(), goldenAnswer: null, goldenSuspects: ['Atlas_Key.docx', 'Atlas_Model_Answer.xlsx'], unscanned: ['Meridian_Scan.pdf'] } })]);
+  let c = page.region('classify');
+  assert.match(c, /<p class="pl-class-note">These files look like the golden answer: Atlas_Key\.docx, Atlas_Model_Answer\.xlsx\. None was identified as the golden answer\.<\/p>/);
+  assert.match(c, /<p class="pl-class-note">The text of these files could not be checked for guideline or golden-answer passages: Meridian_Scan\.pdf\.<\/p>/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), goldenSuspects: ['Atlas_Key.docx'], unscanned: [] } });
+  await page.tick();
+  c = page.region('classify');
+  assert.match(c, /These files look like the golden answer: Atlas_Key\.docx\.<\/p>/, 'with a golden answer named there is nothing to add');
+  assert.doesNotMatch(c, /could not be checked/);
+  companion.update('pl-atlas-0001', { classification: { ...classification(), goldenSuspects: [], unscanned: [] } });
+  await page.tick();
+  assert.doesNotMatch(page.region('classify'), /pl-class-note/);
+  const W = { withheld: true };
+  companion.update('pl-atlas-0001', { classification: { ...classification(), goldenSuspects: W, unscanned: [W, 'x.pdf'] } });
+  await page.tick();
+  assert.match(page.region('classify'), /look like the golden answer: Withheld while a round runs\./);
+  assert.match(page.region('classify'), /could not be checked for guideline or golden-answer passages: Withheld while a round runs, x\.pdf\./);
+  const { page: only } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'design', classification: { prompt: null, worldFiles: [], goldenSuspects: ['k.docx'] } })]);
+  assert.match(only.region('classify'), /k\.docx/, 'the card shows for a classification that only has suspects');
+});
+
+const STRUCTURED = (over = {}) => ({ available: true, kind: 'text', added: 1, removed: 1, before: 2000, after: 2100, truncated: false, lines: [{ op: ' ', text: 'Award full credit when the answer holds the borrowing.' }, { op: '-', text: 'Count the available facility as cash.' }, { op: '+', text: 'Do not count the available facility as cash.' }], ...over });
+
+test('the diffs as the companion sends them, { available, kind, added, removed, before, after, truncated, lines: [{ op, text }] }, read like text, with the counts and the notes', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', design: designFacts({ guidelineDiff: STRUCTURED(), rubricChanges: [], editedFiles: [{ name: 'Atlas_Facility_Schedule.csv', reason: 'r', bytes: 2100, beforeBytes: 2000, diff: STRUCTURED({ lines: [{ op: '-', text: 'Rate,4.00%' }, { op: '+', text: 'Rate,6.00%' }] }) }] }) })]);
+  let d = page.region('design');
+  assert.match(d, /<h3>Line changes<\/h3><p class="muted pl-diff-count">1 line added, 1 removed\.<\/p><pre class="pl-text pl-diff"><span class="pl-diff-same"> Award full credit when the answer holds the borrowing\.\n<\/span><span class="pl-diff-del">-Count the available facility as cash\.\n<\/span><span class="pl-diff-add">\+Do not count the available facility as cash\.<\/span><\/pre>/);
+  assert.match(d, /<summary>What changed in Atlas_Facility_Schedule\.csv<\/summary><p class="muted pl-diff-count">1 line added, 1 removed\.<\/p><pre class="pl-text pl-diff"><span class="pl-diff-del">-Rate,4\.00%\n<\/span><span class="pl-diff-add">\+Rate,6\.00%<\/span>/);
+  assert.match(d, /Size change: \+100 bytes/);
+  assert.doesNotMatch(d, /Only the first lines/);
+  companion.update('pl-atlas-0001', { design: designFacts({ guidelineDiff: STRUCTURED({ truncated: true }), rubricChanges: [] }) });
+  await page.tick();
+  assert.match(page.region('design'), /<p class="muted">Only the first lines of the diff are shown\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ guidelineDiff: STRUCTURED({ available: false, added: 0, removed: 0, lines: [] }), rubricChanges: [] }) });
+  await page.tick();
+  assert.match(page.region('design'), /<h3>Line changes<\/h3><p class="muted">The original is not available as text, so there is no line comparison\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ guidelineDiff: STRUCTURED({ added: 0, removed: 0, lines: [] }), rubricChanges: [] }) });
+  await page.tick();
+  assert.match(page.region('design'), /<p class="muted pl-diff-count">0 lines added, 0 removed\.<\/p><p class="muted">No line changed\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ editedFiles: [{ name: 'Meridian_Ledger.xlsx', reason: 'r', bytes: 5200, beforeBytes: 5000, diff: { kind: 'binary', before: 5000, after: 5200, added: 0, removed: 0, lines: [], truncated: false } }] }) });
+  await page.tick();
+  d = page.region('design');
+  assert.match(d, /Size change: \+200 bytes/);
+  assert.match(d, /<summary>What changed in Meridian_Ledger\.xlsx<\/summary><p class="muted">This file is not compared line by line\. It had 5,000 bytes and has 5,200\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ editedFiles: [{ name: 'a.csv', reason: 'r', diff: { kind: 'text', before: 10, after: 4, added: 0, removed: 1, lines: [{ op: '-', text: 'gone' }] } }] }) });
+  await page.tick();
+  assert.match(page.region('design'), /Size change: −6 bytes/, 'with no byte counts of its own, the size change comes from the diff');
+});
+
+test('a regraded pilot shows its average as the score and "Graded twice: a, b"; the score that counts is the one the companion sets', async t => {
+  const regraded = (first, second, score) => ({ score, regrade: { first, second, average: score } });
+  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.45, 0.2], true, { 0: regraded(0.43, 0.47, 0.45), 1: { regrade: null } }) })]);
+  const s = page.region('screen');
+  assert.match(s, /<td data-label="Score">0\.45<small class="pl-regraded">Graded twice: 0\.43, 0\.47<\/small><\/td>/);
+  assert.match(s, /<td data-label="Score">0\.20<\/td>/, 'a single grading says nothing extra');
+  assert.deepEqual([...s.matchAll(/data-label="Below 0\.45">(.*?)<\/td>/g)].map(m => m[1].replace(/<[^>]*>/g, '')), ['✕ No', '✓ Yes'], 'the average, 0.45, is not below the bar');
+  const { page: edge } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.4496, 0.1], true, { 0: regraded(0.4492, 0.45, 0.4496) }) })]);
+  assert.match(edge.region('screen'), /0\.45 \(0\.4496\)<small class="pl-regraded">Graded twice: 0\.45 \(0\.4492\), 0\.45<\/small>/, 'near-bar digits keep the yes or no honest');
+  const { page: noScore } = await bootWith(t, [baseState({ id: 'pl-atlas-0003', stage: 'test', design: designFacts(), screen: stageOf('screen', [null, 0.2], true, { 0: { regrade: { first: 0.4, second: 0.5, average: 0.46 }, valid: true, score: null } }) })]);
+  assert.match(noScore.region('screen'), /<td data-label="Score">0\.46<small class="pl-regraded">Graded twice: 0\.40, 0\.50<\/small>/, 'if only the average came, it is the score');
+  const { page: junk } = await bootWith(t, [baseState({ id: 'pl-atlas-0004', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3, 0.2], true, { 0: { regrade: 'x' }, 1: { regrade: { first: 0.4 } } }) })]);
+  assert.doesNotMatch(junk.region('screen'), /Graded/);
+  const { page: hidden } = await bootWith(t, [baseState({ id: 'pl-atlas-0005', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3, 0.2], null, { 0: { regrade: { withheld: true } } }) })]);
+  assert.match(hidden.region('screen'), /Graded twice: <span class="pl-withheld">Withheld while a round runs<\/span>/);
+});
+
+test('what a pilot wrote besides its answer is one short line: "3 files, 2 read"', async t => {
+  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3, 0.2, 0.1, 0.2], true, { 0: { outputs: { count: 3, readable: 2 } }, 1: { outputs: { count: 1, readable: 1 } }, 2: { outputs: { count: 2, readable: 0 } }, 3: { outputs: { count: 0, readable: 0 } } }) })]);
+  const s = page.region('screen');
+  assert.match(s, /<th scope="row">Pilot 1<small class="pl-outputs">3 files, 2 read<\/small><\/th>/);
+  assert.match(s, /<th scope="row">Pilot 2<small class="pl-outputs">1 file, 1 read<\/small><\/th>/);
+  assert.match(s, /<th scope="row">Pilot 3<small class="pl-outputs">2 files, none read<\/small><\/th>/);
+  assert.match(s, /<th scope="row">Pilot 4<\/th>/, 'a pilot that wrote nothing has no line');
+  const { page: hidden } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3, 0.2], null, { 0: { outputs: { withheld: true } }, 1: { outputs: 'x' } }) })]);
+  assert.match(hidden.region('screen'), /<th scope="row">Pilot 1<small class="pl-outputs"><span class="pl-withheld">Withheld while a round runs<\/span><\/small><\/th>/);
+  assert.match(hidden.region('screen'), /<th scope="row">Pilot 2<\/th>/);
+});
+
+test('a stage says when a replacement round ran, when none was run because it could not change the result, and when scores are graded twice', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: { ...stageOf('screen', [0.3, 0.2], true), replacementSkipped: true } })]);
+  let s = page.region('screen');
+  assert.match(s, /<p class="muted pl-stage-note">No replacement round was run because it could not change the result\.<\/p>/);
+  assert.doesNotMatch(s, /A replacement round ran/);
+  assert.doesNotMatch(s, /graded a second time/, 'the band is only explained where a score was graded twice');
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [0.3, 0.2, 0.45], true, { 2: { replacement: true, regrade: { first: 0.44, second: 0.46, average: 0.45 } } }), replacementRound: true } });
+  await page.tick();
+  s = page.region('screen');
+  assert.match(s, /A replacement round ran for the pilots without a usable score\./);
+  assert.doesNotMatch(s, /No replacement round was run/);
+  assert.match(s, /A score from 0\.40 to 0\.50 is graded a second time and the two scores are averaged\./, 'the band comes from the companion');
+  const { page: noConfig } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.45, 0.2], true, { 0: { regrade: { first: 0.44, second: 0.46, average: 0.45 } } }) })], { config: {} });
+  assert.doesNotMatch(noConfig.region('screen'), /graded a second time/, 'without the companion\'s band the page does not guess one');
+});
+
+test('every new field is read defensively: wrong types give nothing, never an error', () => {
+  const { adapt } = makeAdapter();
+  const junk = [null, 5, 'x', [], true, {}, { score: 'high' }, { unfair: 'x' }, { unfair: [null, 3, {}, 'loose'] }, { first: 1 }, { reasons: 7 }];
+  for (const value of junk) {
+    const v = adapt(baseState({
+      classification: { warnings: value, goldenSuspects: value, unscanned: value },
+      design: { calibration: value, fairness: value, guidelineDiff: value, rubricChanges: value, repaired: value, editedFiles: [{ name: 'a', diff: value, sizeChange: value }] },
+      attempts: [attemptOf({ rejection: value, repaired: value, note: value, calibration: value, fairness: value, screen: { replacementRound: value, replacementSkipped: value, pilots: [{ score: 0.3, regrade: value, outputs: value }] } })],
+    }));
+    assert.ok(v, JSON.stringify(value));
+    assert.ok(Array.isArray(v.cls.warnings) && Array.isArray(v.cls.goldenSuspects) && Array.isArray(v.cls.unscanned));
+    assert.ok(v.design.calibration === null || typeof v.design.calibration === 'object');
+    assert.ok(v.design.guidelineDiff === null || typeof v.design.guidelineDiff.text === 'string' || v.design.guidelineDiff.withheld);
+    assert.ok(v.attempts[0].rejection === null || typeof v.attempts[0].rejection === 'object');
+    assert.ok([true, false].includes(v.design.repaired) || v.design.repaired.withheld);
+  }
+  const v = adapt(baseState({ design: designFacts({ calibration: 'x', fairness: { unfair: 'x' }, guidelineDiff: 5, rubricChanges: {} }) }));
+  assert.equal(v.design.calibration, null);
+  assert.equal(v.design.fairness, null);
+  assert.equal(v.design.guidelineDiff, null);
+  assert.equal(v.design.rubricChanges, null);
+  const ok = adapt(baseState({ design: designFacts(review({ fairness: { unfair: [{ item: 'i' }, 'loose', 4] }, rubricChanges: [{ change: 'c' }, 'loose', null], calibration: { score: '0.95' } })) }));
+  assert.deepEqual(plain(ok.design.fairness), { status: 'unfair', unfair: [{ item: 'i', why: '' }, { item: 'loose', why: '' }], count: 2 });
+  assert.deepEqual(plain(ok.design.rubricChanges), [{ change: 'c', reason: '' }, { change: 'loose', reason: '' }]);
+  assert.equal(ok.design.calibration.score, 0.95);
+  const withheld = adapt(baseState({ design: designFacts({ calibration: { withheld: true }, fairness: { withheld: true }, guidelineDiff: { withheld: true }, rubricChanges: { withheld: true } }) }));
+  assert.deepEqual(plain([withheld.design.calibration, withheld.design.fairness, withheld.design.guidelineDiff, withheld.design.rubricChanges]), Array(4).fill({ withheld: true }));
+});
+
+test('adapt() reads the fairness status, the attempt fields and the config the way service.cjs sends them', () => {
+  const { adapt } = makeAdapter();
+  const f = status => adapt(baseState({ design: designFacts({ fairness: status }) })).design.fairness;
+  assert.deepEqual(plain(f({ status: 'ok', unfair: [] })), { status: 'ok', unfair: [], count: 0 });
+  assert.deepEqual(plain(f({ status: 'unusable', unfair: [] })), { status: 'unusable', unfair: [], count: 0 });
+  assert.deepEqual(plain(f({ status: 'unfair', unfair: [{ item: 'a', why: 'b' }] })), { status: 'unfair', unfair: [{ item: 'a', why: 'b' }], count: 1 });
+  assert.equal(f({ status: 'ok' }).status, 'ok', 'a status with no list is enough');
+  assert.equal(f({ unfair: [{ item: 'a', why: 'b' }] }).status, 'unfair', 'no status: worked out from the list');
+  assert.equal(f({ unfair: [] }).status, 'ok');
+  assert.equal(f({ status: 'weird', unfair: [] }).status, 'ok', 'an unknown status is not trusted');
+  assert.deepEqual(plain(f({ status: 'unfair', count: 3 })), { status: 'unfair', unfair: [], count: 3 }, 'an attempt carries a count and no list');
+  const v = adapt(baseState({ attempts: [attemptOf({ n: 1, outcome: 'rejected', repaired: true, note: 'The companion stopped while this attempt was running.', calibration: { score: 0.62, verdict: 'v', reason: 'r' }, fairness: { status: 'unfair', count: 2 }, rejection: { kind: 'checks', reasons: ['one', 'two'] } })] }));
+  const a = v.attempts[0];
+  assert.deepEqual(plain([a.outcome, a.repaired, a.note, a.rejection, a.calibration, a.fairness]), ['rejected', true, 'The companion stopped while this attempt was running.', { kind: 'checks', reasons: ['one', 'two'] }, { score: 0.62, verdict: 'v', reason: 'r' }, { status: 'unfair', unfair: [], count: 2 }]);
+  assert.equal(adapt(baseState({ attempts: [attemptOf({ rejection: null })] })).attempts[0].rejection, null);
+  const g = adapt(baseState({ classification: { ...classification(), goldenSuspects: ['a'], unscanned: ['b', 'c'], warnings: [{ name: 'n', why: 'w' }] } })).cls;
+  assert.deepEqual(plain([g.goldenSuspects, g.unscanned, g.warnings]), [['a'], ['b', 'c'], [{ name: 'n', why: 'w' }]]);
+  assert.equal(adapt(baseState({ config: { acceptMissing: true } })).acceptMissing, true);
+  assert.equal(adapt(baseState({})).acceptMissing, false);
+  const p = adapt(baseState({ screen: { ...stageOf('screen', [0.5, 0.2], true, { 0: { regrade: { first: 0.4, second: 0.6, average: 0.5 }, outputs: { count: 2, readable: 1 } } }), replacementRound: true, replacementSkipped: true } })).screen;
+  assert.deepEqual(plain([p.replacementRound, p.replacementSkipped, p.pilots[0].regrade, p.pilots[0].outputs, p.pilots[0].score]), [true, true, { first: 0.4, second: 0.6, average: 0.5 }, { count: 2, readable: 1 }, 0.5]);
+});
+
+test('the fairness review is drawn from its own status: ok, unfair with its items, or unusable', async t => {
+  const { companion, page } = await bootWith(t, [withReview({ fairness: { status: 'unusable', unfair: [] } })]);
+  assert.match(page.region('design'), /<h3>Fairness review<\/h3><p><span class="pill amber">No usable answer<\/span> The fairness review gave no usable answer\.<\/p>/);
+  assert.doesNotMatch(page.region('design'), /No unfair item/, 'no answer is not a clean bill');
+  companion.update('pl-atlas-0001', { design: designFacts(review({ fairness: { status: 'ok', unfair: [] } })) });
+  await page.tick();
+  assert.match(page.region('design'), /<span class="pill green">No unfair item<\/span> The fairness review found no unfair item\./);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ fairness: { status: 'unfair', unfair: [{ item: 'One', why: 'Because.' }, { item: 'Two', why: 'Also.' }] } })) });
+  await page.tick();
+  assert.match(page.region('design'), /<span class="pill amber">2 unfair items<\/span> The fairness review flagged these\./);
+  companion.update('pl-atlas-0001', { design: designFacts(review({ fairness: { status: 'unfair', count: 3 } })) });
+  await page.tick();
+  assert.match(page.region('design'), /<span class="pill amber">3 unfair items<\/span> The fairness review flagged an item\./, 'a status and a count, no list');
+  assert.doesNotMatch(page.region('design'), /pl-unfair/);
+});
+
+test('a repair turn the designer needed is said once in the traps card', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', design: designFacts({ repaired: true }) })]);
+  assert.match(page.region('design'), /<p class="muted pl-repaired">The designer needed one repair turn to fix its files\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ repaired: false }) });
+  await page.tick();
+  assert.doesNotMatch(page.region('design'), /repair turn/);
+  companion.update('pl-atlas-0001', { design: designFacts({ repaired: { withheld: true } }) });
+  await page.tick();
+  assert.match(page.region('design'), /Whether a repair turn was needed: <span class="pl-withheld">Withheld while a round runs<\/span>/);
+});
+
+test('the start form has the withheld-files choice: off by default, never needed for the button, sent as acceptMissing, and spent by a start', async t => {
+  const { companion, page } = await bootWith(t);
+  const form = page.region('start-form');
+  assert.match(form, /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\)<\/strong>/, 'unticked, with the exact label');
+  assert.ok(!ACK_IDS.includes('acceptMissing') && !/acceptMissing/.test(JSON.stringify(page.pipeline.ACKNOWLEDGEMENTS)), 'it is not an acknowledgement');
+  await page.fillLink();
+  await page.ackAll();
+  assert.equal(page.enabled('start'), true, 'the button needs the four acknowledgements and nothing about this box');
+  await page.type('acceptMissing', { checked: true });
+  assert.match(page.region('start-form'), /data-pl-in="acceptMissing"/);
+  assert.equal(page.enabled('start'), true);
+  await page.click('start');
+  const post = companion.calls.find(c => c.url === '/api/pipeline/start');
+  assert.equal(post.body.acceptMissing, true, 'sent as true when ticked');
+  assert.equal(typeof post.body.acceptMissing, 'boolean');
+  companion.update('pl-run-0001', { stage: 'done', running: false });
+  await page.tick();
+  await page.click('new');
+  assert.doesNotMatch(page.region('start-form'), /data-pl-key="accept-missing" checked/, 'the next form starts with the box off again');
+});
+
+test('when the pipeline stopped because files would be withheld, the result says so in the words of the box and points at it; no other result does', async t => {
+  const message = '2 files the classifier called world or task files are withheld, so the pilots would not get them: Meridian_Ledger.xlsx, Borealis_Notes.txt. If the pilots can do without them, start again with acceptMissing.';
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'failed', running: false, summary: message, error: message, classification: { ...classification(), warnings: [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline' }] } })]);
+  const v = page.region('verdict');
+  assert.ok(!v.includes('acceptMissing'), 'the option\'s API name is not shown');
+  assert.match(v, /start again with the box “Start even if a world or task file has to be withheld” ticked\./);
+  assert.match(v, /<div class="notice pl-accept-note" role="note"><strong>Some files would be withheld from the pilots\.<\/strong> To go on without them, tick “Start even if a world or task file has to be withheld \(the pilots will not get it\)” in the start form, then start again\. <button type="button" class="small" data-pl="accept-form" data-pl-key="accept-form">Open the start form<\/button><\/div>/);
+  assert.doesNotMatch(v, /Reason:/, 'the same message is not said twice');
+  await page.click('accept-form');
+  assert.match(page.region('start-form'), /data-pl-in="acceptMissing"/, 'the start form is open');
+  assert.deepEqual(page.focused.slice(-1), ['accept-missing'], 'and the keyboard is on the box');
+  for (const [stage, text] of [['failed', 'The pipeline hit an internal error.'], ['done', ''], ['stopped', '']]) {
+    const { page: other } = await bootWith(t, [baseState({ id: 'pl-atlas-0009', stage, summary: text, error: text })]);
+    assert.doesNotMatch(other.region('verdict'), /pl-accept-note|Open the start form/, stage);
+  }
+});
+
+test('the cost line uses the companion\'s caps and says reservations include the headroom; without its rules it says only what the page knows', async t => {
+  const { page } = await bootWith(t);
+  const limits = () => page.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
+  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 30.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
+  const { page: custom } = await bootWith(t, [], { config: { classifyCapUsd: 0.75, designCapUsd: 8, repairCapUsd: 2, fairnessCapUsd: 0.4, graderCapUsd: 0.6, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.25 } });
+  const text = custom.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
+  assert.match(text, /the classifier USD 0\.75, the designer USD 8\.00 and one repair turn USD 2\.00, the fairness review USD 0\.40, each grader call USD 0\.60/);
+  assert.match(text, /with 25% headroom on top/, 'the headroom is the companion\'s');
+  const { page: bare } = await bootWith(t, [], { config: {} });
+  const old = bare.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
+  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00, before the classifier, designer and grader runs. The total cap of USD 30.00 covers everything.');
+  const { page: partial } = await bootWith(t, [], { config: { fairnessCapUsd: 0.25, headroom: 1 } });
+  const some = partial.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
+  assert.match(some, /The other calls are capped too: the fairness review USD 0\.25\./);
+  assert.doesNotMatch(some, /headroom/, 'no headroom of 1 to speak of');
+  await page.type('cap', { value: '12' });
+  await page.type('pilotCap', { value: '1' });
+  assert.match(limits(), /^Each pilot is capped at USD 1\.00, so a 2-pilot screen can cost up to USD 2\.00 and a 5-pilot test up to USD 5\.00\..*The total cap of USD 12\.00 covers everything\./);
+});
+
+test('the calibration minimum is the companion\'s goldenMin, and the page knows 0.90 when it says none', async t => {
+  const { companion, page } = await bootWith(t, [withReview({ calibration: { score: 0.93, verdict: 'v', reason: 'r' } })], { config: { goldenMin: 0.95 } });
+  assert.match(page.region('design'), /Calibration failed<\/span> The golden answer scored <strong>0\.93<\/strong> against the revised grader guideline\. It needs 0\.95 or more\./);
+  const { page: standard } = await bootWith(t, [withReview({ calibration: { score: 0.93, verdict: 'v', reason: 'r' } })], { config: {} });
+  assert.match(standard.region('design'), /Calibration passed<\/span>.*It needs 0\.90 or more\./);
+  void companion;
+});
+
+test('a state in which every field is withheld is drawn without an error', async t => {
+  const W = { withheld: true };
+  const everything = baseState({
+    stage: 'design', redacted: true, redesigns: 1, summary: W, error: W, message: W, waiting: W,
+    import: W, classification: { prompt: W, guideline: W, goldenAnswer: W, worldFiles: W, taskFiles: W, other: W, withheld: W, warnings: W, goldenSuspects: W, unscanned: W, notes: W },
+    design: { attempt: W, repaired: W, traps: W, newFiles: W, editedFiles: W, prompt: W, guideline: W, goldenAnswer: W, gold: W, fingerprints: W, notes: W, calibration: W, fairness: W, guidelineDiff: W, rubricChanges: W },
+    attempts: [{ n: W, traps: W, outcome: W, repaired: W, note: W, calibration: W, fairness: W, rejection: W, screen: W, test: { passed: W, replacementRound: W, replacementSkipped: W, pilots: [{ n: W, regrade: W, outputs: W, score: W, audit: W, state: W }] } }],
+  });
+  const { page } = await bootWith(t, [everything]);
+  for (const region of ['import', 'classify', 'design', 'screen', 'test', 'redesigns', 'verdict', 'wait', 'spend']) assert.doesNotMatch(page.region(region), /\[object Object\]|undefined|>null</, region);
+  assert.match(page.region('classify'), /Withheld while a round runs/);
+  assert.match(page.region('design'), /Withheld while a round runs/);
+  assert.ok(page.stage().length > 0);
+});
+
+test('the copy has no percentage: the spend, the stages and the result say it in dollars and counts', async t => {
+  const { page } = await bootWith(t, [doneState()]);
+  for (const region of ['spend', 'timeline', 'import', 'classify', 'screen', 'test', 'redesigns', 'verdict']) assert.ok(!page.region(region).includes('%'), region + ' has no percent sign');
+  assert.ok(!page.stage().includes('%'));
+  const { page: start } = await bootWith(t);
+  assert.equal((start.region('start-foot').match(/\d+%/g) || []).join(), '15%', 'the cost headroom note is the one percentage');
+  assert.ok(!start.region('start-form').includes('%'));
+});
+
 /* ====================================================================== score tables */
 
 const rowsOf = html => [...html.matchAll(/<tr><th scope="row">Pilot (\d+)<\/th><td data-label="Score">([^<]*)<\/td><td data-label="Below 0\.45">(.*?)<\/td><td data-label="Audit">(.*?)<\/td><\/tr>/g)].map(m => ({ pilot: Number(m[1]), score: m[2], below: m[3].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(), audit: m[4].replace(/<[^>]*>/g, '').trim() }));
@@ -727,22 +1185,38 @@ test('a failed screen: a score at or above the bar is No, the pill says Screen f
   assert.match(s, /1 of 2 below 0\.45; both needed\./);
 });
 
-test('the test table: five pilots, needing 4 of 5, with a passing and a failing tally', async t => {
+test('the test table: five pilots, needing 4 of 5; the verdict is the companion\'s, and until it has one the stage is in progress whatever the scores say', async t => {
   const { companion, page } = await bootWith(t, [baseState({ stage: 'grade-test', design: designFacts(), screen: { passed: true, pilots: pilots([0.1, 0.2]) }, test: { passed: null, pilots: pilots([0.1, 0.2, 0.3, 0.9, 0.44]) } })]);
   let s = page.region('test');
   assert.match(s, /5-pilot test/);
   assert.match(s, /The test succeeds when at least 4 of 5 pilots score below 0\.45\./);
   assert.equal(rowsOf(s).length, 5);
-  assert.match(s, /4 of 5 below 0\.45; 4 needed\./);
-  assert.match(s, /<span class="pill green">Test passed<\/span>/, 'worked out from the scores when the companion has not said yet');
+  assert.match(s, /4 of 5 below 0\.45; 4 needed\./, 'the count follows the scores');
+  assert.match(s, /<span class="pill violet">Test in progress<\/span>/, 'four of five below the bar is not a verdict until the companion says so');
+  assert.doesNotMatch(s, /Test passed|Test failed/);
+  companion.attemptPatch('pl-atlas-0001', { test: stageOf('test', [0.1, 0.2, 0.3, 0.9, 0.44], true) });
+  await page.tick();
+  assert.match(page.region('test'), /<span class="pill green">Test passed<\/span>/);
   companion.attemptPatch('pl-atlas-0001', { test: stageOf('test', [0.1, 0.2, 0.6, 0.9, 0.44], null) });
   await page.tick();
   s = page.region('test');
   assert.match(s, /3 of 5 below 0\.45; 4 needed\./);
-  assert.match(s, /<span class="pill red">Test failed<\/span>/);
+  assert.match(s, /<span class="pill violet">Test in progress<\/span>/, 'three of five with every pilot in is still the companion\'s to decide (a replacement may be coming)');
+  companion.attemptPatch('pl-atlas-0001', { test: stageOf('test', [0.1, 0.2, 0.6, 0.9, 0.44], false) });
+  await page.tick();
+  assert.match(page.region('test'), /<span class="pill red">Test failed<\/span>/);
   companion.attemptPatch('pl-atlas-0001', { test: stageOf('test', [0.1, 0.2], null, { 1: { state: 'running', score: null, audit: null, valid: false } }) });
   await page.tick();
-  assert.match(page.region('test'), /<span class="pill violet">Test in progress<\/span>/, 'two of five so far is not a verdict');
+  assert.match(page.region('test'), /<span class="pill violet">Test in progress<\/span>/, 'two of five so far');
+});
+
+test('the screen verdict is the companion\'s too: both pilots below the bar and no verdict yet is still in progress', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'grade-screen', design: designFacts(), screen: stageOf('screen', [0.2, 0.3], null) })]);
+  assert.match(page.region('screen'), /<span class="pill violet">Screen in progress<\/span>/);
+  assert.match(page.region('screen'), /2 of 2 below 0\.45; both needed\./);
+  companion.attemptPatch('pl-atlas-0001', { screen: stageOf('screen', [0.2, 0.3], true) });
+  await page.tick();
+  assert.match(page.region('screen'), /<span class="pill green">Screen passed<\/span>/);
 });
 
 test('scores are shown to two decimals, and a score that rounds onto the bar shows its extra digits so the yes or no is never a surprise', async t => {
@@ -752,20 +1226,39 @@ test('scores are shown to two decimals, and a score that rounds onto the bar sho
   assert.deepEqual(rowsOf(other.region('screen')).map(r => r.score), ['0.12', '1.00']);
 });
 
-test('a discarded or failed pilot has no score: it is shown as such, counts against the design, and the audit badge says DISCARDED in words', async t => {
-  const { page } = await bootWith(t, [baseState({ stage: 'grade-screen', design: designFacts(), screen: { passed: null, pilots: [
-    { n: 1, state: 'completed', score: null, audit: { status: 'DISCARDED' } },
-    { n: 2, state: 'failed', score: null, audit: '' },
+test('a pilot without a score: Replacement pending while the stage is undecided, counts against the design once it is, and the audit badge says DISCARDED in words', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'grade-screen', design: designFacts(), screen: { passed: null, pilots: [
+    { n: 1, state: 'completed', score: null, valid: false, audit: { status: 'DISCARDED' } },
+    { n: 2, state: 'failed', score: null, valid: false, audit: '' },
+    { n: 3, state: 'completed', score: null, valid: false, audit: { status: 'CLEAN' } },
+    { n: 4, state: 'running', score: null, valid: false, audit: null },
   ] } })]);
-  const rows = rowsOf(page.region('screen'));
+  let rows = rowsOf(page.region('screen'));
   assert.equal(rows[0].score, 'No score (discarded)');
   assert.equal(rows[0].audit, 'DISCARDED');
-  assert.match(rows[0].below, /No, a pilot without a score counts against the design/);
+  assert.equal(rows[0].below, 'Replacement pending', 'a discarded pilot is replaced once per stage');
   assert.equal(rows[1].score, 'No score (failed)');
   assert.equal(rows[1].audit, 'Not audited');
+  assert.equal(rows[1].below, 'Replacement pending');
+  assert.equal(rows[2].score, 'Waiting for the grader');
+  assert.equal(rows[2].below, 'Pending', 'an answer that is still to be graded is not a replacement');
+  assert.equal(rows[3].below, 'Pending');
   assert.match(page.region('screen'), /<span class="pill red">DISCARDED<\/span>/);
   assert.match(page.region('screen'), /<span class="pill amber">Not audited<\/span>/);
-  assert.match(page.region('screen'), /<span class="pill red">Screen failed<\/span>/, 'both settled with no score: the screen did not pass');
+  assert.match(page.region('screen'), /<span class="pill violet">Screen in progress<\/span>/, 'no verdict from the companion, so no failed screen');
+  assert.doesNotMatch(page.region('screen'), /counts against the design/);
+  /* decided: nothing more will come for them */
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [null, null], false), pilots: [
+    { n: 1, state: 'completed', score: null, valid: false, audit: { status: 'DISCARDED' } },
+    { n: 2, state: 'completed', score: null, valid: false, audit: { status: 'CLEAN' } },
+  ] } });
+  await page.tick();
+  rows = rowsOf(page.region('screen'));
+  assert.equal(rows[0].score, 'No score (discarded)');
+  assert.equal(rows[1].score, 'No usable score');
+  assert.match(rows[0].below, /No, a pilot without a score counts against the design/);
+  assert.match(rows[1].below, /No, a pilot without a score counts against the design/);
+  assert.match(page.region('screen'), /<span class="pill red">Screen failed<\/span>/);
 });
 
 test('pilots still working show their state, not a score', async t => {
@@ -812,11 +1305,46 @@ test('the redesign card is absent before any redesign; the screen and test cards
   assert.match(page.region('redesigns'), /<td data-label="Outcome">In progress<\/td>/);
 });
 
-test('every outcome the orchestrator records has a name, and an unknown one is shown as it is', async t => {
-  const outcomes = ['passed', 'screen-failed', 'test-failed', 'stopped', 'budget', 'failed', 'in-progress', 'odd-new-one'];
+test('every outcome the companion records has a name, rejected included, and the names it never sends are not invented', async t => {
+  const outcomes = ['passed', 'screen-failed', 'test-failed', 'rejected', 'stopped', 'budget', 'failed', 'in-progress', 'odd-new-one'];
   const { page } = await bootWith(t, [baseState({ stage: 'design', redesigns: 1, attempts: outcomes.map((outcome, i) => attemptOf({ n: i + 1, outcome })) })]);
   const cells = [...page.region('redesigns').matchAll(/<td data-label="Outcome">([^<]*)<\/td>/g)].map(m => m[1]);
-  assert.deepEqual(cells, ['Passed', 'Screen failed', 'Test failed', 'Stopped', 'Stopped at the cap', 'Failed', 'In progress', 'odd-new-one']);
+  assert.deepEqual(cells, ['Passed', 'Screen failed', 'Test failed', 'Rejected before any pilot', 'Stopped', 'Stopped at the cap', 'Failed', 'In progress', 'odd-new-one']);
+  for (const never of ['calibration-failed', 'unfair-rubric', 'leak', 'design-error']) assert.ok(!PIPELINE_SOURCE.includes("'" + never + "'") && !PIPELINE_SOURCE.includes(never + ':'), never + ' is not a name the companion sends');
+});
+
+test('a rejected attempt says it was rejected before any pilot, why, and which check; a note after a restart, a repair turn and the checks it passed are shown', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'design', redesigns: 2, attempts: [
+    attemptOf({ n: 1, outcome: 'rejected', rejection: { kind: 'checks', reasons: ['The golden answer scored 0.62 against its own guideline; at least 0.90 is needed', 'The fairness review found 1 guideline item that a solver could not know'] }, calibration: { score: 0.62, verdict: 'does-not-meet-guidance', reason: 'Missing the date.' }, fairness: { status: 'unfair', count: 1 }, repaired: true }),
+    attemptOf({ n: 2, outcome: 'rejected', rejection: { kind: 'design', reasons: ['out/prompt.txt states a figure of the golden answer'] } }),
+    attemptOf({ n: 3, outcome: 'failed', note: 'The companion stopped while this attempt was running.', calibration: { score: 0.97, verdict: 'v', reason: 'r' }, fairness: { status: 'ok', count: 0 } }),
+  ] })]);
+  const r = page.region('redesigns');
+  assert.match(r, /<td data-label="Outcome">Rejected before any pilot<small class="pl-rejection">The design did not pass the calibration or the fairness check\.<\/small><ul class="pl-cell-list"><li>The golden answer scored 0\.62 against its own guideline; at least 0\.90 is needed<\/li><li>The fairness review found 1 guideline item that a solver could not know<\/li><\/ul><\/td>/);
+  assert.match(r, /<td data-label="Outcome">Rejected before any pilot<small class="pl-rejection">The designer’s files did not pass the design checks\.<\/small><ul class="pl-cell-list"><li>out\/prompt\.txt states a figure of the golden answer<\/li><\/ul><\/td>/);
+  assert.match(r, /<td data-label="Outcome">Failed<small class="pl-rejection">The companion stopped while this attempt was running\.<\/small><\/td>/);
+  assert.match(r, /<th scope="col">Design checks<\/th>/);
+  assert.match(r, /<td data-label="Design checks"><ul class="pl-cell-list"><li>Calibration: 0\.62, failed<\/li><li>Fairness review: 1 unfair item<\/li><li>A repair turn was used<\/li><\/ul><\/td>/);
+  assert.match(r, /<td data-label="Design checks"><ul class="pl-cell-list"><li>Calibration: 0\.97, passed<\/li><li>Fairness review: no unfair item<\/li><\/ul><\/td>/);
+  assert.match(r, /<td data-label="Design checks">Not recorded<\/td>/, 'an attempt with no recorded checks');
+  companion.attemptPatch('pl-atlas-0001', { calibration: { score: null, verdict: null, reason: '' }, fairness: { status: 'unusable', count: 0 } });
+  await page.tick();
+  assert.match(page.region('redesigns'), /<li>Calibration: no usable score<\/li><li>Fairness review: no usable answer<\/li>/);
+});
+
+test('every part of a rejected attempt may be withheld while a round runs, and the page still draws it', async t => {
+  const W = { withheld: true };
+  const { page } = await bootWith(t, [baseState({ stage: 'design', redacted: true, redesigns: 1, attempts: [
+    attemptOf({ n: 1, outcome: 'rejected', traps: [{ id: 't1', title: W }], rejection: W, calibration: W, fairness: W, repaired: W, note: W }),
+    attemptOf({ n: 2, outcome: 'rejected', traps: [{ id: 't1', title: W }, { id: 't2', title: W }], rejection: { kind: 'design', reasons: W }, calibration: { score: W, verdict: W, reason: W }, fairness: { withheld: true } }),
+  ] })]);
+  const r = page.region('redesigns');
+  const w = '<span class="pl-withheld">Withheld while a round runs</span>';
+  assert.ok(r.includes(`<td data-label="Outcome">Rejected before any pilot<small class="pl-rejection">${w}</small><small class="pl-rejection">${w}</small></td>`), 'the rejection and the note');
+  assert.ok(r.includes(`<li>Calibration: ${w}</li><li>Fairness review: ${w}</li><li>Repair turn: ${w}</li>`));
+  assert.ok(r.includes('<td data-label="Traps">Withheld while a round runs</td>'), 'a trap whose title is withheld keeps its place');
+  assert.ok(r.includes(`<small class="pl-rejection">The designer’s files did not pass the design checks.</small><ul class="pl-cell-list"><li>${w}</li></ul>`), 'withheld reasons');
+  assert.doesNotMatch(r, /\[object Object\]|undefined|>null</);
 });
 
 test('a replacement pilot is marked, and once the stage is decided a pilot with no usable score says so', async t => {
@@ -1136,7 +1664,7 @@ test('adapt() survives anything the companion could send, and reads only what it
   assert.equal(odd.waiting, null, 'only an object is a wait');
   assert.equal(odd.hasDesign, true);
   assert.deepEqual(plain(odd.design.newFiles), ['1', 'n.txt']);
-  assert.deepEqual(plain(odd.design.edited), [{ name: 'a', reason: '4' }, { name: 'b.txt', reason: '' }]);
+  assert.deepEqual(plain(odd.design.edited), [{ name: 'a', reason: '4', diff: null, size: null }, { name: 'b.txt', reason: '', diff: null, size: null }]);
   assert.deepEqual(plain(odd.design.notes), ['1', 'ok']);
   assert.equal(odd.attempts.length, 1);
   assert.deepEqual(plain(odd.attempts[0].traps), ['T', '5']);
@@ -1177,6 +1705,16 @@ test('adapt() reads the real shape of the companion: source, counts, references,
   assert.equal(row.capUsd, 30);
 });
 
+test('adapt() turns a structured diff into text lines and keeps its counts; an object without lines is nothing', () => {
+  const { adapt } = makeAdapter();
+  const v = adapt(baseState({ design: designFacts({ guidelineDiff: STRUCTURED(), editedFiles: [{ name: 'a', diff: { kind: 'binary', before: 1, after: 2, lines: [] } }, { name: 'b', diff: { added: 1 } }, { name: 'c', diff: { lines: [{ op: '?', text: 'odd' }, null, { op: '+', text: 5 }] } }] }) }));
+  assert.deepEqual(plain(v.design.guidelineDiff), { text: ' Award full credit when the answer holds the borrowing.\n-Count the available facility as cash.\n+Do not count the available facility as cash.', added: 1, removed: 1, truncated: false, available: true, kind: 'text', before: 2000, after: 2100 });
+  assert.equal(v.design.edited[0].diff.kind, 'binary');
+  assert.equal(v.design.edited[1].diff, null, 'no lines, no diff');
+  assert.equal(v.design.edited[2].diff.text, ' odd\n+5', 'an unknown op is a context line');
+  assert.equal(v.design.edited[0].size, '+1 byte');
+});
+
 test('the export answer is read as { name, zipBase64 } and a name that is not a private zip name is replaced', () => {
   const { adaptExport } = makeAdapter();
   assert.deepEqual(plain(adaptExport({ name: 'Atlas_pipeline_PRIVATE.zip', size: 3, sha256: 'x', files: [], zipBase64: 'QUJD\n' }, 'pln-1')), { base64: 'QUJD', name: 'Atlas_pipeline_PRIVATE.zip' });
@@ -1202,6 +1740,7 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
   assert.equal(RULES.maxRedesigns, k.MAX_REDESIGNS);
   assert.equal(RULES.defaultCapUsd, k.DEFAULT_CAP_USD);
   assert.equal(RULES.maxCapUsd, k.MAX_CAP_USD);
+  if (k.GOLDEN_MIN !== undefined) assert.equal(makeAdapter().CALIBRATION_MIN, k.GOLDEN_MIN, 'the calibration the page says is needed is the one the companion enforces');
   const { ACKNOWLEDGEMENTS } = makeAdapter();
   assert.deepEqual(Array.from(ACKNOWLEDGEMENTS, x => x.id), [...k.ACKNOWLEDGEMENTS], 'the page asks for exactly the acknowledgements the companion requires, in its order');
   const fourth = ACKNOWLEDGEMENTS[3];
@@ -1281,6 +1820,7 @@ async function makeRealWorld(t, { hang = false } = {}) {
   const { createAgentService } = require('../backend/agents/index.cjs');
   const { createPipelineService } = require('../backend/pipeline/index.cjs');
   const { PREAMBLE } = require('../backend/pipeline/classify.cjs');
+  const gates = fs.existsSync(path.join(REPO, 'backend', 'pipeline', 'gates.cjs')) ? require('../backend/pipeline/gates.cjs') : {};
   const STUB = path.join(REPO, 'backend', 'agents', 'stub-claude.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-page-'));
   const root = path.join(base, 'project'), source = path.join(base, 'source'), tmpRoot = path.join(base, 'tmp');
@@ -1311,6 +1851,9 @@ async function makeRealWorld(t, { hang = false } = {}) {
   const rules = [
     { prompt: '^' + PREAMBLE.slice(0, 30), scenario: { resultText: JSON.stringify({ prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: ['Facility_Terms.txt', 'Cash_Facts.csv'], taskFiles: ['Atlas_Supplement.txt'], other: [] }), costUsd: 0.01 } },
     { prompt: 'This is design attempt 1 of', scenario: { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/task/Facility_Terms.txt' }, result: 'x' }], writeFiles: designFiles, resultText: 'Designed the traps of attempt 1.', costUsd: 0.05 } },
+    /* the checks a design passes before any pilot runs, when the companion makes them: the fairness review finds nothing, the golden answer is calibrated at 0.98 */
+    ...(gates.FAIRNESS_PREAMBLE ? [{ prompt: '^' + gates.FAIRNESS_PREAMBLE.slice(0, 40), scenario: { resultText: JSON.stringify({ unfair: [] }), costUsd: 0.01 } }] : []),
+    { cwd: 'finance-studio-pilots/gsim-', prompt: '<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: { resultText: JSON.stringify({ verdict: 'meets-guidance', reason: 'Synthetic calibration reason', score: 0.98 }), costUsd: 0.02 } },
     { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: 'PV1', scenario: scores.map((score, i) => ({ resultText: `ANS-1-${i + 1} Cash is 3,050 because the available facility counted as cash. Proceed.`, costUsd: 0.1 })) },
     ...scores.map((score, i) => ({ cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nANS-1-${i + 1}\\b`, scenario: { resultText: JSON.stringify({ verdict: 'does-not-meet-guidance', reason: `Synthetic grader reason for ${score.toFixed(2)}`, score }), costUsd: 0.02 } })),
   ];
@@ -1338,6 +1881,7 @@ test('the page against the real companion: a folder is imported, classified, des
   await page.click('start');
   assert.match(page.status(), /^Started\./, 'the real companion accepted the four acknowledgements and the body: ' + page.status());
 
+  const gatesRun = fs.existsSync(path.join(REPO, 'backend', 'pipeline', 'gates.cjs'));
   const seen = new Set(), redactedSecrets = [];
   const SECRETS = [GUIDELINE_MARK, GOLDEN_MARK, MECH_MARK, CORRECT_MARK, 'DECOY-SECRET-1', 'WRONG-SECRET-1', 'GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc', 'Synthetic grader reason'];
   let redactedPolls = 0;
@@ -1354,7 +1898,7 @@ test('the page against the real companion: a folder is imported, classified, des
     await sleep(30);
   }
   assert.deepEqual(redactedSecrets, [], 'while a round runs no private text is in the page (' + redactedPolls + ' polls saw a round running)');
-  assert.match(page.stage(), /^Done: the 5-pilot test passed\./);
+  assert.match(page.stage(), /^Done: the 5-pilot test passed\./, 'the pipeline ended as: ' + page.region('verdict').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '));
   assert.ok(seen.has('Import') || seen.has('Classify') || seen.has('Design') || seen.has('Screen') || seen.has('Test'), 'it was followed through its stages: ' + [...seen].join(', '));
 
   /* the finished pipeline, as the real orchestrator reported it */
@@ -1369,8 +1913,15 @@ test('the page against the real companion: a folder is imported, classified, des
   assert.match(page.region('classify'), /Section “Golden answer”/);
   assert.match(page.region('design'), /Lender summary overstates cash/);
   assert.match(page.region('design'), /<li>Meridian_Lender_Summary\.txt<\/li>/);
-  assert.match(page.region('design'), /<li class="pl-edit"><span class="pill amber">Edited world file<\/span> <strong>Facility_Terms\.txt<\/strong><span class="pl-edit-reason">The amendment date must differ from the lender summary\.<\/span>/);
+  assert.match(page.region('design'), /<li class="pl-edit"><span class="pill amber">Edited world file<\/span> <strong>Facility_Terms\.txt<\/strong>( <span class="pl-edit-size">Size change: [+\u2212-]?\d+ bytes<\/span>)?<span class="pl-edit-reason">The amendment date must differ from the lender summary\.<\/span>/);
   for (const secret of [MECH_MARK, CORRECT_MARK, GUIDELINE_MARK, GOLDEN_MARK]) assert.ok(page.region('design').includes(secret), secret + ' shows once no round runs');
+  if (gatesRun) {
+    assert.match(page.region('design'), /Calibration passed<\/span> The golden answer scored <strong>0\.98<\/strong> against the revised grader guideline\. It needs 0\.90 or more\./, 'the calibration the real companion made');
+    assert.match(page.region('design'), /<span class="pill green">No unfair item<\/span>/, 'the fairness review the real companion made');
+    assert.match(page.region('design'), /<details class="pl-changes"><summary>What the designer changed in the grader guideline<\/summary>/, 'the guideline changes, collapsed');
+    assert.match(page.region('design'), /<span class="pl-diff-(add|del)">[+-]/, 'with its line diff marked');
+    assert.doesNotMatch(page.region('design'), /<details class="pl-changes" open/);
+  }
   const screen = rowsOf(page.region('screen')), test = rowsOf(page.region('test'));
   assert.deepEqual(screen.map(r => r.score), ['0.20', '0.30']);
   assert.equal(test.length, 5);

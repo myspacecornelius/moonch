@@ -154,17 +154,43 @@ function withheldReason(rel) {
   return WITHHELD_ROLES.includes(role.role) ? role.reason.replace(/^Withheld by default: /, '').replace(/\.$/, '') : '';
 }
 
+/* What the page says about a file, whatever the model answered: a file whose name, group or label names a golden or reference answer, a
+   model answer, a solution, an answer key or an answer file, or a rubric, a guideline or grading, is withheld. The name is held to a
+   narrower rule for guidelines (a business document called Lending_Guidelines.pdf is a source; classifyPath has the same nuance). */
+const GOLDEN_LABEL_RE = /\bgolden\b|\bgold[\s_-]+(?:answer|response|solution)s?\b|\b(?:reference|model|ideal|expected|sample|correct|official)[\s_-]+(?:answer|response|solution)s?\b|\banswer[\s_-]*keys?\b|\bsolutions?\b|\b(?:answer|response)s?[\s_-]+files?\b/i;
+const GRADING_LABEL_RE = /\brubrics?\b|\bgrad(?:er|ers|ing)\b|\bguidelines?\b|\bscoring\b|\bmarking[\s_-]+scheme\b/i;
+const GRADING_NAME_RE = /\brubrics?\b|\bgraders?\b|\bgrading\b/i;
+
+/* { kind: 'answer' | 'grading', why } for a file { name, group, label }, or null. */
+function labelFinding(file) {
+  if (!file) return null;
+  const nameWords = words(file.name);
+  const hint = [file.group, file.label].filter(Boolean).join(' | ');
+  const golden = GOLDEN_LABEL_RE.exec(nameWords) || GOLDEN_LABEL_RE.exec(hint);
+  if (golden) return { kind: 'answer', why: `its name, group or label names an answer or a solution ("${oneLine(golden[0], 40)}")` };
+  const grading = GRADING_NAME_RE.exec(nameWords) || GRADING_LABEL_RE.exec(hint);
+  if (grading) return { kind: 'grading', why: `its name, group or label names a rubric, a guideline or grading ("${oneLine(grading[0], 40)}")` };
+  return null;
+}
+
 /* Raw classification (model or heuristic) -> what the pipeline keeps. Throws nothing; `problems` lists what stops the run. */
 function settle(raw, { sections, files }, method, notes = []) {
   const withheld = [];
+  const warnings = [];
+  const byName = new Map(files.map(file => [file.name, file]));
   const take = (name, why) => { if (!withheld.some(item => item.name === name)) withheld.push({ name, why }); };
   for (const [role, why] of [['guideline', 'the grader guideline'], ['goldenAnswer', 'the golden answer'], ['prompt', 'the business prompt']]) {
     if (raw[role] && raw[role].kind === 'file') take(raw[role].name, why);
   }
+  /* A file the classifier called a world or task file that is withheld anyway is a file the pilots will not get: it is listed as a warning. */
   const keep = list => list.filter(name => {
-    const why = withheldReason(name);
-    if (why) { take(name, `the shared rule withholds it: ${why}`); return false; }
-    return true;
+    const rule = withheldReason(name);
+    const found = rule ? null : labelFinding(byName.get(name));
+    const why = rule ? `the shared rule withholds it: ${rule}` : found ? found.why : '';
+    if (!why) return true;
+    take(name, why);
+    warnings.push({ name, why });
+    return false;
   });
   const worldFiles = keep(raw.worldFiles);
   const taskFiles = keep(raw.taskFiles);
@@ -172,6 +198,8 @@ function settle(raw, { sections, files }, method, notes = []) {
   const problems = [];
   if (!raw.prompt) problems.push('the business prompt');
   if (!raw.guideline) problems.push('the grader guideline');
+  /* Fail closed: when no golden answer was named, any file that looks like one is a reason to stop, not a world file. */
+  const goldenSuspects = raw.goldenAnswer ? [] : files.filter(file => { const found = labelFinding(file); return found && found.kind === 'answer' && !(raw.guideline && raw.guideline.kind === 'file' && raw.guideline.name === file.name); }).map(file => file.name);
   return {
     method,
     prompt: raw.prompt,
@@ -181,6 +209,8 @@ function settle(raw, { sections, files }, method, notes = []) {
     taskFiles,
     other,
     withheld,
+    warnings,
+    goldenSuspects,
     notes,
     problems,
   };
@@ -199,4 +229,4 @@ function classify({ answer, sections, files }) {
   return settle(heuristicClassification({ sections, files }), { sections, files }, 'heuristic', notes);
 }
 
-module.exports = { PREAMBLE, buildClassifierPrompt, parseClassifierOutput, heuristicClassification, classify, withheldReason };
+module.exports = { PREAMBLE, buildClassifierPrompt, parseClassifierOutput, heuristicClassification, classify, withheldReason, labelFinding };

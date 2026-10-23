@@ -20,14 +20,28 @@ const MODEL_READS_TASK_TEXT = 'Model reads the task: the classifier, the trap de
 const STAGES = ['import', 'classify', 'design', 'screen', 'grade-screen', 'redesign', 'test', 'grade-test', 'done', 'failed', 'stopped', 'budget'];
 const TERMINAL = ['done', 'failed', 'stopped', 'budget'];
 
-/* Spending caps (--max-budget-usd) of the calls that are not pilots. A grader call uses the agent service's tool-less default. */
-const CAPS = { classifyUsd: 0.5, designUsd: 5, graderUsd: 0.5 };
+/* Spending caps (--max-budget-usd) of the calls that are not pilots. A grader call uses the agent service's tool-less default
+   (a test ties graderUsd to BUDGET_USD.toolLessDefault). repairUsd is the one repair turn of the designer, fairnessUsd one fairness review. */
+const CAPS = { classifyUsd: 0.5, designUsd: 5, graderUsd: 0.5, repairUsd: 1, fairnessUsd: 0.25 };
+
+/* Every reservation before a step is its worst case times this: a run can finish a little over its cap (the runtime checks the cap
+   between turns). */
+const HEADROOM = 1.15;
+
+/* The golden answer of a design must score at least this against the design's own guideline, or the design is rejected before any pilot
+   runs. A pilot score in REGRADE_BAND (both ends included) is graded a second time and the two are averaged. */
+const GOLDEN_MIN = 0.9;
+const REGRADE_BAND = [0.4, 0.5];
+/* The simulated grader runs at least at this effort, whatever the pilots use. */
+const MIN_GRADER_EFFORT = 'medium';
+/* A grader call at most twice per pilot (the second only in the regrade band). */
+const GRADE_CALLS_PER_PILOT = 2;
 
 /* What a link or a folder may bring in (the link loader has the same caps). */
 const INTAKE = { files: 300, fileBytes: 200 * 1024 * 1024, totalBytes: 2 * 1024 * 1024 * 1024, depth: 4, sections: 200, sectionChars: 20000, pageBytes: 8 * 1024 * 1024, textBytes: 1024 * 1024 };
 
 /* What the designer may hand back. The prompt and the guideline limits are the agent service's (rounds.cjs). */
-const DESIGN = { traps: 3, promptChars: 20000, guidelineChars: 29000, goldenChars: 60000, newFiles: 100, titleChars: 200, textChars: 1000, reasonChars: 500, leakWindow: 200 };
+const DESIGN = { traps: 3, promptChars: 20000, guidelineChars: 29000, goldenChars: 60000, newFiles: 100, titleChars: 200, textChars: 1000, reasonChars: 500, leakWindow: 80, leakStep: 30, guidelineGrowth: 1.5, editShrinkMax: 0.2, rubricChanges: 20, diffLines: 200 };
 
 const ID_RE = /^pln-[0-9a-f]{12}$/;
 const WORKSPACE_DIRNAME = 'finance-studio-pipelines';
@@ -43,5 +57,5 @@ function deepFreeze(value) {
 module.exports = deepFreeze({
   PASS_BAR, SCREEN_PILOTS, TEST_PILOTS, TEST_NEED, MAX_REDESIGNS, DEFAULT_CAP_USD, MAX_CAP_USD,
   AGENT_ACKNOWLEDGEMENTS, MODEL_READS_TASK, ACKNOWLEDGEMENTS, MODEL_READS_TASK_TEXT,
-  STAGES, TERMINAL, CAPS, INTAKE, DESIGN, ID_RE, WORKSPACE_DIRNAME,
+  STAGES, TERMINAL, CAPS, HEADROOM, GOLDEN_MIN, REGRADE_BAND, MIN_GRADER_EFFORT, GRADE_CALLS_PER_PILOT, INTAKE, DESIGN, ID_RE, WORKSPACE_DIRNAME,
 });

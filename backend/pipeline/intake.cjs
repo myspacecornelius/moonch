@@ -9,7 +9,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { INTAKE } = require('./constants.cjs');
-const { isObject, capText, oneLine, readJson, within, nameProblem, walkFiles, copyVerified, hashFile } = require('./util.cjs');
+const { isObject, capText, oneLine, readJson, within, nameProblem, walkFiles, copyHashed, isJunkName, Stopped } = require('./util.cjs');
 
 class IntakeError extends Error {}
 
@@ -45,32 +45,38 @@ function readPageFile(file, required) {
   }
 }
 
-/* Copies announced files into original/ and returns [{ name, bytes, sha256, group, label }]. */
-function copyAll(entries, original) {
+/* Copies announced files into original/ one after the other, as streams, and returns [{ name, bytes, sha256, group, label }]. The hash is
+   taken from the bytes written and must be the announced one when there is one. shouldStop() is asked between files and for every chunk. */
+async function copyAll(entries, original, shouldStop) {
   if (entries.length > INTAKE.files) throw new IntakeError(`The task has more than ${INTAKE.files} files`);
   let total = 0;
   const out = [];
   const seen = new Set();
   for (const entry of entries) {
+    if (shouldStop && shouldStop()) throw new Stopped('stopped');
     const key = entry.name.toLowerCase();
     if (seen.has(key)) throw new IntakeError(`Two files share the name ${entry.name}`);
     seen.add(key);
     total += entry.bytes;
     if (entry.bytes > INTAKE.fileBytes) throw new IntakeError(`${entry.name} is larger than ${Math.round(INTAKE.fileBytes / 1048576)} MB`);
     if (total > INTAKE.totalBytes) throw new IntakeError('The task files together are larger than the limit');
-    let sha256;
+    let copied;
     try {
-      sha256 = copyVerified(entry.abs, path.join(original, ...entry.name.split('/')), entry.sha256);
+      copied = await copyHashed(entry.abs, path.join(original, ...entry.name.split('/')), { expected: entry.sha256, shouldStop });
     } catch (error) {
-      throw new IntakeError(error && error.message ? error.message : 'A file could not be copied');
+      if (error instanceof Stopped) throw error;
+      throw new IntakeError(entry.sha256 && /hash differs/.test(String(error && error.message))
+        ? `The loaded file ${oneLine(entry.name, 200)} does not match the hash the loader recorded`
+        : `${oneLine(entry.name, 200)} could not be copied`);
     }
-    out.push({ name: entry.name, bytes: entry.bytes, sha256, group: entry.group || '', label: entry.label || '' });
+    if (copied.bytes !== entry.bytes) throw new IntakeError(`${oneLine(entry.name, 200)} changed while it was copied`);
+    out.push({ name: entry.name, bytes: copied.bytes, sha256: copied.sha256, group: entry.group || '', label: entry.label || '' });
   }
   return out;
 }
 
 /* The loader's finished state -> original/. The folder must be the loader's own (<root>/private/links/<id>). */
-function intakeFromLoader({ state, root, original }) {
+async function intakeFromLoader({ state, root, original, shouldStop }) {
   if (!isObject(state) || typeof state.folder !== 'string' || !path.isAbsolute(state.folder)) throw new IntakeError('The link loader did not say where it saved the files');
   let folder;
   let linksRoot;
@@ -86,7 +92,7 @@ function intakeFromLoader({ state, root, original }) {
   const skipped = [];
   for (const item of Array.isArray(state.files) ? state.files : []) {
     if (!isObject(item) || typeof item.name !== 'string') continue;
-    const problem = nameProblem(item.name, INTAKE.depth);
+    const problem = nameProblem(item.name, INTAKE.depth) || (isJunkName(item.name) ? 'it is a system or lock file' : '');
     if (problem) { skipped.push({ name: oneLine(item.name, 200), why: problem }); continue; }
     const abs = path.join(filesDir, ...item.name.split('/'));
     let stat;
@@ -96,11 +102,10 @@ function intakeFromLoader({ state, root, original }) {
     } catch { stat = null; }
     if (!stat) throw new IntakeError(`The loaded file ${oneLine(item.name, 200)} is missing`);
     if (typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256)) throw new IntakeError(`The loaded file ${oneLine(item.name, 200)} has no hash`);
-    if (hashFile(abs) !== item.sha256) throw new IntakeError(`The loaded file ${oneLine(item.name, 200)} does not match the hash the loader recorded`);
     entries.push({ name: item.name, abs, bytes: stat.size, sha256: item.sha256, group: oneLine(item.group, 200), label: oneLine(item.label, 300) });
   }
   const page = readPageFile(path.join(folder, 'page.json'), true);
-  const files = copyAll(entries, original);
+  const files = await copyAll(entries, original, shouldStop);
   const toggle = isObject(state.toggle) ? {
     found: state.toggle.found === true,
     label: oneLine(state.toggle.label, 300),
@@ -113,7 +118,7 @@ function intakeFromLoader({ state, root, original }) {
 }
 
 /* A folder of files (and optionally a page.json) -> original/. realDir comes from resolveSourceDir: absolute, real, outside the project. */
-function intakeFromFolder({ realDir, original }) {
+async function intakeFromFolder({ realDir, original, shouldStop }) {
   let walked;
   try {
     walked = walkFiles(realDir, { maxFiles: INTAKE.files, depth: INTAKE.depth, skipTop: new Set(['page.json']) });
@@ -123,7 +128,7 @@ function intakeFromFolder({ realDir, original }) {
   const page = readPageFile(path.join(realDir, 'page.json'), false);
   const described = new Map((page ? page.fileList : []).map(item => [item.name, item]));
   const entries = walked.files.map(file => ({ name: file.rel, abs: file.abs, bytes: file.bytes, group: (described.get(file.rel) || {}).group || '', label: (described.get(file.rel) || {}).label || '' }));
-  const files = copyAll(entries, original);
+  const files = await copyAll(entries, original, shouldStop);
   return { files, sections: page ? page.sections : [], page: page ? page.page : null, toggle: null, skipped: walked.skipped.map(item => ({ name: item.rel, why: item.why })) };
 }
 

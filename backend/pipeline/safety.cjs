@@ -71,15 +71,16 @@ function verifyRoundPacket(round, manifest) {
   }
 }
 
-/* The windows of a withheld text used by the leak check: its squashed form cut into overlapping pieces of DESIGN.leakWindow
-   characters (the whole text when it is shorter). A text of fewer than 40 characters gives none. */
+/* The windows of a withheld text used by the leak check: its squashed form cut into overlapping pieces of DESIGN.leakWindow characters
+   (80), a new piece every DESIGN.leakStep characters (30), and the last piece; the whole text when it is shorter. A text of fewer than 40
+   characters gives none. */
 function leakWindows(text) {
   const s = squash(text);
   if (s.length < 40) return [];
   const size = DESIGN.leakWindow;
   if (s.length <= size) return [s];
   const out = [];
-  for (let at = 0; at + size <= s.length; at += size / 2) out.push(s.slice(at, at + size));
+  for (let at = 0; at + size <= s.length; at += DESIGN.leakStep) out.push(s.slice(at, at + size));
   out.push(s.slice(-size));
   return out;
 }

@@ -57,9 +57,30 @@
 .pl-names,.pl-traps,.pl-edits{margin:0 0 4px;padding-left:20px;font-size:.88rem;line-height:1.55}
 .pl-names li,.pl-traps li{margin:4px 0;overflow-wrap:anywhere}
 .pl-edits{list-style:none;padding-left:0}
-.pl-edit{margin:8px 0;padding:10px 14px;border:1px solid var(--warn);border-left-width:3px;border-radius:0 8px 8px 0;background:var(--warn-tint);overflow-wrap:anywhere;--muted:var(--muted-strong)}
+.pl-edit,.pl-unfair{margin:8px 0;padding:10px 14px;border:1px solid var(--warn);border-left-width:3px;border-radius:0 8px 8px 0;background:var(--warn-tint);overflow-wrap:anywhere;--muted:var(--muted-strong)}
 .pl-edit-reason{display:block;margin-top:4px;font-size:.84rem;color:var(--muted-strong)}
+.pl-class-note{margin:10px 0;max-width:84ch;font-size:.86rem;line-height:1.55;color:var(--muted-strong);overflow-wrap:anywhere}
+.pl-warning-lead{margin:6px 0 0;font-size:.86rem}
+.pl-accept{margin:0 0 18px}
+.pl-accept-note{margin:14px 0 0}
+.pl-repaired{margin:10px 0 0;font-size:.84rem}
+.pl-diff-count{margin:0 0 6px;font-size:.82rem}
+.pl-stage-note{margin:8px 0 0;font-size:.82rem}
+.pl-cell-list{margin:4px 0 0;padding-left:16px;font-size:.82rem;line-height:1.5}
+.pl-cell-list li{margin:2px 0;overflow-wrap:anywhere}
+.pl-rejection{display:block;margin-top:4px;font-size:.8rem;line-height:1.45;color:var(--muted-strong)}
+.pl-outputs{display:block;margin-top:2px;font-size:.74rem;font-weight:400;color:var(--muted-strong)}
 .pl-trap details{margin-top:2px}
+.pl-edit-size{margin-left:6px;font-size:.8rem;color:var(--muted-strong)}
+.pl-edit .pl-diff-box{margin-top:6px}
+.pl-changes{margin:14px 0 0}
+.pl-warning{margin:0 0 18px;border-left-width:4px}
+.pl-warning ul{margin:8px 0 0}
+.pl-diff{max-height:360px}
+.pl-diff-add{color:var(--pass-ink)}
+.pl-diff-del{color:var(--fail-ink)}
+.pl-diff-hunk{color:var(--muted-strong)}
+.pl-regraded{display:block;margin-top:2px;font-size:.74rem;color:var(--muted-strong)}
 .pl-withheld{margin:0;color:var(--muted-strong);font-style:italic}
 .pl-text{max-height:320px}
 
@@ -88,7 +109,6 @@
   .pl-table,.pl-table tbody,.pl-table tr,.pl-table td,.pl-table tbody th{display:block;width:100%}
   .pl-table tr{border:1px solid var(--line);border-radius:10px;padding:6px 12px;margin-bottom:10px;background:var(--surface-2)}
   .pl-table td,.pl-table tbody th{border:0;padding:5px 0}
-  .pl-table td{display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px;align-items:start}
-  .pl-table td::before{content:attr(data-label);color:var(--muted);font-size:.74rem}
-  .pl-table td>.pill{justify-self:start}
+  .pl-table td{display:block}
+  .pl-table td::before{content:attr(data-label);display:block;color:var(--muted);font-size:.74rem}
 }

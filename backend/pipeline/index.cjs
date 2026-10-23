@@ -13,7 +13,8 @@
        pollMs   how often the loader is asked for its state while a page loads (default 500)
        onStage  an observer called with (stage, { id, attempt }) at every stage change; for tests, errors ignored
 
-     start(body) -> { id }          list() -> { pipelines, running, config }       get(id) -> view
+     start(body) -> { id }          list() -> { pipelines, running, config }       get(id) -> view      busy() -> true while one runs
+       body: { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, designCapUsd?, graderModel?, label?, acceptMissing? }
      continue(id) -> view           stop(id) -> view                               export(id) -> { name, size, sha256, files, zipBase64 }
      whenDone(id) -> view (waits)   shutdown() (stops everything)                  */
 

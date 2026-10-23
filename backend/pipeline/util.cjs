@@ -5,6 +5,8 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { hashFile } = require('../agents/pilot-folder.cjs');
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -13,6 +15,13 @@ const clone = value => (value === undefined ? undefined : JSON.parse(JSON.string
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const JUNK_NAMES = new Set(['.DS_Store', '__MACOSX', 'Thumbs.db']);
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.html', '.htm', '.xml', '.log', '.yaml', '.yml']);
+
+/* Thrown when a copy was cut short because the owner pressed Stop. */
+class Stopped extends Error {}
+
+/* Files that are never part of a design or a packet: system litter and the lock files office programs leave next to a file. */
+const JUNK_FILE_RE = /^(?:~\$.*|\.~lock\..*#|desktop\.ini|Thumbs\.db|\.DS_Store|.*\.(?:swp|swo))$/i;
+const isJunkName = rel => String(rel).split('/').some(part => JUNK_NAMES.has(part)) || JUNK_FILE_RE.test(path.posix.basename(String(rel)));
 
 /* Text cut to `max` characters, never inside a surrogate pair. */
 function capText(value, max) {
@@ -80,6 +89,7 @@ function walkFiles(root, options = {}) {
       if (!relDir && skipTop.has(entry.name)) continue;
       if (CONTROL_RE.test(entry.name)) { skipped.push({ rel: shown, why: 'its name holds a control character' }); continue; }
       if (entry.name.startsWith('.') || JUNK_NAMES.has(entry.name)) { skipped.push({ rel: shown, why: 'hidden' }); continue; }
+      if (!entry.isDirectory() && JUNK_FILE_RE.test(entry.name)) { skipped.push({ rel: shown, why: 'junk' }); continue; }
       if (entry.isSymbolicLink()) { skipped.push({ rel: shown, why: 'a symbolic link, never followed' }); continue; }
       if (entry.isDirectory()) {
         if (rel.split('/').length >= depth) { skipped.push({ rel: shown + '/', why: `nested deeper than ${depth} levels` }); continue; }
@@ -109,6 +119,45 @@ function copyVerified(source, target, expected) {
     throw new Error(`${path.basename(source)} is not the file that was announced (its hash differs)`);
   }
   return actual;
+}
+
+/* Copies one regular file as a stream (the event loop stays free for a file of hundreds of megabytes), never over an existing file and
+   never through a link, while hashing the bytes it writes. shouldStop() is asked for every chunk and ends the copy with Stopped.
+   expected: the hash the bytes must have; a mismatch removes the copy and throws. Resolves { sha256, bytes }. */
+async function copyHashed(source, target, options = {}) {
+  const { expected, shouldStop } = options;
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  let written = false;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`${path.basename(source)} is not a regular file`);
+    const hash = crypto.createHash('sha256');
+    let bytes = 0;
+    const meter = new Transform({
+      transform(chunk, encoding, done) {
+        if (shouldStop && shouldStop()) { done(new Stopped('stopped')); return; }
+        hash.update(chunk);
+        bytes += chunk.length;
+        done(null, chunk);
+      },
+    });
+    written = true;
+    await pipeline(handle.createReadStream(), meter, fs.createWriteStream(target, { flags: 'wx', mode: 0o644 }));
+    written = false;
+    fs.chmodSync(target, 0o644);
+    const sha256 = hash.digest('hex');
+    if (expected && sha256 !== expected) {
+      fs.rmSync(target, { force: true });
+      throw new Error(`${path.basename(source)} is not the file that was announced (its hash differs)`);
+    }
+    return { sha256, bytes };
+  } catch (error) {
+    if (written) fs.rmSync(target, { force: true });
+    throw error;
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 /* The text of a file when it is text (a known text extension, valid UTF-8, no NUL), cut to `max`; null otherwise. */
@@ -142,6 +191,6 @@ function removeTree(dir) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 module.exports = {
-  isObject, sha256Hex, clone, CONTROL_RE, JUNK_NAMES, TEXT_EXTENSIONS, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson,
+  isObject, sha256Hex, clone, CONTROL_RE, JUNK_NAMES, JUNK_FILE_RE, isJunkName, Stopped, copyHashed, TEXT_EXTENSIONS, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson,
   within, nameProblem, walkFiles, copyVerified, readTextFile, squash, removeTree, delay, hashFile,
 };

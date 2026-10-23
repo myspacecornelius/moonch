@@ -54,7 +54,7 @@ const SUPPLEMENT = 'Atlas supplement, synthetic. Draw requests are listed by dat
 const WORLD_NAMES = ['Facility_Terms.txt', 'Cash_Facts.csv'];
 
 /* Values the redaction tests must never see in an answer while a round runs. */
-const SECRETS = ['GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc', 'DESIGNER-GUIDELINE-MARK', 'DESIGNER-GOLDEN-MARK', 'MECH-SECRET', 'DECOY-SECRET', 'CORRECT-SECRET', 'WRONG-SECRET', 'Synthetic grader reason', 'PV1'];
+const SECRETS = ['GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc', 'DESIGNER-GUIDELINE-MARK', 'DESIGNER-GOLDEN-MARK', 'MECH-SECRET', 'DECOY-SECRET', 'CORRECT-SECRET', 'WRONG-SECRET', 'Synthetic grader reason', 'PV1', 'Lender summary overstates cash', 'Amended facility date', 'The amendment date must differ'];
 
 function pageJson(extra = {}) {
   return {
@@ -110,6 +110,21 @@ function designFiles(n, over = {}) {
 const gradeJson = score => JSON.stringify({ verdict: score < 0.45 ? 'does-not-meet-guidance' : 'meets-guidance', reason: `Synthetic grader reason for ${score.toFixed(2)}`, score });
 
 /* The rules of one design attempt: the designer, its pilots (scores[k-1] is pilot k's score) and the grader for each of their answers. */
+/* What the designer of attempt n does: reads a file, writes the design (and whatever else opts adds), costs opts.designCost. */
+function designerScenario(n, opts = {}) {
+  return {
+    toolUses: [
+      { name: 'Read', input: { file_path: '{{cwd}}/task/Facility_Terms.txt' }, result: FACILITY },
+      { name: 'Write', input: { file_path: '{{cwd}}/out/prompt.txt', content: 'drafted' }, result: 'ok' },
+      ...(opts.designerToolUses || []),
+    ],
+    writeFiles: designFiles(n, opts.design || {}),
+    resultText: `Designed the traps of attempt ${n}.`,
+    costUsd: opts.designCost === undefined ? 0.05 : opts.designCost,
+    ...(opts.designerExtra || {}),
+  };
+}
+
 function attemptRules(n, scores, opts = {}) {
   const pilotScenarios = scores.map((score, index) => ({
     resultText: `ANS-${n}-${index + 1} ${score < 0.45 ? 'Cash is 3,050 because the available facility counted as cash. Proceed.' : 'Usable cash is 1,250. Hold the borrowing.'}`,
@@ -117,12 +132,13 @@ function attemptRules(n, scores, opts = {}) {
     ...(opts.pilotExtra && opts.pilotExtra[index] ? opts.pilotExtra[index] : {}),
   }));
   const rules = [
-    { prompt: `This is design attempt ${n} of`, scenario: { toolUses: [
-      { name: 'Read', input: { file_path: '{{cwd}}/task/Facility_Terms.txt' }, result: FACILITY },
-      { name: 'Write', input: { file_path: '{{cwd}}/out/prompt.txt', content: 'drafted' }, result: 'ok' },
-      ...(opts.designerToolUses || []),
-    ], writeFiles: designFiles(n, opts.design || {}), resultText: `Designed the traps of attempt ${n}.`, costUsd: opts.designCost === undefined ? 0.05 : opts.designCost, ...(opts.designerExtra || {}) } },
+    /* the repair turn: 'clean' is a designer that delivers the sound design; 'same' is the scenario of the first run again */
+    ...(opts.repairScenario ? [{ prompt: `repair turn for design attempt ${n} of`, scenario: opts.repairScenario === 'clean' ? designerScenario(n, { designCost: 0.03 }) : opts.repairScenario }] : []),
+    { prompt: `design attempt ${n} of`, scenario: designerScenario(n, opts) },
     { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: `PV${n}`, scenario: pilotScenarios },
+    /* the fairness review reads the revised prompt (PV<n>); the golden answer of attempt n is graded by the grader */
+    { prompt: `You are reviewing a revised grader guideline for fairness[\\s\\S]*PV${n}`, scenario: { resultText: opts.fairness === undefined ? '{"unfair": []}' : opts.fairness, costUsd: 0.01 } },
+    { cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held, attempt ${n}`, scenario: { resultText: opts.goldenGrade === undefined ? gradeJson(opts.goldenScore === undefined ? 0.95 : opts.goldenScore) : opts.goldenGrade, costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } },
   ];
   scores.forEach((score, index) => {
     rules.push({ cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nANS-${n}-${index + 1}\\b`, scenario: { resultText: gradeJson(score), costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } });
@@ -180,7 +196,7 @@ async function makeWorld(t, options = {}) {
     root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs,
     onStage: (stage, info) => { stages.push(stage); if (options.onStage) options.onStage(stage, info, world); },
   });
-  const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines') };
+  const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines'), priv: id => path.join(root, 'private', 'pipelines', id) };
   world.body = (extra = {}) => ({ sourceDir: source, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS.slice(), ...extra });
   world.run = async (extra) => {
     const { id } = await pipeline.start(world.body(extra));
@@ -315,8 +331,10 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
     for (const secret of SECRETS) assert.ok(!text.includes(secret), `${name} holds ${secret}`);
   }
   assert.equal(fs.readFileSync(path.join(w.source, 'Facility_Terms.txt'), 'utf8'), FACILITY, 'the original is never modified');
-  assert.equal(fs.readFileSync(path.join(w.workRoot, id, 'original', 'Facility_Terms.txt'), 'utf8'), FACILITY, 'original/ keeps the downloaded file');
-  assert.equal(readTree(path.join(w.workRoot, id, 'work', 'filesystem'))['Facility_Terms.txt'].includes('Clause 4'), true);
+  assert.equal(fs.readFileSync(path.join(w.priv(id), 'original', 'Facility_Terms.txt'), 'utf8'), FACILITY, 'original/ keeps the downloaded file, inside the project\'s private folder');
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'out', 'edited', 'Facility_Terms.txt'), 'utf8'), /Clause 4/);
+  assert.equal(fs.existsSync(path.join(w.workRoot, id)), false, 'the working folder outside the project is removed when the pipeline ends');
+  assert.equal(fs.existsSync(path.join(w.workRoot, id, 'page.json')), false);
 
   /* what every pilot was told: only the designer's prompt, never the guideline or the golden answer */
   const pilots = pilotPrompts(w);
@@ -325,11 +343,13 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
     assert.ok(run.prompt.endsWith('PV1\n') || run.prompt.endsWith('PV1'), 'the pilot prompt is the designer prompt');
     for (const secret of SECRETS.filter(item => item !== 'PV1')) assert.ok(!run.prompt.includes(secret), `a pilot prompt holds ${secret}`);
   }
-  /* the classifier and the designer got their prompt on stdin, not on a command line */
+  /* the classifier, the designer and the fairness review got their prompt on stdin, not on a command line */
   const viaStdin = promptRuns(w).filter(run => run.via === 'stdin');
-  assert.equal(viaStdin.length, 2);
+  assert.equal(viaStdin.length, 3);
   assert.ok(viaStdin[0].prompt.startsWith(PREAMBLE));
   assert.ok(viaStdin[1].prompt.includes('You are the trap designer'));
+  assert.ok(viaStdin[2].prompt.startsWith('You are reviewing a revised grader guideline for fairness.'));
+  assert.ok(viaStdin[2].prompt.includes('DESIGNER-GUIDELINE-MARK') && viaStdin[2].prompt.includes('GUIDELINE-MARKER-7f3a'), 'the fairness review reads the revised and the original guideline');
   const argv = readJsonLines(w.argvLog).filter(args => args.includes('-p'));
   assert.ok(argv.every(args => args.includes('--max-budget-usd')), 'every call has its own spending cap');
   const designerArgs = argv.find(args => args[0] === '-p' && args.includes('--input-format') && args.includes('Bash,Read,Write,Edit,Glob,Grep'));
@@ -343,7 +363,10 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
 
   /* the grader: one call per answer, with the designer's guideline and the scoring scale, never the original guideline */
   const graders = promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader'));
-  assert.equal(graders.length, 7);
+  assert.equal(graders.length, 8, 'the golden answer of the design, and the 7 pilots');
+  assert.ok(graders[0].prompt.includes('Usable cash is 1,250 and the borrowing is held, attempt 1'), 'the first call grades the golden answer against the design\'s own guideline');
+  const graderArgv = readJsonLines(w.argvLog).filter(args => args[0] === '-p' && args[1].includes('You are a simulated grader'));
+  assert.ok(graderArgv.every(args => args[args.indexOf('--effort') + 1] === 'medium'), 'the grader runs at least at medium effort, whatever the pilots use');
   for (const run of graders) {
     assert.ok(run.prompt.includes('DESIGNER-GUIDELINE-MARK'));
     assert.ok(run.prompt.includes('Scoring scale for this rehearsal'));
@@ -351,10 +374,10 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
     assert.equal((run.prompt.match(/<<<ANSWER/g) || []).length, 1, 'one answer per call');
   }
 
-  /* the budget: classify .01 + design .05 + 7 pilots at .10 + 7 graders at .02 */
+  /* the budget: classify .01 + design .05 + golden answer check .02 + fairness .01 + 7 pilots at .10 + 7 graders at .02 */
   const kinds = view.ledger.reduce((sum, entry) => ({ ...sum, [entry.kind]: (sum[entry.kind] || 0) + 1 }), {});
-  assert.deepEqual(kinds, { classify: 1, design: 1, pilot: 7, grader: 7 });
-  assert.ok(Math.abs(view.spentUsd - (0.01 + 0.05 + 0.7 + 0.14)) < 1e-9, String(view.spentUsd));
+  assert.deepEqual(kinds, { classify: 1, design: 1, calibration: 1, fairness: 1, pilot: 7, grader: 7 });
+  assert.ok(Math.abs(view.spentUsd - (0.01 + 0.05 + 0.02 + 0.01 + 0.7 + 0.14)) < 1e-9, String(view.spentUsd));
   assert.equal(view.ledger.reduce((sum, entry) => sum + entry.costUsd, 0).toFixed(6), view.spentUsd.toFixed(6));
   assert.equal(view.remainingUsd, +(30 - view.spentUsd).toFixed(6));
   assert.ok(view.ledger.every(entry => entry.estimated === false));
@@ -364,7 +387,7 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
   assert.equal(rounds.length, 2);
   for (const row of rounds) {
     assert.equal(row.status, 'finished');
-    assert.equal(row.gafVisible, false);
+    assert.equal(row.gafVisible, true, 'the production solver sees the gaf folder, so the pilots do');
     assert.equal(row.config.maxBudgetUsd, 1);
     assert.equal(row.task, `Pipeline ${id}`);
   }
@@ -380,7 +403,7 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
   assert.equal(fs.readdirSync(path.join(w.root, 'private', 'pipelines', id)).some(name => name.endsWith('.tmp')), false);
   assert.ok(!fs.readFileSync(stateFile, 'utf8').includes(w.base), 'no absolute path in the state');
   assert.equal(fs.statSync(stateFile).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.join(w.workRoot, id)).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(w.priv(id)).mode & 0o777, 0o700);
 
   /* the list */
   const listed = await w.pipeline.list();
@@ -427,7 +450,7 @@ test('a failed screen sends the designer back with feedback, and the second desi
   assert.match(view.design.prompt, /PV2/);
 
   /* the second designer run got feedback.md (scores, verdicts, reasons, final answers) and its previous design */
-  const feedback = fs.readFileSync(path.join(w.workRoot, id, 'designer', 'feedback.md'), 'utf8');
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'designer', 'feedback.md'), 'utf8');
   assert.match(feedback, /Feedback on design attempt 1/);
   assert.match(feedback, /The screen did not pass/);
   assert.match(feedback, /score: 0\.80 \(at or above the bar, the pilot got through\)/);
@@ -436,7 +459,7 @@ test('a failed screen sends the designer back with feedback, and the second desi
   assert.match(feedback, /Synthetic grader reason for 0\.80/);
   assert.match(feedback, /ANS-1-1 Usable cash is 1,250\. Hold the borrowing\./);
   assert.match(feedback, /t1: Lender summary overstates cash/);
-  assert.match(fs.readFileSync(path.join(w.workRoot, id, 'designer', 'previous', 'prompt.txt'), 'utf8'), /PV1/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'designer', 'previous', 'prompt.txt'), 'utf8'), /PV1/);
   const designerPrompts = promptRuns(w).filter(run => run.prompt.includes('You are the trap designer'));
   assert.equal(designerPrompts.length, 2);
   assert.ok(designerPrompts[0].prompt.includes('This is design attempt 1 of 4.'));
@@ -497,8 +520,8 @@ test('the budget stops the pipeline before a stage whose worst case would not fi
   const { view } = await w.run({ capUsd: 1.1, pilotCapUsd: 0.5, designCapUsd: 0.5 });
   assert.equal(view.stage, 'budget');
   assert.equal(view.result.verdict, 'budget');
-  assert.match(view.message, /Stopped before the screen: USD 0\.06 spent, the step could cost up to USD 2\.00, and the cap is USD 1\.10/);
-  assert.ok(Math.abs(view.spentUsd - 0.06) < 1e-9);
+  assert.match(view.message, /Stopped before the screen: USD 0\.09 spent, the step could cost up to USD 3\.45 \(with 15% headroom\), and the cap is USD 1\.10/);
+  assert.ok(Math.abs(view.spentUsd - 0.09) < 1e-9);
   assert.deepEqual(w.stages, ['import', 'classify', 'design', 'budget']);
   assert.equal((await w.agents.listRounds()).length, 0, 'no round was created');
   assert.equal(pilotPrompts(w).length, 0);
@@ -508,11 +531,11 @@ test('the budget stops between stages: the screen ran and passed, the test would
   const w = await makeWorld(t);
   const { view } = await w.run({ capUsd: 4, pilotCapUsd: 0.5, designCapUsd: 0.5 });
   assert.equal(view.stage, 'budget');
-  assert.match(view.message, /Stopped before the test: USD 0\.30 spent, the step could cost up to USD 5\.00, and the cap is USD 4\.00/);
+  assert.match(view.message, /Stopped before the test: USD 0\.33 spent, the step could cost up to USD 8\.63 \(with 15% headroom\), and the cap is USD 4\.00/);
   assert.equal(view.attempts[0].screen.passed, true);
   assert.equal(view.attempts[0].test, null);
   assert.equal(pilotPrompts(w).length, 2);
-  assert.ok(Math.abs(view.spentUsd - (0.01 + 0.05 + 0.2 + 0.04)) < 1e-9, String(view.spentUsd));
+  assert.ok(Math.abs(view.spentUsd - (0.01 + 0.05 + 0.02 + 0.01 + 0.2 + 0.04)) < 1e-9, String(view.spentUsd));
   assert.equal(view.attempts[0].outcome, 'budget', 'the attempt was not judged: the budget ended it');
 });
 
@@ -520,7 +543,7 @@ test('a classifier that does not fit the cap is not started, and a cap too small
   const w = await makeWorld(t);
   const { view } = await w.run({ capUsd: 0.4 });
   assert.equal(view.stage, 'budget');
-  assert.match(view.message, /Stopped before the classifier: USD 0\.00 spent, the step could cost up to USD 0\.50, and the cap is USD 0\.40/);
+  assert.match(view.message, /Stopped before the classifier: USD 0\.00 spent, the step could cost up to USD 0\.57 \(with 15% headroom\), and the cap is USD 0\.40/);
   assert.equal(promptRuns(w).length, 0, 'no model was started');
 });
 
@@ -552,15 +575,36 @@ test('a DISCARDED pilot is replaced once, and the replacement counts', async t =
   assert.equal(screen.counted, 2);
   assert.equal(screen.belowBar, 2);
   assert.equal(screen.passed, true);
-  /* the test round had the same pilot 2 discarded and was replaced too: 4 of 5 counted below the bar */
+  /* the test round had the same pilot 2 discarded, but 4 of 5 were already below the bar: a replacement could not change the decision */
   const test = view.attempts[0].test;
-  assert.equal(test.replacementRound, true);
+  assert.equal(test.replacementRound, false);
+  assert.equal(test.replacementSkipped, true);
+  assert.equal(test.roundIds.length, 1);
+  assert.equal(test.counted, 4);
   assert.equal(test.passed, true);
   assert.equal(test.pilots.filter(pilot => pilot.audit.status === 'DISCARDED').length, 1);
+  assert.equal(screen.replacementSkipped, false);
   assert.equal(w.stages.filter(stage => stage === 'screen').length, 2, 'the screen stage shows once for the pilots and once for the replacement');
-  assert.equal(pilotPrompts(w).length, 2 + 1 + 5 + 1);
-  /* the discarded run's answer was never graded */
-  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader')).length, 1 + 1 + 4 + 1, 'the discarded answers were never graded');
+  assert.equal(pilotPrompts(w).length, 2 + 1 + 5);
+  /* the discarded run's answer was never graded: the golden answer of the design, 2 in the screen, 4 in the test */
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader')).length, 1 + 1 + 1 + 4, 'the discarded answers were never graded');
+});
+
+test('a replacement round that cannot change the decision is not run', async t => {
+  const discard = { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] };
+  /* attempt 1: pilot 1 gets through (0.9) and pilot 2 is discarded: even a perfect replacement gives 1 of 2, so the screen cannot pass */
+  const rules = [classifierRule(), ...attemptRules(1, [0.9, 0.2], { pilotExtra: [{}, discard] }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  const screen = view.attempts[0].screen;
+  assert.equal(screen.passed, false);
+  assert.equal(screen.replacementRound, false);
+  assert.equal(screen.replacementSkipped, true);
+  assert.equal(screen.roundIds.length, 1);
+  assert.equal(screen.pilots.length, 2);
+  assert.equal(view.attempts[0].outcome, 'screen-failed');
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[1].screen.replacementSkipped, false);
 });
 
 test('when the replacement is lost too the decision is made on what exists: a missing score counts against the design', async t => {
@@ -710,7 +754,7 @@ test('a task link: the loader is started with the link, the page is followed, th
   assert.deepEqual(view.import.toggle, { found: true, label: 'Show all files', flipped: true, filesBefore: 1, filesAfter: 3, learned: false });
   assert.deepEqual(view.import.page, { origin: 'https://tasks.example', path: '/review/atlas-4821' });
   assert.equal(view.import.fileCount, 3);
-  assert.equal(fs.readFileSync(path.join(w.workRoot, id, 'original', 'Cash_Facts.csv'), 'utf8'), CASH);
+  assert.equal(fs.readFileSync(path.join(w.priv(id), 'original', 'Cash_Facts.csv'), 'utf8'), CASH);
   /* the link, its query and its token are in no file the pipeline wrote and in no answer */
   const stored = fs.readFileSync(path.join(w.root, 'private', 'pipelines', id, 'state.json'), 'utf8');
   for (const text of [stored, JSON.stringify(view)]) {
@@ -816,7 +860,7 @@ test('without a link loader a link is refused and a folder still works; the link
 
 const GOLDEN_FILE = 'Usable cash,1250 GOLDEN-FILE-MARK\n';
 
-function withheldWorld(t, extra = {}) {
+async function withheldWorld(t, extra = {}) {
   const page = pageJson({ sections: pageJson().sections.slice(0, 2).concat([{ heading: 'Delivery notes', text: 'Delivery notes, nothing else.' }]) });
   const answer = {
     prompt: { section: 1 },
@@ -826,12 +870,16 @@ function withheldWorld(t, extra = {}) {
     taskFiles: ['Atlas_Supplement.txt'],
     other: [],
   };
-  return makeWorld(t, {
+  const w = await makeWorld(t, {
     page,
     files: { 'Borealis_Position.csv': GOLDEN_FILE, 'Grader_Notes.txt': 'Notes for the grader, synthetic.\n', 'Cash_Facts_Copy.csv': GOLDEN_FILE },
     rules: [classifierRule({ answer }), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], extra.attempt || {})],
     ...(extra.world || {}),
   });
+  /* the classifier calls two withheld files world files: the owner has said the pilots can do without them */
+  const run = w.run;
+  w.run = options => run({ acceptMissing: true, ...options });
+  return w;
 }
 
 test('SAFETY: a golden answer file with an ordinary name, a file the shared rule withholds and a byte-identical copy never reach the packet', async t => {
@@ -848,7 +896,7 @@ test('SAFETY: a golden answer file with an ordinary name, a file the shared rule
   assert.deepEqual(view.classification.worldFiles, ['Facility_Terms.txt', 'Cash_Facts.csv']);
   assert.deepEqual(view.import.facts, { world: 2, task: 1, withheld: 3, other: 0 });
   /* the packet, the pilot folders and the round the agent service made hold none of them */
-  const packet = Object.keys(readTree(path.join(w.workRoot, id, 'work', 'filesystem'))).sort();
+  const packet = ['Atlas_Supplement.txt', 'Cash_Facts.csv', 'Facility_Terms.txt', 'Meridian_Lender_Summary.txt'];
   assert.deepEqual(packet, ['Atlas_Supplement.txt', 'Cash_Facts.csv', 'Facility_Terms.txt', 'Meridian_Lender_Summary.txt']);
   const given = pilotFiles(w);
   assert.equal(Object.keys(given).length > 0, true);
@@ -860,7 +908,7 @@ test('SAFETY: a golden answer file with an ordinary name, a file the shared rule
   const detail = await w.agents.getRound(round.id);
   assert.deepEqual(detail.packet.files.map(file => file.path).sort(), packet);
   /* the designer saw the golden answer's text in its own folder, and nothing of the withheld files in task/ */
-  const designer = path.join(w.workRoot, id, 'designer');
+  const designer = path.join(w.priv(id), 'designer');
   assert.match(fs.readFileSync(path.join(designer, 'golden-answer.md'), 'utf8'), /GOLDEN-FILE-MARK/);
   assert.deepEqual(Object.keys(readTree(path.join(designer, 'task'))).sort(), ['Atlas_Supplement.txt', 'Cash_Facts.csv', 'Facility_Terms.txt']);
   /* every pilot prompt and grader prompt */
@@ -877,12 +925,18 @@ test('SAFETY: a designer that copies the golden answer or a passage of the guide
   ];
   for (const [label, extraFiles, expected] of cases) {
     const w = await withheldWorld(t, { attempt: { design: { extraFiles } } });
-    const { view } = await w.run();
-    assert.equal(view.stage, 'failed', label);
-    assert.match(view.message, expected, label);
+    const { id, view } = await w.run();
+    /* the designer got one repair turn with the exact problem, delivered the same files, and the attempt was rejected */
+    assert.equal(view.attempts[0].outcome, 'rejected', label);
+    assert.equal(view.attempts[0].repaired, true, label);
+    assert.match(view.attempts[0].rejection.reasons[0], expected, label);
     assert.equal(view.design, null, label);
+    assert.equal(view.stage, 'failed', label);
     assert.equal((await w.agents.listRounds()).length, 0, `${label}: no round was made`);
     assert.equal(pilotPrompts(w).length, 0, label);
+    assert.ok(promptRuns(w).some(run => run.prompt.includes('THE PROBLEM, exactly')), `${label}: the repair turn was told`);
+    /* the unusable file never got into the pilots' packet or its folder */
+    assert.equal(fs.existsSync(path.join(w.workRoot, id)), false, label);
   }
 });
 
@@ -968,7 +1022,8 @@ test('the leak check: windows of a withheld text are found in a file that holds 
   assert.ok(containsLeak(`Intro.\n${text.slice(30, 330).toUpperCase().replace(/ /g, '  \n')}\nOutro.`, windows));
   assert.equal(containsLeak('Atlas facility terms. Available credit is not cash received.', windows), false);
   assert.deepEqual(leakWindows('too short'), []);
-  assert.equal(leakWindows('x'.repeat(100)).length, 1, 'a short text is one window');
+  assert.equal(leakWindows('x'.repeat(70)).length, 1, 'a text of up to 80 characters is one window');
+  assert.equal(leakWindows('x '.repeat(100)).length, 5, 'longer texts: a window of 80 characters every 30, and the last one');
   assert.equal(containsLeak('anything', []), false);
 });
 
@@ -1244,38 +1299,91 @@ test('the designer prompt, the feedback and the catalog', () => {
 
 /* ====================================================================== the designer in a run */
 
-test('a designer whose tool calls leave its folder is DISCARDED: its work is not used and no pilot runs', async t => {
-  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3], { designerToolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }, { name: 'Bash', input: { command: 'curl http://127.0.0.1:9/x' }, result: '' }] })];
-  const w = await makeWorld(t, { rules });
+test('a designer whose tool calls leave its folder is DISCARDED, gets one repair turn with the exact problem, and its repaired work is used', async t => {
+  const violations = [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }, { name: 'Bash', input: { command: 'curl http://127.0.0.1:9/x' }, result: '' }];
+  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designerToolUses: violations, repairScenario: 'clean' })] });
   const { view } = await w.run();
-  assert.equal(view.stage, 'failed');
-  assert.match(view.message, /The trap designer was DISCARDED by the audit \(2 violations: abs, loopback\)\. Its work was not used\./);
-  assert.equal(view.design, null);
-  assert.deepEqual(view.attempts[0].audit, { status: 'DISCARDED', violationCount: 2 });
-  assert.equal(view.attempts[0].outcome, 'failed');
-  assert.equal((await w.agents.listRounds()).length, 0);
-  assert.ok(view.ledger.some(entry => entry.kind === 'design' && entry.costUsd === 0.05), 'the designer\'s cost is counted');
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].repaired, true);
+  assert.equal(view.design.repaired, true);
+  assert.equal(view.attempts[0].audit.status, 'CLEAN', 'the repair turn was audited and cleared');
+  const repairs = view.ledger.filter(entry => entry.kind === 'design-repair');
+  assert.deepEqual(repairs.map(entry => entry.costUsd), [0.03], 'the repair turn is in the ledger');
+  const prompts = promptRuns(w).filter(run => run.prompt.includes('You are the trap designer'));
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].prompt.includes('THE PROBLEM, exactly:'));
+  assert.ok(prompts[1].prompt.includes('The trap designer was DISCARDED by the audit (2 violations: abs, loopback). Its work was not used.'));
+  assert.ok(prompts[1].prompt.includes('repair turn for design attempt 1 of 4'));
   assert.ok(!JSON.stringify(view).includes('/etc/hostname'), 'the violation paths are not shown');
 });
 
-test('a designer that does not finish, or hands back an invalid design, fails the stage with a message that names no model text', async t => {
+test('a designer that is still wrong after its repair turn is rejected for this attempt and the pipeline goes on to a redesign', async t => {
+  const violations = [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }, { name: 'Bash', input: { command: 'curl http://127.0.0.1:9/x' }, result: '' }];
+  const bothBad = { designerToolUses: violations, repairScenario: designerScenario(1, { designerToolUses: violations, designCost: 0.03 }) };
+  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2], bothBad), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.redesigns, 1);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].repaired, true);
+  assert.deepEqual(view.attempts[0].rejection, { kind: 'design', reasons: ['The trap designer was DISCARDED by the audit (2 violations: abs, loopback). Its work was not used.'] });
+  assert.equal(view.attempts[0].screen, null, 'no pilot ran for it');
+  assert.equal(view.attempts[1].outcome, 'passed');
+  assert.deepEqual(w.stages.slice(0, 6), ['import', 'classify', 'design', 'redesign', 'design', 'screen']);
+  assert.equal(pilotPrompts(w).filter(run => run.prompt.includes('PV1')).length, 0);
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'designer', 'feedback.md'), 'utf8');
+  assert.match(feedback, /# Feedback on design attempt 1/);
+  assert.match(feedback, /This design was rejected before any pilot ran/);
+  assert.match(feedback, /The trap designer was DISCARDED by the audit/);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'design-repair').length, 1);
+  assert.equal(view.design.attempt, 2);
+});
+
+test('a designer that does not finish, or hands back an invalid design, is told exactly what is wrong and repairs it', async t => {
   const cases = [
     [{ designerExtra: { exitCode: 1 } }, /The trap designer did not finish \(exit-code\)/],
-    [{ designerExtra: { budgetExhausted: true } }, /The trap designer did not finish \(budget\)/],
+    [{ designerExtra: { budgetExhausted: true } }, /The trap designer did not finish \(budget\)[\s\S]*reached its spending cap/],
     [{ designerExtra: { noResult: true } }, /The trap designer did not finish \(no-result\)/],
     [{ design: { traps: { traps: [] } } }, /traps\.json needs 1 to 3 traps/],
     [{ design: { traps: { newFiles: ['Ghost.txt'] } } }, /lists the new file Ghost\.txt/],
   ];
   for (const [opts, expected] of cases) {
-    const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3], opts)] });
+    const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { ...opts, repairScenario: 'clean' })] });
     const { view } = await w.run();
-    assert.equal(view.stage, 'failed', JSON.stringify(opts));
-    assert.match(view.message, expected);
-    assert.equal(view.design, null);
-    assert.equal(view.attempts[0].outcome, 'failed');
-    assert.equal((await w.agents.listRounds()).length, 0, 'no round for a design that was not accepted');
-    assert.ok(view.ledger.some(entry => entry.kind === 'design'));
+    assert.equal(view.stage, 'done', `${JSON.stringify(opts)}: ${view.message}`);
+    assert.equal(view.attempts[0].repaired, true);
+    const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
+    assert.ok(repair, JSON.stringify(opts));
+    assert.match(repair.prompt, expected);
+    assert.ok(view.ledger.some(entry => entry.kind === 'design') && view.ledger.some(entry => entry.kind === 'design-repair'));
   }
+});
+
+test('three redesigns that are all rejected end the pipeline as failed: nothing was run, and there is no design to export', async t => {
+  const broken = { design: { traps: { traps: [] } } };
+  const rules = [classifierRule(), ...[1, 2, 3, 4].flatMap(n => attemptRules(n, [0.2], { ...broken, repairScenario: designerScenario(n, broken) }))];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'failed');
+  assert.equal(view.redesigns, 3);
+  assert.equal(view.attempts.length, 4);
+  assert.ok(view.attempts.every(attempt => attempt.outcome === 'rejected' && attempt.repaired && attempt.rejection.kind === 'design'));
+  assert.match(view.message, /^Stopped after 3 redesigns: the design of attempt 4 was rejected before any pilot ran \(traps\.json needs 1 to 3 traps\)\. Nothing from it was run\./);
+  assert.equal((await w.agents.listRounds()).length, 0);
+  assert.equal(view.design, null);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'design-repair').length, 4);
+  await assert.rejects(w.pipeline.export(id), error => error.status === 409 && /made no design/.test(error.message));
+});
+
+test('junk files in the designer\'s folders (system litter, office lock files) are ignored, not an error', async t => {
+  const extraFiles = [{ path: 'out/new/.DS_Store', content: 'x' }, { path: 'out/new/~$Meridian_Lender_Summary.txt', content: 'lock' }, { path: 'out/edited/Thumbs.db', content: 'x' }, { path: 'out/new/.~lock.Meridian_Lender_Summary.txt#', content: 'x' }];
+  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { extraFiles } })] });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].repaired, false);
+  assert.deepEqual(view.design.newFiles.map(file => file.name), ['Meridian_Lender_Summary.txt']);
+  const names = Object.keys(pilotFiles(w)).map(key => key.split('/').slice(1).join('/'));
+  assert.ok(names.every(name => !/DS_Store|~\$|lock|Thumbs/.test(name)), names.join(', '));
 });
 
 test('the designer is held to the pilot environment: a private config and temp folder in its own folder, no memory files', async t => {
@@ -1287,8 +1395,8 @@ test('the designer is held to the pilot environment: a private config and temp f
   const runs = readJsonLines(envLog);
   const designer = runs.find(run => run.cwd.endsWith(`${id}/designer`) || run.cwd.endsWith('/designer'));
   assert.ok(designer, JSON.stringify(runs.map(run => run.cwd)));
-  assert.equal(fs.realpathSync(designer.TMPDIR), fs.realpathSync(path.join(w.workRoot, id, 'designer', '.tmp')));
-  assert.equal(fs.realpathSync(path.dirname(designer.CLAUDE_CONFIG_DIR)), fs.realpathSync(path.join(w.workRoot, id, 'designer', '.tmp')));
+  assert.equal(fs.realpathSync(designer.TMPDIR), fs.realpathSync(path.join(w.priv(id), 'designer', '.tmp')));
+  assert.equal(fs.realpathSync(path.dirname(designer.CLAUDE_CONFIG_DIR)), fs.realpathSync(path.join(w.priv(id), 'designer', '.tmp')));
   assert.equal(designer.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
   assert.equal(designer.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
   for (const run of runs) assert.ok(run.cwd.startsWith(fs.realpathSync(w.base)) || run.cwd.startsWith(w.base), 'every run is in a folder of this world');
@@ -1417,7 +1525,7 @@ test('the export is a private zip of the final design, with the score table, and
   assert.match(await text('README_PRIVATE.txt'), /PRIVATE pipeline export: Atlas 4821/);
   assert.match(await text('README_PRIVATE.txt'), /Never put it in a pilot packet/);
   assert.match(await text('README_PRIVATE.txt'), /Result: done\. The test passed/);
-  assert.match(await text('README_PRIVATE.txt'), /Spent: USD 0\.90 of a cap of USD 30\.00/);
+  assert.match(await text('README_PRIVATE.txt'), new RegExp(`Spent: USD ${view.spentUsd.toFixed(2)} of a cap of USD 30\\.00`));
   assert.match(await text('prompt.txt'), /PV1/);
   assert.match(await text('guideline.md'), /DESIGNER-GUIDELINE-MARK/);
   assert.match(await text('golden-answer.md'), /DESIGNER-GOLDEN-MARK/);
@@ -1554,12 +1662,20 @@ test('REDACTION: while a round runs every pipeline answer withholds the prompt, 
   for (const key of ['prompt', 'guideline', 'goldenAnswer', 'gold', 'fingerprints']) assert.deepEqual(view.design[key], { withheld: true }, key);
   assert.equal(view.design.traps.length, 2, 'the traps are listed');
   for (const trap of view.design.traps) {
-    assert.ok(trap.id && trap.title && Array.isArray(trap.files), 'id, title and files stay');
-    for (const key of ['mechanism', 'decoy', 'correctValue', 'wrongValue']) assert.deepEqual(trap[key], { withheld: true }, key);
+    assert.ok(trap.id, 'the id stays');
+    for (const key of ['title', 'files', 'mechanism', 'decoy', 'correctValue', 'wrongValue']) assert.deepEqual(trap[key], { withheld: true }, key);
   }
-  assert.deepEqual(view.design.newFiles.map(file => file.name), ['Meridian_Lender_Summary.txt'], 'the names of new files stay');
+  assert.deepEqual(view.attempts[0].traps.map(trap => trap.id), ['t1', 't2'], 'the ids and the count of the traps of an attempt stay');
+  assert.ok(view.attempts[0].traps.every(trap => trap.title.withheld === true));
+  assert.deepEqual(view.design.newFiles.map(file => file.name), ['Meridian_Lender_Summary.txt'], 'the names of new files stay: they are in the pilots\' folder');
+  assert.deepEqual(view.design.editedFiles[0].name, { withheld: true }, 'which file was edited says where the trap is');
   assert.deepEqual(view.design.editedFiles[0].reason, { withheld: true }, 'the reason of an edit says how the trap works');
-  assert.equal(view.design.editedFiles[0].name, 'Facility_Terms.txt');
+  assert.deepEqual(view.design.editedFiles[0].diff, { withheld: true });
+  assert.equal(view.design.editedFiles.length, 1);
+  for (const key of ['calibration', 'fairness', 'guidelineDiff', 'rubricChanges', 'notes']) assert.deepEqual(view.design[key], { withheld: true }, key);
+  assert.ok(view.design.packet.files.length === 4, 'the packet\'s file names stay');
+  assert.deepEqual(view.attempts[0].calibration, { withheld: true });
+  assert.deepEqual(view.attempts[0].fairness, { withheld: true });
   for (const secret of SECRETS) assert.ok(!during.text.includes(secret), `the answer holds ${secret}`);
   /* the other routes that carry the state */
   const list = await w.get('/api/pipeline');
@@ -1596,9 +1712,11 @@ test('REDACTION: redactPipelineData withholds by name wherever the name appears,
     design: {
       attempt: 2, prompt: 'P', guideline: 'G', goldenAnswer: 'A', gold: { decision: 'hold' }, fingerprints: [{ id: 'f' }],
       traps: [{ id: 't', title: 'Title', files: ['a.csv'], mechanism: 'm', decoy: 'd', correctValue: 'c', wrongValue: 'w' }],
-      newFiles: [{ name: 'n.txt', bytes: 3 }], editedFiles: [{ name: 'e.txt', reason: 'because', bytes: 4 }],
+      newFiles: [{ name: 'n.txt', bytes: 3 }], editedFiles: [{ name: 'e.txt', reason: 'because', bytes: 4, diff: { lines: [] } }],
+      calibration: { score: 0.95 }, fairness: { status: 'ok' }, guidelineDiff: { lines: [] }, rubricChanges: [{ change: 'c', reason: 'r' }], notes: ['x.txt is listed as edited'],
+      packet: { fileCount: 1, files: [{ name: 'a.csv', bytes: 1, sha256: 'ab' }] },
     },
-    attempts: [{ n: 1, screen: { pilots: [{ n: 1, score: 0.3, reason: 'quoted guideline text', verdict: 'x', answer: 'whole answer' }] }, extra: { deep: { gold: 1 } } }],
+    attempts: [{ n: 1, traps: [{ id: 't', title: 'Title' }], screen: { pilots: [{ n: 1, score: 0.3, reason: 'quoted guideline text', verdict: 'x', answer: 'whole answer' }] }, extra: { deep: { gold: 1 } } }],
     future: { correctValue: 'x', summarySha256: 'abc', approvalSummary: { text: 't' } },
   };
   const before = JSON.stringify(view);
@@ -1611,8 +1729,11 @@ test('REDACTION: redactPipelineData withholds by name wherever the name appears,
   assert.deepEqual(out.design.goldenAnswer, W);
   assert.deepEqual(out.design.gold, W);
   assert.deepEqual(out.design.fingerprints, W);
-  assert.deepEqual(out.design.traps[0], { id: 't', title: 'Title', files: ['a.csv'], mechanism: W, decoy: W, correctValue: W, wrongValue: W });
-  assert.deepEqual(out.design.editedFiles, [{ name: 'e.txt', reason: W, bytes: 4 }]);
+  assert.deepEqual(out.design.traps[0], { id: 't', title: W, files: W, mechanism: W, decoy: W, correctValue: W, wrongValue: W });
+  assert.deepEqual(out.design.editedFiles, [{ name: W, reason: W, bytes: 4, diff: W }]);
+  assert.deepEqual([out.design.calibration, out.design.fairness, out.design.guidelineDiff, out.design.rubricChanges, out.design.notes], [W, W, W, W, W]);
+  assert.deepEqual(out.design.packet, view.design.packet, 'the packet\'s files are the pilots\' own names');
+  assert.deepEqual(out.attempts[0].traps, [{ id: 't', title: W }]);
   assert.deepEqual(out.design.newFiles, [{ name: 'n.txt', bytes: 3 }]);
   assert.deepEqual(out.attempts[0].screen.pilots[0], { n: 1, score: 0.3, reason: W, verdict: 'x', answer: W });
   assert.deepEqual(out.attempts[0].extra.deep.gold, W, 'a private name is withheld at any depth');
@@ -1689,7 +1810,7 @@ test('a folder is imported file by file: no links, no hidden files, page.json is
   assert.deepEqual(view.import.skipped.map(item => item.name).sort(), ['.DS_Store', '.hidden.txt', 'Link.txt']);
   assert.equal(view.import.files.find(file => file.name === 'Cash_Facts.csv').group, 'World files', 'the group comes from page.json');
   assert.equal(view.import.files.find(file => file.name === 'sub/Meridian_Ledger.csv').group, '');
-  assert.ok(!fs.existsSync(path.join(w.workRoot, id, 'original', 'page.json')), 'page.json is the page, not a task file');
+  assert.ok(!fs.existsSync(path.join(w.priv(id), 'original', 'page.json')), 'page.json is the page, not a task file');
   assert.equal(view.import.files[1].sha256, sha(CASH));
 });
 
@@ -1763,8 +1884,9 @@ test('the working folder is outside the project, private, and not a link', async
   const { id } = await loose.pipeline.start(loose.body({ capUsd: 0.4 }));
   await loose.pipeline.whenDone(id);
   assert.equal(fs.statSync(loose.workRoot).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(path.join(loose.workRoot, id)).mode & 0o777, 0o700);
-  for (const sub of ['original', 'designer', 'work', 'runs']) assert.equal(fs.statSync(path.join(loose.workRoot, id, sub)).mode & 0o777, 0o700, sub);
+  assert.equal(fs.statSync(loose.priv(id)).mode & 0o777, 0o700);
+  for (const sub of ['original', 'runs']) assert.equal(fs.statSync(path.join(loose.priv(id), sub)).mode & 0o777, 0o700, sub);
+  assert.equal(fs.existsSync(path.join(loose.workRoot, id)), false, 'removed when the pipeline ended');
   /* a temporary folder inside the project is refused */
   const inside = await makeWorld(t);
   const insideService = createPipelineService({ root: inside.root, agents: inside.agents, claudeBin: STUB, env: inside.env, tmpRoot: path.join(inside.root, 'tmp-inside') });
@@ -1776,15 +1898,16 @@ test('the working folder is outside the project, private, and not a link', async
 
 test('Stop while the simulated grader is running cancels that call and starts no other', async t => {
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3])];
-  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-') rule.scenario = { ...rule.scenario, delayMs: 60000 };
+  /* the grader of a pilot's answer hangs; the check of the golden answer, before any pilot, does not */
+  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-' && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
   const w = await makeWorld(t, { rules });
   const { id } = await w.pipeline.start(w.body());
-  await waitFor(() => promptRuns(w).some(run => run.prompt.includes('You are a simulated grader')), { label: 'the grader to start' });
+  await waitFor(() => promptRuns(w).some(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('<<<ANSWER\nANS-1-')), { label: 'the grader of a pilot answer to start' });
   const started = Date.now();
   const view = await w.pipeline.stop(id);
   assert.ok(Date.now() - started < 15000);
   assert.equal(view.stage, 'stopped');
-  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader')).length, 1, 'the second answer was never sent to the grader');
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('<<<ANSWER\nANS-1-')).length, 1, 'the second answer was never sent to the grader');
   assert.equal((await w.agents.listRounds())[0].status, 'finished', 'the pilots had finished');
 });
 
@@ -1855,7 +1978,7 @@ test('Stop pressed as the designer is about to start, and as the pilots are abou
     assert.ok(Date.now() - started < 15000, `${stage}: stopped in ${Date.now() - started} ms`);
     assert.equal(promptRuns(w).filter(ran).length, 0, `${stage}: it never ran`);
     const modelSpawns = w.spawns.filter(args => args.includes('-p'));
-    assert.equal(modelSpawns.length, stage === 'design' ? 1 : 2, `${stage}: only the earlier steps spawned a model process (the classifier${stage === 'design' ? '' : ' and the designer'})`);
+    assert.equal(modelSpawns.length, stage === 'design' ? 1 : 4, `${stage}: only the earlier steps spawned a model process (the classifier${stage === 'design' ? '' : ', the designer, the check of the golden answer and the fairness review'})`);
     for (const round of await w.agents.listRounds()) assert.equal(round.status, 'cancelled', `${stage}: a round that was made is cancelled`);
     assert.equal(w.stages.at(-1), 'stopped');
   }
@@ -1874,12 +1997,632 @@ test('Stop pressed while the loader is still starting cancels the load as soon a
 
 test('Stop pressed as the simulated grader is about to start is honoured within a moment, not at the grader\'s time limit', async t => {
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3])];
-  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-') rule.scenario = { ...rule.scenario, delayMs: 60000 };
+  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-' && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
   const w = await makeWorld(t, { rules, onStage: (name, info, world) => { if (name === 'grade-screen') setImmediate(() => world.pipeline.stop(info.id).catch(() => {})); } });
   const { id } = await w.pipeline.start(w.body());
   const started = Date.now();
   const view = await w.pipeline.whenDone(id);
   assert.equal(view.stage, 'stopped');
   assert.ok(Date.now() - started < 20000, `stopped in ${Date.now() - started} ms`);
-  assert.ok(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader')).length <= 1, 'no second grader call');
+  assert.ok(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('<<<ANSWER\nANS-1-')).length <= 1, 'no second pilot answer was graded');
+});
+
+/* ====================================================================== the page says what a file is, whatever the model says */
+
+const encoder = new TextEncoder();
+const xmlEscape = text => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/* A word-processing file with one paragraph per string, and a spreadsheet with one row per array: zips of XML, as the real ones are. */
+const docxFile = paragraphs => Buffer.from(packageEngine.writeZip([
+  { name: '[Content_Types].xml', bytes: encoder.encode('<Types/>') },
+  { name: 'word/document.xml', bytes: encoder.encode(`<w:document><w:body>${paragraphs.map(text => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`).join('')}</w:body></w:document>`) },
+]));
+const xlsxFile = rows => {
+  const strings = [];
+  const cell = (value, column, row) => {
+    const ref = `${'ABCDEFGH'[column]}${row}`;
+    if (typeof value === 'number') return `<c r="${ref}"><v>${value}</v></c>`;
+    strings.push(value);
+    return `<c r="${ref}" t="s"><v>${strings.length - 1}</v></c>`;
+  };
+  const sheet = `<worksheet><sheetData>${rows.map((row, r) => `<row r="${r + 1}">${row.map((value, c) => cell(value, c, r + 1)).join('')}</row>`).join('')}</sheetData></worksheet>`;
+  return Buffer.from(packageEngine.writeZip([
+    { name: '[Content_Types].xml', bytes: encoder.encode('<Types/>') },
+    { name: 'xl/sharedStrings.xml', bytes: encoder.encode(`<sst>${strings.map(text => `<si><t>${xmlEscape(text)}</t></si>`).join('')}</sst>`) },
+    { name: 'xl/worksheets/sheet1.xml', bytes: encoder.encode(sheet) },
+  ]));
+};
+
+const labelledPage = () => pageJson({
+  fileList: [
+    { name: 'Facility_Terms.txt', group: 'World files', label: 'Facility terms' },
+    { name: 'Cash_Facts.csv', group: 'World files', label: 'Cash facts' },
+    { name: 'Atlas_Supplement.txt', group: 'Task files', label: 'Supplement' },
+    { name: 'Borealis_Position.csv', group: 'Response files', label: 'Golden answer' },
+  ],
+});
+const LABELLED = { 'Borealis_Position.csv': 'Usable cash,1250 LABELLED-GOLDEN-MARK\n' };
+const answerWithLabelled = over => ({ ...CLASSIFICATION, worldFiles: [...CLASSIFICATION.worldFiles, 'Borealis_Position.csv'], ...over });
+
+test('SAFETY: a file the page labels "Golden answer" never reaches a pilot, whatever the model called it', async t => {
+  const w = await makeWorld(t, { page: labelledPage(), files: LABELLED, rules: [classifierRule({ answer: answerWithLabelled() }), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  /* it is a world file for the model: the pipeline stops before any designer, naming the file, unless the owner accepts the loss */
+  const stopped = (await w.run()).view;
+  assert.equal(stopped.stage, 'failed');
+  assert.match(stopped.message, /^1 file the classifier called world or task files is withheld, so the pilots would not get it: Borealis_Position\.csv\. If the pilots can do without it, start again with acceptMissing\./);
+  assert.deepEqual(stopped.classification.warnings, [{ name: 'Borealis_Position.csv', why: 'its name, group or label names an answer or a solution ("Response files")' }]);
+  assert.deepEqual(stopped.classification.withheld, [{ name: 'Borealis_Position.csv', why: 'its name, group or label names an answer or a solution ("Response files")' }]);
+  assert.ok(!stopped.classification.worldFiles.includes('Borealis_Position.csv'));
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are the trap designer')).length, 0, 'no designer was paid');
+  /* accepted: the run goes on, and the file is in no pilot's folder and no prompt */
+  const accepted = (await w.run({ acceptMissing: true })).view;
+  assert.equal(accepted.stage, 'done', accepted.message);
+  assert.equal(accepted.config.acceptMissing, true);
+  for (const [key, text] of Object.entries(pilotFiles(w))) {
+    assert.ok(!key.includes('Borealis_Position'), key);
+    assert.ok(!text.includes('LABELLED-GOLDEN-MARK'), key);
+  }
+  assert.equal(Object.keys(pilotFiles(w)).length > 0, true);
+  for (const run of promptRuns(w).filter(item => item.prompt.startsWith('The task materials'))) assert.ok(!run.prompt.includes('LABELLED-GOLDEN-MARK'));
+});
+
+test('SAFETY: with no golden answer named, a file the page labels as one stops the run before anything is paid for', async t => {
+  const w = await makeWorld(t, { page: labelledPage(), files: LABELLED, rules: [classifierRule({ answer: answerWithLabelled({ goldenAnswer: null }) })] });
+  const { view } = await w.run({ acceptMissing: true });
+  assert.equal(view.stage, 'failed');
+  assert.match(view.message, /^The page has a file that looks like the golden answer \(Borealis_Position\.csv\) but none was identified as the golden answer\. Nothing was started\./);
+  assert.deepEqual(view.classification.goldenSuspects, ['Borealis_Position.csv']);
+  assert.equal(promptRuns(w).length, 1, 'only the classifier ran');
+});
+
+test('SAFETY: a file that holds a passage of the guideline or the golden answer is withheld, in plain text and inside a document or a spreadsheet', async t => {
+  const files = {
+    'Notes_Archive.txt': `Archive notes.\n${GOLDEN}\nMore notes.\n`,
+    'Draft_Pack.docx': docxFile(['Draft memo.', GUIDELINE, 'End.']),
+    'Ledger_Extract.xlsx': xlsxFile([['Usable cash is 1,250.', 'Hold the borrowing.', 'GOLDEN-MARKER-91bc'], ['Opening cash', 100]]),
+    'Atlas_Background.docx': docxFile(['Atlas background pack.', 'Nothing of the grading here.']),
+    'Rates_Table.xlsx': xlsxFile([['Rate', 'Value'], ['Base', 5]]),
+    'Scan_Copy.pdf': Buffer.from('%PDF-1.4 synthetic'),
+  };
+  const answer = { ...CLASSIFICATION, worldFiles: [...CLASSIFICATION.worldFiles, ...Object.keys(files)] };
+  const w = await makeWorld(t, { files, rules: [classifierRule({ answer }), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { view } = await w.run({ acceptMissing: true });
+  assert.equal(view.stage, 'done', view.message);
+  const reasons = Object.fromEntries(view.classification.withheld.map(item => [item.name, item.why]));
+  assert.deepEqual(Object.keys(reasons).sort(), ['Draft_Pack.docx', 'Ledger_Extract.xlsx', 'Notes_Archive.txt']);
+  for (const why of Object.values(reasons)) assert.equal(why, 'it holds a long passage of the guideline or the golden answer');
+  assert.deepEqual(view.classification.worldFiles.sort(), ['Atlas_Background.docx', 'Cash_Facts.csv', 'Facility_Terms.txt', 'Rates_Table.xlsx', 'Scan_Copy.pdf']);
+  assert.deepEqual(view.classification.unscanned, ['Scan_Copy.pdf'], 'a file whose text cannot be read is said to be unscanned');
+  const given = new Set(Object.keys(pilotFiles(w)).map(key => key.split('/').slice(1).join('/')));
+  for (const name of ['Notes_Archive.txt', 'Draft_Pack.docx', 'Ledger_Extract.xlsx']) assert.ok(!given.has(name), name);
+  for (const name of ['Atlas_Background.docx', 'Rates_Table.xlsx', 'Scan_Copy.pdf']) assert.ok(given.has(name), name);
+});
+
+test('the text of a spreadsheet, a document and a slide file is read without running anything; a text file is read as it is', async t => {
+  const { extractText, textHoldsWindows } = require('../backend/pipeline/extract.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-extract-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  put(dir, 'a.docx', docxFile(['First &amp; second', 'Tab\there']));
+  put(dir, 'b.xlsx', xlsxFile([['Label', 'Value'], ['Cash', 1250]]));
+  put(dir, 'c.txt', 'plain text\n');
+  put(dir, 'd.pdf', '%PDF');
+  put(dir, 'e.xlsx', 'not a zip');
+  assert.equal(await extractText(path.join(dir, 'a.docx')), 'First &amp; second\nTab\there\n'.replace('&amp;amp;', '&amp;'));
+  assert.equal(await extractText(path.join(dir, 'b.xlsx')), 'Label Value\nCash 1250');
+  assert.equal(await extractText(path.join(dir, 'c.txt')), 'plain text\n');
+  assert.equal(await extractText(path.join(dir, 'd.pdf')), null);
+  assert.equal(await extractText(path.join(dir, 'e.xlsx')), null, 'a damaged zip has no text and is not an error');
+  assert.equal(await extractText(path.join(dir, 'missing.txt')), null);
+  /* a large plain file is scanned in chunks; a passage across a chunk boundary is found */
+  const windows = leakWindows(GOLDEN);
+  const filler = 'filler words about nothing in particular. '.repeat(1024 * 30);
+  put(dir, 'big.csv', `${filler}${GOLDEN}${filler}`);
+  assert.equal(await textHoldsWindows(path.join(dir, 'big.csv'), windows), true);
+  put(dir, 'big2.csv', filler);
+  assert.equal(await textHoldsWindows(path.join(dir, 'big2.csv'), windows), false);
+  assert.equal(await textHoldsWindows(path.join(dir, 'b.xlsx'), windows), null, 'not a plain text file');
+  assert.equal(await textHoldsWindows(path.join(dir, 'big.csv'), windows, () => true), null, 'stopped');
+});
+
+test('the packet is checked against the agent service\'s limits right after the classification, before a designer is paid', async t => {
+  const many = Object.fromEntries(Array.from({ length: 150 }, (_, index) => [`Atlas_Record_${index}.txt`, `record ${index}\n`]));
+  const w = await makeWorld(t, { files: many, rules: [classifierRule({ scenario: { resultText: 'no answer' } })] });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'failed');
+  assert.match(view.message, /^The pilot packet would hold 153 files; the limit is 150\. Take files out of the task, then start again\./);
+  assert.equal(promptRuns(w).length, 1, 'only the classifier ran');
+  /* too many bytes (a sparse file: nothing is written to disk) */
+  const big = await makeWorld(t, { rules: [classifierRule({ scenario: { resultText: 'no answer' } })] });
+  fs.closeSync(fs.openSync(path.join(big.source, 'Big_Ledger.csv'), 'w'));
+  fs.truncateSync(path.join(big.source, 'Big_Ledger.csv'), 101 * 1024 * 1024);
+  const bigRun = (await big.run()).view;
+  assert.equal(bigRun.stage, 'failed');
+  assert.match(bigRun.message, /^The pilot packet would be 10[12] MB; the limit is 100 MB\./);
+  assert.equal(promptRuns(big).length, 1);
+  /* a file nested too deep for the packet */
+  assert.equal(C.LIMITS.depth, 4);
+});
+
+test('a runtime that cannot be found stops start() before a link is opened', async t => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-nobin-'));
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true }));
+  const base = path.join(outer, 'project');
+  fs.mkdirSync(path.join(base, 'private'), { recursive: true });
+  fs.mkdirSync(path.join(outer, 'source'));
+  fs.writeFileSync(path.join(outer, 'source', 'Facility_Terms.txt'), FACILITY);
+  const agents = createAgentService({ root: base, claudeBin: path.join(base, 'no-such-claude'), env: cleanEnv(), tmpRoot: outer });
+  const loader = fakeLoader(base);
+  const service = createPipelineService({ root: base, agents, links: loader, tmpRoot: path.join(outer, 'tmp'), env: cleanEnv() });
+  await assert.rejects(service.start({ url: LINK, acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
+  assert.deepEqual(loader.calls.start, [], 'the link loader (Chrome) was never started');
+  assert.equal(service.busy(), false, 'the place is free again');
+  await assert.rejects(service.start({ sourceDir: path.join(outer, 'source'), acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
+  assert.equal((await service.list()).pipelines.length, 0);
+  assert.equal(fs.existsSync(path.join(outer, 'tmp')), false, 'no working folder was made');
+});
+
+test('gaf files are part of the packet and are delivered: the production solver sees the gaf folder', async t => {
+  const w = await makeWorld(t, { files: { 'gaf/Template_Layout.txt': 'Template layout, synthetic.\n' }, rules: [classifierRule({ answer: { ...CLASSIFICATION, worldFiles: [...CLASSIFICATION.worldFiles, 'gaf/Template_Layout.txt'] } }), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.ok(view.classification.worldFiles.includes('gaf/Template_Layout.txt'));
+  assert.ok(view.design.packet.files.some(file => file.name === 'gaf/Template_Layout.txt'));
+  assert.ok(Object.keys(pilotFiles(w)).some(key => key.endsWith('/gaf/Template_Layout.txt')), 'the pilot got it');
+  const [round] = await w.agents.listRounds();
+  assert.equal(round.gafVisible, true);
+  assert.equal(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'out', 'traps.json'), 'utf8').length > 0, true);
+});
+
+/* ====================================================================== the checks a design passes before any pilot runs */
+
+test('the design is recorded with its checks: the golden answer\'s score, the fairness review, the guideline diff, and a diff of each edited file', async t => {
+  const w = await makeWorld(t);
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const design = view.design;
+  assert.deepEqual(design.calibration, { score: 0.95, verdict: 'meets-guidance', reason: 'Synthetic grader reason for 0.95' });
+  assert.deepEqual(design.fairness, { status: 'ok', unfair: [] });
+  assert.deepEqual(design.rubricChanges, []);
+  assert.equal(design.repaired, false);
+  assert.equal(design.guidelineDiff.available, true);
+  assert.ok(design.guidelineDiff.added > 0 && design.guidelineDiff.removed > 0);
+  assert.ok(design.guidelineDiff.lines.some(line => line.op === '-' && line.text.includes('GUIDELINE-MARKER-7f3a')), 'the original line is shown as removed');
+  assert.ok(design.guidelineDiff.lines.some(line => line.op === '+' && line.text.includes('DESIGNER-GUIDELINE-MARK')), 'the revised line is shown as added');
+  assert.equal(design.guidelineDiff.truncated, false);
+  const edit = design.editedFiles[0];
+  assert.equal(edit.name, 'Facility_Terms.txt');
+  assert.equal(edit.beforeBytes, Buffer.byteLength(FACILITY));
+  assert.equal(edit.diff.kind, 'text');
+  assert.equal(edit.diff.before, edit.beforeBytes);
+  assert.equal(edit.diff.after, edit.bytes);
+  assert.ok(edit.diff.lines.some(line => line.op === '-' && line.text.startsWith('Atlas facility terms, synthetic. Available credit')));
+  assert.ok(edit.diff.lines.some(line => line.op === '+' && line.text.includes('Clause 4 was amended')));
+  assert.deepEqual(view.attempts[0].calibration, design.calibration);
+  assert.deepEqual(view.attempts[0].fairness, { status: 'ok', count: 0 });
+  assert.equal(view.attempts[0].rejection, null);
+  assert.equal(view.config.graderEffort, 'medium', 'the pilots run at low effort, the grader at least at medium');
+  assert.equal(view.config.acceptMissing, false);
+  assert.ok(id);
+});
+
+test('the grader\'s cap is the agent service\'s tool-less cap, and its effort is at least medium', async t => {
+  assert.equal(P.CAPS.graderUsd, C.BUDGET_USD.toolLessDefault);
+  assert.equal(P.GOLDEN_MIN, 0.9);
+  assert.deepEqual(P.REGRADE_BAND, [0.4, 0.5]);
+  assert.equal(P.HEADROOM, 1.15);
+  const w = await makeWorld(t);
+  for (const [effort, expected] of [['low', 'medium'], ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']]) {
+    const { id } = await w.pipeline.start(w.body({ effort, capUsd: 0.4 }));
+    assert.equal((await w.pipeline.whenDone(id)).config.graderEffort, expected, effort);
+  }
+});
+
+test('a golden answer that does not score at least 0.90 against its own guideline rejects the design before any pilot runs, and the designer is told the score and the reason', async t => {
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3], { goldenScore: 0.62 }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.deepEqual(view.attempts[0].rejection, { kind: 'checks', reasons: ['The golden answer scored 0.62 against its own guideline; at least 0.90 is needed'] });
+  assert.equal(view.attempts[0].calibration.score, 0.62);
+  assert.equal(view.attempts[0].screen, null);
+  assert.equal(pilotPrompts(w).filter(run => run.prompt.includes('PV1')).length, 0, 'no pilot ever saw the rejected design');
+  assert.equal(view.redesigns, 1);
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'designer', 'feedback.md'), 'utf8');
+  assert.match(feedback, /Your golden answer scored 0\.62: Synthetic grader reason for 0\.62\./);
+  assert.match(feedback, /at least 0\.90 against your own guideline/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'designer', 'previous', 'golden-answer.md'), 'utf8'), /attempt 1/, 'the rejected design is given back to the designer');
+  assert.equal(view.design.calibration.score, 0.95);
+  assert.ok(view.ledger.some(entry => entry.kind === 'calibration' && entry.ref === 'attempt 1'));
+});
+
+test('0.90 is enough for the golden answer; a golden answer with no usable score is tried twice and then rejects the design', async t => {
+  const exact = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { goldenScore: 0.9 })] });
+  assert.equal((await exact.run()).view.stage, 'done');
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3], { goldenGrade: 'I cannot grade this.' }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.attempts[0].rejection.reasons, ['The simulated grader gave the golden answer no usable score, so the guideline could not be checked against it']);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'calibration' && entry.ref === 'attempt 1').length, 2, 'one more try');
+  assert.equal(view.attempts[0].calibration.score, null);
+});
+
+test('the fairness review: an item a solver could not know rejects the design with the items in the feedback; no usable answer rejects it too', async t => {
+  const unfair = JSON.stringify({ unfair: [{ item: 'Applies the 2025 day-count convention', why: 'No file states which convention to use' }, { item: 'Mentions a covenant', why: 'No trap explains it' }] });
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3], { fairness: unfair }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.attempts[0].rejection, { kind: 'checks', reasons: ['The fairness review found 2 guideline items that a solver could not know from the prompt and the files, or that no trap explains'] });
+  assert.deepEqual(view.attempts[0].fairness, { status: 'unfair', count: 2 });
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'designer', 'feedback.md'), 'utf8');
+  assert.match(feedback, /"Applies the 2025 day-count convention" \(No file states which convention to use\)/);
+  assert.match(feedback, /"Mentions a covenant" \(No trap explains it\)/);
+  assert.deepEqual(view.design.fairness, { status: 'ok', unfair: [] });
+  assert.equal(view.ledger.filter(entry => entry.kind === 'fairness').length, 2, 'one review per design');
+  /* unusable twice: rejected, and the review was asked twice */
+  const bad = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2], { fairness: 'This looks fine to me.' }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const second = (await bad.run()).view;
+  assert.equal(second.stage, 'done', second.message);
+  assert.deepEqual(second.attempts[0].rejection.reasons, ['The fairness review gave no usable answer']);
+  assert.equal(second.attempts[0].fairness.status, 'unusable');
+  assert.equal(promptRuns(bad).filter(run => run.prompt.startsWith('You are reviewing a revised grader guideline for fairness.') && run.prompt.includes('PV1')).length, 2);
+  /* a review that tried a tool is not an answer */
+  const tool = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2]), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  tool.rules.unshift({ prompt: 'You are reviewing a revised grader guideline for fairness[\\s\\S]*PV1', scenario: { toolUses: [{ name: 'Bash', input: { command: 'ls' }, result: 'x' }], resultText: '{"unfair": []}' } });
+  tool.env.FINANCE_STUB_SCENARIO = JSON.stringify({ rules: tool.rules, default: {} });
+  const third = (await tool.run()).view;
+  assert.equal(third.attempts[0].fairness.status, 'unusable');
+});
+
+test('both checks run, and a design that fails both is told both', async t => {
+  const unfair = JSON.stringify({ unfair: [{ item: 'Item A', why: 'Nowhere in the files' }] });
+  const rules = [classifierRule(), ...attemptRules(1, [0.2], { fairness: unfair, goldenScore: 0.5 }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.attempts[0].rejection.reasons.length, 2);
+  assert.match(view.attempts[0].rejection.reasons[0], /golden answer scored 0\.50/);
+  assert.match(view.attempts[0].rejection.reasons[1], /fairness review found 1 guideline item /);
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'designer', 'feedback.md'), 'utf8');
+  assert.match(feedback, /Your golden answer scored 0\.50/);
+  assert.match(feedback, /"Item A" \(Nowhere in the files\)/);
+});
+
+/* the deterministic checks of readDesign that need the original task */
+const originalCorpus = text => squashText(text);
+const squashText = text => String(text).replace(/\s+/gu, ' ').trim().toLowerCase();
+function originalWorld(t, over = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-orig-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  put(dir, 'Facility_Terms.txt', FACILITY);
+  put(dir, 'Cash_Facts.csv', CASH);
+  put(dir, 'Atlas_Supplement.txt', SUPPLEMENT);
+  const original = { numbers: new Set(['100', '500']), corpus: originalCorpus(`${PROMPT} ${FACILITY} ${CASH} ${SUPPLEMENT}`), guidelineLength: GUIDELINE.length, guidelineText: GUIDELINE, ...over };
+  return { dir, original, read: (outDir, extra = {}) => readDesign({ outDir, packet: extra.packet || PACKET, ...withheld(), original: extra.original || original, originalDir: dir }) };
+}
+
+test('readDesign: every gold figure must be in the golden answer and in the guideline, as digits', t => {
+  const { read } = originalWorld(t);
+  const ok = read(makeOut(t));
+  assert.equal(ok.gold.figures[0].value, '1,250');
+  const fails = (change, expected, detail) => assert.throws(() => read(makeOut(t, change)), error => {
+    assert.equal(error.constructor.name, 'DesignError');
+    assert.match(error.message, expected);
+    assert.ok(!/1,?250/.test(error.message), 'the public message names no figure');
+    if (detail) assert.match(error.detail, detail);
+    return true;
+  });
+  fails({ 'golden-answer.md': 'The borrowing is held.\n' }, /^A figure in gold\.figures does not appear in both out\/golden-answer\.md and out\/guideline\.md$/, /Usable cash = 1,250/);
+  fails({ 'guideline.md': 'Hold the borrowing. DESIGNER-GUIDELINE-MARK\n' }, /does not appear in both/);
+  assert.doesNotThrow(() => read(makeOut(t, { 'golden-answer.md': 'Usable cash is 1250 and the borrowing is held. DESIGNER-GOLDEN-MARK\n' })), 'with or without the thousands comma');
+  assert.doesNotThrow(() => read(makeOut(t, { 'guideline.md': 'The answer states usable cash of 1,250.00 and holds the borrowing. DESIGNER-GUIDELINE-MARK\n' })));
+});
+
+test('readDesign: a guideline much longer than the original needs its additions listed with a reason', t => {
+  const { read } = originalWorld(t);
+  const long = `A correct answer states usable cash of 1,250 and holds the borrowing. DESIGNER-GUIDELINE-MARK ${'More detail on the facility terms. '.repeat(12)}`;
+  assert.ok(long.length > GUIDELINE.length * 1.5);
+  const fails = change => assert.throws(() => read(makeOut(t, change)), error => /more than 1\.5 times as long as the original guideline and traps\.json has no rubricChanges/.test(error.message) && /out\/guideline\.md has \d+ characters, the original guideline \d+/.test(error.detail));
+  fails({ 'guideline.md': long });
+  const trapsWith = rubricChanges => JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), rubricChanges });
+  const accepted = read(makeOut(t, { 'guideline.md': long, 'traps.json': trapsWith([{ change: 'Added the facility-terms points', reason: 'The new lender summary needs them' }]) }));
+  assert.deepEqual(accepted.rubricChanges, [{ change: 'Added the facility-terms points', reason: 'The new lender summary needs them' }]);
+  assert.throws(() => read(makeOut(t, { 'guideline.md': long, 'traps.json': trapsWith([{ change: 'x' }]) })), /rubric change 1 needs a change and a reason/);
+  assert.throws(() => read(makeOut(t, { 'traps.json': trapsWith('nope') })), /rubricChanges must be a list/);
+  /* no original length (the guideline was a file that is not text): nothing to compare with */
+  const { read: readNone } = originalWorld(t, { guidelineLength: null, guidelineText: null });
+  assert.equal(readNone(makeOut(t, { 'guideline.md': long })).guidelineDiff.available, false);
+});
+
+test('readDesign: an edit may not cut a file down, and every edit is shown as a comparison', t => {
+  const { read, dir } = originalWorld(t);
+  const shrunk = 'Atlas terms.\n';
+  assert.throws(() => read(makeOut(t, { 'edited/Facility_Terms.txt': shrunk })), error => /The edit of Facility_Terms\.txt makes the file more than 20% smaller/.test(error.message) && /has \d+ bytes, the original \d+/.test(error.detail));
+  const grown = read(makeOut(t, { 'edited/Facility_Terms.txt': `${FACILITY}Clause 4 was amended.\nClause 5 is new.\n` }));
+  assert.equal(grown.editedFiles[0].diff.kind, 'text');
+  assert.equal(grown.editedFiles[0].diff.added, 2);
+  assert.equal(grown.editedFiles[0].diff.removed, 0);
+  /* a file that is not text: the sizes */
+  const packet = new Map([...PACKET, ['Rates.bin', { sha256: sha('r'.repeat(100)), bytes: 100 }]]);
+  put(dir, 'Rates.bin', 'r'.repeat(100));
+  const binary = read(makeOut(t, {
+    'edited/Rates.bin': 'r'.repeat(120),
+    'traps.json': JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), editedFiles: [{ name: 'Facility_Terms.txt', reason: 'a' }, { name: 'Rates.bin', reason: 'b' }] }),
+  }), { packet });
+  const rates = binary.editedFiles.find(file => file.name === 'Rates.bin');
+  assert.deepEqual(rates.diff, { kind: 'binary', before: 100, after: 120, added: 0, removed: 0, lines: [], truncated: false });
+  assert.equal(rates.beforeBytes, 100);
+  /* the guideline diff */
+  assert.equal(ok(read(makeOut(t))).guidelineDiff.available, true);
+  function ok(value) { return value; }
+});
+
+test('readDesign: the prompt and the names of new files may not state what only the golden answer should say', t => {
+  const { read } = originalWorld(t);
+  const fails = (change, detail, extra) => assert.throws(() => read(makeOut(t, change), extra), error => {
+    assert.equal(error.constructor.name, 'DesignError');
+    assert.ok(!/\b1,?250\b|the phrase|the figure/.test(error.message), `the public message names no figure or phrase: ${error.message}`);
+    assert.match(error.detail, detail);
+    return true;
+  });
+  fails({ 'prompt.txt': 'Assess the position. The usable cash is 1,250 for the borrowing.\n' }, /states the figure 1250 of the golden answer/);
+  fails({ 'prompt.txt': 'Assess the position and say whether to hold the borrowing.\n' }, /states the phrase "hold"/);
+  fails({ 'new/Cash_1250_Summary.txt': 'x' }, /The name of Cash_1250_Summary\.txt states the figure 1250/);
+  fails({ 'new/Hold_Summary.txt': 'x' }, /The name of Hold_Summary\.txt states the phrase "hold"/);
+  /* what the original task already says is not a leak */
+  const known = originalWorld(t, { original: undefined });
+  const withKnown = { numbers: new Set(['100', '500', '1250']), corpus: originalCorpus(`${PROMPT} ${FACILITY} ${CASH} please hold the line`), guidelineLength: GUIDELINE.length, guidelineText: GUIDELINE };
+  assert.doesNotThrow(() => known.read(makeOut(t, { 'prompt.txt': 'Assess the position; the usable cash is 1,250 and we may hold.\n' }), { original: withKnown }));
+  /* a number of fewer than three digits is not an atom */
+  const small = JSON.parse(designFiles(1)[3].content);
+  small.gold = { decision: 'hold', figures: [{ label: 'Rate', value: 12, tolerance: 0 }] };
+  small.traps[0].correctValue = '12';
+  assert.doesNotThrow(() => read(makeOut(t, {
+    'prompt.txt': 'Assess the position at a rate of 12 percent, and give the cash.\n',
+    'traps.json': JSON.stringify(small),
+    'golden-answer.md': 'Usable cash is 1,250 and the rate is 12, attempt 1. DESIGNER-GOLDEN-MARK\n',
+    'guideline.md': 'A correct answer states usable cash of 1,250 and a rate of 12. DESIGNER-GUIDELINE-MARK\n',
+  })));
+});
+
+test('a prompt that states a figure of the golden answer is sent back for one repair, and the public reason names no figure', async t => {
+  const leaky = { 'out/prompt.txt': 'Assess the Atlas liquidity position, where usable cash is 1,250, and say whether the borrowing can proceed. PV1\n' };
+  const withLeak = n => [{ path: 'out/prompt.txt', content: leaky['out/prompt.txt'].replace('PV1', `PV${n}`) }];
+  const extraFiles = withLeak(1);
+  /* the first run and the repair both leak (the extra file replaces the prompt written by designFiles): rejected, then a clean attempt 2 */
+  const rules = [classifierRule(), ...attemptRules(1, [0.2], { design: { extraFiles }, repairScenario: designerScenario(1, { design: { extraFiles } }) }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.attempts[0].rejection.reasons, ['out/prompt.txt states a figure or a decision of the golden answer that no original file or prompt holds']);
+  assert.ok(!view.attempts[0].rejection.reasons.join(' ').includes('1250'));
+  const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
+  assert.match(repair.prompt, /out\/prompt\.txt states the figure 1250 of the golden answer/, 'the designer is told the exact figure');
+  assert.equal(pilotPrompts(w).filter(run => run.prompt.includes('PV1')).length, 0);
+});
+
+/* ====================================================================== grading: the regrade band, a refused call, the files a pilot wrote */
+
+/* graderSim answered from a script for the answers of attempt 1 (the golden answer and attempt 2 go to the stub): per pilot, the score of
+   each call in turn (a number, or 'refuse:<status>'). */
+function scriptedGrader(scripts, calls = {}) {
+  return real => ({
+    ...real,
+    graderSim: async body => {
+      const match = /ANS-1-(\d)/.exec(body.answerTexts[0]);
+      if (!match) return real.graderSim(body);
+      const list = scripts[match[1]] || [0.2];
+      const index = calls[match[1]] = (calls[match[1]] || 0) + 1;
+      const step = list[Math.min(index, list.length) - 1];
+      if (typeof step === 'string') throw new AgentError(Number(step.split(':')[1]), `scripted refusal ${step}`);
+      return { simulated: true, verdict: step < 0.45 ? 'does-not-meet-guidance' : 'meets-guidance', reason: `scripted ${step}`, score: step, items: [], results: [{ state: 'completed', costUsd: 0.02 }] };
+    },
+  });
+}
+
+test('a score from 0.40 to 0.50 is graded once more and the two are averaged; both are recorded', async t => {
+  const calls = {};
+  /* pilot 1: 0.40 -> 0.30 in the screen (average 0.35), 0.42 -> 0.50 in the test (0.46); pilot 2: 0.39, no second call; pilot 3: 0.50 -> 0.38 (0.44);
+     pilot 4: 0.51, no second call; pilot 5: 0.20 */
+  const scripts = { 1: [0.4, 0.3, 0.42, 0.5], 2: [0.39, 0.39], 3: [0.5, 0.38], 4: [0.51], 5: [0.2] };
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2]), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules, wrapAgents: scriptedGrader(scripts, calls) });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const [screen, test] = [view.attempts[0].screen, view.attempts[0].test];
+  const round = pilot => ({ score: pilot.score, regrade: pilot.regrade, belowBar: pilot.belowBar });
+  assert.deepEqual(round(screen.pilots[0]), { score: 0.35, regrade: { first: 0.4, second: 0.3, average: 0.35 }, belowBar: true });
+  assert.deepEqual(round(screen.pilots[1]), { score: 0.39, regrade: null, belowBar: true });
+  assert.equal(screen.passed, true);
+  assert.deepEqual(test.pilots.map(pilot => pilot.score), [0.46, 0.39, 0.44, 0.51, 0.2]);
+  assert.deepEqual(test.pilots.map(pilot => pilot.regrade && [pilot.regrade.first, pilot.regrade.second]), [[0.42, 0.5], null, [0.5, 0.38], null, null]);
+  assert.deepEqual(test.pilots.map(pilot => pilot.belowBar), [false, true, true, false, true], '0.46 is not below the bar; the average decides');
+  assert.equal(test.belowBar, 3);
+  assert.equal(test.passed, false, '3 of 5');
+  assert.equal(view.attempts[0].outcome, 'test-failed');
+  assert.equal(calls[1], 4);
+  assert.equal(calls[2], 2);
+  assert.equal(calls[3], 2);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'grader' && /#1$/.test(entry.ref) && entry.stage === 'grade-test').length >= 2, true, 'both calls are in the ledger');
+});
+
+test('a grader call the service refuses gives that pilot no score and does not fail the pipeline; when every call is refused the stage fails', async t => {
+  /* one refusal (413) for pilot 2 of the screen: its place is taken by a replacement */
+  const once = scriptedGrader({ 1: [0.2], 2: ['refuse:413', 0.2], 3: [0.2], 4: [0.2], 5: [0.2] });
+  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2])], wrapAgents: once });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const screen = view.attempts[0].screen;
+  assert.equal(screen.pilots[1].valid, false);
+  assert.equal(screen.pilots[1].score, null);
+  assert.equal(screen.pilots[1].reason, 'The simulated grader could not take this answer.');
+  assert.equal(screen.replacementRound, true);
+  assert.equal(screen.counted, 2);
+  /* 409 and 400 are the same; every call refused is the grader being unusable */
+  const all = scriptedGrader({ 1: ['refuse:409'], 2: ['refuse:400'], 3: ['refuse:409'], 4: ['refuse:409'], 5: ['refuse:409'] });
+  const dead = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2])], wrapAgents: all });
+  const failed = (await dead.run()).view;
+  assert.equal(failed.stage, 'failed');
+  assert.match(failed.message, /^The simulated grader could not be used: scripted refusal refuse:409/);
+  /* an error of another kind is not a refusal of one answer */
+  const broken = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2])], wrapAgents: real => ({ ...real, graderSim: async body => { if (/ANS-1-/.test(body.answerTexts[0])) throw new AgentError(500, 'internal'); return real.graderSim(body); } }) });
+  assert.equal((await broken.run()).view.stage, 'failed');
+  /* the check of the golden answer: refused twice, the design is rejected */
+  const refusedGolden = real => ({ ...real, graderSim: async body => { if (/attempt 1\b/.test(body.answerTexts[0]) && /Usable cash is 1,250 and the borrowing is held/.test(body.answerTexts[0])) throw new AgentError(413, 'too large'); return real.graderSim(body); } });
+  const g = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2]), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])], wrapAgents: refusedGolden });
+  const gv = (await g.run()).view;
+  assert.equal(gv.stage, 'done', gv.message);
+  assert.match(gv.attempts[0].rejection.reasons[0], /gave the golden answer no usable score/);
+});
+
+test('the simulated grader reads the files a pilot wrote as well as its final message; a pilot with files nobody can read and nothing to say is not graded', async t => {
+  const longAnswer = 'The usable cash is the confirmed amount, not the facility. '.repeat(14);
+  const pilotExtra = [
+    { writeFiles: [{ path: 'outputs/analysis.csv', content: 'item,value\nUsable cash,3050\n' }, { path: 'outputs/notes/summary.md', content: 'Summary: proceed with the borrowing.\n' }, { path: 'outputs/picture.png', content: 'binary-ish' }] },
+    { resultText: 'ANS-1-2 see the file', writeFiles: [{ path: 'outputs/model.bin', content: 'binary-ish' }] },
+    { resultText: `ANS-1-3 ${longAnswer}`, writeFiles: [{ path: 'outputs/model.bin', content: 'binary-ish' }] },
+  ];
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2], { pilotExtra })];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const graderPrompts = promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('<<<ANSWER\nANS-1-'));
+  const first = graderPrompts.find(run => run.prompt.includes('ANS-1-1'));
+  assert.match(first.prompt, /--- outputs\/analysis\.csv ---\nitem,value\nUsable cash,3050/);
+  assert.match(first.prompt, /--- outputs\/notes\/summary\.md ---\nSummary: proceed with the borrowing\./);
+  assert.ok(!first.prompt.includes('outputs/picture.png'), 'a file with no readable text adds nothing');
+  const screen = view.attempts[0].screen;
+  assert.deepEqual(screen.pilots[0].outputs, { count: 3, readable: 2 });
+  /* pilot 2: files, a final message of under 600 characters, nothing readable: not graded, and the replacement takes its place */
+  assert.deepEqual(screen.pilots[1].outputs, { count: 1, readable: 0 });
+  assert.equal(screen.pilots[1].valid, false);
+  assert.ok(!graderPrompts.some(run => run.prompt.includes('ANS-1-2 see the file')), 'never sent to the grader');
+  assert.equal(screen.replacementRound, true);
+  /* pilot 3 (of the test): the same files, but a long final answer: graded */
+  const test = view.attempts[0].test;
+  assert.deepEqual(test.pilots[2].outputs, { count: 1, readable: 0 });
+  assert.equal(test.pilots[2].valid, true);
+  assert.ok(graderPrompts.some(run => run.prompt.includes('ANS-1-3 The usable cash')));
+});
+
+/* ====================================================================== nothing else may use the pilots or the grader while a pipeline runs */
+
+test('while a pipeline runs, other launches, the simulated grader and the author review are refused with 409', async t => {
+  const rules = [{ prompt: 'MANUAL-ROUND-PROMPT', scenario: { resultText: 'manual answer' } }, classifierRule(), ...attemptRules(1, [0.2, 0.3], { pilotExtra: [{ delayMs: 60000 }, { delayMs: 60000 }] })];
+  const w = await makeWorld(t, { rules, server: true });
+  const round = await w.agents.createRound({ label: 'by hand', sourceDir: w.source, promptText: 'MANUAL-ROUND-PROMPT', gafVisible: true, config: { model: 'claude-opus-5-5', effort: 'low', count: 1 } });
+  await w.agents.freezeRound(round.id, { gold: { decision: 'hold' }, fingerprints: [] });
+  const summary = await w.agents.approvalSummary(round.id);
+  await w.agents.approveRound(round.id, { summarySha256: summary.summarySha256, acknowledgements: ACKS.slice(0, 3) });
+  const started = await w.post('/api/pipeline/start', w.body());
+  assert.equal(started.status, 200, started.text);
+  assert.equal(w.pipeline.busy(), true);
+  for (const [urlPath, body] of [
+    [`/api/agents/rounds/${round.id}/launch`, {}],
+    ['/api/agents/grader-sim', { guidelineText: 'Guide.', answerText: 'Answer.' }],
+    ['/api/agents/author-review', { packageText: 'Package.' }],
+  ]) {
+    const refused = await w.post(urlPath, body);
+    assert.equal(refused.status, 409, urlPath);
+    assert.match(refused.json.error, /^A pipeline is running\./, urlPath);
+  }
+  assert.equal((await w.agents.getRound(round.id)).status, 'approved', 'the round was not launched');
+  /* when the pipeline has ended the lock is gone */
+  const stopped = await w.post(`/api/pipeline/${started.json.id}/stop`);
+  assert.equal(stopped.status, 200);
+  assert.equal(w.pipeline.busy(), false);
+  const launched = await w.post(`/api/agents/rounds/${round.id}/launch`);
+  assert.equal(launched.status, 200, launched.text);
+  const graded = await w.post('/api/agents/grader-sim', { guidelineText: 'Guide.', answerText: 'Answer.' });
+  assert.ok(!(graded.status === 409 && /A pipeline is running/.test(graded.text)), 'not refused for a pipeline any more');
+});
+
+test('the rest of the pipeline does not need the HTTP routes: its own rounds and grader calls are made through the service', async t => {
+  const w = await makeWorld(t, { server: true });
+  const started = await w.post('/api/pipeline/start', w.body());
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${started.json.id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.stage, 'done', finished.json.message);
+});
+
+/* ====================================================================== what survives a restart, and what a Stop interrupts */
+
+test('on start the pipelines of an earlier run are closed: attempts in progress fail with a note, and working folders left in the temporary folder are removed', async t => {
+  const w = await makeWorld(t);
+  const id = 'pln-aaaaaaaaaaaa';
+  const dir = path.join(w.root, 'private', 'pipelines', id);
+  fs.mkdirSync(dir, { recursive: true });
+  const state = { schema: 'finance-pipeline', schemaVersion: 1, id, label: 'Old', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', endedAt: null, stage: 'screen', message: 'Running', error: null, waiting: null, source: { kind: 'folder', name: 'task' }, config: { capUsd: 30 }, spentUsd: 1, ledger: [], attempts: [{ n: 1, outcome: 'in-progress', screen: null, test: null }, { n: 2, outcome: 'passed' }], redesigns: 0, attempt: 1, design: null, result: null };
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state));
+  const done = 'pln-bbbbbbbbbbbb';
+  fs.mkdirSync(path.join(w.root, 'private', 'pipelines', done), { recursive: true });
+  fs.writeFileSync(path.join(w.root, 'private', 'pipelines', done, 'state.json'), JSON.stringify({ ...state, id: done, stage: 'done', endedAt: 'x', attempts: [] }));
+  /* an old working folder, as an earlier version left it (and a stray one of a pipeline nobody knows) */
+  for (const name of [id, done, 'pln-cccccccccccc']) put(path.join(w.workRoot, name), 'original/Facility_Terms.txt', 'old copy');
+  const service = createPipelineService({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot });
+  const view = await service.get(id);
+  assert.equal(view.stage, 'failed');
+  assert.deepEqual(view.attempts.map(attempt => [attempt.outcome, attempt.note || null]), [['failed', 'The companion stopped while this attempt was running.'], ['passed', null]]);
+  assert.equal(fs.existsSync(path.join(w.workRoot, id)), false);
+  assert.equal(fs.existsSync(path.join(w.workRoot, done)), false, 'the working folder of a pipeline that ended is not kept either');
+  assert.equal(fs.existsSync(path.join(w.workRoot, 'pln-cccccccccccc')), true, 'a folder nobody here owns is left alone');
+});
+
+test('Stop pressed while the files are being copied ends the copy at once and leaves no half-copied file', async t => {
+  const w = await makeWorld(t, { onStage: (stage, info, world) => { if (stage === 'import') setImmediate(() => world.pipeline.stop(info.id).catch(() => {})); } });
+  fs.closeSync(fs.openSync(path.join(w.source, 'Big_Ledger.csv'), 'w'));
+  fs.truncateSync(path.join(w.source, 'Big_Ledger.csv'), 64 * 1024 * 1024);
+  const { id } = await w.pipeline.start(w.body());
+  const view = await w.pipeline.whenDone(id);
+  assert.equal(view.stage, 'stopped');
+  assert.equal(fs.existsSync(path.join(w.priv(id), 'original', 'Big_Ledger.csv')), false, 'no half-copied file');
+  assert.equal(promptRuns(w).length, 0, 'nothing was started');
+});
+
+test('copyHashed copies as a stream, hashes what it writes, and stops on request without leaving a file', async t => {
+  const { copyHashed, Stopped } = require('../backend/pipeline/util.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-copy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const data = crypto.randomBytes(3 * 1024 * 1024);
+  put(dir, 'in.bin', data);
+  const done = await copyHashed(path.join(dir, 'in.bin'), path.join(dir, 'sub', 'out.bin'));
+  assert.deepEqual(done, { sha256: sha(data), bytes: data.length });
+  assert.equal(sha(fs.readFileSync(path.join(dir, 'sub', 'out.bin'))), sha(data));
+  assert.equal(fs.statSync(path.join(dir, 'sub', 'out.bin')).mode & 0o777, 0o644);
+  await assert.rejects(copyHashed(path.join(dir, 'in.bin'), path.join(dir, 'sub', 'out.bin')), /EEXIST/, 'never over a file');
+  await assert.rejects(copyHashed(path.join(dir, 'in.bin'), path.join(dir, 'x.bin'), { expected: sha('other') }), /hash differs/);
+  assert.equal(fs.existsSync(path.join(dir, 'x.bin')), false);
+  let asked = 0;
+  await assert.rejects(copyHashed(path.join(dir, 'in.bin'), path.join(dir, 'y.bin'), { shouldStop: () => ++asked > 2 }), Stopped);
+  assert.equal(fs.existsSync(path.join(dir, 'y.bin')), false, 'a copy that was stopped is removed');
+  fs.symlinkSync(path.join(dir, 'in.bin'), path.join(dir, 'link.bin'));
+  await assert.rejects(copyHashed(path.join(dir, 'link.bin'), path.join(dir, 'z.bin')), /ELOOP|symbolic/i, 'a link is never followed');
+  assert.equal(fs.existsSync(path.join(dir, 'z.bin')), false);
+  await assert.rejects(copyHashed(dir, path.join(dir, 'w.bin')), /not a regular file|EISDIR/);
+});
+
+test('lineDiff: the common start and end are cut off, changed lines come with one line of context, and a long change is capped', () => {
+  const { lineDiff } = require('../backend/pipeline/diff.cjs');
+  assert.deepEqual(lineDiff('a\nb\nc\nd\ne', 'a\nb\nX\nd\ne\nf'), { added: 2, removed: 1, lines: [{ op: ' ', text: 'b' }, { op: '-', text: 'c' }, { op: '+', text: 'X' }, { op: ' ', text: 'd' }, { op: ' ', text: 'e' }, { op: '+', text: 'f' }], truncated: false });
+  assert.deepEqual(lineDiff('same\n', 'same\n'), { added: 0, removed: 0, lines: [], truncated: false });
+  const big = lineDiff(Array.from({ length: 400 }, (_, index) => `old ${index}`).join('\n'), Array.from({ length: 400 }, (_, index) => `new ${index}`).join('\n'), { maxLines: 50 });
+  assert.equal(big.lines.length, 50);
+  assert.equal(big.truncated, true);
+  assert.equal(big.added, 400);
+  assert.equal(big.removed, 400);
+  assert.equal(lineDiff('a\r\nb', 'a\nb').added, 0, 'line ends do not count');
+  assert.equal(lineDiff('x'.repeat(1000), 'y').lines[0].text.length, 303, 'a long line is cut');
+});
+
+test('while a pipeline runs only the pilot packet is outside the project; the downloaded files and the designer\'s folder are in its private folder', async t => {
+  const seen = [];
+  const w = await makeWorld(t, { onStage: (stage, info, world) => {
+    if (stage === 'design' || stage === 'screen') seen.push([stage, fs.readdirSync(path.join(world.workRoot, info.id)).sort(), fs.readdirSync(world.priv(info.id)).sort()]);
+  } });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(seen[0], ['design', ['work'], ['original', 'runs', 'state.json']]);
+  assert.deepEqual(seen.at(-1)[1], ['work'], 'nothing but the packet in the temporary folder');
+  assert.ok(seen.at(-1)[2].includes('designer') && seen.at(-1)[2].includes('attempts'));
+  assert.equal(fs.existsSync(w.workRoot) ? fs.readdirSync(w.workRoot).length : 0, 0, 'and nothing at all once the pipeline has ended');
+  assert.ok(!fs.existsSync(path.join(w.workRoot, view.id || 'x')));
 });
