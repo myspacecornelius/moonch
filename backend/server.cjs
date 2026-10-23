@@ -84,7 +84,7 @@ const HOST = '127.0.0.1';
 const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js', 'pipeline.js', 'pipeline.css']);
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
 const JSON_TYPE_RE = /^application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
-const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415]);
+const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415, 502]); /* 502: a fault of a part the companion drives (the link loader), message already scrubbed */
 const GENERIC_ERROR = 'The companion hit an internal error. The details are in the terminal where it is running.';
 const DRAIN_ALLOWANCE = 16 * 1024 * 1024; /* bytes read and thrown away after a 413 before the connection is dropped */
 const SETTLE_MS = 10000; /* shutdown waits this long for requests that are still being answered */

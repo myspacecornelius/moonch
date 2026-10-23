@@ -3064,6 +3064,21 @@ test('POST /api/pipeline/:id/continue answers a stale Continue with 409, not 500
   assert.equal((w.logs || []).length, 0, (w.logs || []).join('\n'));
 });
 
+test('POST /api/pipeline/:id/continue answers another loader fault with 502 and the scrubbed message, not a generic 500', async t => {
+  const probe = await makeWorld(t);
+  const w = await makeWorld(t, { loader: fakeLoader(probe.root, { script: [{ state: 'needs-person', message: 'Turn it on.', wait: true }], continueError: new Error(`connection to ${LINK} was reset`) }), server: true });
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  assert.equal(started.status, 200, started.text);
+  const id = started.json.id;
+  await waitFor(async () => (await w.get(`/api/pipeline/${id}`)).json.waiting, { label: 'the wait' });
+  const response = await w.post(`/api/pipeline/${id}/continue`);
+  assert.equal(response.status, 502, response.text);
+  assert.match(response.json.error, /connection to <link> was reset/);
+  assert.ok(!response.text.includes('tasks.example') && !response.text.includes('SECRET-TOKEN-123'));
+  await w.post(`/api/pipeline/${id}/stop`);
+  assert.equal((w.logs || []).length, 0, (w.logs || []).join('\n'));
+});
+
 /* ---------------------------------------------------------------- the total cap has to pay for one full attempt */
 
 test('the least total cap: the parts are exposed, the formula is the sum of the caps with the headroom, and the default cap passes it', async t => {
