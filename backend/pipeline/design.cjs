@@ -171,22 +171,28 @@ function readCapped(file, max, what) {
   return text;
 }
 
-function figureList(list, where) {
+/* A fault in traps.json that is about one thing the designer named (a trap, a fingerprint). The public message says "a trap" or "a
+   fingerprint"; the name the designer chose (an id can carry a figure, a title can say what the trap is) is in the detail only. */
+const upper = text => text.charAt(0).toUpperCase() + text.slice(1);
+const named = (what, exact, text) => new DesignError(upper(`${what} ${text}`), `${exact} ${text}`);
+
+/* what: how the public message calls the owner of the list ('gold', 'a fingerprint'); exact: the same with the designer's own id. */
+function figureList(list, what, exact = what) {
   if (list === undefined || list === null) return [];
-  if (!Array.isArray(list) || list.length > 50) throw new DesignError(`${where} figures must be a list of at most 50`);
+  if (!Array.isArray(list) || list.length > 50) throw named(what, exact, 'figures must be a list of at most 50');
   return list.map((item, index) => {
-    if (!isObject(item)) throw new DesignError(`${where} figure ${index + 1} is not an object`);
-    if (parseFigure(item.value) === null) throw new DesignError(`${where} figure ${index + 1} needs a numeric value`);
+    if (!isObject(item)) throw named(what, exact, `figure ${index + 1} is not an object`);
+    if (parseFigure(item.value) === null) throw named(what, exact, `figure ${index + 1} needs a numeric value`);
     const tolerance = item.tolerance === undefined || item.tolerance === null || item.tolerance === '' ? 0 : parseFigure(item.tolerance);
-    if (tolerance === null || tolerance < 0) throw new DesignError(`${where} figure ${index + 1} needs a tolerance of zero or more`);
+    if (tolerance === null || tolerance < 0) throw named(what, exact, `figure ${index + 1} needs a tolerance of zero or more`);
     return { label: oneLine(item.label, 200), value: typeof item.value === 'number' ? item.value : String(item.value).trim(), tolerance };
   });
 }
 
-function textValue(value, max, what) {
+function textValue(value, max, what, exact = what) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value !== 'string') throw new DesignError(`${what} must be text`);
-  if (value.length > max) throw new DesignError(`${what} is longer than ${max} characters`);
+  if (typeof value !== 'string') throw new DesignError(upper(`${what} must be text`), `${exact} must be text`);
+  if (value.length > max) throw new DesignError(upper(`${what} is longer than ${max} characters`), `${exact} is longer than ${max} characters`);
   return value.trim();
 }
 
@@ -201,19 +207,19 @@ function parseTrapsFile(text, available) {
     const id = textValue(item.id, 64, `trap ${index + 1} id`);
     if (!ID_RE.test(id) || seen.has(id)) throw new DesignError(`trap ${index + 1} needs a unique id of letters, digits, dashes and underscores`);
     seen.add(id);
-    const title = oneLine(textValue(item.title, DESIGN.titleChars, `trap ${id} title`), DESIGN.titleChars);
-    if (!title) throw new DesignError(`trap ${id} needs a title`);
+    const title = oneLine(textValue(item.title, DESIGN.titleChars, 'a trap title', `trap ${id} title`), DESIGN.titleChars);
+    if (!title) throw named('a trap', `trap ${id}`, 'needs a title');
     const files = Array.isArray(item.files) ? item.files : [];
-    if (files.length > 20 || files.some(name => typeof name !== 'string')) throw new DesignError(`trap ${id} files must be a list of at most 20 names`);
-    for (const name of files) if (!available.has(name)) throw new DesignError(`trap ${id} names a file that is not in the pilot packet`);
+    if (files.length > 20 || files.some(name => typeof name !== 'string')) throw named('a trap', `trap ${id}`, 'files must be a list of at most 20 names');
+    for (const name of files) if (!available.has(name)) throw new DesignError('A trap names a file that is not in the pilot packet', `trap ${id} names the file ${oneLine(name, 120)}, which is not in the pilot packet`);
     return {
       id,
       title,
-      mechanism: textValue(item.mechanism === undefined ? '' : item.mechanism, DESIGN.textChars, `trap ${id} mechanism`),
+      mechanism: textValue(item.mechanism === undefined ? '' : item.mechanism, DESIGN.textChars, 'a trap mechanism', `trap ${id} mechanism`),
       files: files.slice(),
-      decoy: textValue(item.decoy === undefined ? '' : item.decoy, DESIGN.textChars, `trap ${id} decoy`),
-      correctValue: textValue(item.correctValue === undefined ? '' : item.correctValue, 200, `trap ${id} correctValue`),
-      wrongValue: textValue(item.wrongValue === undefined ? '' : item.wrongValue, 200, `trap ${id} wrongValue`),
+      decoy: textValue(item.decoy === undefined ? '' : item.decoy, DESIGN.textChars, 'a trap decoy', `trap ${id} decoy`),
+      correctValue: textValue(item.correctValue === undefined ? '' : item.correctValue, 200, 'a trap correctValue', `trap ${id} correctValue`),
+      wrongValue: textValue(item.wrongValue === undefined ? '' : item.wrongValue, 200, 'a trap wrongValue', `trap ${id} wrongValue`),
     };
   });
   if (!isObject(data.gold)) throw new DesignError('traps.json needs a gold object');
@@ -229,9 +235,9 @@ function parseTrapsFile(text, available) {
     if (!ID_RE.test(id) || printIds.has(id)) throw new DesignError(`fingerprint ${index + 1} needs a unique id`);
     printIds.add(id);
     const tokens = (Array.isArray(item.tokens) ? item.tokens : []).filter(token => typeof token === 'string').map(token => token.trim()).filter(Boolean);
-    if (tokens.length > 30 || tokens.some(token => token.length > 200)) throw new DesignError(`fingerprint ${id} has too many or too long tokens`);
-    const printFigures = figureList(item.figures, `fingerprint ${id}`);
-    if (!tokens.length && !printFigures.length) throw new DesignError(`fingerprint ${id} needs a token or a figure`);
+    if (tokens.length > 30 || tokens.some(token => token.length > 200)) throw named('a fingerprint', `fingerprint ${id}`, 'has too many or too long tokens');
+    const printFigures = figureList(item.figures, 'a fingerprint', `fingerprint ${id}`);
+    if (!tokens.length && !printFigures.length) throw named('a fingerprint', `fingerprint ${id}`, 'needs a token or a figure');
     return { id, label: oneLine(item.label, 200), tokens, figures: printFigures };
   });
   const rubric = data.rubricChanges === undefined || data.rubricChanges === null ? [] : data.rubricChanges;
@@ -359,7 +365,7 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
       return walked.files.filter(file => !isJunkName(file.rel));
     } catch (error) {
       if (error instanceof DesignError) throw error;
-      throw new DesignError(`out/${sub} could not be read (${error && error.message ? error.message.slice(0, 120) : 'error'})`);
+      throw new DesignError(`out/${sub} could not be read`, `out/${sub} could not be read (${error && error.message ? error.message.slice(0, 120) : 'error'})`);
     }
   };
   const newOnDisk = lister('new');
@@ -543,7 +549,7 @@ async function buildWork({ originalDir, outDir, workDir, packet, design, shouldS
   } catch (error) {
     fs.rmSync(workDir, { recursive: true, force: true });
     if (error && error.constructor && error.constructor.name === 'Stopped') throw error;
-    throw new DesignError(`The pilot packet could not be built (${error && error.message ? error.message.slice(0, 160) : 'error'})`);
+    throw new DesignError('The pilot packet could not be built', `The pilot packet could not be built (${error && error.message ? error.message.slice(0, 160) : 'error'})`);
   }
   return manifest.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }

@@ -186,9 +186,11 @@ class PipelineService {
     return entry;
   }
 
-  _setStage(p, stage, message) {
+  /* quotes: true when the message quotes the reasons a design was rejected (redact.cjs withholds such a message while a round runs). */
+  _setStage(p, stage, message, quotes = false) {
     p.stage = stage;
     p.message = message;
+    p.quotesRejection = quotes === true;
     this._save(p);
     if (this.onStage) { try { this.onStage(stage, { id: p.id, attempt: p.attempt }); } catch { /* an observer never changes a run */ } }
   }
@@ -196,6 +198,7 @@ class PipelineService {
   /* The line the page shows, changed without a change of stage. */
   _note(p, message) {
     p.message = message;
+    p.quotesRejection = false;
     this._save(p);
   }
 
@@ -271,7 +274,7 @@ class PipelineService {
   _row(p) {
     return {
       id: p.id, label: p.label, createdAt: p.createdAt, updatedAt: p.updatedAt, endedAt: p.endedAt,
-      stage: p.stage, running: !isTerminal(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.config.capUsd,
+      stage: p.stage, running: !isTerminal(p.stage), message: p.message, quotesRejection: p.quotesRejection === true, spentUsd: p.spentUsd, capUsd: p.config.capUsd,
       attempt: p.attempt, redesigns: p.redesigns, verdict: p.result ? p.result.verdict : null,
     };
   }
@@ -533,7 +536,7 @@ class PipelineService {
     const classification = c ? { ...c, prompt: ref(c.prompt), guideline: ref(c.guideline), goldenAnswer: ref(c.goldenAnswer) } : null;
     return clone({
       schema: p.schema, schemaVersion: p.schemaVersion, id: p.id, label: p.label, createdAt: p.createdAt, updatedAt: p.updatedAt, endedAt: p.endedAt,
-      stage: p.stage, running: !isTerminal(p.stage), message: p.message, summary: p.result ? p.result.message : '', error: p.error, waiting: p.waiting, source: p.source,
+      stage: p.stage, running: !isTerminal(p.stage), message: p.message, quotesRejection: p.quotesRejection === true, summary: p.result ? p.result.message : '', error: p.error, waiting: p.waiting, source: p.source,
       config: p.config, capUsd: p.config.capUsd, pilotCapUsd: p.config.pilotCapUsd, model: p.config.model, effort: p.config.effort,
       acknowledgements: p.acknowledgements, spentUsd: p.spentUsd, remainingUsd: round6(Math.max(0, p.config.capUsd - p.spentUsd)), ledger: p.ledger,
       loader: p.loader, import: p.import, classification, attempt: p.attempt, redesigns: p.redesigns, design, attempts: p.attempts, result: p.result,
@@ -560,10 +563,10 @@ class PipelineService {
           attempt.outcome = 'rejected';
           attempt.rejection = { kind: rejection.kind, reasons: rejection.reasons };
           if (p.redesigns >= P.MAX_REDESIGNS) {
-            return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the design of attempt ${attempt.n} was rejected before any pilot ran (${rejection.reasons[0]}). Nothing from it was run.`, 'failed');
+            return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the design of attempt ${attempt.n} was rejected before any pilot ran (${rejection.reasons[0]}). Nothing from it was run.`, 'failed', true);
           }
           p.redesigns++;
-          this._setStage(p, 'redesign', `The design was rejected (${rejection.reasons[0]}). Preparing feedback for redesign ${p.redesigns} of ${P.MAX_REDESIGNS}.`);
+          this._setStage(p, 'redesign', `The design was rejected (${rejection.reasons[0]}). Preparing feedback for redesign ${p.redesigns} of ${P.MAX_REDESIGNS}.`, true);
           this._prepareRejectionFeedback(p, ctl, attempt, rejection);
           continue;
         }
@@ -597,12 +600,12 @@ class PipelineService {
   }
 
   /* Every end of a pipeline comes through here: the result is recorded and the pilot packet outside the project is removed. */
-  _finish(p, stage, message, verdict) {
+  _finish(p, stage, message, verdict, quotes = false) {
     p.waiting = null;
     p.endedAt = this.now();
     p.result = { verdict, message };
     this._removeWorkspace(p.id);
-    this._setStage(p, stage, message);
+    this._setStage(p, stage, message, quotes);
   }
 
   _fail(p, ctl, error) {
@@ -617,7 +620,11 @@ class PipelineService {
       return this._finish(p, 'budget', error.message, 'budget');
     }
     let message;
-    if (error instanceof SafetyError) message = `SAFETY STOP: ${error.message}. Nothing was started.`;
+    if (error instanceof SafetyError) {
+      message = `SAFETY STOP: ${error.message}. Nothing was started.`;
+      /* the exact file is for the owner, in the pipeline's private folder */
+      try { writeTextAtomic(path.join(this.dir, p.id, 'error.log'), `${error.detail}\n`); } catch { /* the message above is enough to stop */ }
+    }
     else if (error instanceof Failure || error instanceof DesignError || error instanceof IntakeError || error instanceof AgentError) message = oneLine(error.message, 400);
     else {
       message = 'The pipeline hit an internal error. The details are in its error.log.';

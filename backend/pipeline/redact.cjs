@@ -9,7 +9,9 @@
        the hashes and sizes in the task's file list and in the pilot packet's (so the one that differs, the edited file, cannot be found),
        design.unscanned (it can name an edited file),
        the calibration and the fairness review of a design, the guideline diff and the rubric changes,
-       every pilot's grader reason.
+       every pilot's grader reason,
+       the reasons a design was rejected (attempts[].rejection.reasons) and, when the view says it quotes them (quotesRejection: true),
+       the stage message, the summary, the error and result.message.
      The same names are withheld wherever they appear, so a field added to the view later is covered. The answer carries redacted: true.
 
    The server applies it to the response (backend/server.cjs), not to the service's view, so it does not depend on how the view was built. */
@@ -18,7 +20,7 @@ const { isObject } = require('./util.cjs');
 
 const MARK = Object.freeze({ withheld: true });
 /* Withheld wherever they appear. */
-const ANYWHERE = new Set(['gold', 'fingerprints', 'mechanism', 'decoy', 'correctValue', 'wrongValue', 'reason', 'calibration', 'fairness', 'guidelineDiff', 'diff', 'rubricChanges', 'guidelineText', 'goldenAnswerText', 'promptText', 'finalText', 'answer', 'answerText', 'summarySha256', 'approvalSummary', 'sourceDir']);
+const ANYWHERE = new Set(['gold', 'fingerprints', 'mechanism', 'decoy', 'correctValue', 'wrongValue', 'reason', 'reasons', 'calibration', 'fairness', 'guidelineDiff', 'diff', 'rubricChanges', 'guidelineText', 'goldenAnswerText', 'promptText', 'finalText', 'answer', 'answerText', 'summarySha256', 'approvalSummary', 'sourceDir']);
 /* Withheld only directly inside the design object: classification.prompt and classification.guideline are names, not texts. */
 const IN_DESIGN = new Set(['prompt', 'guideline', 'goldenAnswer', 'notes', 'unscanned']);
 /* Withheld only inside the list of traps (design.traps, attempts[].traps) and the list of edited files. */
@@ -38,6 +40,11 @@ function walk(value, key, parentKey, depth) {
   for (const [name, child] of Object.entries(value)) {
     if (ANYWHERE.has(name) || (key === 'design' && IN_DESIGN.has(name)) || (key === 'traps' && IN_TRAPS.has(name)) || (key === 'editedFiles' && IN_EDITED.has(name)) || (key === 'files' && IN_FILE_LISTS.has(name))) out[name] = { ...MARK };
     else out[name] = walk(child, name, key, depth + 1);
+  }
+  /* A message that quotes the reasons a design was rejected: the reasons are withheld above, so the line that repeats them is too. */
+  if (value.quotesRejection === true) {
+    for (const name of ['message', 'summary', 'error']) if (name in out) out[name] = { ...MARK };
+    if (isObject(out.result) && 'message' in out.result) out.result = { ...out.result, message: { ...MARK } };
   }
   return out;
 }

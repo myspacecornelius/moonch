@@ -16,7 +16,14 @@ const { classifyPath, WITHHELD_ROLES } = require('../../package-engine.js');
 const { DESIGN } = require('./constants.cjs');
 const { sha256Hex, squash, hashFile } = require('./util.cjs');
 
-class SafetyError extends Error {}
+/* message is shown to the owner and kept in the state; detail, when there is one, names the file and goes to the pipeline's private error.log
+   only (a name chosen by the designer can say where a trap is). */
+class SafetyError extends Error {
+  constructor(message, detail) {
+    super(message);
+    this.detail = detail || message;
+  }
+}
 
 const EMPTY_SHA = sha256Hex('');
 
@@ -26,9 +33,9 @@ function treeManifest(dir) {
   const visit = relDir => {
     for (const entry of fs.readdirSync(path.join(dir, relDir), { withFileTypes: true })) {
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink()) throw new SafetyError(`The pilot packet holds a link (${rel.slice(0, 120)})`);
+      if (entry.isSymbolicLink()) throw new SafetyError('The pilot packet holds a link', `The pilot packet holds a link (${rel.slice(0, 120)})`);
       if (entry.isDirectory()) { visit(rel); continue; }
-      if (!entry.isFile()) throw new SafetyError(`The pilot packet holds something that is not a file (${rel.slice(0, 120)})`);
+      if (!entry.isFile()) throw new SafetyError('The pilot packet holds something that is not a file', `The pilot packet holds something that is not a file (${rel.slice(0, 120)})`);
       const abs = path.join(dir, rel);
       out.push({ name: rel, bytes: fs.lstatSync(abs).size, sha256: hashFile(abs) });
     }
@@ -54,10 +61,10 @@ function verifyPacket({ dir, manifest, withheldHashes, withheldNames }) {
   }
   for (const file of actual) {
     const built = expected.get(file.name);
-    if (built.sha256 !== file.sha256 || built.bytes !== file.bytes) throw new SafetyError(`A file of the pilot packet changed after it was built (${file.name.slice(0, 120)})`);
-    if (file.sha256 !== EMPTY_SHA && withheldHashes.has(file.sha256)) throw new SafetyError(`A file of the pilot packet is byte for byte withheld material (${file.name.slice(0, 120)})`);
-    if (withheldNames.has(file.name.toLowerCase())) throw new SafetyError(`A file of the pilot packet carries the name of withheld material (${file.name.slice(0, 120)})`);
-    if (WITHHELD_ROLES.includes(classifyPath(file.name).role)) throw new SafetyError(`A file of the pilot packet looks like grading material by name (${file.name.slice(0, 120)})`);
+    if (built.sha256 !== file.sha256 || built.bytes !== file.bytes) throw new SafetyError('A file of the pilot packet changed after it was built', `A file of the pilot packet changed after it was built (${file.name.slice(0, 120)})`);
+    if (file.sha256 !== EMPTY_SHA && withheldHashes.has(file.sha256)) throw new SafetyError('A file of the pilot packet is byte for byte withheld material', `A file of the pilot packet is byte for byte withheld material (${file.name.slice(0, 120)})`);
+    if (withheldNames.has(file.name.toLowerCase())) throw new SafetyError('A file of the pilot packet carries the name of withheld material', `A file of the pilot packet carries the name of withheld material (${file.name.slice(0, 120)})`);
+    if (WITHHELD_ROLES.includes(classifyPath(file.name).role)) throw new SafetyError('A file of the pilot packet looks like grading material by name', `A file of the pilot packet looks like grading material by name (${file.name.slice(0, 120)})`);
   }
   return actual;
 }

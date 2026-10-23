@@ -8,13 +8,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
 const { readZip } = require('../../package-engine.js');
-const { TEXT_EXTENSIONS, squash } = require('./util.cjs');
+const { TEXT_EXTENSIONS } = require('./util.cjs');
 const { containsLeak } = require('./safety.cjs');
 
 const ZIP_EXTENSIONS = new Set(['.docx', '.docm', '.xlsx', '.xlsm', '.pptx', '.pptm']);
 const ZIP_READ_BYTES = 50 * 1024 * 1024; /* the zip reader's own limit */
 const DEFAULT_CHARS = 4 * 1024 * 1024;
 const CHUNK = 1024 * 1024;
+const CARRY_CHARS = 16 * 1024; /* the overlap kept between two chunks: far more than a window (80 characters) with its white space */
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'' };
 function decodeXml(text) {
@@ -112,9 +113,10 @@ async function scanFile(file, windows, shouldStop) {
     handle = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     const decoder = new StringDecoder('utf8');
     const buffer = Buffer.alloc(CHUNK);
+    /* The end of the last chunk as it is in the file, white space and all: the next chunk is joined to it as it is, without a space put
+       between them (a boundary can fall inside a word) and without one taken away (it can fall on a space). containsLeak squashes. */
     let carry = '';
     let leak = false;
-    const widest = windows.length ? Math.max(...windows.map(window => window.length)) + 8 : 0;
     for (;;) {
       if (shouldStop && shouldStop()) return { leak: null, binary };
       const { bytesRead } = await handle.read(buffer, 0, CHUNK, null);
@@ -122,9 +124,9 @@ async function scanFile(file, windows, shouldStop) {
       const chunk = buffer.subarray(0, bytesRead);
       if (!binary && chunk.includes(0)) binary = true;
       if (!leak && windows.length) {
-        const text = squash(carry + ' ' + decoder.write(chunk));
-        if (containsLeak(text, windows)) leak = true;
-        carry = text.slice(-widest);
+        const raw = carry + decoder.write(chunk);
+        if (containsLeak(raw, windows)) leak = true;
+        carry = raw.slice(-CARRY_CHARS);
       }
       if (leak) break;
     }

@@ -410,7 +410,7 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
   const listed = await w.pipeline.list();
   assert.equal(listed.running, null);
   assert.equal(listed.pipelines.length, 1);
-  assert.deepEqual(Object.keys(listed.pipelines[0]).sort(), ['attempt', 'capUsd', 'createdAt', 'endedAt', 'id', 'label', 'message', 'redesigns', 'running', 'spentUsd', 'stage', 'updatedAt', 'verdict']);
+  assert.deepEqual(Object.keys(listed.pipelines[0]).sort(), ['attempt', 'capUsd', 'createdAt', 'endedAt', 'id', 'label', 'message', 'quotesRejection', 'redesigns', 'running', 'spentUsd', 'stage', 'updatedAt', 'verdict']);
   assert.equal(listed.config.passBar, 0.45);
   assert.deepEqual(listed.config.acknowledgements, ACKS);
   assert.equal(listed.config.linksAvailable, false);
@@ -2861,11 +2861,14 @@ test('the public reason for a new file whose name states the gold names neither 
     const response = await w.get(`/api/pipeline/${id}`);
     return response.json && response.json.stage === 'screen' && response.json.redacted && response.json.attempts.length === 2 ? response : null;
   }, { label: 'a redacted answer during the screen of attempt 2' });
-  assert.deepEqual(during.json.attempts[0].rejection, { kind: 'design', reasons: ['The name of a new file gives away part of the answer'] });
+  /* the reasons themselves are withheld while a round runs, and what they say holds no file name either way */
+  assert.deepEqual(during.json.attempts[0].rejection, { kind: 'design', reasons: { withheld: true } });
   assert.ok(!during.text.includes('Cash_1250'), 'the file name is nowhere in the answer');
   assert.ok(!/Cash_1250|1,250/.test(during.json.message || ''));
   const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
   assert.equal(finished.json.stage, 'done', finished.json.message);
+  assert.deepEqual(finished.json.attempts[0].rejection, { kind: 'design', reasons: ['The name of a new file gives away part of the answer'] }, 'the owner sees the reason when no round runs');
+  assert.ok(!JSON.stringify(finished.json).includes('Cash_1250'), 'and it holds no file name');
   const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
   assert.match(repair.prompt, /The name of the new file Cash_1250_Summary\.txt states the figure 1250/);
   assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /Cash_1250_Summary\.txt/, 'and so is the feedback for the redesign');
@@ -3196,4 +3199,190 @@ test('what the loader says while the pipeline waits is kept up to 1000 character
   assert.match(scrubbed.waiting.message, /^Sign in at <link> and press Continue\. a{400}$/);
   assert.ok(!JSON.stringify(scrubbed).includes('SECRET-TOKEN-123'));
   await service3.stop(last.id);
+});
+
+/* ====================================================================== review fixes 3: no designer-chosen name in a public message, a scan across a chunk boundary */
+
+test('parseTrapsFile: a fault in a trap or a fingerprint is reported without the id, title or file name the designer chose; the detail has them', () => {
+  const good = JSON.parse(designFiles(1)[3].content);
+  const trap = (over = {}) => ({ id: 'trap_Cash_3050', title: 'Cash 3050 trap', mechanism: 'm', files: [], decoy: 'd', correctValue: '1', wrongValue: '2', ...over });
+  const cases = [
+    [{ traps: [trap({ title: '' })] }, /^A trap needs a title$/, /trap trap_Cash_3050 needs a title/],
+    [{ traps: [trap({ files: [5] })] }, /^A trap files must be a list of at most 20 names$/, /trap trap_Cash_3050 files/],
+    [{ traps: [trap({ files: ['Cash_3050_Missing.csv'] })] }, /^A trap names a file that is not in the pilot packet$/, /trap trap_Cash_3050 names the file Cash_3050_Missing\.csv/],
+    [{ traps: [trap({ mechanism: { a: 1 } })] }, /^A trap mechanism must be text$/, /trap trap_Cash_3050 mechanism must be text/],
+    [{ traps: [trap({ decoy: 'x'.repeat(1001) })] }, /^A trap decoy is longer than 1000 characters$/, /trap trap_Cash_3050 decoy/],
+    [{ traps: [trap({ correctValue: 'x'.repeat(201) })] }, /^A trap correctValue is longer than 200 characters$/, /trap trap_Cash_3050 correctValue/],
+    [{ traps: [trap({ title: 'x'.repeat(201) })] }, /^A trap title is longer than 200 characters$/, /trap trap_Cash_3050 title/],
+    [{ traps: [trap()], fingerprints: [{ id: 'counts_credit_as_cash_3050', tokens: [], figures: [] }] }, /^A fingerprint needs a token or a figure$/, /fingerprint counts_credit_as_cash_3050 needs a token or a figure/],
+    [{ traps: [trap()], fingerprints: [{ id: 'counts_credit_as_cash_3050', tokens: ['x'.repeat(201)] }] }, /^A fingerprint has too many or too long tokens$/, /fingerprint counts_credit_as_cash_3050 has/],
+    [{ traps: [trap()], fingerprints: [{ id: 'counts_credit_as_cash_3050', figures: [{ value: 'many' }] }] }, /^A fingerprint figure 1 needs a numeric value$/, /fingerprint counts_credit_as_cash_3050 figure 1/],
+    [{ traps: [trap()], fingerprints: [{ id: 'counts_credit_as_cash_3050', figures: [{ value: 1, tolerance: -1 }] }] }, /^A fingerprint figure 1 needs a tolerance of zero or more$/, /fingerprint counts_credit_as_cash_3050 figure 1/],
+    [{ traps: [trap()], fingerprints: [{ id: 'counts_credit_as_cash_3050', figures: 'x'.repeat(3) }] }, /^A fingerprint figures must be a list of at most 50$/, /fingerprint counts_credit_as_cash_3050 figures/],
+  ];
+  for (const [over, publicRe, detailRe] of cases) {
+    assert.throws(() => parseTrapsFile(JSON.stringify({ ...good, ...over }), new Set(['Cash_Facts.csv'])), error => {
+      assert.equal(error.constructor.name, 'DesignError');
+      assert.match(error.message, publicRe);
+      assert.ok(!/3050|trap_Cash|counts_credit|Cash_3050/.test(error.message), `the public message names the designer's id: ${error.message}`);
+      assert.match(error.detail, detailRe);
+      return true;
+    }, JSON.stringify(over).slice(0, 80));
+  }
+  /* the gold has no designer-chosen name, so its messages stay as they are */
+  assert.throws(() => parseTrapsFile(JSON.stringify({ ...good, gold: { decision: 'x', figures: [{ label: 'a', value: 'many' }] } }), new Set(['Meridian_Lender_Summary.txt', 'Cash_Facts.csv', 'Facility_Terms.txt'])), error => error.message === 'Gold figure 1 needs a numeric value' && error.detail === 'gold figure 1 needs a numeric value');
+});
+
+test('readDesign: a fault in a file with an underscore name never puts the name, or a figure in it, into the public message', t => {
+  const fragments = ['Cash', '1250', 'Summary', 'Hold'];
+  const publicOnly = (change, expected) => assert.throws(() => read(makeOut(t, change)), error => {
+    assert.equal(error.constructor.name, 'DesignError');
+    assert.match(error.message, expected);
+    for (const fragment of fragments) assert.ok(!error.message.includes(fragment), `${fragment} is in the public message: ${error.message}`);
+    return true;
+  }, JSON.stringify(Object.keys(change)));
+  /* the same file name in every kind of fault; \b would not see these names (an underscore is a word character) */
+  publicOnly({ 'new/Cash_1250_Summary.txt': `Notes: ${GUIDELINE}` }, /holds a long passage/);
+  publicOnly({ 'new/Cash_1250_Summary.csv': GOLDEN_FILE }, /is a copy of withheld material/);
+  publicOnly({ 'new/Cash_1250_Summary/gaf/Layout.txt': 'x' }, /gaf path/);
+  publicOnly({ 'new/Cash_1250_Answer_Key.txt': 'x' }, /looks like grading material by name/);
+  publicOnly({ 'new/Hold_Cash_1250_Summary.txt': 'x', 'traps.json': JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), newFiles: ['Meridian_Lender_Summary.txt', 'Hold_Cash_1250_Summary.txt', 'Ghost_1250.txt'] }) }, /lists a new file that out\/new does not hold|holds a long passage|gives away/);
+  publicOnly({ 'new/Meridian_Lender_Summary.txt': 'x', 'new/cash_1250_summary.txt': 'a', 'new/Cash_1250_Summary.txt': 'b' }, /is named twice|existing file/);
+  publicOnly({ 'edited/Cash_1250_Summary.txt': 'x' }, /is not a world or task file/);
+  /* a name that states the figure, with a passage in the file as well: one public message, no name */
+  const withAtoms = originalWorld(t);
+  assert.throws(() => withAtoms.read(makeOut(t, { 'new/Cash_1250_Summary.txt': 'x' })), error => error.message === 'The name of a new file gives away part of the answer' && /Cash_1250_Summary\.txt/.test(error.detail));
+});
+
+test('REDACTION: the reasons a design was rejected are withheld while a round runs, and so is a message that quotes them', async t => {
+  const W = { withheld: true };
+  const view = {
+    id: 'pln-0123456789ab', stage: 'failed', quotesRejection: true, message: 'Stopped after 3 redesigns: the design of attempt 4 was rejected before any pilot ran (A fingerprint needs a token or a figure). Nothing from it was run.',
+    summary: 'Stopped after 3 redesigns: quoted reason', error: 'quoted', result: { verdict: 'failed', message: 'Stopped after 3 redesigns: quoted reason' },
+    attempts: [{ n: 4, outcome: 'rejected', rejection: { kind: 'design', reasons: ['A fingerprint needs a token or a figure'] } }],
+    pipelines: [{ id: 'pln-0123456789ab', stage: 'failed', quotesRejection: true, message: 'quoted reason' }, { id: 'pln-0123456789ac', stage: 'done', quotesRejection: false, message: 'The test passed.' }],
+  };
+  const out = redactPipelineData(view);
+  assert.deepEqual(out.attempts[0].rejection, { kind: 'design', reasons: W });
+  assert.deepEqual([out.message, out.summary, out.error, out.result.message], [W, W, W, W]);
+  assert.equal(out.result.verdict, 'failed', 'the verdict is not a quotation');
+  assert.deepEqual(out.pipelines[0].message, W, 'a row of the list too');
+  assert.equal(out.pipelines[1].message, 'The test passed.', 'a message that quotes nothing stays');
+  assert.equal(out.quotesRejection, true);
+  /* a view that does not quote keeps its message */
+  const plain = redactPipelineData({ id: 'x', stage: 'screen', quotesRejection: false, message: 'Running 2 pilots for the screen', summary: '', error: null, result: null });
+  assert.equal(plain.message, 'Running 2 pilots for the screen');
+  assert.equal(plain.error, null);
+
+  /* the real service: the flag is set on the messages that quote reasons, and on no other */
+  const seen = [];
+  const rules = [classifierRule(), ...[1, 2, 3, 4].flatMap(n => attemptRules(n, [0.2], { goldenScore: 0.5 }))];
+  const w = await makeWorld(t, { rules, onStage: (stage, info, world) => { const state = world.pipeline._entry(info.id).state; seen.push([stage, state.quotesRejection === true, state.message]); } });
+  const { view: final } = await w.run();
+  assert.equal(final.stage, 'failed', final.message);
+  assert.deepEqual(seen.filter(([stage]) => stage === 'redesign').map(item => item[1]), [true, true, true]);
+  assert.deepEqual(seen.filter(([stage]) => stage === 'design').map(item => item[1]), [false, false, false, false]);
+  assert.equal(final.quotesRejection, true);
+  assert.match(final.message, /^Stopped after 3 redesigns: the design of attempt 4 was rejected before any pilot ran \(The golden answer scored 0\.50/);
+  const redacted = redactPipelineData(final);
+  assert.deepEqual([redacted.message, redacted.summary, redacted.result.message], [W, W, W]);
+  assert.ok(redacted.attempts.every(attempt => attempt.rejection.reasons.withheld === true));
+  assert.ok(!JSON.stringify(redacted).includes('golden answer scored'), 'the quoted reason is nowhere');
+  const row = (await w.pipeline.list()).pipelines[0];
+  assert.equal(row.quotesRejection, true);
+  /* a pipeline that passed quotes nothing */
+  const ok = await makeWorld(t);
+  const done = (await ok.run()).view;
+  assert.equal(done.quotesRejection, false);
+  assert.equal(redactPipelineData(done).message, done.message);
+});
+
+test('a fingerprint id that carries a figure reaches neither the public reason nor the redacted view of the next round; the designer is told the exact id', async t => {
+  const traps = { fingerprints: [{ id: 'counts-credit-as-cash-3050', label: 'x', tokens: [], figures: [] }] };
+  const design = { traps };
+  const rules = [classifierRule(), ...attemptRules(1, [], { design, repairScenario: designerScenario(1, { design }) }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { pilotExtra: [0, 1, 2, 3, 4].map(() => ({ delayMs: 900 })) })];
+  const w = await makeWorld(t, { rules, server: true });
+  const started = await w.post('/api/pipeline/start', w.body());
+  const id = started.json.id;
+  const during = await waitFor(async () => {
+    const response = await w.get(`/api/pipeline/${id}`);
+    return response.json && response.json.stage === 'screen' && response.json.redacted && response.json.attempts.length === 2 ? response : null;
+  }, { label: 'a redacted answer during the screen of attempt 2' });
+  assert.deepEqual(during.json.attempts[0].rejection, { kind: 'design', reasons: { withheld: true } });
+  assert.ok(!during.text.includes('counts-credit-as-cash'), 'the id is nowhere in the answer');
+  const list = await w.get('/api/pipeline');
+  assert.ok(!list.text.includes('counts-credit-as-cash'));
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.stage, 'done', finished.json.message);
+  assert.deepEqual(finished.json.attempts[0].rejection, { kind: 'design', reasons: ['A fingerprint needs a token or a figure'] });
+  assert.ok(!finished.text.includes('counts-credit-as-cash'), 'and the full view holds no id either');
+  const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
+  assert.match(repair.prompt, /fingerprint counts-credit-as-cash-3050 needs a token or a figure/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /counts-credit-as-cash-3050/);
+});
+
+test('SAFETY: a SafetyError names no file in its message; the exact file is in the pipeline\'s private error.log', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-safe-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-safe-'));
+  t.after(() => fs.rmSync(plain, { recursive: true, force: true }));
+  put(dir, 'Cash_1250_Summary.txt', 'x');
+  put(dir, 'Cash_1250_Answer_Key.txt', 'y');
+  put(plain, 'Cash_1250_Summary.txt', 'x');
+  const none = { withheldHashes: new Set(), withheldNames: new Set() };
+  const entry = (name, text) => ({ name, bytes: Buffer.byteLength(text), sha256: sha(text) });
+  const check = (manifest, sets, expected, name, where = plain) => assert.throws(() => verifyPacket({ dir: where, manifest, ...sets }), error => {
+    assert.ok(error instanceof SafetyError);
+    assert.match(error.message, expected);
+    assert.ok(!error.message.includes('Cash_1250') && !error.message.includes('1250'), error.message);
+    assert.ok(error.detail.includes(name), error.detail);
+    return true;
+  });
+  check([entry('Cash_1250_Summary.txt', 'x'), entry('Cash_1250_Answer_Key.txt', 'y')], none, /looks like grading material by name$/, 'Cash_1250_Answer_Key.txt', dir);
+  check([{ ...entry('Cash_1250_Summary.txt', 'x'), sha256: sha('other') }], none, /changed after it was built$/, 'Cash_1250_Summary.txt');
+  check([entry('Cash_1250_Summary.txt', 'x')], { withheldHashes: new Set([sha('x')]), withheldNames: new Set() }, /byte for byte withheld material$/, 'Cash_1250_Summary.txt');
+  check([entry('Cash_1250_Summary.txt', 'x')], { withheldHashes: new Set(), withheldNames: new Set(['cash_1250_summary.txt']) }, /carries the name of withheld material$/, 'Cash_1250_Summary.txt');
+  fs.symlinkSync('/etc/hostname', path.join(plain, 'Cash_1250_Link.txt'));
+  check([entry('Cash_1250_Summary.txt', 'x')], none, /holds a link$/, 'Cash_1250_Link.txt');
+  /* in a run: a file that changed after the packet was built */
+  const w = await makeWorld(t, { onStage: (stage, info, world) => { if (stage === 'test') fs.writeFileSync(path.join(world.workRoot, info.id, 'work', 'filesystem', 'Cash_Facts.csv'), 'changed\n'); } });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'failed');
+  assert.equal(view.message, 'SAFETY STOP: A file of the pilot packet changed after it was built. Nothing was started.');
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'error.log'), 'utf8'), /changed after it was built \(Cash_Facts\.csv\)/);
+});
+
+test('the scan of a file in chunks finds a short passage whichever way it falls across the boundary: inside a word, on a space, at either end', async t => {
+  const { scanFile, textHoldsWindows } = require('../backend/pipeline/extract.cjs');
+  const windows = leakWindows(GOLDEN);
+  assert.ok(windows.length >= 1 && windows.every(window => window.length < 80), 'a short passage: one window, the whole text');
+  const CHUNK = 1024 * 1024;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-chunk-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'big.txt');
+  /* the passage starts `before` characters before the first chunk ends: every place the boundary can fall in it, and one on each side */
+  for (let before = 0; before <= GOLDEN.length + 1; before++) {
+    fs.writeFileSync(file, `${'q'.repeat(CHUNK - before - 1)} ${GOLDEN}\n${'r'.repeat(100)}`);
+    assert.equal((await scanFile(file, windows, () => false)).leak, true, `${before} characters of the passage before the boundary`);
+    assert.equal(await textHoldsWindows(file, windows, () => false), true, `${before} (textHoldsWindows)`);
+  }
+  /* a boundary in the middle of runs of white space, and a long passage (several windows) across it */
+  fs.writeFileSync(file, `${'q'.repeat(CHUNK - 3)}   \n\n   ${GOLDEN.replace(/ /g, '  \n ')}`);
+  assert.equal((await scanFile(file, windows, () => false)).leak, true, 'white space in the passage and at the boundary');
+  const long = leakWindows(GUIDELINE);
+  for (const before of [1, 7, 33, 80, 120]) {
+    fs.writeFileSync(file, `${'q'.repeat(CHUNK - before - 1)} ${GUIDELINE}\n`);
+    assert.equal((await scanFile(file, long, () => false)).leak, true, `guideline, ${before}`);
+  }
+  /* no false join: two words that are apart in the file are not read as one, and a passage that is not there is not found */
+  const spaced = leakWindows('usable cash is held at the lender today and the board approved it');
+  fs.writeFileSync(file, `${'q'.repeat(CHUNK - 8)} usable cashis held at the lender today and the board approved it`);
+  assert.equal((await scanFile(file, spaced, () => false)).leak, false, 'a missing space is not made up');
+  fs.writeFileSync(file, `${'q'.repeat(CHUNK - 5)}usable cash is held at the lender today and the board approved it`);
+  assert.equal((await scanFile(file, spaced, () => false)).leak, true, 'the passage right after the boundary');
+  fs.writeFileSync(file, `${'q'.repeat(CHUNK - 8)}usable cash is held at the lender today and the board a`);
+  assert.equal((await scanFile(file, spaced, () => false)).leak, false, 'a passage cut short is not one');
+  /* the multi-byte character that is split by the boundary is not lost */
+  fs.writeFileSync(file, Buffer.concat([Buffer.from('q'.repeat(CHUNK - 1)), Buffer.from('\u00e9 '), Buffer.from(GOLDEN)]));
+  assert.equal((await scanFile(file, windows, () => false)).leak, true);
 });
