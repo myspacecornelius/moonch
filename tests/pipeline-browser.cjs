@@ -313,8 +313,59 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.ok(posts.some(p => p.url === '/api/pipeline/pl-browser-0001/continue' && p.nonce === NONCE));
     pass('the waiting message shows in a polite live region with a Continue button that works from the keyboard and posts once');
 
+    /* ---------- the owner checks the fetched files against the task page (waiting kind confirm-files) ---------- */
+    const FETCHED = Array.from({ length: 40 }, (_, i) => ({ name: 'Atlas_File_' + String(i + 1).padStart(2, '0') + ['.csv', '.txt', '.xlsx'][i % 3], group: i < 25 ? 'World files' : 'Task files', bytes: 1000 + i }));
+    const CONFIRM_NOTES = ['The file list stopped at the 200 file cap.', 'A second page of files was not followed.', 'A frame on the page could not be read.'];
+    const continuesBefore = posts.filter(p => p.url.endsWith('/continue')).length;
+    set({
+      import: { fileCount: 40, page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle: { found: true, label: 'Show all files', flipped: true, filesBefore: 4, filesAfter: 40, learned: false },
+        skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES },
+      waiting: { kind: 'confirm-files', message: '40 files were fetched. Compare them with the files listed on the task page, then press Continue.', since: new Date().toISOString() },
+    });
+    await waitFor(stageIs('^Waiting for you: check the files$'), 'the confirm-files wait', POLL_WAIT);
+    assert.equal(await text('#pl-wait h2'), 'Check the files');
+    assert.match(await text('#pl-wait .pl-wait-message'), /^40 files were fetched\. Compare them with the files listed on the task page/);
+    assert.equal(await count('#pl-wait .pl-files li'), 40, 'every fetched file is listed');
+    assert.match(await text('#pl-wait .pl-files li:first-child'), /Atlas_File_01\.csv\s+World files/);
+    assert.match(await text('#pl-wait .pl-files li:last-child'), /Atlas_File_40\.csv\s+Task files/);
+    assert.equal(await text('#pl-wait .pl-notes li:nth-child(3)'), 'A frame on the page could not be read.');
+    assert.equal(await count('#pl-wait .pl-notes li'), 3, 'the three notes');
+    assert.match(await text('#pl-wait .pl-notes'), /The loader could not fully cover these places/);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-notes").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the notes come before the files');
+    assert.match(await text('#pl-wait'), /Skipped \(2\)[\s\S]*Atlas_Thumbs\.db\s+a system file[\s\S]*Atlas_Archive_2019\.zip\s+larger than the size cap/);
+    assert.match(await text('#pl-wait'), /Show all files[\s\S]*Found and turned on \(\u201CShow all files\u201D\)\. 4 files offered before, 40 after\./);
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-wait .pl-confirm-actions button")].map(b=>b.textContent.trim()).join("|")'), 'Every file is there: continue|Stop');
+    assert.deepEqual(await yellowButtons(), [], 'no yellow button here: the only yellow one is Approve and start');
+    assert.equal(await evaluate('(()=>{const b=document.querySelector("#pl-wait .pl-files-box");return b.scrollHeight>b.clientHeight&&getComputedStyle(b).overflowY==="auto"&&b.clientHeight<=Math.ceil(parseFloat(getComputedStyle(document.documentElement).fontSize)*15.5)})()'), true, 'a long list scrolls inside its box, which stays short');
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-files-box").getAttribute("tabindex")'), '0', 'and the box can be scrolled from the keyboard');
+    assert.match(await text('#pl-import .pl-notes'), /A frame on the page could not be read\./, 'the notes are in the import card too');
+    await evaluate('document.querySelector("#pl-wait .pl-files-box").focus()');
+    assert.equal(await evaluate('document.activeElement.className'), 'pl-files-box');
+    await press('Tab');
+    assert.equal(await focused(), 'continue', 'Tab leaves the list for the Continue button');
+    await press('Tab');
+    assert.equal(await focused(), 'wait-stop', 'then Stop');
+    await shot('02c-confirm-1440', 1440, 1000);
+    for (const [w, h] of [[390, 844], [320, 640]]) {
+      await viewport(w, h);
+      const o = await overflow();
+      assert.ok(o.scroll <= o.inner, `check the files: horizontal overflow at ${w}x${h}: scrollWidth ${o.scroll} > ${o.inner}`);
+      const rects = await evaluate('JSON.stringify([...document.querySelectorAll("#pl-wait .pl-confirm-actions button")].map(b=>{const r=b.getBoundingClientRect();return [Math.round(r.left),Math.round(r.right),Math.round(r.width),Math.round(r.height)]}))');
+      assert.equal(JSON.parse(rects).every(([l, r, bw, bh]) => l >= 0 && r <= w && bw >= 44 && bh >= 36), true, 'both buttons fit and are big enough to press at ' + w + ': ' + rects);
+      assert.equal(await evaluate('(()=>{const r=document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect();return r.left>=0&&r.right<=window.innerWidth})()'), true, 'the file list fits at ' + w);
+    }
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-wait").scrollIntoView()');
+    await shot('02c-confirm-390', 390, 844);
+    await noHorizontalOverflow('check the files');
+    await evaluate('document.querySelector("[data-pl=continue]").focus()');
+    await press('Enter');
+    await waitFor('!document.querySelector("#pl-wait [data-pl=continue]")', 'the confirm wait to end', 5000);
+    assert.equal(posts.filter(p => p.url.endsWith('/continue')).length, continuesBefore + 1, 'one more continue was posted');
+    pass('the confirm-files wait shows "Check the files": the message, three notes above the list, 40 files with groups in a scrolling box, the skipped files, the toggle result, and two buttons that fit a phone and work from the keyboard');
+
     /* ---------- classify, design ---------- */
-    set({ stage: 'classify', message: 'Classifying what was captured', spentUsd: 0.4, import: { fileCount: 9, page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle: { found: true, label: 'Show all files', flipped: true, filesBefore: 4, filesAfter: 9, learned: false }, skipped: [], files: [], facts: { world: 5, task: 3, withheld: 2, other: 1 } } });
+    set({ stage: 'classify', message: 'Classifying what was captured', spentUsd: 0.4, import: { fileCount: 9, page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle: { found: true, label: 'Show all files', flipped: true, filesBefore: 4, filesAfter: 9, learned: false }, skipped: [], files: [], notes: ['A frame on the page could not be read.'], facts: { world: 5, task: 3, withheld: 2, other: 1 } } });
     await waitFor(stageIs('^Classify:'), 'classify', POLL_WAIT);
     assert.match(await text('#pl-import'), /9 files in all · 5 world · 3 task · 2 withheld · 1 other/);
     assert.match(await text('#pl-import'), /Found and turned on \(“Show all files”\)\. 4 files offered before, 9 after\./);

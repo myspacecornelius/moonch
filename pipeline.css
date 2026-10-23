@@ -43,6 +43,14 @@
 
 .pl-wait{border-color:var(--warn)}
 .pl-wait-message{margin:0 0 14px;font-size:.95rem;line-height:1.55;overflow-wrap:anywhere}
+.pl-wait h3{margin:16px 0 8px}
+.pl-files-box{max-height:15rem;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--bg)}
+.pl-files{list-style:none;margin:0;padding:0;display:grid;gap:5px;font-size:.86rem;line-height:1.45}
+.pl-files li{display:flex;flex-wrap:wrap;gap:2px 12px;overflow-wrap:anywhere}
+.pl-file-name{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.82rem}
+.pl-toggle-line{margin:0;font-size:.9rem}
+.pl-confirm-actions{margin-top:18px}
+.pl-notes{margin:0 0 14px}
 
 .pl-steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
 .pl-step{display:flex;gap:10px;align-items:flex-start;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}

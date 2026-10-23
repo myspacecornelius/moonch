@@ -795,6 +795,149 @@ test('a failed Continue is shown in words and the button works again', async t =
   assert.equal(page.enabled('continue'), true);
 });
 
+/* ---- the wait after a link import: the owner checks the fetched files against the task page (waiting.kind 'confirm-files', import.notes) ---- */
+
+const fetched = (n = 40) => Array.from({ length: n }, (_, i) => ({ name: 'Atlas_File_' + String(i + 1).padStart(2, '0') + ['.csv', '.txt', '.xlsx'][i % 3], group: i < 25 ? 'World files' : 'Task files', bytes: 1000 + i, sha256: 'a'.repeat(64), label: 'File ' + (i + 1) }));
+const SKIPPED = [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }];
+const NOTES = ['The file list stopped at the 200 file cap.', 'A second page of files was not followed.', 'A frame on the page could not be read.'];
+const CONFIRM_MESSAGE = '40 files were fetched. Compare them with the files listed on the task page, then press Continue.';
+const confirmState = (over = {}, importOver = {}) => baseState({
+  stage: 'import', import: importFacts({ fileCount: 40, files: fetched(), skipped: SKIPPED, notes: NOTES, facts: undefined, ...importOver }),
+  waiting: { kind: 'confirm-files', message: CONFIRM_MESSAGE, since: '2026-10-23T10:02:00.000Z' }, ...over,
+});
+
+test('the confirm-files wait is its own card, "Check the files": the message, the notes, 40 fetched files with their groups, the skipped files, the toggle result, and two buttons', async t => {
+  const { companion, page } = await bootWith(t, [confirmState()]);
+  const w = page.region('wait');
+  assert.match(w, /<div class="eyebrow">Waiting for you<\/div><h2>Check the files<\/h2>/);
+  assert.match(w, /<span class="pill amber">Paused<\/span>/);
+  assert.ok(w.includes('<p class="pl-wait-message">' + CONFIRM_MESSAGE + '</p>'));
+  assert.doesNotMatch(w, /Sign in|Your action is needed/);
+  /* the notes, prominent: a notice before the list of files */
+  assert.match(w, /<div class="notice pl-warning pl-notes" role="note"><strong>The loader could not fully cover these places<\/strong>/);
+  for (const note of NOTES) assert.ok(w.includes('<li>' + note + '</li>'), note);
+  assert.ok(w.indexOf('pl-notes') < w.indexOf('pl-files-box'), 'the notes come before the files');
+  /* the files: a count, a scrolling box that the keyboard can reach, every name with its group */
+  assert.match(w, /<h3>40 files fetched<\/h3>/);
+  assert.match(w, /<div class="pl-files-box" role="region" aria-label="Files fetched from the task page" tabindex="0">/);
+  assert.equal((w.match(/<li><span class="pl-file-name">/g) || []).length, 40);
+  assert.match(w, /<li><span class="pl-file-name">Atlas_File_01\.csv<\/span> <span class="pl-file-group muted">World files<\/span><\/li>/);
+  assert.match(w, /<li><span class="pl-file-name">Atlas_File_40\.csv<\/span>[^]*?Task files<\/span><\/li>/);
+  /* the skipped files with their reasons, and the toggle result */
+  assert.match(w, /<h3>Skipped \(2\)<\/h3><ul class="pl-names"><li>Atlas_Thumbs\.db <span class="muted">a system file<\/span><\/li><li>Atlas_Archive_2019\.zip <span class="muted">larger than the size cap<\/span><\/li><\/ul>/);
+  assert.match(w, /<h3>Show all files<\/h3><p class="pl-toggle-line">Found and turned on \(\u201CShow all files\u201D\)\. 4 files offered before, 9 after\.<\/p>/);
+  /* two buttons, in words; the first is not the yellow primary */
+  assert.match(w, /<button type="button" data-pl="continue" data-pl-key="continue" >Every file is there: continue<\/button>/);
+  assert.match(w, /<button type="button" class="danger" data-pl="stop" data-pl-key="wait-stop" >Stop<\/button>/);
+  assert.doesNotMatch(w, /class="primary"/);
+  assert.equal(page.stage(), 'Waiting for you: check the files');
+  assert.doesNotMatch(w + page.stage(), /%/, 'no percentage');
+  assert.equal(stepsOf(page.region('timeline'))[0].s, 'waiting', 'the import step waits for the owner');
+  assert.equal(stepsOf(page.region('timeline'))[0].caption, 'Waiting for you');
+  assert.match(page.region('wait'), /Every file is there/);
+  assert.match(page.region('actions'), /data-pl="stop"/, 'Stop is also in the bar');
+  /* the stage bar is the same whatever the message says, and a message the companion left out has words of the page's own */
+  companion.update('pl-atlas-0001', { waiting: { kind: 'confirm-files' } });
+  await page.tick();
+  assert.equal(page.stage(), 'Waiting for you: check the files');
+  assert.match(page.region('wait'), /<p class="pl-wait-message">Compare the files below with the task page in the Chrome window\./);
+});
+
+test('Every file is there: continue posts to the continue route once; Stop in the card posts to the stop route', async t => {
+  const { companion, page } = await bootWith(t, [confirmState()]);
+  await page.click('continue');
+  const posts = companion.calls.filter(c => c.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, '/api/pipeline/pl-atlas-0001/continue');
+  assert.equal(posts[0].nonce, 'nonce-fake-1');
+  assert.equal(page.region('wait'), '', 'the card is gone once the companion has no wait');
+  const { companion: other, page: stopper } = await bootWith(t, [confirmState()]);
+  const tag = stopper.region('wait').match(/<button[^>]*data-pl-key="wait-stop"[^>]*>/)[0];
+  assert.ok(tag && !/disabled/.test(tag));
+  await stopper.click('stop');
+  const stops = other.calls.filter(c => c.method === 'POST');
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].url, '/api/pipeline/pl-atlas-0001/stop');
+  assert.match(stopper.region('verdict'), /Stopped by you/);
+});
+
+test('the confirm-files card copes with a missing list, a short list, nothing skipped and no notes, and with markup in names', async t => {
+  const { companion, page } = await bootWith(t, [confirmState({}, { files: undefined, skipped: [], notes: [], toggle: null })]);
+  let w = page.region('wait');
+  assert.match(w, /<h2>Check the files<\/h2>/);
+  assert.match(w, /<h3>Files \(40\)<\/h3><p class="muted">The companion sent no list of the files\.<\/p>/);
+  assert.doesNotMatch(w, /Skipped|pl-notes|Show all files<\/h3>|pl-files-box/);
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 0, files: [] , skipped: [], notes: [] }) });
+  await page.tick();
+  assert.match(page.region('wait'), /The import fetched no file\./);
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 1, files: [{ name: '<b>x</b>.csv', group: '<i>g</i>' }, 'plain.txt', { group: 'nameless' }, null], skipped: [], notes: ['<script>1</script>', '', 7] }) });
+  await page.tick();
+  w = page.region('wait');
+  assert.match(w, /<h3>1 file fetched<\/h3>/);
+  assert.match(w, /&lt;b&gt;x&lt;\/b&gt;\.csv<\/span> <span class="pl-file-group muted">&lt;i&gt;g&lt;\/i&gt;<\/span>/);
+  assert.match(w, /<li><span class="pl-file-name">plain\.txt<\/span><\/li>/);
+  assert.equal((w.match(/pl-file-name/g) || []).length, 2, 'an entry without a name is not listed');
+  assert.match(w, /<li>&lt;script&gt;1&lt;\/script&gt;<\/li><li>7<\/li>/);
+  assert.doesNotMatch(w, /<b>|<script>|<i>/);
+});
+
+test('the confirm-files card with fields withheld (the whole field, or entry by entry): "Withheld while a round runs", no crash', async t => {
+  const W = { withheld: true };
+  const { companion, page } = await bootWith(t, [confirmState({ redacted: true, waiting: { kind: 'confirm-files', message: W, since: 'x' } }, { files: W, skipped: W, notes: W, toggle: W })]);
+  let w = page.region('wait');
+  const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
+  assert.ok(w.includes('<p class="pl-wait-message">' + marker + '</p>'), 'the message');
+  assert.match(w, /<h3>Files<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(w, /<h3>Skipped<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(w, /<h3>Show all files<\/h3><p class="pl-toggle-line"><span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+  assert.doesNotMatch(w, /\[object Object\]|undefined|>null</);
+  assert.match(w, /Every file is there: continue/);
+  assert.equal(page.stage(), 'Waiting for you: check the files');
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 3, files: [{ name: W, group: 'World files' }, W, { name: 'Atlas_File_03.csv', group: W }], skipped: [{ name: W, why: W }, W, { name: 'Atlas_Thumbs.db', why: W }], notes: [W, 'A frame could not be read.'], toggle: { found: W, label: W, flipped: W } }) });
+  await page.tick();
+  w = page.region('wait');
+  assert.equal((w.match(/<li><span class="pl-file-name">/g) || []).length, 3);
+  assert.ok(w.includes('<span class="pl-file-name">' + marker + '</span>'));
+  assert.ok(w.includes('<span class="pl-file-group muted">' + marker + '</span>'));
+  assert.ok(w.includes('<li>' + marker + ' <span class="muted">' + marker + '</span></li>'), 'a skipped entry with both parts withheld');
+  assert.ok(w.includes('<li>' + marker + '</li>'), 'a withheld note');
+  assert.match(w, /<li>A frame could not be read\.<\/li>/);
+  assert.doesNotMatch(w, /\[object Object\]|undefined|>null</);
+  assert.equal(page.statusIsError(), false);
+  /* a wait of another kind whose message is withheld */
+  companion.update('pl-atlas-0001', { waiting: { kind: 'needs-person', message: W } });
+  await page.tick();
+  assert.ok(page.region('wait').includes('<p class="pl-wait-message">' + marker + '</p>'));
+  assert.match(page.stage(), /^Waiting for you: Your action is needed in the Chrome window\./);
+});
+
+test('import.notes show in the import card at any time, not only during the wait; withheld notes say so', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'classify', import: importFacts({ notes: NOTES }) })]);
+  let i = page.region('import');
+  assert.match(i, /<div class="notice pl-warning pl-notes" role="note"><strong>The loader could not fully cover these places<\/strong>/);
+  for (const note of NOTES) assert.ok(i.includes('<li>' + note + '</li>'), note);
+  assert.ok(i.indexOf('pl-notes') > i.indexOf('<dl'), 'after the facts');
+  assert.equal(page.region('wait'), '', 'no wait, and the notes are still there');
+  for (const stage of ['design', 'screen', 'test']) {
+    companion.update('pl-atlas-0001', { stage, design: designFacts() });
+    await page.tick();
+    assert.match(page.region('import'), /pl-notes/, stage);
+  }
+  const { page: done } = await bootWith(t, [doneState({ import: importFacts({ notes: ['A request was still pending.'] }) })]);
+  assert.match(done.region('import'), /<li>A request was still pending\.<\/li>/, 'also after the run has ended');
+  const { page: none } = await bootWith(t, [baseState({ stage: 'classify', import: importFacts({ notes: [] }) })]);
+  assert.doesNotMatch(none.region('import'), /pl-notes|could not fully cover/);
+  const { page: absent } = await bootWith(t, [baseState({ stage: 'classify', import: importFacts() })]);
+  assert.doesNotMatch(absent.region('import'), /pl-notes/);
+  const { page: hidden } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, import: importFacts({ notes: { withheld: true } }) })]);
+  assert.match(hidden.region('import'), /<p class="pl-withheld">Places the loader could not fully cover: Withheld while a round runs<\/p>/);
+  assert.doesNotMatch(hidden.region('import'), /\[object Object\]/);
+  /* the toggle and the skipped list of the import card cope with a withheld marker too */
+  const { page: w2 } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, import: importFacts({ toggle: { withheld: true }, skipped: { withheld: true } }) })]);
+  assert.match(w2.region('import'), /<dt>Show all files<\/dt><dd><span class="pl-withheld">Withheld while a round runs<\/span><\/dd>/);
+  assert.match(w2.region('import'), /Skipped files: Withheld while a round runs/);
+});
+
 /* ====================================================================== import facts and classification */
 
 test('import facts: where it came from, the file counts, and whether the show-all-files option was found, turned on or learned', async t => {
