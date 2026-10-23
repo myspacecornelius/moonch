@@ -25,7 +25,8 @@ function scoreRows(attempts) {
 
 const csv = rows => rows.map(row => row.map(cell => (/[",\n]/.test(String(cell)) ? `"${String(cell).replace(/"/g, '""')}"` : String(cell))).join(',')).join('\n') + '\n';
 
-/* outDir: <private>/pipelines/<id>/attempts/<n>/out. state: the pipeline state (label, stage, attempts, spent, config). */
+/* outDir: <private>/pipelines/<id>/attempts/<n>/out. state: the pipeline state (label, stage, attempts, spent, config, and designAttempt:
+   the number of the attempt whose design this is). */
 function buildExport({ outDir, state, note }) {
   const base = `${safeLabel(state.label)}_pipeline_PRIVATE`;
   const enc = new TextEncoder();
@@ -33,7 +34,6 @@ function buildExport({ outDir, state, note }) {
   const add = (name, bytes) => entries.push({ name: `${base}/${name}`, bytes: bytes instanceof Uint8Array ? bytes : enc.encode(bytes) });
   const readIf = file => { try { return fs.readFileSync(file); } catch { return null; } };
   const rows = scoreRows(state.attempts);
-  const lastAttempt = state.attempts[state.attempts.length - 1];
   add('README_PRIVATE.txt', [
     `PRIVATE pipeline export: ${state.label}`,
     '',
@@ -42,7 +42,8 @@ function buildExport({ outDir, state, note }) {
     `Result: ${state.stage}. ${state.message || ''}`.trim(),
     `Design attempts: ${state.attempts.length} (redesigns used: ${state.redesigns}). Spent: USD ${state.spentUsd.toFixed(2)} of a cap of USD ${state.config.capUsd.toFixed(2)}.`,
     `Bar: a pilot beats the design with a simulated-grader score below ${state.config.passBar}. Screen: both of ${state.config.screenPilots}. Test: at least ${state.config.testNeed} of ${state.config.testPilots}.`,
-    note ? `Design of attempt ${lastAttempt ? lastAttempt.n : '?'}: ${note}` : '',
+    /* The design in this zip is the one that was accepted (designAttempt), which is not always the last attempt: later ones may have been rejected. */
+    note ? `Design of attempt ${state.designAttempt === undefined || state.designAttempt === null ? '?' : state.designAttempt}: ${note}` : '',
     '',
     'prompt.txt, guideline.md, golden-answer.md and traps.json are the final design. new/ holds the files added to the world; edited/ holds the world files that were changed (traps.json says why). scores.csv has every pilot score. The simulated grader is a rehearsal, not Studio grading.',
     '',

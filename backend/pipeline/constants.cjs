@@ -7,7 +7,7 @@ const SCREEN_PILOTS = 2; /* the screen passes when BOTH score below the bar */
 const TEST_PILOTS = 5;
 const TEST_NEED = 4; /* the test succeeds when at least this many of the pilots score below the bar */
 const MAX_REDESIGNS = 3; /* then stop and show the owner */
-const DEFAULT_CAP_USD = 30;
+const DEFAULT_CAP_USD = 50; /* pays for one full attempt at the default caps (budget.cjs: 41.40) */
 const MAX_CAP_USD = 200;
 
 /* The three the agent service asks for before a round, plus the one the pipeline adds: the classifier, the designer and the

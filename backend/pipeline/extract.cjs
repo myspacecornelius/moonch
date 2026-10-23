@@ -101,31 +101,45 @@ async function extractText(file, options = {}) {
   return null;
 }
 
-/* Does a plain text file of any size hold one of the windows (safety.leakWindows)? Read in chunks; the end of one chunk is carried into
-   the next, so a passage that spans a boundary is found. Returns true, false, or null when the file is not text. */
-async function textHoldsWindows(file, windows, shouldStop) {
-  if (!windows.length || !TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) return null;
+/* Reads a file of any type and size as utf8 text, in chunks (the end of one chunk is carried into the next, so a passage that spans a
+   boundary is found), and says whether one of the windows (safety.leakWindows) is in it, stopping at the first. Also whether the part
+   read holds a NUL byte, which a text file does not. { leak: true | false | null, binary }: leak is null when the file could not be read
+   or shouldStop said so. */
+async function scanFile(file, windows, shouldStop) {
   let handle;
+  let binary = false;
   try {
     handle = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     const decoder = new StringDecoder('utf8');
     const buffer = Buffer.alloc(CHUNK);
     let carry = '';
-    const widest = Math.max(...windows.map(window => window.length)) + 8;
+    let leak = false;
+    const widest = windows.length ? Math.max(...windows.map(window => window.length)) + 8 : 0;
     for (;;) {
-      if (shouldStop && shouldStop()) return null;
+      if (shouldStop && shouldStop()) return { leak: null, binary };
       const { bytesRead } = await handle.read(buffer, 0, CHUNK, null);
       if (!bytesRead) break;
-      const text = squash(carry + ' ' + decoder.write(buffer.subarray(0, bytesRead)));
-      if (containsLeak(text, windows)) return true;
-      carry = text.slice(-widest);
+      const chunk = buffer.subarray(0, bytesRead);
+      if (!binary && chunk.includes(0)) binary = true;
+      if (!leak && windows.length) {
+        const text = squash(carry + ' ' + decoder.write(chunk));
+        if (containsLeak(text, windows)) leak = true;
+        carry = text.slice(-widest);
+      }
+      if (leak) break;
     }
-    return false;
+    return { leak, binary };
   } catch {
-    return null;
+    return { leak: null, binary };
   } finally {
     if (handle) await handle.close().catch(() => {});
   }
 }
 
-module.exports = { extractText, textHoldsWindows, decodeXml, ZIP_EXTENSIONS };
+/* Does a plain text file of any size hold one of the windows? Returns true, false, or null when the file is not text. */
+async function textHoldsWindows(file, windows, shouldStop) {
+  if (!windows.length || !TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) return null;
+  return (await scanFile(file, windows, shouldStop)).leak;
+}
+
+module.exports = { extractText, textHoldsWindows, scanFile, decodeXml, ZIP_EXTENSIONS };

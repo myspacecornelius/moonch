@@ -70,7 +70,10 @@
                                outside:"decline"   no outside Read at all: a pilot that declined it (the answer says so)
                                quoteOutside:true   the final answer repeats the first line of the outside file, so it holds
                                                    the file's marker
-     writeFiles:[{path,content}]     files written (relative to the working folder) before the result
+     writeFiles:[{path,content}]     files written (relative to the working folder) before the result;
+                                     {path,base64} writes those bytes instead of text (a word-processing file, a picture)
+     symlinks:[{path,target}]        symbolic links made (path relative to the working folder; target as given, so a relative target is
+                                     relative to the folder the link is in), after writeFiles, replacing what is there
      deleteFiles:[path]              files removed (relative to the working folder) before the result
      background              true: start a long lived child process (same process group) and leave it running; its pid
                              is written to .tmp/background.pid
@@ -506,7 +509,16 @@ async function main() {
     const target = path.resolve(process.cwd(), file.path);
     if (target !== process.cwd() && !target.startsWith(process.cwd() + path.sep)) continue; /* a test double stays in its folder */
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, typeof file.content === 'string' ? file.content : '');
+    fs.writeFileSync(target, typeof file.base64 === 'string' ? Buffer.from(file.base64, 'base64') : typeof file.content === 'string' ? file.content : '');
+  }
+
+  for (const link of Array.isArray(scenario.symlinks) ? scenario.symlinks : []) {
+    if (!link || typeof link.path !== 'string' || typeof link.target !== 'string') continue;
+    const target = path.resolve(process.cwd(), link.path);
+    if (target === process.cwd() || !target.startsWith(process.cwd() + path.sep)) continue; /* the link itself stays in the folder */
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.symlinkSync(link.target, target);
   }
 
   for (const rel of Array.isArray(scenario.deleteFiles) ? scenario.deleteFiles : []) {

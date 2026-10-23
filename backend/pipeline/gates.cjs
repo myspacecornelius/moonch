@@ -53,8 +53,24 @@ function parseFairness(output) {
   let data;
   try { data = JSON.parse(raw.slice(start, end + 1)); } catch { return { ok: false, error: 'not valid JSON' }; }
   if (!isObject(data) || !Array.isArray(data.unfair)) return { ok: false, error: 'no unfair list' };
-  const unfair = data.unfair.filter(isObject).map(entry => ({ item: oneLine(entry.item, 300), why: oneLine(entry.why, 400) })).filter(entry => entry.item).slice(0, 20);
+  const unfair = data.unfair.map(unfairEntry).filter(entry => entry.item).slice(0, 20);
+  /* A list that holds something but nothing readable is not "every item is fair": it is an answer that cannot be used. */
+  if (data.unfair.length && !unfair.length) return { ok: false, error: 'the unfair list holds no readable item' };
   return { ok: true, unfair };
+}
+
+/* One entry of the reviewer's list: a string is the item itself, an object names it with `item` (or one of the keys a reviewer is likely
+   to use instead) and says why with `why`. */
+const ITEM_KEYS = ['item', 'rubric_item', 'rubricItem', 'rubric', 'text', 'criterion', 'point', 'description'];
+const WHY_KEYS = ['why', 'reason', 'explanation', 'because'];
+function unfairEntry(entry) {
+  if (typeof entry === 'string') return { item: oneLine(entry, 300), why: '' };
+  if (!isObject(entry)) return { item: '', why: '' };
+  const pick = keys => {
+    for (const key of keys) if (typeof entry[key] === 'string' && entry[key].trim()) return entry[key];
+    return '';
+  };
+  return { item: oneLine(pick(ITEM_KEYS), 300), why: oneLine(pick(WHY_KEYS), 400) };
 }
 
 /* What the simulated grader reads for one pilot: its final message, then each output file it wrote as text under

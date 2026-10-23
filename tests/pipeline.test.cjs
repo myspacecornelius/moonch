@@ -137,7 +137,7 @@ function attemptRules(n, scores, opts = {}) {
     { prompt: `design attempt ${n} of`, scenario: designerScenario(n, opts) },
     { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: `PV${n}`, scenario: pilotScenarios },
     /* the fairness review reads the revised prompt (PV<n>); the golden answer of attempt n is graded by the grader */
-    { prompt: `You are reviewing a revised grader guideline for fairness[\\s\\S]*PV${n}`, scenario: { resultText: opts.fairness === undefined ? '{"unfair": []}' : opts.fairness, costUsd: 0.01 } },
+    { prompt: `You are reviewing a revised grader guideline for fairness[\\s\\S]*PV${n}`, scenario: { resultText: opts.fairness === undefined ? '{"unfair": []}' : opts.fairness, costUsd: opts.fairnessCost === undefined ? 0.01 : opts.fairnessCost } },
     { cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held, attempt ${n}`, scenario: { resultText: opts.goldenGrade === undefined ? gradeJson(opts.goldenScore === undefined ? 0.95 : opts.goldenScore) : opts.goldenGrade, costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } },
   ];
   scores.forEach((score, index) => {
@@ -162,7 +162,8 @@ function put(dir, rel, data) {
 const readJsonLines = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : []);
 
 /* <base>/project (with private/), <base>/source (a downloaded task), <base>/tmp. options: rules, page (false: no page.json), files (extra
-   source files), limits, loader (a fake link loader), serverCreate (true: also an HTTP server). */
+   source files), limits, loader (a fake link loader), serverCreate (true: also an HTTP server), minCapCheck (false: a total cap below the
+   cost of one full attempt is accepted, for the tests of the budget stop). */
 async function makeWorld(t, options = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-test-'));
   const root = path.join(base, 'project');
@@ -193,7 +194,7 @@ async function makeWorld(t, options = {}) {
   const agents = options.wrapAgents ? options.wrapAgents(realAgents) : realAgents;
   const stages = [];
   const pipeline = createPipelineService({
-    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs,
+    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs, minCapCheck: options.minCapCheck, linkCloseMs: options.linkCloseMs,
     onStage: (stage, info) => { stages.push(stage); if (options.onStage) options.onStage(stage, info, world); },
   });
   const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines'), priv: id => path.join(root, 'private', 'pipelines', id) };
@@ -421,7 +422,7 @@ test('the constants are the rules of the spec', () => {
   assert.equal(P.TEST_PILOTS, 5);
   assert.equal(P.TEST_NEED, 4);
   assert.equal(P.MAX_REDESIGNS, 3);
-  assert.equal(P.DEFAULT_CAP_USD, 30);
+  assert.equal(P.DEFAULT_CAP_USD, 50);
   assert.equal(P.MAX_CAP_USD, 200);
   assert.deepEqual(P.ACKNOWLEDGEMENTS, ['shell-access', 'network', 'isolation-by-audit', 'model-reads-task']);
   assert.throws(() => { P.PASS_BAR = 1; }, TypeError, 'frozen');
@@ -515,7 +516,7 @@ test('three redesigns are the most: then the pipeline stops, fails with a summar
 /* ====================================================================== budget */
 
 test('the budget stops the pipeline before a stage whose worst case would not fit under the cap', async t => {
-  const w = await makeWorld(t);
+  const w = await makeWorld(t, { minCapCheck: false });
   /* classify 0.01 and design 0.05 are spent; the screen could cost 2 x (0.50 + 0.50) = 2.00, more than what is left of 1.10 */
   const { view } = await w.run({ capUsd: 1.1, pilotCapUsd: 0.5, designCapUsd: 0.5 });
   assert.equal(view.stage, 'budget');
@@ -528,7 +529,7 @@ test('the budget stops the pipeline before a stage whose worst case would not fi
 });
 
 test('the budget stops between stages: the screen ran and passed, the test would not fit', async t => {
-  const w = await makeWorld(t);
+  const w = await makeWorld(t, { minCapCheck: false });
   const { view } = await w.run({ capUsd: 4, pilotCapUsd: 0.5, designCapUsd: 0.5 });
   assert.equal(view.stage, 'budget');
   assert.match(view.message, /Stopped before the test: USD 0\.33 spent, the step could cost up to USD 8\.63 \(with 15% headroom\), and the cap is USD 4\.00/);
@@ -540,7 +541,7 @@ test('the budget stops between stages: the screen ran and passed, the test would
 });
 
 test('a classifier that does not fit the cap is not started, and a cap too small for anything stops at once', async t => {
-  const w = await makeWorld(t);
+  const w = await makeWorld(t, { minCapCheck: false });
   const { view } = await w.run({ capUsd: 0.4 });
   assert.equal(view.stage, 'budget');
   assert.match(view.message, /Stopped before the classifier: USD 0\.00 spent, the step could cost up to USD 0\.57 \(with 15% headroom\), and the cap is USD 0\.40/);
@@ -642,7 +643,7 @@ test('a pilot with no usable score does not count, and the replacement fills the
 
 test('Stop cancels the round that is running, ends the pipeline as stopped and starts nothing else', async t => {
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3], { pilotExtra: [{ delayMs: 60000 }, { delayMs: 60000 }] })];
-  const w = await makeWorld(t, { rules });
+  const w = await makeWorld(t, { rules, minCapCheck: false });
   const { id } = await w.pipeline.start(w.body());
   await waitFor(async () => (await w.agents.listRounds()).some(row => row.status === 'running'), { label: 'the screen round to run' });
   const started = Date.now();
@@ -703,9 +704,10 @@ function fakeLoader(root, options = {}) {
   const folder = options.folder || path.join(root, 'private', 'links', LINK_ID);
   const files = options.files || { 'Facility_Terms.txt': FACILITY, 'Cash_Facts.csv': CASH, 'Atlas_Supplement.txt': SUPPLEMENT };
   const script = options.script || [{ state: 'starting' }, { state: 'loading' }, { state: 'done' }];
-  const calls = { start: [], get: 0, continue: [], cancel: [] };
+  const calls = { start: [], get: 0, continue: [], cancel: [], waitFor: 0, closed: false };
   let cursor = 0;
   let cancelled = false;
+  let running = false;
   const toggle = { found: true, label: 'Show all files', flipped: true, filesBefore: 1, filesAfter: 3, learned: false };
   const done = () => ({
     id: LINK_ID, state: 'done', message: 'Done.', page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle,
@@ -717,6 +719,11 @@ function fakeLoader(root, options = {}) {
     start(url) {
       calls.start.push(url);
       if (options.startError) throw options.startError;
+      /* options.strict: like the real loader, one load at a time, and a load is over only when its browser is closed (after a cancel: closeMs later) */
+      if (options.strict && running) throw Object.assign(new Error('A link is already loading. Wait for it to finish, or cancel it.'), { status: 409 });
+      running = true;
+      cancelled = false;
+      cursor = 0;
       for (const [name, data] of Object.entries(files)) put(path.join(folder, 'files'), name, data);
       fs.writeFileSync(path.join(folder, 'page.json'), JSON.stringify(pageJson()));
       return options.startDelay ? sleep(options.startDelay).then(() => LINK_ID) : LINK_ID;
@@ -731,11 +738,20 @@ function fakeLoader(root, options = {}) {
     },
     continue(id) {
       calls.continue.push(id);
+      if (options.continueError) throw options.continueError;
       if (cursor < script.length - 1) cursor++;
       return { id };
     },
     cancel(id) { calls.cancel.push(id); cancelled = true; return { id }; },
-    waitFor: async () => done(),
+    /* resolves when the load is over: at once, or closeMs after the call (a browser that takes its time to close), or never */
+    waitFor: async () => {
+      calls.waitFor++;
+      if (options.neverCloses) await new Promise(() => {});
+      if (options.closeMs) await sleep(options.closeMs);
+      calls.closed = true;
+      running = false;
+      return done();
+    },
     shutdown: async () => {},
   };
 }
@@ -772,7 +788,7 @@ test('a task link: the loader is started with the link, the page is followed, th
 test('files the loader could not download (the person went on without them) are listed in the import as skipped', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { skipped: [{ label: 'Board_Pack.pdf', group: 'World files', reason: 'HTTP 403' }, { label: '', group: '', reason: '' }] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
   const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.import.fileCount, 3);
@@ -792,7 +808,7 @@ test('the loader waits for the person: sign-in, then the show-all-files switch; 
     { state: 'downloading' },
     { state: 'done' },
   ] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
   const { id } = await service.start({ url: LINK, capUsd: 0.4, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const signIn = await waitFor(async () => { const v = await service.get(id); return v.waiting ? v : null; }, { label: 'the sign-in wait' });
   assert.equal(signIn.stage, 'import');
@@ -818,7 +834,7 @@ test('the loader waits for the person: sign-in, then the show-all-files switch; 
 test('a load that fails, a start that is refused, a file that does not match its hash and a folder that is not the loader\'s all end the import as failed, without the link', async t => {
   const w = await makeWorld(t);
   const run = async (loader, expected) => {
-    const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5 });
+    const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, minCapCheck: false });
     const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
     const view = await service.whenDone(id);
     assert.equal(view.stage, 'failed', view.message);
@@ -838,7 +854,7 @@ test('a load that fails, a start that is refused, a file that does not match its
 test('a loader that never finishes is cancelled after the import limit', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }] });
-  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, importTimeoutMs: 80 });
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, importTimeoutMs: 80, minCapCheck: false });
   const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.stage, 'failed');
@@ -1139,7 +1155,7 @@ test('a classifier answer that is garbage, that fails or that tries a tool is re
     ['a tool call', { toolUses: [{ name: 'Bash', input: { command: 'ls' }, result: 'x' }], resultText: JSON.stringify(CLASSIFICATION) }],
   ];
   for (const [label, scenario] of answers) {
-    const w = await makeWorld(t, { rules: [classifierRule({ scenario })] });
+    const w = await makeWorld(t, { rules: [classifierRule({ scenario })], minCapCheck: false });
     const { view } = await w.run({ capUsd: 1 });
     assert.equal(view.classification.method, 'heuristic', label);
     assert.deepEqual(view.classification.prompt, { kind: 'section', section: 'Business prompt', number: 1 }, label);
@@ -1226,20 +1242,28 @@ test('readDesign refuses what is missing, too long or not the shape', t => {
 test('readDesign holds new and edited files to the rules: listed, named like ordinary files, not copies, not gaf', t => {
   const fails = (change, expected) => assert.throws(() => read(makeOut(t, change)), error => error.constructor.name === 'DesignError' && expected.test(error.message), JSON.stringify(Object.keys(change)));
   const trapsWith = (over) => JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), ...over });
-  fails({ 'edited/Cash_Facts.csv': 'Label,Value\nx,1\n' }, /edited file Cash_Facts\.csv is not listed with a reason/);
+  /* the public message of a fault in one file never names the file (a name can state the gold or show which world file was edited); the detail does */
+  const failsNamed = (change, expected, name, detail) => assert.throws(() => read(makeOut(t, change)), error => {
+    assert.equal(error.constructor.name, 'DesignError');
+    assert.match(error.message, expected);
+    assert.ok(!error.message.includes(name), `the public message names ${name}: ${error.message}`);
+    assert.match(error.detail, detail || new RegExp(name.replace(/[.]/g, '\\.')));
+    return true;
+  }, JSON.stringify(Object.keys(change)));
+  failsNamed({ 'edited/Cash_Facts.csv': 'Label,Value\nx,1\n' }, /An edited file is not listed with a reason in traps\.json/, 'Cash_Facts.csv');
   fails({ 'traps.json': trapsWith({ editedFiles: [{ name: 'Facility_Terms.txt', reason: '' }] }) }, /has no reason/);
-  fails({ 'traps.json': trapsWith({ editedFiles: [{ name: 'Cash_Facts.csv', reason: 'r' }, { name: 'Facility_Terms.txt', reason: 'r' }] }) }, /lists the edited file Cash_Facts\.csv but out\/edited does not hold it/);
-  fails({ 'edited/Brand_New.txt': 'x', 'traps.json': trapsWith({ editedFiles: [{ name: 'Facility_Terms.txt', reason: 'r' }, { name: 'Brand_New.txt', reason: 'r' }] }) }, /is not a world or task file; write it under out\/new instead/);
-  fails({ 'new/facility_terms.txt': 'x' }, /has the name of an existing file; edit that file instead/);
-  fails({ 'traps.json': trapsWith({ newFiles: ['Meridian_Lender_Summary.txt', 'Ghost.txt'] }) }, /lists the new file Ghost\.txt but out\/new does not hold it/);
+  failsNamed({ 'traps.json': trapsWith({ editedFiles: [{ name: 'Cash_Facts.csv', reason: 'r' }, { name: 'Facility_Terms.txt', reason: 'r' }] }) }, /lists an edited file that out\/edited does not hold/, 'Cash_Facts.csv');
+  failsNamed({ 'edited/Brand_New.txt': 'x', 'traps.json': trapsWith({ editedFiles: [{ name: 'Facility_Terms.txt', reason: 'r' }, { name: 'Brand_New.txt', reason: 'r' }] }) }, /is not a world or task file; write it under out\/new instead/, 'Brand_New.txt');
+  failsNamed({ 'new/facility_terms.txt': 'x' }, /has the name of an existing file; edit that file instead/, 'facility_terms.txt');
+  failsNamed({ 'traps.json': trapsWith({ newFiles: ['Meridian_Lender_Summary.txt', 'Ghost.txt'] }) }, /lists a new file that out\/new does not hold/, 'Ghost.txt');
   fails({ 'new/.hidden.txt': 'x' }, /out\/new holds an entry that cannot be used/);
   fails({ 'new/a/b/c/d/deep.txt': 'x' }, /out\/new holds an entry that cannot be used|nested deeper/);
-  fails({ 'new/Rubric_Notes.txt': 'x' }, /looks like grading material by name/);
+  failsNamed({ 'new/Rubric_Notes.txt': 'x' }, /looks like grading material by name/, 'Rubric_Notes.txt');
   fails({ 'new/Golden_Figures.csv': 'x' }, /looks like grading material by name/);
   fails({ 'new/reference/Rates.csv': 'x' }, /looks like grading material by name/);
   fails({ 'new/gaf/Layout.txt': 'x' }, /gaf path/);
   fails({ 'new/Copy.csv': GOLDEN_FILE }, /is a copy of withheld material/);
-  fails({ 'edited/Facility_Terms.txt': `${FACILITY}${GUIDELINE}\n` }, /holds a long passage of the guideline or the golden answer/);
+  failsNamed({ 'edited/Facility_Terms.txt': `${FACILITY}${GUIDELINE}\n` }, /An edited file holds a long passage of the guideline or the golden answer/, 'Facility_Terms.txt');
   fails({ 'prompt.txt': `Assess it. ${GOLDEN} and then ${GUIDELINE}` }, /out\/prompt\.txt holds a long passage/);
   /* a designer's own guideline is withheld too: the prompt must not quote it */
   const own = designFiles(1)[1].content;
@@ -1248,7 +1272,7 @@ test('readDesign holds new and edited files to the rules: listed, named like ord
   /* a link is not a file */
   const dir = makeOut(t);
   fs.symlinkSync('/etc/hostname', path.join(dir, 'new', 'Link.txt'));
-  assert.throws(() => read(dir), /out\/new holds an entry that cannot be used \(Link\.txt: a symbolic link/);
+  assert.throws(() => read(dir), error => /^out\/new holds an entry that cannot be used$/.test(error.message) && /\(Link\.txt: a symbolic link/.test(error.detail));
   /* a new file that traps.json did not list is included, with a note */
   const unlisted = read(makeOut(t, { 'new/Atlas_Extra.txt': 'Extra record.\n' }));
   assert.deepEqual(unlisted.newFiles.map(file => file.name), ['Atlas_Extra.txt', 'Meridian_Lender_Summary.txt']);
@@ -1455,14 +1479,13 @@ test('start validates everything before anything is created', async t => {
   assert.equal(fs.existsSync(w.workRoot), false, 'nothing was created for a refused start');
   assert.equal((await w.pipeline.list()).pipelines.length, 0);
   assert.equal(promptRuns(w).length, 0);
-  /* a cap of one cent and the default values are accepted */
-  const { id } = await w.pipeline.start({ sourceDir: w.source, capUsd: 0.01, acknowledgements: ACKS });
+  /* the default values are accepted: the total cap pays for one full attempt at the default caps, and the designer's cap is 5.00 */
+  const { id } = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS });
   const view = await w.pipeline.whenDone(id);
-  assert.deepEqual([view.config.model, view.config.effort, view.config.graderModel, view.config.pilotCapUsd, view.config.designCapUsd], [C.DEFAULT_MODEL, C.DEFAULT_EFFORT, C.GRADER_MODEL, 3, 0.5], 'the designer cap is a fifth of the total, at least 0.50');
-  const four = await w.pipeline.start({ sourceDir: w.source, capUsd: 4, acknowledgements: ACKS });
-  assert.equal((await w.pipeline.whenDone(four.id)).config.designCapUsd, 0.8);
-  const full = await w.pipeline.start({ sourceDir: w.source, capUsd: 30, acknowledgements: ACKS });
-  assert.equal((await w.pipeline.whenDone(full.id)).config.designCapUsd, 5, 'and at most 5.00');
+  assert.deepEqual([view.config.capUsd, view.config.model, view.config.effort, view.config.graderModel, view.config.pilotCapUsd, view.config.designCapUsd], [P.DEFAULT_CAP_USD, C.DEFAULT_MODEL, C.DEFAULT_EFFORT, C.GRADER_MODEL, 3, 5]);
+  /* a total cap does not move the designer's default cap */
+  const small = await w.pipeline.start({ sourceDir: w.source, capUsd: 45, acknowledgements: ACKS });
+  assert.equal((await w.pipeline.whenDone(small.id)).config.designCapUsd, 5);
   assert.match(view.label, /^Pipeline [0-9a-f]{6}$/);
 });
 
@@ -1725,10 +1748,12 @@ test('REDACTION: redactPipelineData withholds by name wherever the name appears,
     design: {
       attempt: 2, prompt: 'P', guideline: 'G', goldenAnswer: 'A', gold: { decision: 'hold' }, fingerprints: [{ id: 'f' }],
       traps: [{ id: 't', title: 'Title', files: ['a.csv'], mechanism: 'm', decoy: 'd', correctValue: 'c', wrongValue: 'w' }],
-      newFiles: [{ name: 'n.txt', bytes: 3 }], editedFiles: [{ name: 'e.txt', reason: 'because', bytes: 4, diff: { lines: [] } }],
+      newFiles: [{ name: 'n.txt', bytes: 3 }], editedFiles: [{ name: 'e.txt', reason: 'because', bytes: 4, beforeBytes: 5, sha256: 'cd', diff: { before: 5, after: 4, lines: [] } }],
+      unscanned: [{ name: 'e.xls', kind: 'edited' }],
       calibration: { score: 0.95 }, fairness: { status: 'ok' }, guidelineDiff: { lines: [] }, rubricChanges: [{ change: 'c', reason: 'r' }], notes: ['x.txt is listed as edited'],
       packet: { fileCount: 1, files: [{ name: 'a.csv', bytes: 1, sha256: 'ab' }] },
     },
+    import: { fileCount: 1, totalBytes: 9, files: [{ name: 'a.csv', bytes: 1, sha256: 'ab', group: 'World files' }] },
     attempts: [{ n: 1, traps: [{ id: 't', title: 'Title' }], screen: { pilots: [{ n: 1, score: 0.3, reason: 'quoted guideline text', verdict: 'x', answer: 'whole answer' }] }, extra: { deep: { gold: 1 } } }],
     future: { correctValue: 'x', summarySha256: 'abc', approvalSummary: { text: 't' } },
   };
@@ -1743,9 +1768,12 @@ test('REDACTION: redactPipelineData withholds by name wherever the name appears,
   assert.deepEqual(out.design.gold, W);
   assert.deepEqual(out.design.fingerprints, W);
   assert.deepEqual(out.design.traps[0], { id: 't', title: W, files: W, mechanism: W, decoy: W, correctValue: W, wrongValue: W });
-  assert.deepEqual(out.design.editedFiles, [{ name: W, reason: W, bytes: 4, diff: W }]);
+  assert.deepEqual(out.design.editedFiles, [{ name: W, reason: W, bytes: W, beforeBytes: W, sha256: W, diff: W }], 'the hash and the sizes of an edited file would show which file it is');
+  assert.deepEqual(out.design.unscanned, W, 'the list of unscanned files can name an edited file');
   assert.deepEqual([out.design.calibration, out.design.fairness, out.design.guidelineDiff, out.design.rubricChanges, out.design.notes], [W, W, W, W, W]);
-  assert.deepEqual(out.design.packet, view.design.packet, 'the packet\'s files are the pilots\' own names');
+  /* the file lists keep the names (the pilots have them) but not the hashes and sizes: the one that differs between the task's list and the packet's is the edited file */
+  assert.deepEqual(out.design.packet, { fileCount: 1, files: [{ name: 'a.csv', bytes: W, sha256: W }] });
+  assert.deepEqual(out.import, { fileCount: 1, totalBytes: 9, files: [{ name: 'a.csv', bytes: W, sha256: W, group: 'World files' }] });
   assert.deepEqual(out.attempts[0].traps, [{ id: 't', title: W }]);
   assert.deepEqual(out.design.newFiles, [{ name: 'n.txt', bytes: 3 }]);
   assert.deepEqual(out.attempts[0].screen.pilots[0], { n: 1, score: 0.3, reason: W, verdict: 'x', answer: W });
@@ -1814,7 +1842,7 @@ test('parsePage keeps what the loader promises and cuts the rest', () => {
 });
 
 test('a folder is imported file by file: no links, no hidden files, page.json is the page, the originals are copies', async t => {
-  const w = await makeWorld(t, { files: { '.hidden.txt': 'h', 'sub/Meridian_Ledger.csv': 'a,b\n1,2\n', '.DS_Store': 'x' } });
+  const w = await makeWorld(t, { files: { '.hidden.txt': 'h', 'sub/Meridian_Ledger.csv': 'a,b\n1,2\n', '.DS_Store': 'x' }, minCapCheck: false });
   fs.symlinkSync('/etc/hostname', path.join(w.source, 'Link.txt'));
   const { id, view } = await w.run({ capUsd: 0.4 });
   assert.equal(view.stage, 'budget');
@@ -1832,6 +1860,7 @@ test('a folder with no page.json can still be classified by file names', async t
     page: false,
     files: { 'Task_Prompt.txt': 'Assess it.\n', 'Grader_Rubric.txt': 'Rubric text.\n', 'Golden_Answer.txt': 'Hold.\n' },
     rules: [classifierRule({ scenario: { resultText: 'unusable' } })],
+    minCapCheck: false,
   });
   const { view } = await w.run({ capUsd: 1 });
   assert.equal(view.classification.method, 'heuristic');
@@ -1891,7 +1920,7 @@ test('the working folder is outside the project, private, and not a link', async
   assert.equal(linked.pipeline.active, null);
   assert.equal((await linked.pipeline.list()).pipelines.length, 0);
   /* a folder that others can enter is tightened to 0700 */
-  const loose = await makeWorld(t);
+  const loose = await makeWorld(t, { minCapCheck: false });
   fs.mkdirSync(loose.workRoot, { mode: 0o755 });
   fs.chmodSync(loose.workRoot, 0o755);
   const { id } = await loose.pipeline.start(loose.body({ capUsd: 0.4 }));
@@ -2025,11 +2054,39 @@ test('Stop pressed as the simulated grader is about to start is honoured within 
 const encoder = new TextEncoder();
 const xmlEscape = text => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 /* A word-processing file with one paragraph per string, and a spreadsheet with one row per array: zips of XML, as the real ones are. */
-const docxFile = paragraphs => Buffer.from(packageEngine.writeZip([
+const docxEntries = paragraphs => [
   { name: '[Content_Types].xml', bytes: encoder.encode('<Types/>') },
   { name: 'word/document.xml', bytes: encoder.encode(`<w:document><w:body>${paragraphs.map(text => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`).join('')}</w:body></w:document>`) },
-]));
-const xlsxFile = rows => {
+];
+const docxFile = paragraphs => Buffer.from(packageEngine.writeZip(docxEntries(paragraphs)));
+/* A zip whose entries are deflated, as the files of a real office program are: the text in them cannot be found by reading the bytes. */
+function deflatedZip(entries) {
+  const zlib = require('node:zlib');
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name);
+    const data = Buffer.from(entry.bytes);
+    const packed = zlib.deflateRawSync(data);
+    const crc = zlib.crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6); local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(packed.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(name.length, 26);
+    const head = Buffer.alloc(46);
+    head.writeUInt32LE(0x02014b50, 0); head.writeUInt16LE(20, 4); head.writeUInt16LE(20, 6); head.writeUInt16LE(0x0800, 8); head.writeUInt16LE(8, 10);
+    head.writeUInt32LE(crc, 16); head.writeUInt32LE(packed.length, 20); head.writeUInt32LE(data.length, 24); head.writeUInt16LE(name.length, 28); head.writeUInt32LE(offset, 42);
+    parts.push(local, name, packed);
+    central.push(head, name);
+    offset += 30 + name.length + packed.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(central.reduce((n, x) => n + x.length, 0), 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, ...central, end]);
+}
+const docxDeflated = paragraphs => deflatedZip(docxEntries(paragraphs));
+const xlsxEntries = rows => {
   const strings = [];
   const cell = (value, column, row) => {
     const ref = `${'ABCDEFGH'[column]}${row}`;
@@ -2038,12 +2095,14 @@ const xlsxFile = rows => {
     return `<c r="${ref}" t="s"><v>${strings.length - 1}</v></c>`;
   };
   const sheet = `<worksheet><sheetData>${rows.map((row, r) => `<row r="${r + 1}">${row.map((value, c) => cell(value, c, r + 1)).join('')}</row>`).join('')}</sheetData></worksheet>`;
-  return Buffer.from(packageEngine.writeZip([
+  return [
     { name: '[Content_Types].xml', bytes: encoder.encode('<Types/>') },
     { name: 'xl/sharedStrings.xml', bytes: encoder.encode(`<sst>${strings.map(text => `<si><t>${xmlEscape(text)}</t></si>`).join('')}</sst>`) },
     { name: 'xl/worksheets/sheet1.xml', bytes: encoder.encode(sheet) },
-  ]));
+  ];
 };
+const xlsxFile = rows => Buffer.from(packageEngine.writeZip(xlsxEntries(rows)));
+const xlsxDeflated = rows => deflatedZip(xlsxEntries(rows));
 
 const labelledPage = () => pageJson({
   fileList: [
@@ -2222,7 +2281,7 @@ test('the grader\'s cap is the agent service\'s tool-less cap, and its effort is
   assert.equal(P.GOLDEN_MIN, 0.9);
   assert.deepEqual(P.REGRADE_BAND, [0.4, 0.5]);
   assert.equal(P.HEADROOM, 1.15);
-  const w = await makeWorld(t);
+  const w = await makeWorld(t, { minCapCheck: false });
   for (const [effort, expected] of [['low', 'medium'], ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']]) {
     const { id } = await w.pipeline.start(w.body({ effort, capUsd: 0.4 }));
     assert.equal((await w.pipeline.whenDone(id)).config.graderEffort, expected, effort);
@@ -2350,7 +2409,7 @@ test('readDesign: a guideline much longer than the original needs its additions 
 test('readDesign: an edit may not cut a file down, and every edit is shown as a comparison', t => {
   const { read, dir } = originalWorld(t);
   const shrunk = 'Atlas terms.\n';
-  assert.throws(() => read(makeOut(t, { 'edited/Facility_Terms.txt': shrunk })), error => /The edit of Facility_Terms\.txt makes the file more than 20% smaller/.test(error.message) && /has \d+ bytes, the original \d+/.test(error.detail));
+  assert.throws(() => read(makeOut(t, { 'edited/Facility_Terms.txt': shrunk })), error => error.message === 'An edit makes its file more than 20% smaller' && /The edit of Facility_Terms\.txt makes the file more than 20% smaller: the edited file has \d+ bytes, the original \d+/.test(error.detail));
   const grown = read(makeOut(t, { 'edited/Facility_Terms.txt': `${FACILITY}Clause 4 was amended.\nClause 5 is new.\n` }));
   assert.equal(grown.editedFiles[0].diff.kind, 'text');
   assert.equal(grown.editedFiles[0].diff.added, 2);
@@ -2374,14 +2433,17 @@ test('readDesign: the prompt and the names of new files may not state what only 
   const { read } = originalWorld(t);
   const fails = (change, detail, extra) => assert.throws(() => read(makeOut(t, change), extra), error => {
     assert.equal(error.constructor.name, 'DesignError');
-    assert.ok(!/\b1,?250\b|the phrase|the figure/.test(error.message), `the public message names no figure or phrase: ${error.message}`);
+    /* no \b: an underscore is a word character, and a file name is made of them */
+    assert.ok(!/1,?250|the phrase|the figure|hold/i.test(error.message.replace('out/prompt.txt states a figure or a decision of the golden answer that no original file or prompt holds', '')), `the public message names no figure or phrase: ${error.message}`);
+    assert.ok(!/Cash_|Hold_|Summary/.test(error.message), `and no file name: ${error.message}`);
     assert.match(error.detail, detail);
     return true;
   });
   fails({ 'prompt.txt': 'Assess the position. The usable cash is 1,250 for the borrowing.\n' }, /states the figure 1250 of the golden answer/);
   fails({ 'prompt.txt': 'Assess the position and say whether to hold the borrowing.\n' }, /states the phrase "hold"/);
-  fails({ 'new/Cash_1250_Summary.txt': 'x' }, /The name of Cash_1250_Summary\.txt states the figure 1250/);
-  fails({ 'new/Hold_Summary.txt': 'x' }, /The name of Hold_Summary\.txt states the phrase "hold"/);
+  fails({ 'new/Cash_1250_Summary.txt': 'x' }, /The name of the new file Cash_1250_Summary\.txt states the figure 1250/);
+  fails({ 'new/Hold_Summary.txt': 'x' }, /The name of the new file Hold_Summary\.txt states the phrase "hold"/);
+  assert.throws(() => read(makeOut(t, { 'new/Cash_1250_Summary.txt': 'x' })), error => error.message === 'The name of a new file gives away part of the answer');
   /* what the original task already says is not a leak */
   const known = originalWorld(t, { original: undefined });
   const withKnown = { numbers: new Set(['100', '500', '1250']), corpus: originalCorpus(`${PROMPT} ${FACILITY} ${CASH} please hold the line`), guidelineLength: GUIDELINE.length, guidelineText: GUIDELINE };
@@ -2638,4 +2700,500 @@ test('while a pipeline runs only the pilot packet is outside the project; the do
   assert.ok(seen.at(-1)[2].includes('designer') && seen.at(-1)[2].includes('attempts'));
   assert.equal(fs.existsSync(w.workRoot) ? fs.readdirSync(w.workRoot).length : 0, 0, 'and nothing at all once the pipeline has ended');
   assert.ok(!fs.existsSync(path.join(w.workRoot, view.id || 'x')));
+});
+
+/* ====================================================================== review fixes 2: files by content, links, names, hashes, export, fairness, loader, cap */
+
+const { scanDesignFiles } = require('../backend/pipeline/design.cjs');
+const { parseFairness } = require('../backend/pipeline/gates.cjs');
+const { minCapParts, minCapUsd } = require('../backend/pipeline/budget.cjs');
+const { Stopped } = require('../backend/pipeline/util.cjs');
+
+/* readDesign, then the scan of the files by content (what the service does after readDesign). */
+async function readAndScan(t, change, { packet = PACKET, ctx = null, shouldStop = null } = {}) {
+  const dir = makeOut(t, change);
+  const world = ctx || originalWorld(t);
+  const design = world.read(dir, { packet });
+  const scanned = await scanDesignFiles({ outDir: dir, design, shouldStop });
+  return { design, scanned };
+}
+
+test('scanDesignFiles: a passage of the guideline or the golden answer in a word-processing, spreadsheet, large or oddly named file fails the design; what cannot be read is listed as unscanned', async t => {
+  const failsScan = async (change, expected, label, options) => {
+    await assert.rejects(readAndScan(t, change, options), error => {
+      assert.equal(error.constructor.name, 'DesignError', label);
+      assert.match(error.message, expected, label);
+      return true;
+    }, label);
+  };
+  const holds = /holds a long passage of the guideline or the golden answer$/;
+  /* a word-processing file and a spreadsheet, as new files */
+  await failsScan({ 'new/Board_Notes.docx': docxDeflated(['Intro.', GUIDELINE, 'Outro.']) }, /^A new file holds a long passage/, 'docx, deflated as a real one is');
+  await failsScan({ 'new/Board_Notes.docx': docxFile(['Intro.', GUIDELINE, 'Outro.']) }, /^A new file holds a long passage/, 'docx, stored');
+  await failsScan({ 'new/Board_Notes.xlsx': xlsxDeflated([['Item', 'Note'], ['x', GOLDEN]]) }, /^A new file holds a long passage/, 'xlsx');
+  /* a file with an edited copy of a spreadsheet of the task */
+  const sheet = xlsxDeflated([['Item', 'Value'], ['Cash', 100], ['Draw', 500]]);
+  const world = originalWorld(t);
+  put(world.dir, 'Rates.xlsx', sheet);
+  const packet = new Map([...PACKET, ['Rates.xlsx', { sha256: sha(sheet), bytes: sheet.length }]]);
+  const trapsEdited = JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), editedFiles: [{ name: 'Facility_Terms.txt', reason: 'a' }, { name: 'Rates.xlsx', reason: 'b' }] });
+  await failsScan({ 'edited/Rates.xlsx': xlsxDeflated([['Item', 'Value'], ['Cash', 100], ['Draw', 500], ['Note', GUIDELINE]]), 'traps.json': trapsEdited }, /^An edited file holds a long passage/, 'edited xlsx', { packet, ctx: world });
+  /* a text file larger than the read cap of the first check, with the passage at its end; other kinds of text */
+  await failsScan({ 'new/Big_Notes.txt': `${'filler words. '.repeat(165000)}${GUIDELINE}\n${'filler words. '.repeat(165000)}` }, holds, 'large text, the passage in the middle');
+  await failsScan({ 'new/Board_Notes.rtf': `{\\rtf1 ${GOLDEN} and more}` }, holds, 'rtf');
+  await failsScan({ 'new/Board_Notes': `Notes: ${GUIDELINE}` }, holds, 'no extension');
+  await failsScan({ 'new/Board_Log.jsonl': `${JSON.stringify({ text: GUIDELINE })}\n` }, holds, 'jsonl');
+  await failsScan({ 'new/Board_Script.py': `# ${GOLDEN}\n` }, holds, 'source');
+  /* the designer's own guideline is checked too */
+  const own = designFiles(1)[1].content;
+  await failsScan({ 'new/Board_Notes.docx': docxDeflated([own]) }, /^A new file holds a long passage/, 'its own guideline in a docx');
+  /* the name is in the detail only */
+  await assert.rejects(readAndScan(t, { 'new/Board_Notes.docx': docxDeflated([GUIDELINE]) }), error => !error.message.includes('Board_Notes') && /Board_Notes\.docx/.test(error.detail));
+
+  /* a clean design, and the files that cannot be read as text */
+  const clean = await readAndScan(t, { 'new/Board_Notes.docx': docxDeflated(['Nothing of the answer here.']), 'new/Board_Log.rtf': '{\\rtf1 plain notes}' });
+  assert.deepEqual(clean.scanned.unscanned, []);
+  const odd = await readAndScan(t, {
+    'new/Corrupt.docx': Buffer.from('PK\u0003\u0004 this is not a zip file'),
+    'new/Board_Pack.pdf': Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from([0, 1, 2, 3, 255, 254]), Buffer.from('\nendobj\n')]),
+    'new/Logo.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13]),
+    'new/Old_Sheet.xls': 'plain text under an old binary extension',
+  });
+  assert.deepEqual(odd.scanned.unscanned.map(item => `${item.kind}:${item.name}`).sort(), ['new:Board_Pack.pdf', 'new:Corrupt.docx', 'new:Logo.png', 'new:Old_Sheet.xls']);
+  /* a PDF is still read as bytes: text stored in it as it is gets found */
+  await failsScan({ 'new/Board_Pack.pdf': Buffer.concat([Buffer.from([0, 1]), Buffer.from(`BT (${GUIDELINE}) Tj ET`)]) }, holds, 'plain text inside a PDF');
+  /* Stop ends the scan */
+  await assert.rejects(readAndScan(t, { 'new/Board_Notes.docx': docxFile(['x']) }, { shouldStop: () => true }), error => error instanceof Stopped);
+});
+
+test('SAFETY: a designer file that is not plain text and holds a passage of the guideline is sent back once, then rejected, and no pilot gets it', async t => {
+  const extraFiles = [{ path: 'out/new/Board_Notes.docx', base64: docxDeflated(['Board notes.', GUIDELINE]).toString('base64') }];
+  const rules = [classifierRule(), ...attemptRules(1, [0.2], { design: { extraFiles }, repairScenario: designerScenario(1, { design: { extraFiles } }) }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].repaired, true);
+  assert.deepEqual(view.attempts[0].rejection, { kind: 'design', reasons: ['A new file holds a long passage of the guideline or the golden answer'] });
+  const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
+  assert.match(repair.prompt, /The new file Board_Notes\.docx holds a long passage/, 'the designer is told which file');
+  assert.equal(pilotPrompts(w).filter(run => run.prompt.includes('PV1')).length, 0);
+  for (const [name] of Object.entries(pilotFiles(w))) assert.ok(!/Board_Notes/.test(name), name);
+});
+
+test('a new file whose content cannot be read as text is listed as unscanned on the design, and the list is withheld while a round runs', async t => {
+  const extraFiles = [
+    { path: 'out/new/Board_Pack.pdf', base64: Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from([0, 1, 2, 3, 255])]).toString('base64') },
+    { path: 'out/new/Corrupt.docx', base64: Buffer.from('PK\u0003\u0004 not a zip').toString('base64') },
+  ];
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { extraFiles }, pilotExtra: [0, 1, 2, 3, 4].map(() => ({ delayMs: 900 })) })];
+  const w = await makeWorld(t, { rules, server: true });
+  const started = await w.post('/api/pipeline/start', w.body());
+  const id = started.json.id;
+  const during = await waitFor(async () => {
+    const response = await w.get(`/api/pipeline/${id}`);
+    return response.json && response.json.stage === 'screen' && response.json.redacted ? response : null;
+  }, { label: 'a redacted answer during the screen' });
+  assert.deepEqual(during.json.design.unscanned, { withheld: true }, 'it can name an edited file');
+  assert.ok(!during.text.includes('Corrupt.docx') || during.json.design.newFiles.some(file => file.name === 'Corrupt.docx'), 'only as a new file the pilots have');
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.stage, 'done', finished.json.message);
+  assert.deepEqual(finished.json.design.unscanned, [{ name: 'Board_Pack.pdf', kind: 'new' }, { name: 'Corrupt.docx', kind: 'new' }]);
+});
+
+test('readDesign: out/, out/new and out/edited must be plain folders, not links to somewhere else', t => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  put(outside, 'Ledger_Extra.csv', 'a,b\n1,2\n');
+  put(outside, 'Secret_Other.txt', 'Not for the pilots.\n');
+  const refused = (dir, expected, detail) => assert.throws(() => read(dir), error => {
+    assert.equal(error.constructor.name, 'DesignError');
+    assert.match(error.message, expected);
+    if (detail) assert.match(error.detail, detail);
+    return true;
+  });
+  for (const sub of ['new', 'edited']) {
+    const dir = makeOut(t);
+    fs.rmSync(path.join(dir, sub), { recursive: true, force: true });
+    fs.symlinkSync(outside, path.join(dir, sub));
+    refused(dir, new RegExp(`^out/${sub} is not a plain folder \\(a link or a file stands in its place\\)$`), /Do not make links/);
+  }
+  /* a link to a folder inside out/ is no better, and neither is a file where the folder should be */
+  const inner = makeOut(t);
+  fs.rmSync(path.join(inner, 'new'), { recursive: true, force: true });
+  fs.symlinkSync(path.join(inner, 'edited'), path.join(inner, 'new'));
+  refused(inner, /^out\/new is not a plain folder/);
+  const filed = makeOut(t);
+  fs.rmSync(path.join(filed, 'edited'), { recursive: true, force: true });
+  fs.writeFileSync(path.join(filed, 'edited'), 'x');
+  refused(filed, /^out\/edited is not a plain folder/);
+  /* out/ itself */
+  const real = makeOut(t);
+  const alias = path.join(os.tmpdir(), `finance-pipeline-alias-${process.pid}-${Date.now()}`);
+  fs.symlinkSync(real, alias);
+  t.after(() => fs.rmSync(alias, { force: true }));
+  refused(alias, /^out\/ is not a plain folder/);
+  /* a folder that is not there is no files; a plain one works as before */
+  const bare = makeOut(t, { 'edited/Facility_Terms.txt': null, 'traps.json': JSON.stringify({ ...JSON.parse(designFiles(1)[3].content), editedFiles: [] }) });
+  fs.rmSync(path.join(bare, 'edited'), { recursive: true, force: true });
+  assert.deepEqual(read(bare).editedFiles, []);
+});
+
+test('SAFETY: a designer that makes out/new a link to a folder outside out/ is rejected, and nothing from that folder reaches a pilot', async t => {
+  const symlinks = [{ path: 'out/new', target: '../../original' }];
+  const rules = [classifierRule(), ...attemptRules(1, [0.2], { designerExtra: { symlinks }, repairScenario: designerScenario(1, { designerExtra: { symlinks } }) }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.deepEqual(view.attempts[0].rejection.reasons, ['out/new is not a plain folder (a link or a file stands in its place)']);
+  assert.equal(pilotPrompts(w).filter(run => run.prompt.includes('PV1')).length, 0);
+  assert.ok(!fs.existsSync(path.join(w.priv(id), 'attempts', '1', 'out', 'new')) || !fs.lstatSync(path.join(w.priv(id), 'attempts', '1', 'out', 'new')).isSymbolicLink(), 'the kept copy of the attempt holds no link');
+});
+
+test('the public reason for a new file whose name states the gold names neither the file nor the figure; the redacted view of the next round does not either, and the designer is told', async t => {
+  const extraFiles = [{ path: 'out/new/Cash_1250_Summary.txt', content: 'A cash summary, nothing more.\n' }];
+  const rules = [classifierRule(), ...attemptRules(1, [0.2], { design: { extraFiles }, repairScenario: designerScenario(1, { design: { extraFiles } }) }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { pilotExtra: [0, 1, 2, 3, 4].map(() => ({ delayMs: 900 })) })];
+  const w = await makeWorld(t, { rules, server: true });
+  const started = await w.post('/api/pipeline/start', w.body());
+  const id = started.json.id;
+  const during = await waitFor(async () => {
+    const response = await w.get(`/api/pipeline/${id}`);
+    return response.json && response.json.stage === 'screen' && response.json.redacted && response.json.attempts.length === 2 ? response : null;
+  }, { label: 'a redacted answer during the screen of attempt 2' });
+  assert.deepEqual(during.json.attempts[0].rejection, { kind: 'design', reasons: ['The name of a new file gives away part of the answer'] });
+  assert.ok(!during.text.includes('Cash_1250'), 'the file name is nowhere in the answer');
+  assert.ok(!/Cash_1250|1,250/.test(during.json.message || ''));
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.stage, 'done', finished.json.message);
+  const repair = promptRuns(w).find(run => run.prompt.includes('THE PROBLEM, exactly'));
+  assert.match(repair.prompt, /The name of the new file Cash_1250_Summary\.txt states the figure 1250/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /Cash_1250_Summary\.txt/, 'and so is the feedback for the redesign');
+});
+
+test('REDACTION: while a round runs the hashes and sizes that would show which world file was edited are withheld; they come back when the round has ended', async t => {
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { pilotExtra: [0, 1, 2, 3, 4].map(() => ({ delayMs: 900 })) })];
+  const w = await makeWorld(t, { rules, server: true });
+  const started = await w.post('/api/pipeline/start', w.body());
+  const id = started.json.id;
+  const during = await waitFor(async () => {
+    const response = await w.get(`/api/pipeline/${id}`);
+    return response.json && response.json.stage === 'screen' && response.json.redacted ? response : null;
+  }, { label: 'a redacted answer during the screen' });
+  const W = { withheld: true };
+  const view = during.json;
+  assert.ok(view.import.files.length >= 3);
+  for (const file of view.import.files) assert.deepEqual([file.sha256, file.bytes], [W, W], file.name);
+  for (const file of view.design.packet.files) assert.deepEqual([file.sha256, file.bytes], [W, W], file.name);
+  assert.deepEqual(view.design.editedFiles[0], { name: W, reason: W, bytes: W, beforeBytes: W, diff: W });
+  /* nothing in the answer lets the edited file be told by comparing the two lists */
+  const hashes = new Set(JSON.parse(JSON.stringify(view.import.files.concat(view.design.packet.files))).map(file => file.sha256).filter(item => typeof item === 'string'));
+  assert.equal(hashes.size, 0);
+  const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
+  assert.equal(finished.json.redacted, undefined);
+  assert.match(finished.json.import.files[0].sha256, /^[0-9a-f]{64}$/);
+  assert.equal(typeof finished.json.design.editedFiles[0].bytes, 'number');
+  const edited = finished.json.design.packet.files.find(file => file.name === 'Facility_Terms.txt');
+  const original = finished.json.import.files.find(file => file.name === 'Facility_Terms.txt');
+  assert.notEqual(edited.sha256, original.sha256, 'the full view still shows the difference');
+});
+
+test('the export README names the attempt whose design is in the zip, and what became of it, when later attempts were rejected', async t => {
+  /* attempt 1 is accepted and fails its screen; attempts 2, 3 and 4 are rejected (the golden answer does not score) */
+  const rules = [classifierRule(), ...attemptRules(1, [0.9, 0.9]), ...[2, 3, 4].flatMap(n => attemptRules(n, [0.2], { goldenScore: 0.5 }))];
+  const w = await makeWorld(t, { rules });
+  const { id, view } = await w.run();
+  assert.equal(view.stage, 'failed', view.message);
+  assert.deepEqual(view.attempts.map(item => item.outcome), ['screen-failed', 'rejected', 'rejected', 'rejected']);
+  assert.equal(view.design.attempt, 1);
+  const exported = await w.pipeline.export(id);
+  const zip = await packageEngine.readZip(new Uint8Array(Buffer.from(exported.zipBase64, 'base64')));
+  const entries = [...zip.entries.keys()];
+  const readme = await zip.text(entries.find(name => name.endsWith('/README_PRIVATE.txt')));
+  assert.match(readme, /Design of attempt 1: this design did not pass the screen/);
+  assert.ok(!/Design of attempt 4/.test(readme));
+  assert.match(await zip.text(entries.find(name => name.endsWith('/prompt.txt'))), /PV1/);
+  /* the same on the unit: the number comes from the state, not from the last attempt */
+  const state = { label: 'x', stage: 'failed', message: 'It failed.', attempts: [{ n: 1 }, { n: 2 }, { n: 3 }], redesigns: 2, spentUsd: 1, designAttempt: 2, config: { capUsd: 5, passBar: 0.45, screenPilots: 2, testNeed: 4, testPilots: 5 } };
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-exp-'));
+  t.after(() => fs.rmSync(out, { recursive: true, force: true }));
+  put(out, 'prompt.txt', 'p');
+  const built = buildExport({ outDir: out, state, note: 'this design passed the test' });
+  const text = await (await packageEngine.readZip(new Uint8Array(built.bytes))).text(`x_pipeline_PRIVATE/README_PRIVATE.txt`);
+  assert.match(text, /Design of attempt 2: this design passed the test/);
+});
+
+test('export: the note follows the outcome of the exported design: passed, screen failed, test failed, or not judged', async t => {
+  const w = await makeWorld(t);
+  const { id } = await w.run();
+  const entry = w.pipeline._entry(id).state;
+  const note = outcome => { entry.attempts.find(item => item.n === entry.design.attempt).outcome = outcome; return w.pipeline._exportNote(entry); };
+  assert.equal(note('passed'), 'this design passed the test');
+  assert.equal(note('screen-failed'), 'this design did not pass the screen');
+  assert.equal(note('test-failed'), 'this design did not pass the test');
+  for (const outcome of ['stopped', 'budget', 'failed', 'in-progress']) assert.match(note(outcome), /not judged/, outcome);
+});
+
+test('parseFairness: strings, other key names and an unreadable list; a list that holds something is never read as "every item is fair"', () => {
+  assert.deepEqual(parseFairness('{"unfair": []}'), { ok: true, unfair: [] });
+  assert.deepEqual(parseFairness('{"unfair": [{"item": "a", "why": "b"}]}'), { ok: true, unfair: [{ item: 'a', why: 'b' }] });
+  assert.deepEqual(parseFairness('{"unfair": ["Item 4 asks for a convention that no file states"]}'), { ok: true, unfair: [{ item: 'Item 4 asks for a convention that no file states', why: '' }] });
+  assert.deepEqual(parseFairness('{"unfair": [{"rubric_item": "x", "why": "y"}]}'), { ok: true, unfair: [{ item: 'x', why: 'y' }] });
+  assert.deepEqual(parseFairness('{"unfair": [{"text": "x", "reason": "y"}]}'), { ok: true, unfair: [{ item: 'x', why: 'y' }] });
+  assert.deepEqual(parseFairness('Here: {"unfair": ["a", {"item": "b"}, 5, null, {}]}').unfair.map(entry => entry.item), ['a', 'b'], 'what is readable is kept');
+  for (const bad of ['{"unfair": [{}]}', '{"unfair": [5, null]}', '{"unfair": [{"foo": "bar"}]}', '{"unfair": ["", "  "]}']) {
+    const parsed = parseFairness(bad);
+    assert.equal(parsed.ok, false, bad);
+    assert.match(parsed.error, /no readable item/);
+  }
+  assert.equal(parseFairness('{"unfair": "none"}').ok, false);
+  assert.equal(parseFairness('no json').ok, false);
+});
+
+test('a fairness review that lists unfair items as plain strings rejects the design; one with nothing readable is asked again and then rejects it', async t => {
+  const rules = [
+    classifierRule(),
+    ...attemptRules(1, [0.2], { fairness: '{"unfair": ["Item 4 asks for a convention that no file states"]}' }),
+    ...attemptRules(2, [0.2], { fairness: '{"unfair": [{"foo": "bar"}]}' }),
+    ...attemptRules(3, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.attempts.map(item => item.outcome), ['rejected', 'rejected', 'passed']);
+  assert.deepEqual(view.attempts[0].fairness, { status: 'unfair', count: 1 });
+  assert.match(view.attempts[0].rejection.reasons[0], /The fairness review found 1 guideline item that a solver could not know/);
+  assert.deepEqual(view.attempts[1].fairness, { status: 'unusable', count: 0 });
+  assert.deepEqual(view.attempts[1].rejection.reasons, ['The fairness review gave no usable answer']);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'fairness' && entry.ref === 'attempt 2').length, 2, 'asked twice');
+  assert.equal(view.ledger.filter(entry => entry.kind === 'fairness' && entry.ref === 'attempt 1').length, 1);
+  assert.match(fs.readFileSync(path.join(w.priv(view.id), 'attempts', '1', 'feedback.md'), 'utf8'), /"Item 4 asks for a convention that no file states"/, 'the designer is told the item');
+});
+
+/* ---------------------------------------------------------------- the link loader: ending, and a stale Continue */
+
+/* A service of its own over the world's agents, shut down at the end of the test so that a failed assertion cannot leave a load polling. */
+const loaderService = (t, w, loader, extra = {}) => {
+  const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, ...extra });
+  t.after(() => service.shutdown().catch(() => {}));
+  return service;
+};
+const startLinked = (service, extra = {}) => service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS, ...extra });
+
+test('Stop ends the pipeline only when the loader has closed its browser, so busy() stays true until then and the next start is not refused', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }], closeMs: 250, strict: true });
+  const atEnd = [];
+  const service = loaderService(t, w, loader, { onStage: stage => { if (stage === 'stopped') atEnd.push({ closed: loader.calls.closed, busy: service.busy() }); } });
+  const { id } = await startLinked(service);
+  await waitFor(() => loader.calls.get > 0, { label: 'the loader to be read' });
+  const view = await service.stop(id);
+  assert.equal(view.stage, 'stopped');
+  assert.deepEqual(atEnd, [{ closed: true, busy: true }], 'the browser was closed before the stage ended, and the place was held until then');
+  assert.equal(service.busy(), false);
+  assert.deepEqual(loader.calls.cancel, [LINK_ID]);
+  /* the loader takes only one load at a time: a start right after Stop works */
+  const next = await startLinked(service);
+  await waitFor(() => loader.calls.start.length === 2, { label: 'the second load to start' });
+  const second = await service.stop(next.id);
+  assert.equal(second.stage, 'stopped', `${second.stage}: ${second.message}`);
+});
+
+test('a load that does not finish in time is cancelled, and the failure is reported only when the loader has closed', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }], closeMs: 200 });
+  const atEnd = [];
+  const service = loaderService(t, w, loader, { importTimeoutMs: 80, minCapCheck: false, onStage: stage => { if (stage === 'failed') atEnd.push(loader.calls.closed); } });
+  const { id } = await startLinked(service, { capUsd: 0.4 });
+  const view = await service.whenDone(id);
+  assert.equal(view.stage, 'failed');
+  assert.match(view.message, /did not finish in time/);
+  assert.deepEqual(atEnd, [true]);
+  assert.equal(loader.calls.waitFor, 1);
+});
+
+test('the wait for the loader to close is bounded: a loader that never closes does not hold Stop for more than linkCloseMs', async t => {
+  const w = await makeWorld(t);
+  const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }], neverCloses: true });
+  const service = loaderService(t, w, loader, { linkCloseMs: 150 });
+  const { id } = await startLinked(service);
+  await waitFor(() => loader.calls.get > 0, { label: 'the loader to be read' });
+  const started = Date.now();
+  const view = await service.stop(id);
+  assert.equal(view.stage, 'stopped');
+  assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+  assert.equal(loader.calls.closed, false);
+  assert.equal(service.busy(), false);
+});
+
+test('Continue after the loader has moved on is a 409 and clears the wait; any other fault of the loader is a 502, never a generic 500', async t => {
+  const stale = Object.assign(new Error('Nothing is waiting for you.'), { status: 409 });
+  const w = await makeWorld(t);
+  const staleLoader = fakeLoader(w.root, { script: [{ state: 'needs-sign-in', message: 'Sign in in the Chrome window.', wait: true }], continueError: stale });
+  const service = loaderService(t, w, staleLoader);
+  const { id } = await startLinked(service);
+  await waitFor(async () => (await service.get(id)).waiting, { label: 'the wait' });
+  await assert.rejects(service.continue(id), error => error instanceof AgentError && error.status === 409 && /Nothing is waiting for you\./.test(error.message));
+  assert.equal((await service.get(id)).waiting, null, 'the wait is over');
+  await service.stop(id);
+  /* another fault */
+  const broken = fakeLoader(w.root, { script: [{ state: 'needs-person', message: 'Turn it on.', wait: true }], continueError: new Error(`connection to ${LINK} was reset`) });
+  const service2 = loaderService(t, w, broken);
+  const second = await startLinked(service2);
+  await waitFor(async () => (await service2.get(second.id)).waiting, { label: 'the second wait' });
+  await assert.rejects(service2.continue(second.id), error => error instanceof AgentError && error.status === 502 && /connection to <link> was reset/.test(error.message) && !error.message.includes('tasks.example'));
+  assert.ok((await service2.get(second.id)).waiting, 'the wait is still there');
+  await service2.stop(second.id);
+});
+
+test('POST /api/pipeline/:id/continue answers a stale Continue with 409, not 500', async t => {
+  const loader = (root) => fakeLoader(root, { script: [{ state: 'needs-sign-in', message: 'Sign in in the Chrome window.', wait: true }], continueError: Object.assign(new Error('Nothing is waiting for you.'), { status: 409 }) });
+  const probe = await makeWorld(t);
+  const w = await makeWorld(t, { loader: loader(probe.root), server: true });
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  assert.equal(started.status, 200, started.text);
+  const id = started.json.id;
+  await waitFor(async () => (await w.get(`/api/pipeline/${id}`)).json.waiting, { label: 'the wait' });
+  const response = await w.post(`/api/pipeline/${id}/continue`);
+  assert.equal(response.status, 409);
+  assert.match(response.json.error, /Nothing is waiting for you\./);
+  await w.post(`/api/pipeline/${id}/stop`);
+  assert.equal((w.logs || []).length, 0, (w.logs || []).join('\n'));
+});
+
+/* ---------------------------------------------------------------- the total cap has to pay for one full attempt */
+
+test('the least total cap: the parts are exposed, the formula is the sum of the caps with the headroom, and the default cap passes it', async t => {
+  const parts = minCapParts();
+  assert.deepEqual(Object.keys(parts).sort(), ['fixedUsd', 'headroom', 'perPilotUsd', 'pilots']);
+  /* fixedUsd: the classifier, the designer (at its default cap), one repair, two grader calls on the golden answer and two fairness reviews */
+  assert.equal(parts.fixedUsd, P.CAPS.classifyUsd + P.CAPS.designUsd + P.CAPS.repairUsd + 2 * P.CAPS.graderUsd + 2 * P.CAPS.fairnessUsd);
+  assert.equal(parts.perPilotUsd, P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd);
+  assert.equal(parts.pilots, P.SCREEN_PILOTS + P.TEST_PILOTS);
+  assert.equal(parts.headroom, P.HEADROOM);
+  assert.deepEqual(parts, { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 });
+  const w = await makeWorld(t, { server: true });
+  assert.deepEqual((await w.pipeline.list()).config.minCap, parts);
+  assert.deepEqual((await w.get('/api/pipeline')).json.config.minCap, parts, 'and so does GET /api/pipeline');
+  /* the default total cap is reported next to it, and it is the one that passes the rule */
+  assert.equal((await w.pipeline.list()).config.defaultCapUsd, 50);
+  assert.equal((await w.get('/api/pipeline')).json.config.defaultCapUsd, P.DEFAULT_CAP_USD);
+  /* ceil to the cent of headroom x (fixed + pilots x (pilot cap + per pilot)) */
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }), 41.4);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 1 }), 25.3);
+  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 1 }), 20.13, '1.15 x (3.5 + 7 x 2) = 20.125, rounded up to the cent');
+  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 0.5 }), 16.1);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 0.05 }), Math.ceil(1.15 * (8 + 7 * 1.05) * 100 - 1e-9) / 100);
+  /* the default cap pays for it at the default pilot cap, and the page can compute the same from the parts */
+  const page = pilotCap => Math.ceil(Math.round(parts.headroom * (parts.fixedUsd + parts.pilots * (pilotCap + parts.perPilotUsd)) * 1e6) / 1e4) / 100;
+  assert.equal(page(C.BUDGET_USD.pilotDefault), minCapUsd({ designCapUsd: P.CAPS.designUsd, pilotCapUsd: C.BUDGET_USD.pilotDefault }));
+  assert.ok(P.DEFAULT_CAP_USD >= page(C.BUDGET_USD.pilotDefault), `${P.DEFAULT_CAP_USD} must pay for ${page(C.BUDGET_USD.pilotDefault)}`);
+  /* even at the largest pilot cap the least cap is inside the largest cap that is accepted */
+  assert.ok(page(C.BUDGET_USD.maxUsd) <= P.MAX_CAP_USD);
+});
+
+test('start refuses a total cap below the cost of one full attempt, says what the least is, and creates nothing; the least itself is accepted', async t => {
+  const w = await makeWorld(t);
+  const refused = async (extra, least) => {
+    await assert.rejects(w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, ...extra }), error => {
+      assert.ok(error instanceof AgentError);
+      assert.equal(error.status, 400);
+      assert.equal(error.message, `A full attempt (design, the 2-pilot screen and the 5-pilot test) can cost up to USD ${least} with these caps; set the total cap to at least USD ${least}`);
+      return true;
+    });
+  };
+  await refused({ capUsd: 41.39 }, '41.40');
+  await refused({ capUsd: 30 }, '41.40');
+  await refused({ capUsd: 25.29, pilotCapUsd: 1 }, '25.30');
+  await refused({ capUsd: 20.12, pilotCapUsd: 1, designCapUsd: 0.5 }, '20.13');
+  await refused({ capUsd: 0.01 }, '41.40');
+  assert.equal(fs.existsSync(w.workRoot), false, 'nothing was created for a refused start');
+  assert.equal((await w.pipeline.list()).pipelines.length, 0);
+  assert.equal(promptRuns(w).length, 0);
+  /* the least is enough, and 25.30 pays for a pilot cap of 1.00 */
+  const a = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 41.4 });
+  assert.equal((await w.pipeline.whenDone(a.id)).config.capUsd, 41.4);
+  const b = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 25.3, pilotCapUsd: 1 });
+  assert.equal((await w.pipeline.whenDone(b.id)).config.capUsd, 25.3);
+  const c = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 20.13, pilotCapUsd: 1, designCapUsd: 0.5 });
+  assert.equal((await w.pipeline.whenDone(c.id)).config.designCapUsd, 0.5);
+  /* the HTTP route answers 400 with the same words */
+  const server = await makeWorld(t, { server: true });
+  const response = await server.post('/api/pipeline/start', server.body({ capUsd: 10 }));
+  assert.equal(response.status, 400);
+  assert.match(response.json.error, /^A full attempt \(design, the 2-pilot screen and the 5-pilot test\) can cost up to USD 25\.30 with these caps; set the total cap to at least USD 25\.30$/);
+});
+
+test('every step of a worst-case first attempt fits under the least cap, whatever the pilots\' and the designer\'s caps are', async t => {
+  const w = await makeWorld(t);
+  for (const pilotCapUsd of [0.05, 0.5, 1, 3, 10, 20]) {
+    for (const designCapUsd of [0.5, 2, 5, 20]) {
+      const cap = minCapUsd({ designCapUsd, pilotCapUsd });
+      if (cap > P.MAX_CAP_USD) continue;
+      const p = { spentUsd: 0, config: { capUsd: cap } };
+      const step = (what, reserve, spend = reserve) => { w.pipeline._reserve(p, what, reserve); p.spentUsd += spend; };
+      /* every run spends its whole cap: classifier, designer and its repair turn, the golden answer graded twice, the fairness review twice,
+         then 2 + 5 pilots each with the pilot cap and two grader calls */
+      step('the classifier', P.CAPS.classifyUsd);
+      step('the designer', designCapUsd);
+      step('the repair turn', P.CAPS.repairUsd);
+      step('the check of the golden answer', P.CAPS.graderUsd);
+      step('the check of the golden answer', P.CAPS.graderUsd);
+      step('the fairness review', P.CAPS.fairnessUsd);
+      step('the fairness review', P.CAPS.fairnessUsd);
+      step('the screen', P.SCREEN_PILOTS * (pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd));
+      step('the test', P.TEST_PILOTS * (pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd));
+      assert.ok(p.spentUsd <= cap + 1e-9, `pilot cap ${pilotCapUsd}, designer cap ${designCapUsd}: spent ${p.spentUsd} of ${cap}`);
+    }
+  }
+});
+
+test('a pipeline with the default caps, every run spending its whole cap, reaches the 5-pilot test and passes it', async t => {
+  const rules = [
+    classifierRule({ scenario: { costUsd: P.CAPS.classifyUsd } }),
+    ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designCost: P.CAPS.designUsd, graderCost: P.CAPS.graderUsd, fairnessCost: P.CAPS.fairnessUsd, pilotCost: C.BUDGET_USD.pilotDefault }),
+  ];
+  const w = await makeWorld(t, { rules });
+  /* no cap given: the defaults */
+  const { id } = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS });
+  const view = await w.pipeline.whenDone(id);
+  assert.equal(view.config.capUsd, P.DEFAULT_CAP_USD);
+  assert.equal(view.config.pilotCapUsd, C.BUDGET_USD.pilotDefault);
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].test.pilots.length, 5);
+  /* 0.5 + 5 + 2 x 0.5 (calibration is one call) ... : classify 0.5, design 5, calibration 0.5, fairness 0.25, 7 pilots at 3 + 0.5 */
+  assert.ok(Math.abs(view.spentUsd - (0.5 + 5 + 0.5 + 0.25 + 7 * 3.5)) < 1e-6, String(view.spentUsd));
+  assert.ok(view.spentUsd < P.DEFAULT_CAP_USD);
+});
+
+test('what the loader says while the pipeline waits is kept up to 1000 characters (it lists the files that could not be downloaded), with any address scrubbed', async t => {
+  const w = await makeWorld(t);
+  const names = Array.from({ length: 20 }, (_, index) => `Borealis_Board_Pack_Part_${index + 1}.pdf`).join(', ');
+  const long = `20 files could not be downloaded: ${names}. Download them yourself into a folder and use Import from folder, or press Continue to go on without them.`;
+  assert.ok(long.length > 600 && long.length < 1000, String(long.length));
+  const loader = fakeLoader(w.root, { script: [{ state: 'needs-person', message: long, wait: true }] });
+  const service = loaderService(t, w, loader);
+  const { id } = await startLinked(service);
+  const waiting = await waitFor(async () => { const v = await service.get(id); return v.waiting ? v : null; }, { label: 'the wait' });
+  assert.equal(waiting.waiting.message, long, 'the whole sentence, including the end that tells the person what Continue means');
+  assert.equal(waiting.loader.message, long);
+  assert.equal(waiting.message, long);
+  await service.stop(id);
+  /* longer than the limit: cut at 1000 */
+  const huge = `Files: ${'x'.repeat(2000)}`;
+  const second = fakeLoader(w.root, { script: [{ state: 'needs-person', message: huge, wait: true }] });
+  const service2 = loaderService(t, w, second);
+  const started = await startLinked(service2);
+  const view = await waitFor(async () => { const v = await service2.get(started.id); return v.waiting ? v : null; }, { label: 'the second wait' });
+  assert.equal(view.waiting.message.length, 1000);
+  assert.equal(view.loader.message.length, 1000);
+  await service2.stop(started.id);
+  /* an address in what the loader says is scrubbed */
+  const third = fakeLoader(w.root, { script: [{ state: 'needs-sign-in', message: `Sign in at https://tasks.example/login?token=SECRET-TOKEN-123 and press Continue. ${'a'.repeat(400)}`, wait: true }] });
+  const service3 = loaderService(t, w, third);
+  const last = await startLinked(service3);
+  const scrubbed = await waitFor(async () => { const v = await service3.get(last.id); return v.waiting ? v : null; }, { label: 'the third wait' });
+  assert.match(scrubbed.waiting.message, /^Sign in at <link> and press Continue\. a{400}$/);
+  assert.ok(!JSON.stringify(scrubbed).includes('SECRET-TOKEN-123'));
+  await service3.stop(last.id);
 });

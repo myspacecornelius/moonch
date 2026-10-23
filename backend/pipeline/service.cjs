@@ -24,7 +24,8 @@ const P = require('./constants.cjs');
 const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, TEXT_EXTENSIONS } = require('./util.cjs');
 const { IntakeError, intakeFromLoader, intakeFromFolder } = require('./intake.cjs');
 const { buildClassifierPrompt, classify } = require('./classify.cjs');
-const { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, numbersIn, canonNumber } = require('./design.cjs');
+const { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, scanDesignFiles, buildWork, numbersIn, canonNumber } = require('./design.cjs');
+const { minCapParts, minCapUsd } = require('./budget.cjs');
 const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak } = require('./safety.cjs');
 const { extractText, textHoldsWindows, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort } = require('./gates.cjs');
@@ -59,6 +60,7 @@ const bad = message => new AgentError(400, message);
 const round6 = value => Math.round(value * 1e6) / 1e6;
 const money = value => `USD ${value.toFixed(2)}`;
 const isTerminal = stage => P.TERMINAL.includes(stage);
+const LOADER_MESSAGE_CHARS = 1000;
 const HEADROOM_TEXT = `${Math.round((P.HEADROOM - 1) * 100)}% headroom`;
 
 /* The promise, or undefined after `ms` (the timer is cleared, so it never keeps the process alive). */
@@ -107,6 +109,10 @@ class PipelineService {
     this.dir = path.join(this.root, 'private', 'pipelines');
     this.pollMs = Number.isFinite(options.pollMs) && options.pollMs > 0 ? options.pollMs : 500;
     this.importTimeoutMs = Number.isFinite(options.importTimeoutMs) && options.importTimeoutMs > 0 ? options.importTimeoutMs : 60 * 60 * 1000;
+    /* How long the pipeline waits, after it has cancelled the link load, for the loader to close its browser and scrub its profile. */
+    this.linkCloseMs = Number.isFinite(options.linkCloseMs) && options.linkCloseMs >= 0 ? options.linkCloseMs : 10000;
+    /* start() refuses a total cap that cannot pay for one full attempt. The tests of the budget stop turn that off to use tiny caps. */
+    this.minCapCheck = options.minCapCheck !== false;
     this.onStage = typeof options.onStage === 'function' ? options.onStage : null; /* an observer for tests; errors are ignored */
     this.options = options;
     this._rt = null;
@@ -227,11 +233,18 @@ class PipelineService {
     };
   }
 
-  /* One cancel of the link load, however many times Stop asks. */
-  async _cancelLink(ctl) {
-    if (!ctl.linkId || ctl.linkCancelled || !this.links || typeof this.links.cancel !== 'function') return;
-    ctl.linkCancelled = true;
-    try { await this.links.cancel(ctl.linkId); } catch { /* the loader may already be over */ }
+  /* One cancel of the link load, however many times Stop asks, and then the wait until the loader has really ended (its browser closed,
+     its profile scrubbed), at most linkCloseMs: the pipeline does not report an end, and busy() does not turn false, while Chrome is
+     still closing. Every caller gets the same promise. */
+  _cancelLink(ctl) {
+    if (!ctl.linkId || !this.links) return Promise.resolve();
+    if (!ctl.linkClosing) {
+      ctl.linkClosing = (async () => {
+        if (typeof this.links.cancel === 'function') { try { await this.links.cancel(ctl.linkId); } catch { /* the loader may already be over */ } }
+        if (typeof this.links.waitFor === 'function') { try { await withTimeout(Promise.resolve(this.links.waitFor(ctl.linkId)), this.linkCloseMs); } catch { /* ended, or gone */ } }
+      })();
+    }
+    return ctl.linkClosing;
   }
 
   /* -------------------------------------------------------------- the HTTP-facing methods */
@@ -248,6 +261,8 @@ class PipelineService {
       defaultCapUsd: P.DEFAULT_CAP_USD, maxCapUsd: P.MAX_CAP_USD, defaultPilotCapUsd: C.BUDGET_USD.pilotDefault,
       minPilotCapUsd: C.BUDGET_USD.minUsd, maxPilotCapUsd: C.BUDGET_USD.maxUsd, designCapUsd: P.CAPS.designUsd, classifyCapUsd: P.CAPS.classifyUsd, graderCapUsd: P.CAPS.graderUsd,
       repairCapUsd: P.CAPS.repairUsd, fairnessCapUsd: P.CAPS.fairnessUsd, goldenMin: P.GOLDEN_MIN, regradeBand: P.REGRADE_BAND.slice(), headroom: P.HEADROOM,
+      /* The total cap must be at least ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)); fixedUsd is at the default designer cap. */
+      minCap: minCapParts(),
       stages: P.STAGES.slice(), acknowledgements: P.ACKNOWLEDGEMENTS.slice(), linksAvailable: Boolean(this.links),
       models: C.MODELS.slice(), efforts: C.EFFORTS.slice(), defaultModel: C.DEFAULT_MODEL, defaultEffort: C.DEFAULT_EFFORT, graderModel: C.GRADER_MODEL,
     };
@@ -290,9 +305,16 @@ class PipelineService {
     if (typeof graderModel !== 'string' || !C.MODELS.includes(graderModel)) throw bad(`The grader model must be one of: ${C.MODELS.join(', ')}`);
     const pilotCapUsd = body.pilotCapUsd === undefined || body.pilotCapUsd === null ? C.BUDGET_USD.pilotDefault : body.pilotCapUsd;
     if (budgetText(pilotCapUsd) === null) throw bad(`The spending cap per pilot must be a number of US dollars from ${C.BUDGET_USD.minUsd.toFixed(2)} to ${C.BUDGET_USD.maxUsd.toFixed(2)}, in whole cents`);
-    /* The designer's cap, when none is given: a fifth of the total cap, at most USD 5.00 and at least USD 0.50, so a small total cap still leaves room for pilots. */
-    const designCapUsd = body.designCapUsd === undefined || body.designCapUsd === null ? Math.min(P.CAPS.designUsd, Math.max(0.5, Math.round(capUsd * 20) / 100)) : body.designCapUsd;
+    /* The designer's cap, when none is given: USD 5.00 (the minimum total cap is worked out from it, so it does not move with the total). */
+    const designCapUsd = body.designCapUsd === undefined || body.designCapUsd === null ? P.CAPS.designUsd : body.designCapUsd;
     if (budgetText(designCapUsd) === null) throw bad(`The spending cap for the designer must be a number of US dollars from ${C.BUDGET_USD.minUsd.toFixed(2)} to ${C.BUDGET_USD.maxUsd.toFixed(2)}, in whole cents`);
+    /* A total cap that cannot pay for one full attempt would stop at the cap before the 5-pilot test: refuse it now, and say what it needs. */
+    if (this.minCapCheck) {
+      const least = minCapUsd({ designCapUsd, pilotCapUsd });
+      if (capUsd + 1e-9 < least) {
+        throw bad(`A full attempt (design, the ${P.SCREEN_PILOTS}-pilot screen and the ${P.TEST_PILOTS}-pilot test) can cost up to ${money(least)} with these caps; set the total cap to at least ${money(least)}`);
+      }
+    }
     if (body.label !== undefined && body.label !== null && typeof body.label !== 'string') throw bad('label must be text');
     if (body.acceptMissing !== undefined && body.acceptMissing !== null && typeof body.acceptMissing !== 'boolean') throw bad('acceptMissing must be true or false');
     let source;
@@ -378,7 +400,14 @@ class PipelineService {
     const { state: p, ctl } = this._entry(id);
     if (isTerminal(p.stage) || !p.waiting || !ctl || !ctl.linkId) throw new AgentError(409, 'Nothing is waiting for you');
     if (!this.links || typeof this.links.continue !== 'function') throw new AgentError(409, 'The link loader cannot continue');
-    await this.links.continue(ctl.linkId);
+    try {
+      await this.links.continue(ctl.linkId);
+    } catch (error) {
+      /* The loader moved on by itself (it left the wait, or the wait timed out): nothing is waiting any more. Any other fault is the loader's. */
+      const stale = Boolean(error) && error.status === 409;
+      if (stale) { p.waiting = null; this._save(p); }
+      throw new AgentError(stale ? 409 : 502, this._scrubLink(error && error.message) || 'The link loader could not continue');
+    }
     p.waiting = null;
     this._save(p);
     return this._view(p);
@@ -445,7 +474,7 @@ class PipelineService {
     const outDir = path.join(this._attemptDir(p.id, p.design.attempt), 'out');
     let built;
     try {
-      built = buildExport({ outDir, state: this._exportState(p), note: p.result && p.result.verdict === 'success' ? 'this design passed the test' : 'this design did not pass' });
+      built = buildExport({ outDir, state: this._exportState(p), note: this._exportNote(p) });
     } catch (error) {
       throw new AgentError(409, `The export could not be made (${oneLine(error && error.message, 160)})`);
     }
@@ -453,7 +482,17 @@ class PipelineService {
   }
 
   _exportState(p) {
-    return { label: p.label, stage: p.stage, message: p.message, attempts: p.attempts, redesigns: p.redesigns, spentUsd: p.spentUsd, config: p.config };
+    return { label: p.label, stage: p.stage, message: p.message, attempts: p.attempts, redesigns: p.redesigns, spentUsd: p.spentUsd, config: p.config, designAttempt: p.design ? p.design.attempt : null };
+  }
+
+  /* What became of the design that is exported (p.design.attempt, which is not always the last attempt: later ones may have been rejected). */
+  _exportNote(p) {
+    const attempt = p.design ? p.attempts.find(item => item.n === p.design.attempt) : null;
+    const outcome = attempt ? attempt.outcome : null;
+    if (outcome === 'passed') return 'this design passed the test';
+    if (outcome === 'screen-failed') return 'this design did not pass the screen';
+    if (outcome === 'test-failed') return 'this design did not pass the test';
+    return 'this design was not judged: the run ended before its pilots finished';
   }
 
   /* -------------------------------------------------------------- views */
@@ -482,6 +521,8 @@ class PipelineService {
       fairness: clone(p.design.fairness),
       guidelineDiff: clone(p.design.guidelineDiff),
       rubricChanges: clone(p.design.rubricChanges),
+      /* New or edited files whose content could not be read as text, so they were not checked for passages of the withheld material: [{ name, kind: 'new'|'edited' }] */
+      unscanned: Array.isArray(p.design.unscanned) ? clone(p.design.unscanned) : [],
       prompt: texts.prompt,
       guideline: texts.guideline,
       goldenAnswer: texts.goldenAnswer,
@@ -604,7 +645,13 @@ class PipelineService {
         throw new Failure(`The link loader could not start: ${this._scrubLink(error && error.message, url)}`);
       }
       if (ctl.stop) { await this._cancelLink(ctl); throw new StopSignal('stopped'); }
-      loaderState = await this._pollLoader(p, ctl);
+      try {
+        loaderState = await this._pollLoader(p, ctl);
+      } catch (error) {
+        /* A stop ends the load: the pipeline ends when the loader has closed its browser, not before. */
+        if (error instanceof StopSignal) await this._cancelLink(ctl);
+        throw error;
+      }
       this._setStage(p, 'import', 'Copying the downloaded files');
       intake = await intakeFromLoader({ state: loaderState, root: this.root, original, shouldStop: () => ctl.stop });
     } else {
@@ -629,10 +676,10 @@ class PipelineService {
     this._save(p);
   }
 
-  _scrubLink(text, url) {
+  _scrubLink(text, url, max = 300) {
     let out = String(text === undefined || text === null ? '' : text);
     if (typeof url === 'string' && url) out = out.split(url).join('<link>');
-    return oneLine(out.replace(/https?:\/\/[^\s"'<>]+/gi, '<link>'), 300);
+    return oneLine(out.replace(/https?:\/\/[^\s"'<>]+/gi, '<link>'), max);
   }
 
   async _pollLoader(p, ctl) {
@@ -647,7 +694,8 @@ class PipelineService {
         throw new Failure(`The link loader could not be read: ${this._scrubLink(error && error.message)}`);
       }
       if (!isObject(state)) throw new Failure('The link loader gave no state');
-      const loaderMessage = oneLine(state.message, 300);
+      /* What the loader says while it waits can be long (it lists the files it could not download): up to LOADER_MESSAGE_CHARS, with any address in it scrubbed. */
+      const loaderMessage = this._scrubLink(state.message, undefined, LOADER_MESSAGE_CHARS);
       if (state.state === 'done') return state;
       if (state.state === 'failed' || state.state === 'cancelled') {
         if (ctl.stop) throw new StopSignal('stopped');
@@ -663,7 +711,7 @@ class PipelineService {
         this._save(p);
       }
       if (Date.now() > deadline) {
-        try { await this.links.cancel(ctl.linkId); } catch { /* the loader may already be over */ }
+        await this._cancelLink(ctl);
         throw new Failure('The link loader did not finish in time.');
       }
       await delay(this.pollMs);
@@ -845,13 +893,21 @@ class PipelineService {
       const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || '')];
       return readDesign({ outDir, packet: ctl.packet, withheldHashes: sets.hashes, windows, original: ctl.original, originalDir: this._origDir(p.id) });
     };
-    const tryRead = () => {
-      try { design = read(); return null; } catch (error) {
+    /* What the designer wrote, read and then scanned: the files by their content (text of any size, the text inside office files), which
+       readDesign cannot do synchronously. */
+    const tryRead = async () => {
+      try {
+        design = read();
+        const scanned = await scanDesignFiles({ outDir, design, shouldStop: () => ctl.stop });
+        design.unscanned = scanned.unscanned;
+        return null;
+      } catch (error) {
+        design = null;
         if (error instanceof DesignError) return { message: error.message, detail: error.detail };
         throw error;
       }
     };
-    if (!problem) problem = tryRead();
+    if (!problem) problem = await tryRead();
     if (problem) {
       attempt.repaired = true;
       this._note(p, `Asking the trap designer to fix its work (attempt ${n} of ${total})`);
@@ -859,7 +915,7 @@ class PipelineService {
       this._reserve(p, 'the repair turn', P.CAPS.repairUsd);
       turn = await this._designerTurn(p, ctl, { prompt: repairPrompt({ attempt: n, attempts: total, problem: problem.detail }), cap: P.CAPS.repairUsd, kind: 'design-repair', ref: `attempt ${n}`, transcript: path.join(attemptDir, 'repair.transcript.jsonl'), designer });
       design = null;
-      problem = turn.problem || tryRead();
+      problem = turn.problem || await tryRead();
       if (problem) {
         this._keepOut(outDir, path.join(attemptDir, 'out'));
         throw new AttemptRejected('design', [problem.message], [problem.detail]);
@@ -895,7 +951,7 @@ class PipelineService {
       details.push('The fairness review of your guideline gave no usable answer. Make each point of the guideline short and plain.');
     } else if (fairness.unfair.length) {
       reasons.push(`The fairness review found ${fairness.unfair.length} guideline item${fairness.unfair.length === 1 ? '' : 's'} that a solver could not know from the prompt and the files, or that no trap explains`);
-      details.push(`The fairness review found guideline items a solver could not know from the prompt and the files, or that are not tied to a trap: ${fairness.unfair.map(entry => `"${entry.item}" (${entry.why})`).join('; ')}. Take them out, or make the prompt and the files settle them.`);
+      details.push(`The fairness review found guideline items a solver could not know from the prompt and the files, or that are not tied to a trap: ${fairness.unfair.map(entry => (entry.why ? `"${entry.item}" (${entry.why})` : `"${entry.item}"`)).join('; ')}. Take them out, or make the prompt and the files settle them.`);
     }
     if (reasons.length) throw new AttemptRejected('checks', reasons, details);
 
@@ -921,6 +977,7 @@ class PipelineService {
       fairness,
       guidelineDiff: design.guidelineDiff,
       rubricChanges: design.rubricChanges,
+      unscanned: design.unscanned,
     };
     this._save(p);
   }

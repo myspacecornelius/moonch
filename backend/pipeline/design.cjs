@@ -15,7 +15,8 @@ const { GAF_PATTERN } = require('../../package-engine.js');
 const C = require('../agents/constants.cjs');
 const { parseFigure } = require('../agents/classify.cjs');
 const { DESIGN, INTAKE } = require('./constants.cjs');
-const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS } = require('./util.cjs');
+const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS, Stopped } = require('./util.cjs');
+const { extractText, scanFile, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { lineDiff } = require('./diff.cjs');
 const { withheldReason } = require('./classify.cjs');
 const { containsLeak, leakWindows, EMPTY_SHA } = require('./safety.cjs');
@@ -28,6 +29,13 @@ class DesignError extends Error {
     super(message);
     this.detail = detail || message;
   }
+}
+
+/* A fault in one file the designer wrote. The public message does not name the file: a new file's name can state the gold, and the name
+   of an edited file shows which world file holds the trap. The name goes into the detail, for the designer only. */
+function fileFault(kind, rel, text, extra) {
+  const who = kind === 'edited' ? 'An edited file' : 'A new file';
+  return new DesignError(`${who} ${text}`, `The ${kind === 'edited' ? 'edited' : 'new'} file ${oneLine(rel, 120)} ${text}${extra ? `. ${extra}` : ''}`);
 }
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -319,13 +327,35 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   windows = [...windows, ...leakWindows(guideline), ...leakWindows(goldenAnswer)];
 
   const lowerPacket = new Map([...packet.keys()].map(name => [name.toLowerCase(), name]));
+  /* out/ and its two folders must be plain folders in the designer's own folder. A link there would lead the copy to files anywhere
+     (a symbolic link is never followed below them, but the folder itself is the root of the walk). lstat does not follow a link;
+     realpath must come back to the place the name says. */
+  const realOut = (() => {
+    try {
+      const stat = fs.lstatSync(outDir);
+      const real = fs.realpathSync(outDir);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || real !== path.join(fs.realpathSync(path.dirname(outDir)), path.basename(outDir))) throw new Error('not plain');
+      return real;
+    } catch {
+      throw new DesignError('out/ is not a plain folder (a link or a file stands in its place)', 'out/ must be a real folder inside your own folder. Do not make links.');
+    }
+  })();
   const lister = sub => {
     const dir = path.join(outDir, sub);
-    if (!fs.existsSync(dir)) return [];
+    let stat;
+    try { stat = fs.lstatSync(dir); } catch (error) {
+      if (error && error.code === 'ENOENT') return [];
+      throw new DesignError(`out/${sub} could not be read`);
+    }
+    let plain = stat.isDirectory() && !stat.isSymbolicLink();
+    if (plain) {
+      try { plain = fs.realpathSync(dir) === path.join(realOut, sub); } catch { plain = false; }
+    }
+    if (!plain) throw new DesignError(`out/${sub} is not a plain folder (a link or a file stands in its place)`, `out/${sub} must be a real folder inside out/, with regular files in it. Do not make links.`);
     try {
       const walked = walkFiles(dir, { maxFiles: DESIGN.newFiles, depth: INTAKE.depth });
       const refused = walked.skipped.filter(item => !isJunkName(item.rel));
-      if (refused.length) throw new DesignError(`out/${sub} holds an entry that cannot be used (${refused[0].rel.slice(0, 120)}: ${refused[0].why})`);
+      if (refused.length) throw new DesignError(`out/${sub} holds an entry that cannot be used`, `out/${sub} holds an entry that cannot be used (${refused[0].rel.slice(0, 120)}: ${refused[0].why}). Only regular files, in plain folders, with ordinary names.`);
       return walked.files.filter(file => !isJunkName(file.rel));
     } catch (error) {
       if (error instanceof DesignError) throw error;
@@ -338,16 +368,16 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
 
   const fileChecks = (file, kind) => {
     const problem = nameProblem(file.rel, INTAKE.depth);
-    if (problem) throw new DesignError(`${kind} file ${oneLine(file.rel, 120)}: ${problem}`);
-    if (GAF_PATTERN.test(file.rel)) throw new DesignError(`${kind} file ${oneLine(file.rel, 120)} is in a gaf path, which pilots never see`);
+    if (problem) throw fileFault(kind, file.rel, `has a name that cannot be used (${problem})`);
+    if (GAF_PATTERN.test(file.rel)) throw fileFault(kind, file.rel, 'is in a gaf path, which pilots never see');
     const why = withheldReason(file.rel);
-    if (why) throw new DesignError(`${kind} file ${oneLine(file.rel, 120)} looks like grading material by name (${why})`);
+    if (why) throw fileFault(kind, file.rel, `looks like grading material by name (${why})`);
     const sha256 = hashFile(file.abs);
-    if (sha256 !== EMPTY_SHA && withheldHashes.has(sha256)) throw new DesignError(`${kind} file ${oneLine(file.rel, 120)} is a copy of withheld material`);
+    if (sha256 !== EMPTY_SHA && withheldHashes.has(sha256)) throw fileFault(kind, file.rel, 'is a copy of withheld material');
     if (TEXT_EXTENSIONS.has(path.extname(file.rel).toLowerCase()) && file.bytes <= READ_CAP) {
       let text = '';
       try { text = fs.readFileSync(file.abs, 'utf8'); } catch { text = ''; }
-      if (containsLeak(text, windows)) throw new DesignError(`${kind} file ${oneLine(file.rel, 120)} holds a long passage of the guideline or the golden answer`);
+      if (containsLeak(text, windows)) throw fileFault(kind, file.rel, 'holds a long passage of the guideline or the golden answer');
     }
     return { name: file.rel, bytes: file.bytes, sha256 };
   };
@@ -355,30 +385,30 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   const taken = new Set();
   const newFiles = newOnDisk.map(file => {
     const key = file.rel.toLowerCase();
-    if (lowerPacket.has(key)) throw new DesignError(`new file ${oneLine(file.rel, 120)} has the name of an existing file; edit that file instead and list it with a reason`);
-    if (taken.has(key)) throw new DesignError(`new file ${oneLine(file.rel, 120)} is named twice`);
+    if (lowerPacket.has(key)) throw fileFault('new', file.rel, 'has the name of an existing file; edit that file instead and list it with a reason');
+    if (taken.has(key)) throw fileFault('new', file.rel, 'is named twice');
     taken.add(key);
     return fileChecks(file, 'new');
   });
   const editedFiles = editedOnDisk.map(file => {
-    if (!packet.has(file.rel)) throw new DesignError(`edited file ${oneLine(file.rel, 120)} is not a world or task file; write it under out/new instead`);
+    if (!packet.has(file.rel)) throw fileFault('edited', file.rel, 'is not a world or task file; write it under out/new instead');
     return fileChecks(file, 'edited');
   });
 
   const available = new Set([...packet.keys(), ...newFiles.map(file => file.name)]);
   const parsed = parseTrapsFile(trapsText, available);
-  for (const name of parsed.listedNew) if (!newFiles.some(file => file.name === name)) throw new DesignError(`traps.json lists the new file ${oneLine(name, 120)} but out/new does not hold it`);
+  for (const name of parsed.listedNew) if (!newFiles.some(file => file.name === name)) throw new DesignError('traps.json lists a new file that out/new does not hold', `traps.json lists the new file ${oneLine(name, 120)} but out/new does not hold it`);
   const unlisted = newFiles.filter(file => !parsed.listedNew.includes(file.name));
   if (unlisted.length) notes.push(`${unlisted.length} new file${unlisted.length === 1 ? ' was' : 's were'} not listed in traps.json and ${unlisted.length === 1 ? 'is' : 'are'} included anyway.`);
   const reasons = new Map();
   for (const item of parsed.listedEdited) {
     const name = typeof item.name === 'string' ? item.name : '';
     const reason = typeof item.reason === 'string' ? oneLine(item.reason, DESIGN.reasonChars) : '';
-    if (!editedFiles.some(file => file.name === name)) throw new DesignError(`traps.json lists the edited file ${oneLine(name, 120)} but out/edited does not hold it`);
-    if (!reason) throw new DesignError(`the edit of ${oneLine(name, 120)} has no reason`);
+    if (!editedFiles.some(file => file.name === name)) throw new DesignError('traps.json lists an edited file that out/edited does not hold', `traps.json lists the edited file ${oneLine(name, 120)} but out/edited does not hold it`);
+    if (!reason) throw new DesignError('An edited file has no reason in traps.json', `the edit of ${oneLine(name, 120)} has no reason in traps.json`);
     reasons.set(name, reason);
   }
-  for (const file of editedFiles) if (!reasons.has(file.name)) throw new DesignError(`the edited file ${oneLine(file.name, 120)} is not listed with a reason`);
+  for (const file of editedFiles) if (!reasons.has(file.name)) throw fileFault('edited', file.name, 'is not listed with a reason in traps.json');
   for (const file of editedFiles) {
     file.reason = reasons.get(file.name);
     if (file.sha256 === packet.get(file.name).sha256) notes.push(`${file.name} is listed as edited but is identical to the original.`);
@@ -406,8 +436,8 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
     const before = packet.get(file.name);
     file.beforeBytes = before.bytes;
     if (before.bytes > 0 && file.bytes < before.bytes * (1 - DESIGN.editShrinkMax)) {
-      throw new DesignError(`The edit of ${oneLine(file.name, 120)} makes the file more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller`,
-        `The edited ${file.name} has ${file.bytes} bytes, the original ${before.bytes}: more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller. Change the file, do not cut it down; add what the trap needs.`);
+      throw new DesignError(`An edit makes its file more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller`,
+        `The edit of ${oneLine(file.name, 120)} makes the file more than ${Math.round(DESIGN.editShrinkMax * 100)}% smaller: the edited file has ${file.bytes} bytes, the original ${before.bytes}. Change the file, do not cut it down; add what the trap needs.`);
     }
     file.diff = editDiff(file, originalDir, outDir);
   }
@@ -422,8 +452,9 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
     for (const file of newFiles) {
       const named = atomsStated(file.name.replace(/\.[^./]*$/, '').replace(/[_./-]+/g, ' '), atoms, original);
       if (named.numbers.length || named.phrases.length) {
-        throw new DesignError(`The name of the new file ${oneLine(file.name, 120)} states a figure or a decision of the golden answer`,
-          `The name of ${file.name} states ${[...named.numbers.map(item => `the figure ${item}`), ...named.phrases.map(item => `the phrase "${item}"`)].join(', ')} of the golden answer. Rename the file.`);
+        /* Neither the name nor the figure it states is in the public message: the redesign keeps the same gold. */
+        throw new DesignError('The name of a new file gives away part of the answer',
+          `The name of the new file ${oneLine(file.name, 120)} states ${[...named.numbers.map(item => `the figure ${item}`), ...named.phrases.map(item => `the phrase "${item}"`)].join(', ')} of the golden answer. Rename the file.`);
       }
     }
   }
@@ -438,7 +469,42 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   const guidelineDiff = original && typeof original.guidelineText === 'string' && original.guidelineText
     ? { available: true, ...lineDiff(original.guidelineText, guideline, { maxLines: DESIGN.diffLines }) }
     : { available: false, added: 0, removed: 0, lines: [], truncated: false };
-  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, rubricChanges: parsed.rubricChanges, guidelineDiff, notes };
+  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, rubricChanges: parsed.rubricChanges, guidelineDiff, notes, windows, unscanned: [] };
+}
+
+/* Extensions read as text by the scan below, whatever they are called: the plain text kinds and the usual source, markup and log forms.
+   A file with no extension is read as text too. Any other kind is still read as bytes, but is reported as unscanned, because what it
+   holds may be packed (a PDF, a picture, an old binary office file). */
+const SCANNED_AS_TEXT = new Set([...TEXT_EXTENSIONS, '', '.rtf', '.tex', '.rst', '.sql', '.py', '.js', '.ts', '.jsonl', '.ndjson', '.ini', '.cfg', '.toml', '.conf', '.sh', '.bas']);
+const ZIP_TEXT_CHARS = 4 * 1024 * 1024;
+
+/* The files the designer wrote, read for passages of the withheld material: the original guideline and golden answer, anything withheld
+   from the task, and the designer's own guideline and golden answer (design.windows). A text file of any size is read in chunks, the text
+   of a word-processing, spreadsheet or slide file is extracted (extract.cjs, as the classification does for the task's own files), and any
+   other file is read as bytes. A hit throws a DesignError; what could not be read as text is returned as unscanned: [{ name, kind }].
+   shouldStop() true throws Stopped. */
+async function scanDesignFiles({ outDir, design, shouldStop }) {
+  const unscanned = [];
+  const stopped = () => { if (shouldStop && shouldStop()) throw new Stopped('stopped'); };
+  for (const [kind, sub, list] of [['new', 'new', design.newFiles], ['edited', 'edited', design.editedFiles]]) {
+    for (const file of list) {
+      stopped();
+      const abs = path.join(outDir, sub, ...file.name.split('/'));
+      const ext = path.extname(file.name).toLowerCase();
+      if (ZIP_EXTENSIONS.has(ext)) {
+        const text = await extractText(abs, { maxChars: ZIP_TEXT_CHARS });
+        stopped();
+        if (text === null) { unscanned.push({ name: file.name, kind }); continue; }
+        if (containsLeak(text, design.windows)) throw fileFault(kind, file.name, 'holds a long passage of the guideline or the golden answer');
+        continue;
+      }
+      const scan = await scanFile(abs, design.windows, shouldStop);
+      stopped();
+      if (scan.leak === true) throw fileFault(kind, file.name, 'holds a long passage of the guideline or the golden answer');
+      if (scan.leak === null || scan.binary || !SCANNED_AS_TEXT.has(ext)) unscanned.push({ name: file.name, kind });
+    }
+  }
+  return { unscanned };
 }
 
 /* The comparison of an edited file with its original: a line diff for a text file, the sizes for any other. */
@@ -482,4 +548,4 @@ async function buildWork({ originalDir, outDir, workDir, packet, design, shouldS
   return manifest.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-module.exports = { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, parseTrapsFile, numbersIn, canonNumber, leakAtoms, atomsStated };
+module.exports = { DesignError, scanDesignFiles, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, parseTrapsFile, numbersIn, canonNumber, leakAtoms, atomsStated };
