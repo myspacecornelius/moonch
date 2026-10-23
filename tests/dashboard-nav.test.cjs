@@ -44,14 +44,14 @@ function makeShell({ location = { protocol: 'file:', hostname: '' } } = {}) {
     const target = { closest: selector => (selector === '[data-dash-tab]' ? tab : null) };
     for (const fn of listeners.click || []) fn({ target });
   };
-  return { dashboard, markup, navButtons, groups, clickTab, element };
+  return { dashboard, markup, navButtons, groups, clickTab, element, context };
 }
 
 test('the sidebar lists the working pages only: no Workspace group, no Mission Control, no Evidence Workbench', () => {
   const shell = makeShell();
   assert.deepEqual(shell.groups(), ['Package analysis', 'Pilots']);
   assert.deepEqual(shell.navButtons(), [
-    ['overview', 'Overview'], ['candidates', 'Candidate roots'], ['ideas', 'Mode ideas'], ['results', 'Results'], ['files', 'Source files'], ['history', 'Run history'], ['agents', 'Agents'],
+    ['overview', 'Overview'], ['candidates', 'Candidate roots'], ['ideas', 'Mode ideas'], ['results', 'Results'], ['files', 'Source files'], ['history', 'Run history'], ['pipeline', 'Pipeline'], ['agents', 'Agents'],
   ]);
   for (const gone of ['Workspace', 'Mission Control', 'Evidence Workbench', 'data-dash-tab="mission"', 'data-dash-tab="workbench"']) assert.ok(!shell.markup().includes(gone), `the shell no longer draws: ${gone}`);
   assert.match(shell.markup(), /<p class="nav-group">Package analysis<\/p><button type="button" class="nav-btn active" data-dash-tab="overview"/, 'Package analysis is the first group and Overview its first page');
@@ -101,4 +101,37 @@ test('the placeholder modules still load: their scripts stay in index.html and t
   for (const name of ['mission.js', 'workbench.js', 'mission-model.js', 'workbench-model.js']) assert.ok(INDEX.includes(`<script defer src="${name}"></script>`), `${name} is still loaded by index.html`);
   assert.ok(fs.existsSync(path.join(REPO, 'mission.js')) && fs.existsSync(path.join(REPO, 'workbench.js')));
   assert.match(DASHBOARD_SOURCE, /mission:missionView,workbench:workbenchView/, 'the page dispatch still knows both views, so adding the rows back is a one-line change');
+});
+
+test('the Pipeline page sits in the Pilots group right above Agents, is reachable by navigate() and by a click, and draws its own header', () => {
+  const shell = makeShell();
+  const order = shell.navButtons().map(([view]) => view);
+  assert.equal(order.indexOf('pipeline'), order.indexOf('agents') - 1, 'Pipeline is the row right above Agents');
+  assert.ok(order.indexOf('pipeline') > order.indexOf('history'), 'and it follows the Package analysis rows');
+  assert.match(shell.markup(), /<p class="nav-group">Pilots<\/p><button type="button" class="nav-btn " data-dash-tab="pipeline"/, 'Pilots opens with Pipeline');
+  assert.equal(shell.dashboard.navigate('pipeline'), true);
+  assert.equal(shell.dashboard.getView(), 'pipeline');
+  assert.match(shell.markup(), /data-dash-tab="pipeline"[^>]*aria-current="page"/, 'the row is marked as the current page');
+  assert.doesNotMatch(shell.markup(), /class="dash-topbar"/, 'the module draws its own header: no package top bar over it');
+  assert.match(shell.markup(), /The Pipeline view did not load\./, 'without pipeline.js the shell shows a card, not a blank page');
+  shell.clickTab('overview');
+  assert.equal(shell.dashboard.getView(), 'overview');
+  assert.match(shell.markup(), /class="dash-topbar"/, 'the package top bar is back on the package pages');
+  shell.clickTab('pipeline');
+  assert.equal(shell.dashboard.getView(), 'pipeline', 'a click on the nav row opens it');
+});
+
+test('the shell tells the Pipeline module whether it is showing after every render, and a module that throws does not take the shell down', () => {
+  const shell = makeShell();
+  const calls = [];
+  shell.context.FinancePipeline = { render: () => '<div id="pl-root">pipeline stub</div>', afterRender: active => calls.push(active) };
+  shell.dashboard.navigate('pipeline');
+  assert.match(shell.markup(), /pipeline stub/);
+  assert.equal(calls[calls.length - 1], true, 'showing: true');
+  shell.dashboard.navigate('overview');
+  assert.equal(calls[calls.length - 1], false, 'not showing: false, so it can stop its timer');
+  shell.context.FinancePipeline = { render: () => { throw new Error('synthetic failure'); }, afterRender: () => { throw new Error('synthetic failure'); } };
+  shell.dashboard.navigate('pipeline');
+  assert.match(shell.markup(), /The Pipeline view could not be drawn: synthetic failure/);
+  assert.match(shell.markup(), /data-dash-tab="agents"/, 'the sidebar is still there');
 });

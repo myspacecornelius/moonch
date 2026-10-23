@@ -1,0 +1,757 @@
+/* Pipeline page: a task link (or a folder) in, a tested set of traps out (window.FinancePipeline = {render, afterRender, handleEvent}).
+   It drives the companion's /api/pipeline routes (backend/pipeline). Rules this file keeps:
+   - It makes no request of its own. Every call goes through window.FinanceAgents.link / get / post (agents.js), which loads the session
+     code, sends it on every POST and only accepts relative paths under /api/. Opened from disk the page makes no request at all.
+   - It never supplies a command, a binary path or an argument list: it sends the task link or a folder path, numbers, a model and an effort
+     from the lists the companion reports, and the four acknowledgements.
+   - Every dynamic string is escaped by the html tag below. No inline style attributes, no form submission, no browser storage: the task
+     link is not kept anywhere (it leaves the page's state when the run starts and it is never shown back, in a message or otherwise).
+   - Every field of the companion's answers is read in adapt() and adaptExport() and nowhere else, so aligning the page with the
+     orchestrator is a change to those two functions. The rest of the file reads the view model they return. */
+(function(){
+  'use strict';
+  const W=window;
+
+  const OFFLINE_MESSAGE='The Pipeline needs the companion: run npm start.';
+  const POLL_MS=2000;
+  /* Display copies of backend/pipeline/constants.cjs (tests/pipeline-page.test.cjs checks that the two agree). The companion enforces its own. */
+  const RULES=Object.freeze({passBar:0.45,screenPilots:2,testPilots:5,testNeed:4,maxRedesigns:3,defaultCapUsd:30,maxCapUsd:200});
+  const CAP_MIN_USD=1;
+  /* The spending cap of one pilot (the same range the Agents page and the companion use). */
+  const PILOT_CAP=Object.freeze({defaultUsd:3,minUsd:0.05,maxUsd:20});
+  const WITHHELD_TEXT='Withheld while a round runs';
+  const ID_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{2,79}$/;
+  const KEY_RE=/^[a-z0-9-]{1,40}$/;
+  /* The first three are the Agents page's, word for word. The fourth is this pipeline's (MODEL_READS_TASK_TEXT in backend/pipeline/constants.cjs, which the
+     tests compare): the models that classify, design and grade read the task. */
+  const ACKNOWLEDGEMENTS=Object.freeze([
+    {id:'shell-access',label:'Shell access as me',text:'Each pilot is a Claude Code agent that can run shell commands as my user account on this computer.'},
+    {id:'network',label:'Network use by the agent runtime',text:'The agent runtime (the claude program) sends the packet files, your prompt and the fixed text before it to Anthropic over the network. This page itself only talks to the companion on this computer.'},
+    {id:'isolation-by-audit',label:'Isolation by audit only',text:'There is no operating system sandbox. Pilots are told to stay inside their own folder and every tool call is checked afterwards. A call outside the folder discards that run. It is detected, not blocked.'},
+    {id:'model-reads-task',label:'Model reads the task',text:'The classifier, the trap designer and the simulated grader are Claude Code runs that send the task text, the grader guideline and the golden answer to Anthropic. The trap designer is an agent with the same tools as a pilot (Bash, Read, Write, Edit, Glob and Grep) in its own working folder, held to that folder by the same after-the-fact audit and not by a sandbox.'}
+  ]);
+  const HAPPENS='What will happen: the task is imported and its files classified, a model designs the hardest traps in a working copy, two blind pilots run a screen that both must score below '+RULES.passBar.toFixed(2)+', then five pilots run a test in which at least '+RULES.testNeed+' of '+RULES.testPilots+' must score below '+RULES.passBar.toFixed(2)+'. A failed screen or test sends the designer back, up to '+RULES.maxRedesigns+' redesigns, and the run stops when the total cap would be exceeded or when you press Stop.';
+
+  /* ---------- Escaping and markup. Interpolated values are escaped unless they are the result of html. ---------- */
+  const ESC={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'};
+  const esc=x=>String(x==null?'':x).replace(/[&<>"'`]/g,c=>ESC[c]);
+  class Raw{constructor(t){this.text=t;}}
+  function part(value){
+    if(value instanceof Raw)return value.text;
+    if(Array.isArray(value))return value.map(part).join('');
+    if(value===false||value===true||value==null)return '';
+    return esc(value);
+  }
+  function html(strings,...values){
+    let out=strings[0];
+    values.forEach((value,i)=>{out+=part(value)+strings[i+1];});
+    return new Raw(out);
+  }
+  const pill=(label,kind='')=>html`<span class="pill ${kind}">${label}</span>`;
+  const $=selector=>document.querySelector(selector);
+
+  /* ---------- The companion's answers: the view model, and the only code that reads their fields ---------- */
+  const isObj=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
+  const isWithheld=v=>isObj(v)&&v.withheld===true;
+  const WITHHELD=Object.freeze({withheld:true});
+  const text=v=>typeof v==='string'?v:typeof v==='number'&&Number.isFinite(v)?String(v):'';
+  const num=v=>{const n=typeof v==='string'&&v.trim()?Number(v):v;return typeof n==='number'&&Number.isFinite(n)?n:null;};
+  const arr=v=>Array.isArray(v)?v:[];
+  const nameList=v=>arr(v).map(x=>isObj(x)?text(x.name||x.file||x.title||x.id):text(x)).filter(Boolean);
+  /* A value that is text (or a number), or the withheld marker the companion keeps in place of a private value while a round runs. */
+  const cell=v=>isWithheld(v)?WITHHELD:text(v);
+  function ref(v){
+    if(isWithheld(v))return {kind:'withheld',name:''};
+    if(isObj(v)&&text(v.section))return {kind:'section',name:text(v.section)};
+    if(isObj(v)&&text(v.file))return {kind:'file',name:text(v.file)};
+    return null;
+  }
+  /* GET /api/pipeline/:id (backend/pipeline/service.cjs _view; each row of GET /api/pipeline has id, stage, createdAt, message, spentUsd, capUsd,
+     redesigns). Fields read, all optional:
+       id, label, stage, redacted, message, summary, error, createdAt, capUsd, spentUsd, pilotCapUsd, model, effort, redesigns
+       waiting: { kind ('needs-sign-in' | 'needs-person'), message }
+       source: { kind ('url' | 'folder'), origin, path, name }
+       import: { fileCount, facts: { world, task, withheld, other }, page: { origin, path }, toggle: { found, label, flipped, filesBefore, filesAfter, learned },
+                 skipped: [{ name, why }], files: a list }
+       classification: { prompt, guideline, goldenAnswer: each { section } | { file }, worldFiles, taskFiles, other: names, withheld: [{ name, why }], notes }
+       design: { attempt, traps: [{ id, title, mechanism, files, decoy, correctValue, wrongValue }], newFiles: [{ name }], editedFiles: [{ name, reason }],
+                 prompt, guideline, goldenAnswer, gold: { decision, figures: [{ label, value, tolerance }] }, fingerprints: [{ id, label, tokens, figures }], notes }
+       attempts: every design attempt, the last one the current one: [{ n, traps (titles), outcome, screen, test }] where
+                 screen, test: { passed, pilots: [{ n, replacement, state, valid, score, audit: { status } }] }
+     Any private value may be { withheld: true } instead of its content. */
+  function adaptStage(v){
+    if(!isObj(v))return null;
+    return {passed:typeof v.passed==='boolean'?v.passed:null,pilots:arr(v.pilots).map((p,i)=>{
+      const q=isObj(p)?p:{},audit=isObj(q.audit)?text(q.audit.status):'';
+      return {n:num(q.n)||i+1,replacement:q.replacement===true,state:text(q.state),score:q.valid===false?null:num(q.score),audit:audit.toUpperCase()};
+    })};
+  }
+  function adaptDesign(d){
+    const traps=isWithheld(d.traps)?null:arr(d.traps).filter(isObj).map((t,i)=>({id:text(t.id)||'trap-'+(i+1),title:text(t.title)||text(t.id)||'Trap '+(i+1),mechanism:cell(t.mechanism),files:nameList(t.files),decoy:cell(t.decoy),correct:cell(t.correctValue),wrong:cell(t.wrongValue)}));
+    const gold=isWithheld(d.gold)?WITHHELD:isObj(d.gold)?{decision:cell(d.gold.decision),figures:arr(d.gold.figures).filter(isObj).map(f=>({label:text(f.label),value:cell(f.value),tolerance:text(f.tolerance)}))}:null;
+    const prints=isWithheld(d.fingerprints)?WITHHELD:arr(d.fingerprints).filter(isObj).map(f=>({id:text(f.id),label:text(f.label),tokens:arr(f.tokens).map(text).filter(Boolean),figures:arr(f.figures).map(x=>isObj(x)?[text(x.label),text(x.value)].filter(Boolean).join(' '):text(x)).filter(Boolean)}));
+    return {attempt:num(d.attempt),traps:traps||[],trapsWithheld:traps===null,newFiles:nameList(d.newFiles),notes:arr(d.notes).map(text).filter(Boolean),
+      edited:arr(d.editedFiles).map(e=>isObj(e)?{name:text(e.name),reason:text(e.reason)}:{name:typeof e==='string'?e:'',reason:''}).filter(e=>e.name),
+      prompt:cell(d.prompt),guideline:cell(d.guideline),golden:cell(d.goldenAnswer),gold,fingerprints:prints};
+  }
+  function adapt(raw,fallbackId){
+    if(!isObj(raw))return null;
+    const imp=isObj(raw.import)?raw.import:{},cls=isObj(raw.classification)?raw.classification:{},des=isObj(raw.design)?raw.design:{},src=isObj(raw.source)?raw.source:{};
+    const tog=isObj(imp.toggle)?imp.toggle:null,page=isObj(imp.page)?imp.page:{},facts=isObj(imp.facts)?imp.facts:{};
+    const lists={world:nameList(cls.worldFiles),task:nameList(cls.taskFiles),other:nameList(cls.other)};
+    const withheld=arr(cls.withheld).map(x=>isObj(x)?{name:text(x.name),why:text(x.why)}:{name:text(x),why:''}).filter(x=>x.name);
+    const count=(k,key)=>num(facts[k])??(cls[key]?(k==='withheld'?withheld:lists[k]).length:null);
+    const w=raw.waiting,waiting=isObj(w)?{kind:text(w.kind),message:text(w.message)}:null;
+    const design=adaptDesign(des),stage=typeof raw.stage==='string'&&raw.stage?raw.stage:'import';
+    const attempts=arr(raw.attempts).filter(isObj).map((a,i,all)=>({n:num(a.n)||i+1,traps:nameList(a.traps),outcome:text(a.outcome),screen:adaptStage(a.screen),test:adaptStage(a.test),current:i===all.length-1}));
+    const last=attempts[attempts.length-1];
+    const folder=src.kind==='folder';
+    return {id:text(raw.id)||fallbackId||'',label:text(raw.label),stage,ended:['done','failed','stopped','budget'].includes(stage),redacted:raw.redacted===true,message:text(raw.message),
+      createdAt:text(raw.createdAt),capUsd:num(raw.capUsd),spentUsd:num(raw.spentUsd)||0,pilotCapUsd:num(raw.pilotCapUsd),
+      model:text(raw.model),effort:text(raw.effort),redesigns:num(raw.redesigns)||0,summary:text(raw.summary),
+      error:isObj(raw.error)?text(raw.error.message):text(raw.error),waiting,
+      hasImport:isObj(raw.import),hasDesign:isObj(raw.design),
+      source:{folder,origin:folder?'':text(src.origin)||text(page.origin),path:folder?'':text(src.origin)?text(src.path):text(page.path),name:text(src.name),pageOrigin:folder?text(page.origin):'',pagePath:folder?text(page.path):''},
+      files:{total:num(imp.fileCount)??(Array.isArray(imp.files)?imp.files.length:null),world:count('world','worldFiles'),task:count('task','taskFiles'),withheld:count('withheld','withheld'),other:count('other','other')},
+      skipped:arr(imp.skipped).map(x=>isObj(x)?{name:text(x.name),why:text(x.why)}:{name:text(x),why:''}).filter(x=>x.name),
+      toggle:tog?{found:tog.found===true,label:text(tog.label),flipped:tog.flipped===true,learned:tog.learned===true,before:num(tog.filesBefore),after:num(tog.filesAfter)}:null,
+      cls:{any:!!(cls.prompt||cls.guideline||cls.goldenAnswer||cls.worldFiles||cls.taskFiles),prompt:ref(cls.prompt),guideline:ref(cls.guideline),golden:ref(cls.goldenAnswer),...lists,withheld,notes:arr(cls.notes).map(text).filter(Boolean)},
+      design,screen:last?last.screen:null,test:last?last.test:null,attempts};
+  }
+  /* The answer to POST /api/pipeline/:id/export: { name, zipBase64 } (it also has size, sha256 and files). */
+  function adaptExport(d,id){
+    const o=isObj(d)?d:{},b64=text(o.zipBase64).replace(/\s+/g,''),given=text(o.name);
+    return {base64:b64,name:/^[\w.-]{1,120}_PRIVATE\.zip$/.test(given)?given:id+'_pipeline_PRIVATE.zip'};
+  }
+  const adaptStart=d=>text(isObj(d)?d.id:'');
+  const adaptList=d=>(Array.isArray(d)?d:arr(isObj(d)?d.pipelines:null)).map(x=>adapt(x)).filter(v=>v&&ID_RE.test(v.id));
+
+  /* ---------- State ---------- */
+  const S={
+    phase:'idle',          // idle | checking | ready | offline
+    offlineNote:'',
+    status:null,           // {models, efforts} from /api/status
+    form:blankForm(),
+    formOpen:true,
+    list:[],               // view models of every pipeline the companion holds, newest first
+    id:null,run:null,      // the pipeline being shown
+    working:'',            // start | stop | continue | export
+    msg:{text:'',error:false},
+    timer:null,mounted:false,
+    ctx:{download:null}
+  };
+  function blankForm(){return {source:'url',url:'',dir:'',cap:String(RULES.defaultCapUsd),pilotCap:PILOT_CAP.defaultUsd.toFixed(2),model:'',effort:'',acks:{}};}
+
+  /* ---------- Small helpers ---------- */
+  const isLocal=()=>{try{return location.protocol==='http:'&&location.hostname==='127.0.0.1';}catch{return false;}};
+  const agents=()=>W.FinanceAgents&&typeof W.FinanceAgents.get==='function'&&typeof W.FinanceAgents.post==='function'?W.FinanceAgents:null;
+  const get=path=>agents().get(path);
+  const post=(path,body)=>agents().post(path,body);
+  const pipePath=(id,tail='')=>{
+    if(typeof id!=='string'||!ID_RE.test(id))throw new Error('That pipeline id is not valid.');
+    return '/api/pipeline/'+id+tail;
+  };
+  const usd=n=>'USD '+(Math.round(Number(n)*100)/100).toFixed(2);
+  const timeText=iso=>{const t=Date.parse(iso);return Number.isFinite(t)?new Date(t).toLocaleString():text(iso);};
+  const plural=(n,one,many)=>n+' '+(n===1?one:many||one+'s');
+  const messageOf=error=>String((error&&error.message)||error||'unknown error');
+  const isActive=()=>S.list.some(v=>!v.ended)||!!(S.run&&!S.run.ended);
+  /* A cap typed as dollars in whole cents, or null. */
+  function money(value,min,max){
+    const t=String(value==null?'':value).trim();
+    if(!/^\d{1,3}(?:\.\d{1,2})?$/.test(t))return null;
+    const n=Math.round(Number(t)*100)/100;
+    return n>=min&&n<=max?n:null;
+  }
+  const capValue=()=>money(S.form.cap,CAP_MIN_USD,RULES.maxCapUsd);
+  const pilotCapValue=()=>money(S.form.pilotCap,PILOT_CAP.minUsd,PILOT_CAP.maxUsd);
+  function linkOk(value){
+    const t=String(value||'').trim();
+    if(!t||t.length>2048||/\s/.test(t))return false;
+    try{const u=new URL(t);return u.protocol==='https:'&&!!u.hostname&&!u.username&&!u.password;}catch{return false;}
+  }
+  const dirOk=value=>{const t=String(value||'').trim();return t.length>1&&t.length<=1024&&t[0]==='/'&&!/[\u0000-\u001f\u007f]/.test(t);};
+  function normalizeChoices(list){
+    const out=[];
+    arr(list).forEach(item=>{
+      if(typeof item==='string'&&item){out.push({id:item,isDefault:false});return;}
+      if(isObj(item)){const id=item.id||item.model||item.effort||item.value||item.name;if(typeof id==='string'&&id)out.push({id,isDefault:!!(item.default||item.isDefault)});}
+    });
+    return out;
+  }
+  const pickDefault=(choices,preferred)=>(choices.find(c=>c.isDefault)||choices.find(c=>c.id===preferred)||choices[0]).id;
+  function normalizeStatus(data){
+    const a=isObj(data)?data.agents:null;
+    if(!isObj(a))throw new Error('This companion has no agent support.');
+    const models=normalizeChoices(a.models),efforts=normalizeChoices(a.efforts);
+    if(!models.length||!efforts.length)throw new Error('The companion did not report model and effort choices.');
+    return {models:models.map(m=>m.id),efforts:efforts.map(m=>m.id),defaultModel:pickDefault(models,'claude-opus-5-5'),defaultEffort:pickDefault(efforts,'medium')};
+  }
+
+  /* ---------- Stages ---------- */
+  const STEPS=[['import','Import'],['classify','Classify'],['design','Design'],['screen','Screen'],['test','Test'],['done','Done']];
+  const STAGES={
+    import:[0,'Import: opening the task and downloading its files.'],
+    classify:[1,'Classify: sorting the captured files and text.'],
+    design:[2,'Design: building the hardest traps in a working copy.'],
+    redesign:[2,'Design: strengthening the traps after a failed stage.'],
+    screen:[3,'Screen: two blind pilots are working.'],
+    'grade-screen':[3,'Screen: grading the two answers.'],
+    test:[4,'Test: five blind pilots are working.'],
+    'grade-test':[4,'Test: grading the five answers.'],
+    done:[5,'Done: the 5-pilot test passed.'],
+    failed:[-1,'Failed: the pipeline ended without a passing design.'],
+    stopped:[-1,'Stopped: you pressed Stop.'],
+    budget:[-1,'Stopped: the next step would pass the total cap.']
+  };
+  /* Where a run that ended early stopped: the last step it has results for. */
+  function reachedStep(v){
+    if(v.test&&v.test.pilots.length)return 4;
+    if((v.screen&&v.screen.pilots.length)||v.attempts.length)return 3;
+    if(v.design.traps.length||v.design.attempt||v.design.newFiles.length)return 2;
+    return v.cls.any?1:0;
+  }
+  function stepOf(v){const s=STAGES[v.stage];return s&&s[0]>=0?s[0]:reachedStep(v);}
+  function stageLine(v){
+    if(!v)return '';
+    if(v.waiting&&!v.ended)return 'Waiting for you: '+(v.waiting.message||'the task page needs your help in the Chrome window.');
+    const known=STAGES[v.stage],line=known?known[1]:'Working ('+v.stage+').';
+    return line+(v.redesigns>0&&!v.ended?' Redesign '+v.redesigns+' of '+RULES.maxRedesigns+'.':'');
+  }
+  function stepStates(v){
+    const cur=stepOf(v);
+    return STEPS.map(([id,label],i)=>{
+      let s;
+      if(v.stage==='done'||i<cur)s='done';
+      else if(i===cur)s=v.ended?'stopped':v.waiting?'waiting':'active';
+      else s='todo';
+      return {id,label,s};
+    });
+  }
+  const STEP_CAPTION={done:'Done',active:'In progress',waiting:'Waiting for you',stopped:'Stopped here',todo:'Not reached yet'};
+  const STEP_MARK={done:'✓',active:'●',waiting:'●',stopped:'!'};
+  /* The state of one stage result: the companion's verdict when it sent one, else worked out from the scores once every pilot has ended. */
+  const settledPilot=(p,decided)=>decided||p.score!==null||p.audit==='DISCARDED'||['failed','cancelled'].includes(p.state);
+  function stageVerdict(res,kind){
+    const need=kind==='test'?RULES.testNeed:RULES.screenPilots,of=kind==='test'?RULES.testPilots:RULES.screenPilots;
+    const below=res.pilots.filter(p=>p.score!==null&&p.score<RULES.passBar).length;
+    const settled=res.pilots.length>=of&&res.pilots.every(p=>settledPilot(p,false));
+    const status=res.passed===true?'passed':res.passed===false?'failed':settled?(below>=need?'passed':'failed'):'running';
+    return {status,below,need,of};
+  }
+  const scoresText=res=>res&&res.pilots.length?res.pilots.map(p=>p.score===null?'no score':p.score.toFixed(2)).join(', '):'';
+  const STATUS_LABEL={passed:'passed',failed:'failed',running:'in progress'};
+  const STATUS_KIND={passed:'green',failed:'red',running:'violet'};
+
+  /* ---------- Painting ---------- */
+  /* Replace an element's markup only when it changed, and put keyboard focus back on the same control afterwards. */
+  function setHtml(el,markup,force){
+    if(!el)return false;
+    const t=markup instanceof Raw?markup.text:String(markup);
+    if(!force&&el.plHtml===t)return false;
+    const active=document.activeElement,key=active&&el.contains&&el.contains(active)?active.getAttribute('data-pl-key'):null;
+    el.innerHTML=t;
+    el.plHtml=t;
+    if(key&&KEY_RE.test(key)){
+      const next=el.querySelector('[data-pl-key="'+key+'"]');
+      if(next&&!next.disabled)next.focus({preventScroll:true});
+    }
+    return true;
+  }
+  function focusKey(key){
+    if(!KEY_RE.test(key||''))return false;
+    const el=document.querySelector('#pl-root [data-pl-key="'+key+'"]');
+    if(el&&!el.disabled&&typeof el.focus==='function'){el.focus({preventScroll:true});return true;}
+    return false;
+  }
+  /* source 'poll' marks a message that the next good poll takes back; an answer to the person's own action stays until the stage changes. */
+  function say(t,isError,source){
+    const message=String(t||'');
+    S.msg={text:message&&isError&&!/^(failed|error)\b|^[^:]{0,40}\bfailed\b/i.test(message)?'Failed: '+message:message,error:!!isError,source:source||''};
+    paintMsg();
+  }
+  function paintMsg(){
+    const el=$('#pl-msg');
+    if(!el)return;
+    el.textContent=S.msg.text;
+    el.className='pl-msg'+(S.msg.error?' error':'');
+  }
+  /* The stage line is a persistent live region: only its words change, so a screen reader hears a change of stage and not each poll. */
+  function paintStage(){
+    const el=$('#pl-stage'),bar=$('#pl-bar'),line=stageLine(S.run);
+    if(bar)bar.className='pl-bar'+(S.run?'':' is-empty');
+    if(el&&el.textContent!==line)el.textContent=line;
+  }
+
+  /* ---------- Start card ---------- */
+  function limitsText(){
+    const cap=capValue(),pilot=pilotCapValue();
+    if(cap===null||pilot===null)return 'Set the caps to see the worst case of the pilot stages.';
+    return 'Each pilot is capped at '+usd(pilot)+', so a '+RULES.screenPilots+'-pilot screen can cost up to '+usd(pilot*RULES.screenPilots)+' and a '+RULES.testPilots+'-pilot test up to '+usd(pilot*RULES.testPilots)+', before the classifier, designer and grader runs. The total cap of '+usd(cap)+' covers everything.';
+  }
+  function startWhy(){
+    const f=S.form;
+    if(isActive())return 'A pipeline is running. Start another when it has ended.';
+    if(f.source==='url'){
+      if(!f.url.trim())return 'Enter the task link, or choose a folder.';
+      if(!linkOk(f.url))return 'The task link must be an https address, without a user name or password.';
+    }else{
+      if(!f.dir.trim())return 'Enter the folder path, or use a task link.';
+      if(!dirOk(f.dir))return 'Enter the full path of the folder, starting with /.';
+    }
+    if(capValue()===null)return 'The total cap must be from '+usd(CAP_MIN_USD)+' to '+usd(RULES.maxCapUsd)+', in whole cents.';
+    if(pilotCapValue()===null)return 'The cap per pilot must be from '+usd(PILOT_CAP.minUsd)+' to '+usd(PILOT_CAP.maxUsd)+', in whole cents.';
+    if(capValue()<pilotCapValue())return 'The total cap must be at least the cap of one pilot.';
+    if(!f.model||!f.effort)return 'Choose a model and an effort.';
+    if(!ACKNOWLEDGEMENTS.every(a=>f.acks[a.id]))return 'Tick all four acknowledgements to enable the button.';
+    return '';
+  }
+  function startFormHtml(){
+    const f=S.form,st=S.status,locked=isActive();
+    if(!S.formOpen){
+      return html`<div class="card-title"><div><div class="eyebrow">Start</div><h2>Start a pipeline</h2></div><button type="button" data-pl="new" data-pl-key="new" ${locked?'disabled':''}>New pipeline</button></div>
+        <p class="muted pl-compact">${locked?'A pipeline is running. You can start another when it has ended.':'The latest pipeline is shown below. You can start another one from a task link or a folder.'}</p>`;
+    }
+    return html`<div class="card-title"><div><div class="eyebrow">Start</div><h2>Start a pipeline</h2></div>${S.run?html`<button type="button" class="small" data-pl="cancel-new" data-pl-key="cancel-new">Cancel</button>`:''}</div>
+      <p class="muted">Paste the link of a task page, or give a folder you already downloaded. One approval covers the whole run, and a total cap in USD stops it. Nothing starts until you press Approve and start.</p>
+      <fieldset class="pl-source"><legend>Where the task comes from</legend>
+        <label class="check"><input type="radio" name="pl-source" value="url" data-pl-in="source" data-pl-key="source-url" ${f.source==='url'?'checked':''}><span><strong>Task link</strong>The companion opens the task page in its own Chrome window, turns on the option that shows all files and downloads them. You sign in there once.</span></label>
+        <label class="check"><input type="radio" name="pl-source" value="dir" data-pl-in="source" data-pl-key="source-dir" ${f.source==='dir'?'checked':''}><span><strong>Folder on this computer</strong>Works offline: the files you downloaded by hand, with an optional page.json beside them.</span></label>
+      </fieldset>
+      ${f.source==='url'
+        ?html`<label class="field">Task link (https)<input type="text" inputmode="url" id="pl-url" data-pl-in="url" data-pl-key="url" value="${f.url}" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="Paste the task link" aria-describedby="pl-url-hint"><small id="pl-url-hint">The link goes to the companion only. It is not saved in this browser and it is not shown again once the run has started.</small></label>`
+        :html`<label class="field">Folder path<input type="text" id="pl-dir" data-pl-in="dir" data-pl-key="dir" value="${f.dir}" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/Users/you/Downloads/task" aria-describedby="pl-dir-hint"><small id="pl-dir-hint">Paste the full path (Finder: select the folder, Option-Command-C). Unzip a task ZIP outside this project first.</small></label>`}
+      <div class="field-row three">
+        <label class="field">Total cap (USD)<input type="text" inputmode="decimal" id="pl-cap" data-pl-in="cap" data-pl-key="cap" value="${f.cap}" maxlength="6" autocomplete="off" spellcheck="false" aria-describedby="pl-cap-hint"><small id="pl-cap-hint">The run stops before a step that could pass it. ${usd(CAP_MIN_USD)} to ${usd(RULES.maxCapUsd)}.</small></label>
+        <label class="field">Model<select data-pl-in="model" data-pl-key="model">${st.models.map(m=>html`<option value="${m}" ${m===f.model?'selected':''}>${m}</option>`)}</select></label>
+        <label class="field">Effort<select data-pl-in="effort" data-pl-key="effort">${st.efforts.map(m=>html`<option value="${m}" ${m===f.effort?'selected':''}>${m}</option>`)}</select></label>
+      </div>
+      <div class="field-row three">
+        <label class="field">Cap per pilot (USD)<input type="text" inputmode="decimal" id="pl-pilot-cap" data-pl-in="pilotCap" data-pl-key="pilot-cap" value="${f.pilotCap}" maxlength="6" autocomplete="off" spellcheck="false" aria-describedby="pl-pilot-hint"><small id="pl-pilot-hint">Passed to each pilot as its own spending cap. ${usd(PILOT_CAP.minUsd)} to ${usd(PILOT_CAP.maxUsd)}.</small></label>
+      </div>
+      <fieldset class="pl-acks"><legend>Required before the run starts</legend>${ACKNOWLEDGEMENTS.map(a=>html`<label class="check"><input type="checkbox" data-pl-in="ack" data-id="${a.id}" data-pl-key="ack-${a.id}" ${f.acks[a.id]?'checked':''}><span><strong>${a.label}</strong>${a.text}</span></label>`)}</fieldset>`;
+  }
+  function startFootHtml(){
+    if(!S.formOpen)return '';
+    const why=startWhy();
+    return html`<div class="pl-start-row"><button type="button" class="primary" data-pl="start" data-pl-key="start" aria-describedby="pl-why" ${why||S.working?'disabled':''}>Approve and start</button><p id="pl-why" class="pl-why">${why}</p></div>
+      <p class="pl-happens">${HAPPENS}</p>
+      <p class="footnote pl-limits">${limitsText()}</p>`;
+  }
+
+  /* ---------- Run: picker, spend, actions, waiting ---------- */
+  function pickerHtml(){
+    if(S.list.length<2)return '';
+    return html`<label class="field pl-pick">Show pipeline<select data-pl-in="pick" data-pl-key="pick">${S.list.map(v=>html`<option value="${v.id}" ${v.id===S.id?'selected':''}>${v.id} · ${(STAGES[v.stage]||[0,v.stage])[1].split(':')[0]}${v.createdAt?' · '+timeText(v.createdAt):''}</option>`)}</select></label>`;
+  }
+  function spendHtml(){
+    const v=S.run;
+    if(!v)return '';
+    const cap=v.capUsd,pct=cap?Math.min(100,Math.round(v.spentUsd/cap*100)):null;
+    return html`${v.message&&!v.ended?html`<p class="pl-progress">${v.message}</p>`:''}<p class="pl-spend-line"><strong>Spent</strong> ${usd(v.spentUsd)}${cap?html` of ${usd(cap)} <span class="muted">(${pct}%)</span>`:''}</p>
+      ${cap?html`<progress class="pl-meter" max="${cap}" value="${Math.min(v.spentUsd,cap)}" aria-label="Spent against the total cap">${pct}%</progress>`:''}
+      <p class="pl-meta muted">Pipeline <code>${v.id}</code>${v.model?' · '+v.model:''}${v.effort?' · '+v.effort:''}${v.pilotCapUsd?' · '+usd(v.pilotCapUsd)+' per pilot':''}${v.createdAt?' · started '+timeText(v.createdAt):''}</p>`;
+  }
+  /* The companion exports any ended pipeline that made a design, and refuses while a round runs (then the answer is redacted). */
+  const canExport=v=>!!v&&v.ended&&!v.redacted&&v.hasDesign;
+  function actionsHtml(){
+    const v=S.run;
+    if(!v)return '';
+    return html`${v.ended?'':html`<button type="button" class="danger" data-pl="stop" data-pl-key="stop" ${S.working==='stop'?'disabled':''}>Stop</button>`}${canExport(v)?html`<button type="button" data-pl="export" data-pl-key="export" ${S.working==='export'?'disabled':''}>Export private zip</button>`:''}`;
+  }
+  function waitHtml(){
+    const v=S.run;
+    if(!v||!v.waiting||v.ended)return '';
+    const w=v.waiting,title=w.kind==='needs-sign-in'?'Sign in in the Chrome window':w.kind==='needs-person'?'Turn on the option that shows all files':'The task page needs you';
+    return html`<div class="card-title"><div><div class="eyebrow">Waiting for you</div><h2>${title}</h2></div>${pill('Paused','amber')}</div>
+      <p class="pl-wait-message">${w.message||'Finish what the Chrome window asks for, then press Continue.'}</p>
+      <div class="actions"><button type="button" data-pl="continue" data-pl-key="continue" ${S.working==='continue'?'disabled':''}>Continue</button></div>`;
+  }
+  function withheldNoteHtml(){
+    const v=S.run;
+    return v&&v.redacted?html`<div class="notice neutral" role="note">A round is running, so this page does not show the prompt, the grader guideline, the golden answer, the gold, the fingerprints or the trap values. They appear when no round is running.</div>`:'';
+  }
+
+  /* ---------- Run: timeline and results ---------- */
+  function timelineHtml(){
+    const v=S.run;
+    if(!v)return '';
+    const states=stepStates(v);
+    return html`<ol class="pl-steps" aria-label="Pipeline stages">${states.map((s,i)=>html`<li class="pl-step is-${s.s}"${s.s==='active'||s.s==='waiting'||s.s==='stopped'?new Raw(' aria-current="step"'):''}><span class="pl-step-mark" aria-hidden="true">${STEP_MARK[s.s]||String(i+1)}</span><span class="pl-step-text"><strong>${s.label}</strong><small>${s.id==='design'&&v.redesigns>0&&s.s!=='todo'?(s.s==='done'?'Done':'Redesign '+v.redesigns+' of '+RULES.maxRedesigns):STEP_CAPTION[s.s]}</small></span></li>`)}</ol>`;
+  }
+  function importHtml(){
+    const v=S.run;
+    if(!v)return '';
+    const f=v.files,t=v.toggle,known=Object.values(f).some(n=>n!==null);
+    if(!v.hasImport&&!v.source.origin&&!v.source.folder&&!known&&!t)return '';
+    const counts=[f.total!==null?plural(f.total,'file')+' in all':'',f.world!==null?f.world+' world':'',f.task!==null?f.task+' task':'',f.withheld!==null?f.withheld+' withheld':'',f.other!==null?f.other+' other':''].filter(Boolean).join(' · ');
+    const toggleText=!t?'':t.learned&&t.flipped?'Turned on from what you showed for this site. '+(t.label?'Label: “'+t.label+'”. ':'')
+      :t.found&&t.flipped?'Found and turned on'+(t.label?' (“'+t.label+'”)':'')+'.'
+      :t.learned?'Learned from you for this site.'
+      :t.found?'Found'+(t.label?' (“'+t.label+'”)':'')+', but not turned on.':'Not found on the page.';
+    const where=v.source.origin?v.source.origin+v.source.path:v.source.folder?(v.source.name?'Folder “'+v.source.name+'” on this computer':'A folder on this computer'):v.hasImport?'A folder on this computer':'';
+    return html`<div class="card-title"><div><div class="eyebrow">Import</div><h2>What was captured</h2></div></div>
+      <dl class="history-details">
+        ${where?html`<dt>Source</dt><dd>${where}</dd>`:''}
+        ${v.source.pageOrigin?html`<dt>Task page</dt><dd>${v.source.pageOrigin+v.source.pagePath} <span class="muted">from the folder’s page.json</span></dd>`:''}
+        ${counts?html`<dt>Files</dt><dd>${counts}</dd>`:''}
+        ${t?html`<dt>Show all files</dt><dd>${toggleText}${t.before!==null&&t.after!==null?' '+plural(t.before,'file')+' offered before, '+t.after+' after.':''}</dd>`:''}
+      </dl>
+      ${v.skipped.length?html`<details><summary>Skipped (${v.skipped.length})</summary><ul class="pl-names">${v.skipped.map(x=>html`<li>${x.name}${x.why?html` <span class="muted">${x.why}</span>`:''}</li>`)}</ul></details>`:''}
+      <p class="footnote">Withheld files (the grader guideline, the golden answer, and any evaluator, audit or run-evidence file) are never copied into what the pilots see.</p>`;
+  }
+  const refText=(r,noun)=>!r?'Not found':r.kind==='withheld'?WITHHELD_TEXT:r.kind==='section'?'Section “'+r.name+'”':r.kind==='file'?'File “'+r.name+'”':'“'+r.name+'”';
+  function nameBlock(label,items){
+    return items.length?html`<h3>${label} (${items.length})</h3><ul class="pl-names">${items.map(n=>html`<li>${n.name}${n.why?html` <span class="muted">${n.why}</span>`:''}</li>`)}</ul>`:'';
+  }
+  const named=list=>list.map(name=>({name,why:''}));
+  function classHtml(){
+    const v=S.run;
+    if(!v||!v.cls.any)return '';
+    const c=v.cls;
+    return html`<div class="card-title"><div><div class="eyebrow">Classify</div><h2>What each part of the task is</h2></div></div>
+      <dl class="history-details"><dt>Business prompt</dt><dd>${refText(c.prompt)}</dd><dt>Grader guideline</dt><dd>${refText(c.guideline)}</dd><dt>Golden answer</dt><dd>${refText(c.golden)}</dd></dl>
+      ${c.notes.length?html`<ul class="pl-names">${c.notes.map(n=>html`<li>${n}</li>`)}</ul>`:''}
+      ${c.world.length||c.task.length||c.other.length||c.withheld.length?html`<details><summary>File lists</summary>${nameBlock('World files',named(c.world))}${nameBlock('Task files',named(c.task))}${nameBlock('Other files',named(c.other))}${nameBlock('Withheld from the pilots',c.withheld)}</details>`:''}`;
+  }
+  const valueText=x=>isWithheld(x)?html`<span class="pl-withheld">${WITHHELD_TEXT}</span>`:x?html`<span>${x}</span>`:html`<span class="muted">Not given</span>`;
+  const blockText=x=>isWithheld(x)?html`<p class="pl-withheld">${WITHHELD_TEXT}</p>`:x?html`<pre class="pl-text">${x.length>8000?x.slice(0,8000)+'\n[shortened for this page]':x}</pre>`:html`<p class="muted">Not given</p>`;
+  function trapHtml(t){
+    return html`<li class="pl-trap"><strong>${t.title}</strong>${t.files.length?html` <span class="muted">Files: ${t.files.join(', ')}</span>`:''}
+      <details><summary>Trap details</summary><dl class="history-details"><dt>Mechanism</dt><dd>${valueText(t.mechanism)}</dd><dt>Decoy</dt><dd>${valueText(t.decoy)}</dd><dt>Correct value</dt><dd>${valueText(t.correct)}</dd><dt>Wrong value</dt><dd>${valueText(t.wrong)}</dd></dl></details></li>`;
+  }
+  function goldHtml(d){
+    const g=d.gold,p=d.fingerprints;
+    return html`<details><summary>Gold and fingerprints</summary>
+      <h3>Gold</h3>${isWithheld(g)?blockText(WITHHELD):g?html`<dl class="history-details"><dt>Decision</dt><dd>${valueText(g.decision)}</dd>${g.figures.map(f=>html`<dt>${f.label||'Figure'}</dt><dd>${valueText(f.value)}${f.tolerance?html` <span class="muted">tolerance ${f.tolerance}</span>`:''}</dd>`)}</dl>`:html`<p class="muted">Not given</p>`}
+      <h3>Fingerprints</h3>${isWithheld(p)?blockText(WITHHELD):p&&p.length?html`<ul class="pl-names">${p.map(f=>html`<li><strong>${f.label||f.id}</strong>${f.tokens.length?html` <span class="muted">Tokens: ${f.tokens.join(', ')}</span>`:''}${f.figures.length?html` <span class="muted">Figures: ${f.figures.join(', ')}</span>`:''}</li>`)}</ul>`:html`<p class="muted">Not given</p>`}</details>`;
+  }
+  function designHtml(){
+    const v=S.run;
+    if(!v)return '';
+    const d=v.design;
+    if(!d.traps.length&&!d.trapsWithheld&&!d.newFiles.length&&!d.edited.length)return '';
+    return html`<div class="card-title"><div><div class="eyebrow">Design</div><h2>The traps</h2></div>${d.attempt?pill('Attempt '+d.attempt,'violet'):v.redesigns>0?pill('Attempt '+(v.redesigns+1),'violet'):''}</div>
+      ${d.trapsWithheld?html`<p class="pl-withheld">${WITHHELD_TEXT}</p>`:d.traps.length?html`<ol class="pl-traps">${d.traps.map(trapHtml)}</ol>`:html`<p class="muted">No trap has been recorded yet.</p>`}
+      <h3>New files (${d.newFiles.length})</h3>${d.newFiles.length?html`<ul class="pl-names">${d.newFiles.map(n=>html`<li>${n}</li>`)}</ul>`:html`<p class="muted">The designer added no new file.</p>`}
+      <h3>Edited world files (${d.edited.length})</h3>${d.edited.length?html`<ul class="pl-edits">${d.edited.map(e=>html`<li class="pl-edit"><span class="pill amber">Edited world file</span> <strong>${e.name}</strong><span class="pl-edit-reason">${e.reason||'No reason was given.'}</span></li>`)}</ul>`:html`<p class="muted">No existing world file was edited. The originals are never changed.</p>`}
+      ${d.notes.length?html`<h3>Checks on the designer’s files</h3><ul class="pl-names">${d.notes.map(n=>html`<li>${n}</li>`)}</ul>`:''}
+      <details><summary>Revised prompt, grader guideline and golden answer</summary><h3>Prompt</h3>${blockText(d.prompt)}<h3>Grader guideline</h3>${blockText(d.guideline)}<h3>Golden answer</h3>${blockText(d.golden)}</details>
+      ${goldHtml(d)}`;
+  }
+  function auditPill(p){
+    if(p.audit==='CLEAN')return pill('CLEAN','green');
+    if(p.audit==='DISCARDED')return pill('DISCARDED','red');
+    return ['failed','cancelled'].includes(p.state)?pill('Not audited','amber'):pill('Pending');
+  }
+  function scoreText(p,decided){
+    if(p.score===null){
+      if(p.audit==='DISCARDED')return 'No score (discarded)';
+      if(['failed','cancelled'].includes(p.state))return 'No score ('+p.state+')';
+      if(decided)return 'No usable score';
+      return p.state==='completed'?'Waiting for the grader':p.state==='queued'?'Queued':'Running';
+    }
+    const two=p.score.toFixed(2);
+    return two===RULES.passBar.toFixed(2)&&p.score!==RULES.passBar?two+' ('+p.score.toFixed(4)+')':two;
+  }
+  function belowHtml(p,decided){
+    if(p.score!==null)return p.score<RULES.passBar?html`<span class="pl-yes"><span aria-hidden="true">✓</span> Yes</span>`:html`<span class="pl-no"><span aria-hidden="true">✕</span> No</span>`;
+    return settledPilot(p,decided)?html`<span class="pl-no"><span aria-hidden="true">✕</span> No, a pilot without a score counts against the design</span>`:html`<span class="muted">Pending</span>`;
+  }
+  function stageHtml(kind){
+    const v=S.run;
+    if(!v)return '';
+    const res=v[kind],isTest=kind==='test',title=isTest?RULES.testPilots+'-pilot test':RULES.screenPilots+'-pilot screen',label=isTest?'Test':'Screen';
+    const rule=isTest?'The test succeeds when at least '+RULES.testNeed+' of '+RULES.testPilots+' pilots score below '+RULES.passBar.toFixed(2)+'.':'The screen passes when both pilots score below '+RULES.passBar.toFixed(2)+'.';
+    const active=STAGES[v.stage]&&STAGES[v.stage][0]===(isTest?4:3)&&!v.ended;
+    if(!res&&!active)return '';
+    if(!res)return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill('In progress','violet')}</div><p class="muted">${rule}</p><p>The pilots are starting.</p>`;
+    const sv=stageVerdict(res,kind);
+    return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill(label+' '+STATUS_LABEL[sv.status],STATUS_KIND[sv.status])}</div>
+      <p class="muted">${rule} Scores come from the simulated grader, run against the revised grader guideline.</p>
+      ${res.pilots.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">${title}: score of each pilot against the bar of ${RULES.passBar.toFixed(2)}</caption><thead><tr><th scope="col">Pilot</th><th scope="col">Score</th><th scope="col">Below ${RULES.passBar.toFixed(2)}</th><th scope="col">Audit</th></tr></thead><tbody>${res.pilots.map(p=>html`<tr><th scope="row">Pilot ${p.n}${p.replacement?' (replacement)':''}</th><td data-label="Score">${scoreText(p,res.passed!==null)}</td><td data-label="Below ${RULES.passBar.toFixed(2)}">${belowHtml(p,res.passed!==null)}</td><td data-label="Audit">${auditPill(p)}</td></tr>`)}</tbody></table></div>
+        <p class="pl-tally">${sv.below} of ${sv.of} below ${RULES.passBar.toFixed(2)}${isTest?'; '+sv.need+' needed':'; both needed'}.</p>`:html`<p>The pilots are starting.</p>`}`;
+  }
+  const OUTCOMES={'in-progress':'In progress',passed:'Passed','screen-failed':'Screen failed','test-failed':'Test failed',stopped:'Stopped',budget:'Stopped at the cap',failed:'Failed'};
+  function redesignsHtml(){
+    const v=S.run;
+    if(!v||(v.attempts.length<2&&!v.redesigns))return '';
+    const sum=(res,kind)=>{if(!res||(!res.pilots.length&&res.passed===null))return 'Not run';const sv=stageVerdict(res,kind);return (sv.status==='passed'?'Passed':sv.status==='failed'?'Failed':'In progress')+(res.pilots.length?' ('+scoresText(res)+')':'');};
+    return html`<div class="card-title"><div><div class="eyebrow">Redesigns</div><h2>Redesign attempts</h2></div>${pill(v.redesigns+' of '+RULES.maxRedesigns+' used',v.redesigns>=RULES.maxRedesigns?'amber':'violet')}</div>
+      <p class="muted">When a screen or a test does not pass, the designer reads the pilots’ answers, scores and grader reasons, strengthens or swaps traps, and the screen runs again. At most ${RULES.maxRedesigns} redesigns.</p>
+      ${v.attempts.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">Every design attempt with its screen and test results</caption><thead><tr><th scope="col">Attempt</th><th scope="col">Traps</th><th scope="col">Screen</th><th scope="col">Test</th><th scope="col">Outcome</th></tr></thead><tbody>${v.attempts.map(a=>html`<tr><th scope="row">Attempt ${a.n}${a.current?' (latest)':''}</th><td data-label="Traps">${a.traps.length?a.traps.join(', '):'Not recorded'}</td><td data-label="Screen">${sum(a.screen,'screen')}</td><td data-label="Test">${sum(a.test,'test')}</td><td data-label="Outcome">${OUTCOMES[a.outcome]||a.outcome||'Not recorded'}</td></tr>`)}</tbody></table></div>`:''}`;
+  }
+  /* The companion writes the result sentence itself (how many pilots scored below the bar, which stage failed, what the cap stopped); this page's own words are the fallback. */
+  function verdictHtml(){
+    const v=S.run;
+    if(!v||!v.ended)return '';
+    const below=v.test?stageVerdict(v.test,'test').below:null;
+    const data={
+      done:['The test passed','Passed','green',below!==null?below+' of '+RULES.testPilots+' test pilots scored below '+RULES.passBar.toFixed(2)+'. The new files, the revised task text and the score table are ready to export.':'The '+RULES.testPilots+'-pilot test passed. The new files, the revised task text and the score table are ready to export.'],
+      failed:['No passing design','Failed','red','The screen or the test did not pass within '+RULES.maxRedesigns+' redesigns, or the run could not continue.'],
+      stopped:['Stopped by you','Stopped','amber','You pressed Stop. What was spent so far is shown above.'],
+      budget:['Stopped at the cap','Cap reached','amber','The worst case of the next step would have passed the total cap'+(v.capUsd?' of '+usd(v.capUsd):'')+', so it was not started.']
+    }[v.stage];
+    return html`<div class="card-title"><div><div class="eyebrow">Result</div><h2>${data[0]}</h2></div>${pill(data[1],data[2])}</div>
+      <p>${v.summary||data[3]}</p>${v.error&&v.error!==v.summary?html`<p class="pl-error">Reason: ${v.error}</p>`:''}
+      <p class="muted">Spent ${usd(v.spentUsd)}${v.capUsd?' of '+usd(v.capUsd):''}. Redesigns used: ${v.redesigns} of ${RULES.maxRedesigns}.</p>`;
+  }
+
+  /* ---------- Regions ---------- */
+  const REGIONS={'start-form':startFormHtml,'start-foot':startFootHtml,picker:pickerHtml,spend:spendHtml,actions:actionsHtml,wait:waitHtml,withheld:withheldNoteHtml,timeline:timelineHtml,import:importHtml,classify:classHtml,design:designHtml,screen:()=>stageHtml('screen'),test:()=>stageHtml('test'),redesigns:redesignsHtml,verdict:verdictHtml};
+  function paint(name){
+    if(S.phase!=='ready'||!REGIONS[name])return;
+    const el=$('#pl-'+name);
+    if(!el)return;
+    try{setHtml(el,REGIONS[name]());}
+    catch(error){el.innerHTML='<p class="pl-error" role="alert">This part of the page could not be drawn: '+esc(messageOf(error))+'</p>';el.plHtml=null;}
+  }
+  function paintRun(){['picker','spend','actions','wait','withheld','timeline','import','classify','design','screen','test','redesigns','verdict'].forEach(paint);paintStage();}
+  function paintStart(){paint('start-form');paint('start-foot');}
+  function paintAll(){paintStart();paintRun();paintMsg();}
+  function offlineHtml(){
+    return html`<section class="card pl-offline" role="status"><p>${OFFLINE_MESSAGE}</p>${S.offlineNote?html`<p class="muted">${S.offlineNote}</p>`:''}</section>`;
+  }
+  function pageInner(){
+    if(S.phase==='offline')return offlineHtml();
+    if(S.phase!=='ready')return html`<section class="card" aria-busy="true" role="status"><p>Checking for the local companion.</p></section>`;
+    return html`<div class="dash-heading"><div><div class="eyebrow">Pipeline</div><h1>From a task link to a tested set of traps.</h1><p>Paste a task link. The Studio captures every file, a model builds the hardest traps in a working copy, two blind pilots screen them and five pilots test them. It all runs through the companion on this computer, after one approval and under one spending cap.</p></div></div>
+      <p id="pl-msg" class="pl-msg" role="status" aria-live="polite" aria-atomic="true"></p>
+      <section id="pl-start" class="card pl-start" aria-label="Start a pipeline"><div id="pl-start-form"></div><div id="pl-start-foot"></div></section>
+      <div id="pl-picker"></div>
+      <div id="pl-bar" class="pl-bar is-empty"><p id="pl-stage" class="pl-stage" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"></p><div id="pl-spend" class="pl-spend"></div><div id="pl-actions" class="pl-actions"></div></div>
+      <section id="pl-wait" class="card pl-wait" role="status" aria-live="polite" aria-label="Waiting for you"></section>
+      <div id="pl-withheld"></div>
+      <section id="pl-timeline" class="card pl-timeline" aria-label="Stages"></section>
+      <section id="pl-import" class="card" aria-label="Import"></section>
+      <section id="pl-classify" class="card" aria-label="Classification"></section>
+      <section id="pl-design" class="card" aria-label="Traps"></section>
+      <section id="pl-screen" class="card" aria-label="Screen"></section>
+      <section id="pl-test" class="card" aria-label="Test"></section>
+      <section id="pl-redesigns" class="card" aria-label="Redesigns"></section>
+      <section id="pl-verdict" class="card pl-verdict" aria-label="Result"></section>`;
+  }
+  function paintRoot(){setHtml($('#pl-root'),pageInner(),true);}
+
+  /* ---------- Loading ---------- */
+  function remember(v){
+    if(!v)return;
+    const at=S.list.findIndex(x=>x.id===v.id);
+    if(at>=0)S.list[at]=v;else S.list.unshift(v);
+  }
+  async function refreshRun(id){
+    const v=adapt(await get(pipePath(id)),id);
+    if(!v)throw new Error('The companion returned no usable pipeline.');
+    v.id=id;
+    remember(v);
+    if(S.id===id)S.run=v;
+    return v;
+  }
+  async function loadList(){
+    const list=adaptList(await get('/api/pipeline'));
+    list.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+    if(S.run&&!list.some(v=>v.id===S.run.id))list.unshift(S.run);
+    S.list=S.run?list.map(v=>v.id===S.run.id?S.run:v):list;
+  }
+  async function selectRun(id){
+    if(!ID_RE.test(id||'')||id===S.id)return;
+    S.id=id;S.run=S.list.find(v=>v.id===id)||null;
+    paintAll();
+    try{await refreshRun(id);}catch(error){say(messageOf(error),true);}
+    paintAll();schedulePoll();
+  }
+
+  /* ---------- Polling every 2 s while the pipeline is running ---------- */
+  const pollWanted=()=>S.mounted&&S.phase==='ready'&&(isActive()||(!!S.id&&!S.run)||!!(S.run&&S.run.redacted));
+  function schedulePoll(){
+    clearTimeout(S.timer);
+    S.timer=null;
+    if(pollWanted())S.timer=setTimeout(pollOnce,POLL_MS);
+  }
+  async function pollOnce(){
+    S.timer=null;
+    if(!S.mounted||S.phase!=='ready')return;
+    if(document.hidden||S.working){schedulePoll();return;}
+    const before=S.run?S.run.stage:'';
+    try{
+      if(S.id)await refreshRun(S.id);
+      await loadList();
+      if(S.msg.source==='poll'||(S.run&&S.run.stage!==before&&!S.msg.error))say('');
+      paintStart();paintRun();
+    }catch(error){say(messageOf(error),true,'poll');}
+    finally{schedulePoll();}
+  }
+
+  /* ---------- Actions ---------- */
+  const activeKey=()=>{const el=document.activeElement;return el&&typeof el.getAttribute==='function'?el.getAttribute('data-pl-key'):null;};
+  async function work(name,fn){
+    if(S.working)return;
+    const keep=activeKey();
+    S.working=name;
+    paint('start-foot');paint('actions');paint('wait');
+    try{await fn();}
+    catch(error){say(messageOf(error),true);}
+    finally{
+      S.working='';paintStart();paintRun();schedulePoll();
+      if(keep&&(!document.activeElement||document.activeElement===document.body))focusKey(keep);
+    }
+  }
+  async function startPipeline(){
+    const why=startWhy();
+    if(why){say(why,true);return;}
+    const f=S.form,body={...(f.source==='url'?{url:f.url.trim()}:{sourceDir:f.dir.trim()}),capUsd:capValue(),model:f.model,effort:f.effort,pilotCapUsd:pilotCapValue(),acknowledgements:ACKNOWLEDGEMENTS.map(a=>a.id)};
+    let started='';
+    await work('start',async()=>{
+      let answer;
+      try{answer=await post('/api/pipeline/start',body);}
+      catch(error){await loadList().catch(()=>{});throw error;}   /* a refusal usually means another pipeline runs: learn which */
+      const id=adaptStart(answer);
+      if(!ID_RE.test(id))throw new Error('The companion did not return a pipeline id.');
+      /* The link and the acknowledgements are spent: neither stays in the page. */
+      f.url='';f.dir='';f.acks={};
+      S.formOpen=false;S.id=id;S.run=null;started=id;
+      say('Started. The pipeline runs on the companion and this page follows it.');
+      await refreshRun(id);
+      await loadList();
+    });
+    if(started){paintAll();focusEl('#pl-stage');}
+  }
+  async function stopPipeline(){
+    const v=S.run;
+    if(!v||v.ended)return;
+    await work('stop',async()=>{
+      await post(pipePath(v.id,'/stop'),{});
+      say('Stop requested. The run ends after the call that is in progress.');
+      await refreshRun(v.id);
+    });
+  }
+  async function continuePipeline(){
+    const v=S.run;
+    if(!v||!v.waiting)return;
+    await work('continue',async()=>{
+      await post(pipePath(v.id,'/continue'),{});
+      say('Continuing.');
+      await refreshRun(v.id);
+    });
+  }
+  function saveBytes(name,bytes){
+    if(typeof S.ctx.download==='function'){S.ctx.download(name,bytes,'application/zip');return;}
+    const url=URL.createObjectURL(new Blob([bytes],{type:'application/zip'})),a=document.createElement('a');
+    a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  async function exportPipeline(){
+    const v=S.run;
+    if(!v||!canExport(v))return;
+    await work('export',async()=>{
+      const out=adaptExport(await post(pipePath(v.id,'/export'),{}),v.id);
+      if(!out.base64||!/^[A-Za-z0-9+/]+={0,2}$/.test(out.base64))throw new Error('The companion did not return a file.');
+      const bin=atob(out.base64),bytes=new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+      saveBytes(out.name,bytes);
+      say('Downloaded '+out.name+'. It holds private task material and the revised answers, so keep it private.');
+    });
+  }
+  function focusEl(selector){try{const el=$(selector);if(el&&typeof el.focus==='function')el.focus({preventScroll:false});}catch{/* focus is a courtesy */}}
+  function openForm(){
+    if(isActive())return;
+    S.formOpen=true;
+    paintStart();
+    focusKey(S.form.source==='url'?'url':'dir');
+  }
+  function closeForm(){
+    S.formOpen=false;
+    paintStart();
+    focusKey('new');
+  }
+
+  /* ---------- Events (delegated on the document; only this page's own elements count) ---------- */
+  const CLICK={start:startPipeline,stop:stopPipeline,continue:continuePipeline,export:exportPipeline,new:openForm,'cancel-new':closeForm};
+  const INPUT={
+    source(el){
+      if(el.value!=='url'&&el.value!=='dir')return;
+      S.form.source=el.value;
+      paintStart();
+      focusKey(el.value==='url'?'source-url':'source-dir');
+    },
+    url(el){S.form.url=String(el.value==null?'':el.value).slice(0,2048);paint('start-foot');},
+    dir(el){S.form.dir=String(el.value==null?'':el.value).slice(0,1024);paint('start-foot');},
+    cap(el){S.form.cap=String(el.value==null?'':el.value).trim().slice(0,6);paint('start-foot');},
+    pilotCap(el){S.form.pilotCap=String(el.value==null?'':el.value).trim().slice(0,6);paint('start-foot');},
+    model(el){if(S.status&&S.status.models.includes(el.value)){S.form.model=el.value;paint('start-foot');}},
+    effort(el){if(S.status&&S.status.efforts.includes(el.value)){S.form.effort=el.value;paint('start-foot');}},
+    ack(el){S.form.acks[el.dataset.id]=!!el.checked;paint('start-foot');},
+    pick(el){selectRun(el.value);}
+  };
+  /* A text field answers input events only (its change event also fires when a repaint removes it); choices answer change events. */
+  const FIELD_EVENT={source:'change',url:'input',dir:'input',cap:'input',pilotCap:'input',model:'change',effort:'change',ack:'change',pick:'change'};
+  function handleEvent(e){
+    const target=e&&e.target;
+    if(!target||typeof target.closest!=='function')return;
+    const mine=el=>!!el&&!!el.closest('#pl-root');
+    if(e.type==='click'){
+      const el=target.closest('[data-pl]');
+      if(!el||!mine(el)||el.disabled)return;
+      const handler=CLICK[el.dataset.pl];
+      if(handler){try{const done=handler(el);if(done&&typeof done.catch==='function')done.catch(error=>say(messageOf(error),true));}catch(error){say(messageOf(error),true);}}
+      return;
+    }
+    if(e.type!=='input'&&e.type!=='change')return;
+    const el=target.closest('[data-pl-in]');
+    if(!el||!mine(el)||FIELD_EVENT[el.dataset.plIn]!==e.type)return;
+    const handler=INPUT[el.dataset.plIn];
+    if(handler){try{handler(el);}catch(error){say(messageOf(error),true);}}
+  }
+  ['click','input','change'].forEach(type=>document.addEventListener(type,handleEvent));
+
+  /* ---------- Lifecycle ---------- */
+  async function boot(){
+    const A=agents();
+    if(!isLocal()){S.phase='offline';S.offlineNote='';paintRoot();return;}
+    if(!A||typeof A.link!=='function'){S.phase='offline';S.offlineNote='The Pipeline page needs agents.js, which did not load. The other views still work.';paintRoot();return;}
+    S.phase='checking';
+    paintRoot();
+    try{
+      const link=await A.link();
+      if(!link.local){S.phase='offline';S.offlineNote='';paintRoot();return;}
+      if(!link.ok){S.phase='offline';S.offlineNote=link.error||'';paintRoot();return;}
+      S.status=normalizeStatus(await get('/api/status'));
+      if(!S.status.models.includes(S.form.model))S.form.model=S.status.defaultModel;
+      if(!S.status.efforts.includes(S.form.effort))S.form.effort=S.status.defaultEffort;
+      await loadList();
+      const pick=S.list.find(v=>!v.ended)||S.list[0]||null;
+      S.id=pick?pick.id:null;S.run=pick;
+      S.formOpen=!pick;
+      S.phase='ready';
+      if(pick)await refreshRun(pick.id).catch(error=>say(messageOf(error),true,'poll'));   /* one unreadable pipeline must not take the page down */
+    }catch(error){
+      S.phase='offline';
+      S.offlineNote=error&&error.status===404?'This companion has no pipeline support. Update the companion and run npm start again.':messageOf(error);
+      paintRoot();
+      return;
+    }
+    paintRoot();
+    paintAll();
+    schedulePoll();
+  }
+  function render(ctx){
+    S.ctx={...S.ctx,download:ctx&&typeof ctx.download==='function'?ctx.download:S.ctx.download};
+    if(!isLocal())S.phase='offline';
+    return `<div id="pl-root" class="pl-root">${pageInner().text}</div>`;
+  }
+  /* The dashboard calls this after each of its own renders, with true while the Pipeline view is showing. */
+  function afterRender(active){
+    if(!active){
+      S.mounted=false;
+      clearTimeout(S.timer);S.timer=null;
+      return;
+    }
+    S.mounted=true;
+    if(S.phase==='idle'||S.phase==='offline')boot();
+    else if(S.phase==='ready'){
+      paintAll();
+      schedulePoll();
+    }
+  }
+
+  W.FinancePipeline={render,afterRender,handleEvent,adapt,adaptExport,RULES,ACKNOWLEDGEMENTS,offlineMessage:OFFLINE_MESSAGE};
+})();

@@ -33,6 +33,13 @@
      FINANCE_STUB_AUTH_LOG   file that receives one JSON line per `auth status`: the same fields as the env log, plus
                              argv and whether CLAUDE_CONFIG_DIR exists.
 
+   Rules. FINANCE_STUB_SCENARIO may also be { "rules": [ { "cwd": "<regex>", "prompt": "<regex>", "scenario": <scenario or array> } ],
+   "default": <scenario or array> }. The first rule whose regular expressions match wins: "cwd" is tested against the working folder
+   (its full path), "prompt" against the prompt the stub received (a rule may have either or both). Its scenario is chosen like any
+   other (an array by the trailing -<n> of the folder name). With no match the "default" applies, else an empty scenario. This lets one
+   scenario text serve a whole pipeline: the classifier, the designer, the pilots and the simulated grader each run in their own folder
+   with their own prompt. In the input of a toolUses entry the text {{cwd}} stands for the working folder.
+
    Scenario fields (all optional):
      init:{model, tools}     resolved model reported in system/init (default: the --model argument)
      toolUses:[{name,input,result}]  assistant tool_use blocks, each followed by a user tool_result block
@@ -251,17 +258,43 @@ async function authCommand(list) {
 
 /* ------------------------------------------------------------------ a run */
 
-function loadScenario() {
-  let parsed = {};
-  const text = process.env.FINANCE_STUB_SCENARIO;
-  if (text) {
-    try { parsed = JSON.parse(text); } catch { parsed = {}; }
-  }
+/* An array of scenarios is chosen by the trailing -<n> of the working folder name (run 1 uses the first entry, and so on, wrapping). */
+function pickScenario(parsed) {
   if (!Array.isArray(parsed)) return parsed && typeof parsed === 'object' ? parsed : {};
   if (!parsed.length) return {};
   const match = /-(\d+)$/.exec(path.basename(process.cwd()));
   const index = match ? (Number(match[1]) - 1) % parsed.length : 0;
   return parsed[Math.max(0, index)] || {};
+}
+
+function ruleMatches(source, text) {
+  try { return new RegExp(source).test(text); } catch { return false; }
+}
+
+function loadScenario(prompt) {
+  let parsed = {};
+  const text = process.env.FINANCE_STUB_SCENARIO;
+  if (text) {
+    try { parsed = JSON.parse(text); } catch { parsed = {}; }
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.rules)) {
+    for (const rule of parsed.rules) {
+      if (!rule || typeof rule !== 'object') continue;
+      if (typeof rule.cwd === 'string' && !ruleMatches(rule.cwd, process.cwd())) continue;
+      if (typeof rule.prompt === 'string' && !ruleMatches(rule.prompt, prompt)) continue;
+      return pickScenario(rule.scenario);
+    }
+    return pickScenario(parsed.default);
+  }
+  return pickScenario(parsed);
+}
+
+/* {{cwd}} in the text of a tool input is the working folder (a scenario cannot know the folder of a run in advance). */
+function fillCwd(value) {
+  if (typeof value === 'string') return value.split('{{cwd}}').join(process.cwd());
+  if (Array.isArray(value)) return value.map(fillCwd);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fillCwd(item)]));
+  return value;
 }
 
 function readStdin() {
@@ -293,7 +326,7 @@ async function main() {
   if (!prompt.trim()) return usageError('Error: Input must be provided either through stdin or as a prompt argument when using --print');
   appendJsonLine(process.env.FINANCE_STUB_PROMPT_LOG, { via, prompt });
 
-  const scenario = loadScenario();
+  const scenario = loadScenario(prompt);
   appendJsonLine(process.env.FINANCE_STUB_ENV_LOG, envFacts());
   if (scenario.ignoreSigterm) process.on('SIGTERM', () => {});
 
@@ -362,7 +395,7 @@ async function main() {
   const toolUses = Array.isArray(scenario.toolUses) ? scenario.toolUses : [];
   for (const use of toolUses) {
     const entry = use || {};
-    await toolCall(entry.name || 'Bash', entry.input || {}, typeof entry.result === 'string' ? entry.result : 'ok');
+    await toolCall(entry.name || 'Bash', fillCwd(entry.input || {}), typeof entry.result === 'string' ? fillCwd(entry.result) : 'ok');
   }
 
   if (scenario.spill) {

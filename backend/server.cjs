@@ -30,8 +30,20 @@
                                                   line is { seq, at, kind, tool, chars } and nothing else; otherwise its text
                                                   has passed the path redactor (scrubLogText) and is cut to 2000 characters.
 
+   The pipeline routes (backend/pipeline; the options.pipeline service) follow the same rules as /api/agents: the nonce, the Origin and
+   the JSON type on every POST, the same body cap, the same error mapping. While ANY round runs (also a round the pipeline itself
+   started) every pipeline answer is passed through redactPipelineData (pipeline/redact.cjs): the prompt, the guideline, the golden
+   answer, the gold, the fingerprints, each trap's mechanism, decoy and values and each grader reason become { withheld: true }, and the
+   answer carries redacted: true. The export is refused with 409 while any round runs.
+       POST /api/pipeline/start               { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements } -> { id }
+       GET  /api/pipeline                     { pipelines: [row], running, config }
+       GET  /api/pipeline/:id                 the pipeline view
+       POST /api/pipeline/:id/continue        the view (the owner signed in, or turned on the option that shows all files)
+       POST /api/pipeline/:id/stop            the view
+       POST /api/pipeline/:id/export          { name, size, sha256, files, zipBase64 }
+
    Module API (used by the tests):
-     createServer({ root, service, port, runner?, state?, log? }) -> { server, nonce, runner, listen(port?), close(), shutdown(), killPilots() }
+     createServer({ root, service, pipeline?, port, runner?, state?, log? }) -> { server, nonce, runner, listen(port?), close(), shutdown(), killPilots() }
        listen() resolves { port, url } (listen(0) binds a free port instead of the port given to createServer). close() stops
        the listener and drops connections. shutdown() also cancels the archived adapter and every running round
        (service.shutdown()) before it closes. killPilots() is the synchronous last resort: SIGKILL to every pilot's process group.
@@ -62,10 +74,11 @@ const { HarnessRun } = require('./harness.cjs');
 const { createAgentService, AgentError } = require('./agents/index.cjs');
 const { readPilotToken, sourceText, gatewayFindings, describeFindings } = require('./agents/pilot-token.cjs');
 const C = require('./agents/constants.cjs');
+const { redactPipelineData } = require('./pipeline/redact.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const HOST = '127.0.0.1';
-const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js']);
+const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js', 'pipeline.js', 'pipeline.css']);
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
 const JSON_TYPE_RE = /^application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
 const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415]);
@@ -78,6 +91,7 @@ const LOCK_WAIT_MS = 10000; /* how long a start waits for another start that hol
 const COMPANION_ID = 'finance-task-studio';
 const KEEP_OPEN_LINE = 'Keep this window open while a round runs; closing it stops the companion and its pilots.';
 const TOOL_LESS_WHILE_RUNNING = 'A round of pilots is running. The simulated grader and the author review wait until it has ended, because their text would be on a command line that a running pilot can read. Nothing was started';
+const PIPELINE_EXPORT_WHILE_RUNNING = 'A round of pilots is running. The pipeline export holds the grader guideline and the golden answer, so it waits until the round has ended. Nothing was exported';
 const LAUNCH_WHILE_TOOL_LESS = 'A simulated grader or an author review is still running. Launch the round when it has finished, because its text is on a command line that a pilot could read. Nothing was started';
 
 /* An error that is safe to show the writer, with the HTTP status to send. */
@@ -378,6 +392,7 @@ function createServer(options = {}) {
   const root = path.resolve(options.root || ROOT);
   const service = options.service;
   if (!service || typeof service.status !== 'function') throw new TypeError('createServer needs an agent service');
+  const pipeline = options.pipeline && typeof options.pipeline.start === 'function' ? options.pipeline : null;
   const port = options.port === undefined ? 0 : options.port;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError('The port must be a whole number from 0 to 65535');
   const log = typeof options.log === 'function' ? options.log : message => console.error(message);
@@ -407,6 +422,11 @@ function createServer(options = {}) {
         graderModel: C.GRADER_MODEL,
       };
     }
+  }
+
+  function needPipeline() {
+    if (!pipeline) throw new AgentError(404, 'The pipeline is not available in this version of the companion');
+    return pipeline;
   }
 
   /* A frozen or approved round carries the approval summary and its hash, so the page approves exactly what will run. */
@@ -560,6 +580,20 @@ function createServer(options = {}) {
     },
     { method: 'POST', pattern: '/api/agents/rounds/:id/runs/:n/classify', roundData: true, handler: ({ params, body }) => service.classifyRun(params.id, params.n, body) },
     { method: 'POST', pattern: '/api/agents/grader-sim', handler: ({ body }) => toolLess(() => service.graderSim(body)) },
+    /* The pipeline (backend/pipeline). Every answer that carries pipeline data is redacted while any round runs. */
+    { method: 'POST', pattern: '/api/pipeline/start', handler: ({ body }) => needPipeline().start(body) },
+    { method: 'GET', pattern: '/api/pipeline', roundData: true, whileRunning: redactPipelineData, handler: () => needPipeline().list() },
+    { method: 'GET', pattern: '/api/pipeline/:id', roundData: true, whileRunning: redactPipelineData, handler: ({ params }) => needPipeline().get(params.id) },
+    { method: 'POST', pattern: '/api/pipeline/:id/continue', roundData: true, whileRunning: redactPipelineData, handler: ({ params }) => needPipeline().continue(params.id) },
+    { method: 'POST', pattern: '/api/pipeline/:id/stop', roundData: true, whileRunning: redactPipelineData, handler: ({ params }) => needPipeline().stop(params.id) },
+    {
+      method: 'POST',
+      pattern: '/api/pipeline/:id/export',
+      handler: async ({ params }) => {
+        if (await anyRoundRunning()) throw new HttpError(409, PIPELINE_EXPORT_WHILE_RUNNING);
+        return needPipeline().export(params.id);
+      },
+    },
     {
       /* The Agents page has an author review button. The service has no such method yet, so the answer says so plainly. */
       method: 'POST',
@@ -716,6 +750,14 @@ function createServer(options = {}) {
   }
 
   async function stopRounds() {
+    /* The pipeline first: it stops its classifier, designer and link load, and cancels the round it is waiting for. */
+    if (pipeline && typeof pipeline.shutdown === 'function') {
+      try {
+        await pipeline.shutdown();
+      } catch (error) {
+        log(`companion: stopping the pipeline failed: ${error && error.message ? error.message : error}`);
+      }
+    }
     if (typeof service.shutdown !== 'function') return;
     try {
       await service.shutdown();
@@ -1093,7 +1135,26 @@ async function describePilotSignIn(env) {
   return 'your own Claude Code sign-in (no pilot token stored; README, "Pilot sign-in")';
 }
 
-/* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, usualPort, proc and exit (for
+/* The pipeline service on top of the agent service and, when it is installed, the link loader. Both are required here, lazily and
+   inside a try: a companion without backend/links still runs pipelines on a folder, and one without backend/pipeline still runs
+   rounds. Nothing is said when the service is a test double that cannot make rounds. Returns the service, or null. */
+function buildPipeline({ root, env, claudeBin, agents, say }) {
+  if (!agents || typeof agents.createRound !== 'function') return null;
+  let links = null;
+  try {
+    links = require('./links/index.cjs').createLinkLoader({ root });
+  } catch (error) {
+    say(`The link loader is not available (${error && error.message ? error.message : error}); a pipeline can import a folder only.`);
+  }
+  try {
+    return require('./pipeline/index.cjs').createPipelineService({ root, agents, links, claudeBin, env });
+  } catch (error) {
+    say(`The pipeline is not available (${error && error.message ? error.message : error}).`);
+    return null;
+  }
+}
+
+/* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, createPipeline (replaces buildPipeline), usualPort, proc and exit (for
    installSignalHandlers), isAlive and probe (findRunningCompanion), statusTimeoutMs and lockWaitMs (claimStart). Resolves
    { app, url }, or { alreadyRunning: true, url } when another companion already serves this folder. Rejects, with what to do
    about it, when a companion may be running but did not say so (claimStart). */
@@ -1116,8 +1177,9 @@ async function runCompanion(argv = process.argv.slice(2), env = process.env, dep
   try {
     audit = loadEvidenceAudit(root);
     const service = (deps.createService || createAgentService)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
+    const pipeline = (deps.createPipeline || buildPipeline)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN), agents: service, say });
     const choice = portChoice(env, deps.usualPort);
-    app = createServer({ root, service, port: choice.port, state: loadModelRunState(root) });
+    app = createServer({ root, service, pipeline, port: choice.port, state: loadModelRunState(root) });
     listening = await listenWithFallback(app, choice);
   } catch (error) {
     claim.release();
@@ -1159,6 +1221,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, HttpError, ASSETS,
+  createServer, installSignalHandlers, localServerRecord, usableClaudeBin, redactRoundData, scrubLogText, describePilotSignIn, buildPipeline, HttpError, ASSETS,
   runCompanion, findRunningCompanion, claimFolder, releaseFolder, removeLocalServerRecord, pidAlive, portChoice, listenWithFallback, DEFAULT_PORT, KEEP_OPEN_LINE,
 };
