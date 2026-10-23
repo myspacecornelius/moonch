@@ -160,6 +160,17 @@ class Tab {
   /* A constant function and ONE JSON argument. Nothing from the page, the link or the person is ever spliced into code. */
   evalFn(fn, arg, options) { return this.evalIsolated(`(${fn.toString()})(${JSON.stringify(arg === undefined ? null : arg)})`, options); }
 
+  /* The ids of the frames of this tab, its own first (a download that starts in an iframe names the iframe's frame). */
+  async frameIds() {
+    try {
+      const { frameTree } = await this.s.send('Page.getFrameTree', {}, { timeout: 3000 });
+      const out = [];
+      const walk = (node) => { if (node && node.frame) out.push(node.frame.id); for (const child of (node && node.childFrames) || []) walk(child); };
+      walk(frameTree);
+      return out.length ? out : [this.frameId];
+    } catch (e) { return [this.frameId]; }
+  }
+
   /* Bring this tab's window to the front (macOS opens Chrome behind the Studio's own window). Failures are ignored. */
   async front() {
     await this.s.send('Page.bringToFront', {}, { timeout: 3000 }).catch(() => {});
@@ -182,11 +193,15 @@ class Tab {
                     without a byte). A request that is past that is idle: a beacon or keepalive fetch nobody reads, a long poll. It is
                     remembered as idle (tab.net.quiet), so only the first settle pays for it, and it never makes the page "unsettled";
      DOM stable     the MutationObserver installed at document start has seen nothing for `quietMs`, and readyState is "complete".
+   patientMs: past maxMs, keep waiting while an API request is still waiting for its answer, until patientMs (a tab or a "Load more" served by
+   a slow API); a DOM that never goes quiet (a ticker) still ends at maxMs. lost: how many API requests that started since `since` were
+   still waiting when the settle ended (their files may be missing, the caller says so). graceMs: with `since`, not settled before that long
+   after it (the request a click started shows up in the log a moment later).
    A page that never settles (a ticker, a poll) is not an error: the result says settled:false and the loader goes on with what is there. */
 const IGNORED_TYPES = new Set(['WebSocket', 'EventSource', 'Ping', 'Prefetch', 'CSPViolationReport']);
 const SETTLE_DOM = '({ readyState: document.readyState, quiet: performance.now() - (globalThis.__fstLast || 0), count: globalThis.__fstCount || 0 })';
 
-async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000, pollMs = 80, stalledMs = 2500, stalledApiMs = 20000, signal } = {}) {
+async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000, pollMs = 80, stalledMs = 2500, stalledApiMs = 20000, patientMs = 0, since = 0, graceMs = 0, signal } = {}) {
   const started = Date.now();
   const quiet = tab.net.quiet || (tab.net.quiet = new Set());
   let lastDom = { readyState: '?', quiet: 0, count: 0 };
@@ -195,27 +210,31 @@ async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000,
     const now = Date.now();
     let busy = 0;      /* requests that still count */
     let waiting = 0;   /* of those, XHR and fetch that have not answered yet (the only ones a deadline does not hold against the page) */
+    let fresh = 0;     /* of those, the ones that started since `since` (the click or the press that this settle follows) */
     for (const [id, entry] of tab.net.inflight) {
       if (IGNORED_TYPES.has(entry.type) || quiet.has(id)) continue;
       const api = entry.type === 'XHR' || entry.type === 'Fetch';
       const live = entry.responded ? now - entry.lastDataAt <= stalledMs : now - entry.startedAt <= (api ? stalledApiMs : stalledMs);
       if (!live) { quiet.add(id); continue; }
       busy += 1;
-      if (api && !entry.responded) waiting += 1;
+      if (api && !entry.responded) { waiting += 1; if (entry.startedAt >= since) fresh += 1; }
     }
     try { lastDom = await tab.evalIsolated(SETTLE_DOM, { timeout: 1500, retries: 0 }); }
     catch (e) { lastDom = { readyState: 'loading', quiet: 0, count: lastDom.count }; }   /* the document is being replaced: not stable yet */
     const networkIdle = busy === 0 && now - tab.net.lastActivityAt >= idleMs;
     const domStable = lastDom.readyState === 'complete' && lastDom.quiet >= quietMs;
-    if (networkIdle && domStable) return { settled: true, ms: Date.now() - started };
+    /* graceMs: the request that a click has just started is not in the log yet (its event is still on its way); do not call it quiet before then */
+    const graced = !(graceMs && since && now - since < graceMs);
+    if (graced && networkIdle && domStable) return { settled: true, ms: Date.now() - started };
     if (now - started >= maxMs) {
+      if (waiting > 0 && now - started < patientMs) { await sleep(pollMs); continue; }   /* an answer is on its way: patientMs is the longest the caller will wait for one */
       /* at the deadline an API request that is still waiting is not held against the page: it may be a long poll. It is forgotten
          from now on, so the next settle does not wait for it again. */
       if (domStable && busy === waiting) {
         for (const [id, entry] of tab.net.inflight) if ((entry.type === 'XHR' || entry.type === 'Fetch') && !entry.responded) quiet.add(id);
-        return { settled: true, ms: Date.now() - started, apiPending: waiting };
+        return { settled: true, ms: Date.now() - started, apiPending: waiting, lost: fresh };
       }
-      return { settled: false, ms: Date.now() - started };
+      return { settled: false, ms: Date.now() - started, lost: fresh };
     }
     await sleep(pollMs);
   }

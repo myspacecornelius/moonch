@@ -35,7 +35,8 @@
    Every file the page offers is downloaded or listed in skipped with the reason, never dropped without a word: a file that cannot be
    fetched, a control that looks like a file but would submit a form or starts with a destructive verb ("looks like an action"), a row
    that is gone when its turn comes. notes (also at the end of the done message) says when a step was cut off while the page still
-   had more to show: "Load more" or scrolling at its time limit, a tab that could not be opened.
+   had more to show: "Load more" or scrolling at its time limit, a tab that could not be opened, an API request of the page that had not
+   answered when a step ended, rows that look different but were taken for one another, a file that was listed twice and kept once.
    How the files are found: look again after the page settled; open <details> and expanders (repeated until nothing new opens); turn on
    the "show all files" switch (also when it is learned, or already on) and open what it revealed; in the open tab and in every other
    tab press "Load more" and scroll until nothing new comes. A file that is a button is identified by the name or the text of its row, its
@@ -53,7 +54,7 @@ const { Tab, safeText, cleanLabel, waitForSettled } = require('./tab.cjs');
 const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE } = require('./page.cjs');
 const { classifyPage, LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('./auth-wall.cjs');
 const { DownloadManager } = require('./downloads.cjs');
-const { stabilize, expandAll, gather, replay, candidateKey, tabKey, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
+const { stabilize, expandAll, gather, replay, candidateKey, tabKey, LOST, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
 const { validateLink, fileUrlAllowed } = require('./url.cjs');
 const store = require('./store.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
@@ -154,7 +155,7 @@ function createLinkLoader(options = {}) {
       if (signal.aborted) throw new CdpError('Cancelled.', { code: 'CANCELLED' });
       if (job.browser && job.browser.cdp.closed) throw new CdpError('The browser closed the pipe.', { code: 'PIPE_CLOSED' });   /* Chrome died */
     };
-    const settle = async () => { const r = await waitForSettled(job.tab, { maxMs: timeouts.settle, signal }); if (!r.settled) job.unsettled = true; return r; };
+    const settle = async (since = 0) => { const r = await waitForSettled(job.tab, { maxMs: timeouts.settle, since, graceMs: since ? 350 : 0, signal }); if (!r.settled) job.unsettled = true; return r; };
     const stageDir = path.join(st.folder, '.incoming');
     const destDir = path.join(st.folder, 'files');
     const href = job.href;
@@ -319,11 +320,14 @@ function createLinkLoader(options = {}) {
         const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
         return { tab: open ? { label: open.label, path: open.path } : null, more: 0, scroll: 0 };
       };
+      const expandNow = async () => { const total = await expandAll(job.tab, snaps, { signal, view: BASE }); if (total.lost) note(LOST('after something was opened')); };
       const stamp = (list, view) => { for (const x of list) x.view = { tab: view.tab ? { ...view.tab } : null, more: 0, scroll: 0 }; };
+      const capNotes = [];   /* what the loader could not do completely, told at the end of the done message and in page.json */
+      const note = (text) => { if (!capNotes.includes(text)) capNotes.push(text); };
       const snaps = await stabilize(job.tab, page.snap, { signal, waits: timeouts.stable });
       let BASE = await viewNow();
       stamp(snaps, BASE);
-      await expandAll(job.tab, snaps, { signal, view: BASE });
+      await expandNow();
       let snap = snaps[snaps.length - 1];
 
       /* What it took to build the list of files, for when the page has to be rebuilt (it was reloaded, or a download click left it): the
@@ -349,9 +353,10 @@ function createLinkLoader(options = {}) {
       Object.assign(st.toggle, { filesBefore: before.length, filesAfter: before.length, found: Boolean(pick), label: pick ? pick.label : '', learned: usedLearned, flipped: alreadyOn });
       if (pick) recipe.toggle = { key: pick.key, label: pick.label, path: pick.path, option: pick.option, kind: pick.kind };
       if (pick && !alreadyOn && pick.path) {
+        const clickedAt = Date.now() - 50;
         const clicked = await pageOp(job.tab, 'activate', { path: pick.path, option: pick.option });
         if (clicked.ok) {
-          await settle();
+          await settle(clickedAt);
           snap = await growWait(before.length);
           BASE = await viewNow();
           stamp([snap], BASE);
@@ -359,7 +364,7 @@ function createLinkLoader(options = {}) {
           recipe.afterClick = fileCandidates(snap).length;
           recipe.appliedAt = loads;
           const now2 = snap.toggles.find((t) => t.path === pick.path && t.option === pick.option && t.label === pick.label);
-          await expandAll(job.tab, snaps, { signal, view: BASE });
+          await expandNow();
           snap = snaps[snaps.length - 1];
           list = fileCandidates(snap);
           st.toggle.flipped = Boolean((now2 && now2.checked) || list.length > before.length);
@@ -371,7 +376,7 @@ function createLinkLoader(options = {}) {
         snaps.push(snap);
         recipe.afterClick = fileCandidates(snap).length;
         recipe.appliedAt = loads;
-        await expandAll(job.tab, snaps, { signal, view: BASE });
+        await expandNow();
         snap = snaps[snaps.length - 1];
         list = fileCandidates(snap);
         st.toggle.filesAfter = list.length;
@@ -390,17 +395,21 @@ function createLinkLoader(options = {}) {
           if (recipe.appliedAt === loads) return current;
           if (fileCandidates(current).length >= recipe.afterClick) { recipe.appliedAt = loads; return current; }
         } else if (t.checked) return current;
+        const pressedAt = Date.now() - 50;
         const r = await pageOp(job.tab, 'activate', { path: t.path, option: t.option });
         if (!r.ok) return current;
         recipe.appliedAt = loads;
-        await settle();
+        await settle(pressedAt);
         return growWait(Math.max(0, recipe.afterClick - 1));
       };
       /* Where the page is, after the person has used the window or a download left it: back on the task page (or below it), or the
          loader goes back once, looks again and puts the switch and the open folders back. */
-      const backToPage = async () => {
+      let pageHref = href;   /* the task page: the link, or the page the person left it on */
+      const backToPage = async ({ accept = false } = {}) => {
         const probe = await where();
-        if (probe && withinPage(probe.href, href)) return;
+        if (probe && withinPage(probe.href, pageHref)) return;
+        /* after the person has used the window, the page they left is the task page (a router may have moved to a sibling path): not reloaded */
+        if (accept && probe && probe.ready && !probe.pw && (() => { try { const x = new URL(probe.href); return x.origin === new URL(href).origin && !LOGIN_PATH_RE.test(x.pathname); } catch (e) { return false; } })()) { pageHref = probe.href; return; }
         const again = await loadOnce();
         if (again.cls.state === 'needs-sign-in' || again.cls.state === 'needs-person') throw new LinkError(`The platform asks you to sign in again. ${IMPORT_HINT}`, 502, 'sign-in-loop');
         if (again.cls.state !== 'ready') throw new LinkError(again.cls.reason, 502, again.cls.state);
@@ -449,13 +458,13 @@ function createLinkLoader(options = {}) {
         if (!headless) await job.tab.front();
         const baseline = snap.toggles;
         await waitPerson(async () => job.st.state !== 'needs-person', timeouts.person, `No answer within ${waited(timeouts.person)}.`);   /* continue() moves the state on */
-        await backToPage();
+        await backToPage({ accept: true });
         await settle();
         snap = await takePage(job.tab);
         BASE = await viewNow();
         stamp([snap], BASE);
         snaps.push(snap);
-        await expandAll(job.tab, snaps, { signal, view: BASE });
+        await expandNow();
         snap = snaps[snaps.length - 1];
         list = fileCandidates(snap);
         st.toggle.filesAfter = list.length;
@@ -471,28 +480,27 @@ function createLinkLoader(options = {}) {
 
       /* Tabs, "Load more", scrolling; then the files of every snapshot as one list. A limit that ended a step is told in a note. */
       set(job, 'loading', `Looking for every file.${KEEP_OPEN}`);
-      const capNotes = [];
-      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand }); recipe.home = info.home; capNotes.push(...info.capped); };
+      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand }); recipe.home = info.home; for (const text of info.capped) note(text); };
       await explore();
       let { list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates));
       if (!candidatesAll.length && !snaps.some((s) => droppedCandidates(s).length)) {
         set(job, 'needs-person', NO_FILES_MESSAGE);
         if (!headless) await job.tab.front();
         await waitPerson(async () => job.st.state !== 'needs-person', timeouts.person, `No answer within ${waited(timeouts.person)}.`);
-        await backToPage();
+        await backToPage({ accept: true });
         await settle();
         const again = await stabilize(job.tab, await takePage(job.tab), { signal, waits: timeouts.stable });
         BASE = await viewNow();
         stamp(again, BASE);
         snaps.push(...again);
-        await expandAll(job.tab, snaps, { signal, view: BASE });
+        await expandNow();
         await explore();
         ({ list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates)));
         st.toggle.filesAfter = Math.max(st.toggle.filesAfter, candidatesAll.length);
       }
       const droppedAll = unionDropped(snaps.map(droppedCandidates));
       /* the backstop: more distinct rows were seen than files kept, so some rows that look different were taken for one file */
-      if (mergedRows > 0) capNotes.push(`${mergedRows} row${mergedRows === 1 ? '' : 's'} that look different on the page were taken for another file's row, so ${mergedRows === 1 ? 'a file' : 'files'} may be missing`);
+      if (mergedRows > 0) note(`${mergedRows} row${mergedRows === 1 ? '' : 's'} that look different on the page were taken for another file's row, so ${mergedRows === 1 ? 'a file' : 'files'} may be missing`);
       const merged = mergeSections(snaps.map((s) => s.sections), limits);
       const sections = merged.map((s) => ({ heading: cleanLabel(s.heading, 160), text: s.text }));
       st.sections = sections.map((s) => ({ heading: s.heading, chars: s.text.length }));
@@ -527,7 +535,7 @@ function createLinkLoader(options = {}) {
         });
         check();
         stopped = out.stopped;
-        if (duplicates) capNotes.push(`${duplicates} file${duplicates === 1 ? ' that was' : 's that were'} listed more than once (same name, same content) kept once`);
+        if (duplicates) note(`${duplicates} file${duplicates === 1 ? ' that was' : 's that were'} listed more than once (same name, same content) kept once`);
         for (const r of out.results) if (r.state !== 'done') st.skipped.push({ label: cleanLabel(r.candidate.label, 160), group: cleanLabel(r.candidate.group, 120), reason: r.detail ? `${r.state}: ${r.detail}` : r.state });
         for (const c of out.rest) st.skipped.push({ label: cleanLabel(c.label, 160), group: cleanLabel(c.group, 120), reason: `not tried: ${stopped}` });
       }

@@ -58,14 +58,15 @@ const GENERIC_TEXT = /^(download|export)\b/i;
    a section above the file) and the tab (the live page shows only one). */
 function candidateKey(c, { withGroup = true, withTab = true } = {}) {
   if (c.mode === 'navigate') return navigateKey(c.href || '', c.label || '');
-  const name = hasExtension(c.nameHint) ? c.nameHint : (c.label || '');
+  const stable = Array.isArray(c.rowParts) && c.rowParts.length ? c.rowParts.join(' ') : '';   /* the row without what changes every minute */
+  const name = hasExtension(c.nameHint) ? c.nameHint : (stable || c.label || '');
   const generic = (c.label || '') === (c.text || '') && GENERIC_TEXT.test(c.text || '');
   const tab = withTab && c.view && c.view.tab ? tabKey(c.view.tab.label) : '';
   return `c|${name}|${withGroup ? c.group || '' : ''}|${tab}|${c.text || ''}|${c.href || ''}${generic ? `|${c.path || ''}` : ''}`;
 }
 /* A row as the reader sees it, independent of how the name was cut: the tab, the control's text and the name phrase of the row text.
    Used only to count: if more distinct rows were seen than candidates kept, some rows were merged. */
-const rowSignature = (c) => `${c.view && c.view.tab ? tabKey(c.view.tab.label) : ''}|${c.text || ''}|${namePhrase(c.label || c.text || '')}`;
+const rowSignature = (c) => `${c.view && c.view.tab ? tabKey(c.view.tab.label) : ''}|${c.text || ''}|${Array.isArray(c.rowParts) && c.rowParts.length ? c.rowParts.join(' ') : namePhrase(c.label || c.text || '')}`;
 
 /* Candidates from several snapshots as one list, in order of first appearance. Each candidate gets occ, its occurrence number among
    the candidates with the same key in the snapshot it first appeared in. A file link seen again keeps its place and takes the newest
@@ -151,26 +152,32 @@ async function stabilize(tab, first, { signal, waits = [1000, 2000] } = {}) {
   return snaps;
 }
 
-const quick = (tab, signal) => waitForSettled(tab, { idleMs: 250, quietMs: 250, maxMs: 2500, signal });
+/* The short settle after a click, a press or a scroll step. A DOM that keeps changing ends it at 2.5 s, but an API request that was started
+   by the step and has not answered yet is waited for (up to 22 s): a tab or a "Load more" served by a slow API. lost: how many such
+   requests were still waiting when it ended. */
+const quick = (tab, signal, since = 0, patientMs = 22000) => waitForSettled(tab, { idleMs: 250, quietMs: 250, maxMs: 2500, patientMs, since, graceMs: 350, signal });
+const LOST = (where) => `a request of the page was still waiting for its answer ${where}, so some files may be missing`;
 const stamp = (snap, view) => { if (view) snap.view = { tab: view.tab ? { ...view.tab } : null, more: view.more, scroll: view.scroll }; return snap; };
 
 /* The cheap part, one pass: details and expanders. Pushes a snapshot into `snaps` when it did anything. Returns what it did. */
 async function expand(tab, snaps, { signal, view } = {}) {
+  const since = Date.now() - 50;
   const did = await pageOp(tab, 'expand');
-  if (did.opened || did.expanded) { await quick(tab, signal); snaps.push(stamp(await takePage(tab), view)); }
+  if (did.opened || did.expanded) { const r = await quick(tab, signal, since); did.lost = r.lost || 0; snaps.push(stamp(await takePage(tab), view)); }
   return did;
 }
 
 /* Repeat it until nothing new opens, at most `passes` times: a folder opened in one pass can show another closed folder. With
    snapshots:false the page is only put into the state (no look is taken). Returns the totals. */
-async function expandAll(tab, snaps, { signal, view, passes = 4, snapshots = true } = {}) {
-  const total = { opened: 0, expanded: 0, passes: 0 };
+async function expandAll(tab, snaps, { signal, view, passes = 4, snapshots = true, patientMs } = {}) {
+  const total = { opened: 0, expanded: 0, passes: 0, lost: 0 };
   for (let i = 0; i < passes; i += 1) {
     checker(signal)();
+    const since = Date.now() - 50;
     const did = await pageOp(tab, 'expand');
     if (!did.opened && !did.expanded) break;
     total.opened += did.opened; total.expanded += did.expanded; total.passes += 1;
-    await quick(tab, signal);
+    total.lost += (await quick(tab, signal, since, patientMs)).lost || 0;
     if (snapshots) snaps.push(stamp(await takePage(tab), view));
   }
   return total;
@@ -187,45 +194,58 @@ async function replay(tab, view, home, { signal } = {}) {
     const fresh = controls.tabs.find((t) => tabKey(t.label) === wantKey && t.path === want.path) || controls.tabs.find((t) => tabKey(t.label) === wantKey);
     if (!fresh) return { ok: false, why: `the tab "${want.label}" is no longer on the page` };
     if (!fresh.selected) {
+      const since = Date.now() - 50;
       const r = await pageOp(tab, 'activate', { path: fresh.path, label: fresh.label });
       if (!r.ok) return { ok: false, why: `the tab "${want.label}" could not be opened again (${r.why})` };
-      await quick(tab, signal);
+      await quick(tab, signal, since);
     }
   }
   await expandAll(tab, [], { signal, snapshots: false });
-  for (let i = 0; i < ((view && view.more) || 0); i += 1) {
+  for (let round = 0; round < ((view && view.more) || 0); round += 1) {   /* a round presses every "Load more" the page shows, as gather did */
     check();
-    const more = (await pageOp(tab, 'controls')).more[0];
-    if (!more) break;
-    const r = await pageOp(tab, 'activate', { path: more.path, label: more.label });
-    if (!r.ok) break;
-    await quick(tab, signal);
+    const since = Date.now() - 50;
+    const buttons = (await pageOp(tab, 'controls')).more;
+    let pressed = 0;
+    for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, label: more.label }); if (r.ok) pressed += 1; }
+    if (!pressed) break;
+    await quick(tab, signal, since);
     await expandAll(tab, [], { signal, snapshots: false });
   }
   await pageOp(tab, 'scroll', { reset: true });
   for (let i = 0; i < ((view && view.scroll) || 0); i += 1) {
     check();
+    const since = Date.now() - 50;
     const r = await pageOp(tab, 'scroll');
     if (!r.moved) break;
     await sleep(120);
-    await quick(tab, signal);
+    await quick(tab, signal, since);
   }
   return { ok: true };
 }
 
-/* The slow part: for the open tab and then for each other tab, expand, press "Load more" while it adds files, scroll in steps until two
-   steps in a row add nothing. Pushes a snapshot after every step. budgetMs is the time for the whole page; every tab gets at least
-   minPerTabMs. Returns { tabs, more, scrolls, home, capped: [text] }. */
-async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, minPerTabMs = 8000 } = {}) {
+/* The slow part: for the open tab and then for each other tab, expand, press every "Load more" while the presses add files, scroll in
+   steps until two steps in a row add nothing. Pushes a snapshot after every step. Every step waits for the answer of an API request that
+   it started (a slow tab, a slow page of the list) and says so in capped when one is still pending at the end. budgetMs is the time for
+   the whole page; every tab gets at least minPerTabMs. Returns { tabs, more, scrolls, home, capped: [text] }. */
+async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, minPerTabMs = 8000, patientMs } = {}) {
   const check = checker(signal);
   const started = Date.now();
   const known = new CandidateSet();
   for (const s of snaps) known.add(fileCandidates(s));
   const did = { tabs: 0, more: 0, scrolls: 0, home: null, capped: [] };
-  const grab = async (view) => { check(); await quick(tab, signal); const s = stamp(await takePage(tab), view); snaps.push(s); return known.add(fileCandidates(s)); };
-  const grabAfter = async (view) => {   /* snapshots the expansion takes also count */
+  const say = (text) => { if (!did.capped.includes(text)) did.capped.push(text); };
+  const grab = async (view, since, where) => {
+    check();
+    const r = await quick(tab, signal, since, patientMs);
+    if (r.lost) say(LOST(where));
+    const s = stamp(await takePage(tab), view);
+    snaps.push(s);
+    return known.add(fileCandidates(s));
+  };
+  const grabAfter = async (view, where) => {   /* snapshots the expansion takes also count */
     const before = snaps.length;
-    await expandAll(tab, snaps, { signal, view });
+    const total = await expandAll(tab, snaps, { signal, view, patientMs });
+    if (total.lost) say(LOST(where));
     let fresh = 0;
     for (let i = before; i < snaps.length; i += 1) fresh += known.add(fileCandidates(snaps[i]));
     return fresh;
@@ -236,57 +256,61 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
   const homeTab = tabs.find((t) => t.selected) || null;
   did.home = homeTab ? { label: homeTab.label, path: homeTab.path } : null;
 
-  const explore = async (tabInfo, deadline, opened) => {
+  const explore = async (tabInfo, deadline, opened, since0) => {
     const where = tabInfo ? ` in the tab "${tabInfo.label}"` : '';
     const view = { tab: tabInfo, more: 0, scroll: 0 };
     const over = () => Date.now() > deadline;
-    if (opened) await grab(view);   /* the tab as it opens */
-    await grabAfter(view);
+    if (opened) await grab(view, since0, `after the tab "${tabInfo.label}" was opened`);   /* the tab as it opens */
+    await grabAfter(view, `after something was opened${where}`);
 
     let flat = 0; let ended = 'done';
     for (let i = 0; ; i += 1) {
       check();
       if (i >= maxMore) { ended = 'steps'; break; }
       if (over()) { ended = 'time'; break; }
-      const more = (await pageOp(tab, 'controls')).more[0];
-      if (!more) break;
-      const r = await pageOp(tab, 'activate', { path: more.path, label: more.label });
-      if (!r.ok) break;
-      did.more += 1; view.more += 1;
-      const fresh = (await grab(view)) + (await grabAfter(view));
+      const buttons = (await pageOp(tab, 'controls')).more;
+      if (!buttons.length) break;
+      const since = Date.now() - 50;
+      let pressed = 0;
+      for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, label: more.label }); if (r.ok) pressed += 1; }
+      if (!pressed) break;
+      did.more += pressed; view.more += 1;
+      const fresh = (await grab(view, since, `after "Load more"${where}`)) + (await grabAfter(view, `after "Load more"${where}`));
       flat = fresh ? 0 : flat + 1;
       if (flat >= 2) break;
     }
-    if (ended !== 'done') did.capped.push(`"Load more"${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxMore} presses`} and may have more files`);
+    if (ended !== 'done') say(`"Load more"${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxMore} presses`} and may have more files`);
 
     let idle = 0; ended = 'done';
     for (let step = 0; ; step += 1) {
       check();
       if (step >= maxScroll) { ended = 'steps'; break; }
       if (over()) { ended = 'time'; break; }
+      const since = Date.now() - 50;
       const r = await pageOp(tab, 'scroll');
       if (!r.moved) break;
       did.scrolls += 1; view.scroll += 1;
       await sleep(120);
-      const fresh = await grab(view);
+      const fresh = await grab(view, since, `after scrolling${where}`);
       idle = fresh ? 0 : idle + 1;
       if (idle >= 2) break;
     }
-    if (ended !== 'done') did.capped.push(`scrolling${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxScroll} steps`} while the page may still have more files`);
+    if (ended !== 'done') say(`scrolling${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxScroll} steps`} while the page may still have more files`);
     if (view.scroll) await pageOp(tab, 'scroll', { reset: true });
   };
 
-  await explore(did.home, started + budgetMs, false);
+  await explore(did.home, started + budgetMs, false, 0);
   for (const t of tabs) {
     if (t.selected) continue;
     check();
+    const since = Date.now() - 50;
     const r = await pageOp(tab, 'activate', { path: t.path, label: t.label });
-    if (!r.ok) { did.capped.push(`the tab "${t.label}" could not be opened (${r.why}), so its files were not looked at`); continue; }
+    if (!r.ok) { say(`the tab "${t.label}" could not be opened (${r.why}), so its files were not looked at`); continue; }
     did.tabs += 1;
-    await explore({ label: t.label, path: t.path }, Math.max(started + budgetMs, Date.now() + minPerTabMs), true);
+    await explore({ label: t.label, path: t.path }, Math.max(started + budgetMs, Date.now() + minPerTabMs), true, since);
   }
   if (did.tabs && homeTab) { await pageOp(tab, 'activate', { path: homeTab.path, label: homeTab.label }); await quick(tab, signal); }
   return did;
 }
 
-module.exports = { stabilize, expand, expandAll, gather, replay, signature, CandidateSet, unionCandidates, unionWithCheck, unionDropped, mergeSections, candidateKey, tabKey, nap, droppedCandidates };
+module.exports = { stabilize, expand, expandAll, gather, replay, signature, CandidateSet, unionCandidates, unionWithCheck, unionDropped, mergeSections, candidateKey, tabKey, nap, droppedCandidates, LOST };

@@ -20,7 +20,7 @@ const discover = require('../backend/links/discover.cjs');
 const { validateLink, fileUrlAllowed, hostProblem } = require('../backend/links/url.cjs');
 const store = require('../backend/links/store.cjs');
 const { Tab, safeUrl, safeText, cleanLabel } = require('../backend/links/tab.cjs');
-const { DownloadManager, pickName, bestName } = require('../backend/links/downloads.cjs');
+const { DownloadManager, pickName, bestName, realExt } = require('../backend/links/downloads.cjs');
 const { createLinkLoader, LinkError, changedToggle, findAllFilesToggle: exportedFinder, TOGGLE_LABEL_RE: exportedRe } = require('../backend/links/index.cjs');
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'links-loader-test-'));
@@ -309,6 +309,14 @@ test('names: Chrome\'s placeholder "download" is replaced by the page\'s name, a
   assert.equal(pickName('downloads.zip', { nameHint: 'Other.zip' }, 'application/zip').name, 'downloads.zip', '"downloads" is a name');
   assert.equal(bestName({ nameHint: 'download', label: 'Q3.pdf', text: 'Download' }), 'Q3.pdf');
   assert.equal(bestName({ nameHint: 'doc42', label: 'no extension', text: 'x' }), 'doc42');
+  assert.equal(bestName({ nameHint: 'download', label: 'Policy 3.2', text: 'Policy 3.2' }, 'application/pdf'), 'Policy 3.2', 'no real extension anywhere: the first name that is not just "download"');
+  assert.equal(bestName({ nameHint: 'Download', rowParts: ['Variance Bridge'], label: 'Variance Bridge updated 1 min ago', text: 'Download' }), 'Variance Bridge', 'the stable part of a row, not its time stamp');
+  assert.equal(pickName('download.pdf', { nameHint: 'download', label: 'Policy 3.2', text: 'Policy 3.2' }, 'application/pdf').name, 'download.pdf', '"3.2" and "v2.1" are not extensions: Chrome\'s name stays');
+  assert.equal(pickName('download', { nameHint: 'download', label: 'Budget v2.1', text: 'Budget v2.1' }, 'application/pdf').name, 'download.pdf');
+  assert.equal(pickName('download.pdf', { nameHint: 'download', label: 'Q3 Bridge.pdf', text: 'Q3 Bridge.pdf' }, 'application/pdf').name, 'Q3 Bridge.pdf');
+  assert.equal(realExt('Policy 3.2', 'application/pdf'), false);
+  assert.equal(realExt('Report.pdf', ''), true);
+  assert.equal(realExt('Report.weird', 'application/x-weird'), false);
   assert.equal(bestName({}), '');
 });
 
@@ -426,14 +434,27 @@ test('candidates: a real file (an extension or a download attribute) is never dr
   assert.deepEqual(fileCandidates({ url: 'https://x.test/', links: [], buttons }).map((c) => c.label), ['Task_A.txt']);
   assert.deepEqual(droppedCandidates({ url: 'https://x.test/', links: [], buttons }).map((d) => [d.label, d.reason]), [['Task_B.txt', 'would submit a form'], ['Delete Atlas.txt', 'looks like an action']]);
 });
-test('candidates: the same file signed twice is one candidate (origin and path, without the signature); two files that differ in a real parameter are two', () => {
-  const mk = (href, text) => ({ text, href, rawHref: href, scheme: 'https:', fileLike: true, why: ['extension'], nameHint: text, ext: 'txt', group: 'F', path: 'a', download: null });
-  const one = fileCandidates({ url: 'https://x.test/', buttons: [], links: [mk('https://x.test/f/A.txt?X-Amz-Signature=1&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/f/A.txt?X-Amz-Signature=2&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/dl?id=1', 'B.txt'), mk('https://x.test/dl?id=2', 'C.txt'), mk('https://x.test/dl?token=a', 'D.txt'), mk('https://x.test/dl?token=b', 'E.txt')] });
+test('candidates: the same address listed twice on a page is one file; the same file signed anew in a later look is still one; two addresses that differ in a token are two files, whatever their labels', () => {
+  const mk = (href, text, extra = {}) => ({ text, href, rawHref: href, scheme: 'https:', fileLike: true, why: ['extension'], nameHint: text, ext: 'txt', group: 'F', path: 'a', download: null, ...extra });
+  const snap = (...links) => ({ url: 'https://x.test/', buttons: [], links });
+  const one = fileCandidates(snap(mk('https://x.test/f/A.txt?X-Amz-Signature=1&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/f/A.txt?X-Amz-Signature=1&X-Amz-Expires=60', 'A.txt icon'), mk('https://x.test/dl?id=1', 'B.txt'), mk('https://x.test/dl?id=2', 'C.txt'), mk('https://x.test/dl?token=a', 'D.txt'), mk('https://x.test/dl?token=b', 'E.txt')));
   assert.deepEqual(one.map((c) => c.label), ['A.txt', 'B.txt', 'C.txt', 'D.txt', 'E.txt']);
   assert.equal(navigateKey('https://x.test/f/A.txt?sig=1&b=2&a=1', 'A'), navigateKey('https://x.test/f/A.txt?a=1&sig=9&b=2', 'A'));
-  const merged = discover.unionCandidates([[{ ...one[0], href: 'https://x.test/f/A.txt?X-Amz-Signature=old' }], [{ ...one[0], href: 'https://x.test/f/A.txt?X-Amz-Signature=new' }]]);
-  assert.equal(merged.length, 1);
-  assert.match(merged[0].href, /new$/, 'the newest address is kept');
+  const later = fileCandidates(snap(mk('https://x.test/f/A.txt?X-Amz-Signature=2&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/dl?id=1', 'B.txt'), mk('https://x.test/dl?id=2', 'C.txt'), mk('https://x.test/dl?token=a2', 'D.txt'), mk('https://x.test/dl?token=b2', 'E.txt')));
+  const merged = discover.unionCandidates([one, later]);
+  assert.deepEqual(merged.map((c) => c.label), ['A.txt', 'B.txt', 'C.txt', 'D.txt', 'E.txt'], 'a re-signed address is the same file');
+  assert.match(merged[0].href, /Signature=2/, 'the newest address is kept');
+  assert.match(merged[3].href, /token=a2/);
+  /* three rows of bare "Download" links whose token IS the file id: three files, in every look, however the tokens are renamed */
+  const row = (token, name) => mk(`https://x.test/dl?token=${token}`, 'Download', { label: name, why: ['download-attribute'], download: '', nameHint: 'Download' });
+  const look1 = fileCandidates(snap(row('aaa111', 'Budget Q1'), row('bbb222', 'Budget Q2'), row('ccc333', 'Budget Q3')));
+  const bare = fileCandidates(snap(mk('https://x.test/dl?token=aaa111', 'Download', { why: ['download-attribute'], download: '' }), mk('https://x.test/dl?token=bbb222', 'Download', { why: ['download-attribute'], download: '' }), mk('https://x.test/dl?token=ccc333', 'Download', { why: ['download-attribute'], download: '' })));
+  assert.equal(look1.length, 3);
+  assert.equal(bare.length, 3, 'no row text at all: the three are still three');
+  const bare2 = fileCandidates(snap(mk('https://x.test/dl?token=aaa999', 'Download', { why: ['download-attribute'], download: '' }), mk('https://x.test/dl?token=bbb999', 'Download', { why: ['download-attribute'], download: '' }), mk('https://x.test/dl?token=ccc999', 'Download', { why: ['download-attribute'], download: '' })));
+  const all = discover.unionCandidates([bare, bare2]);
+  assert.equal(all.length, 3, 'and when each is signed anew they pair up by position');
+  assert.deepEqual(all.map((c) => c.href.slice(-3)), ['999', '999', '999']);
 });
 
 /* ---------------------------------------------------------------- the page reader, on a tiny fake document (the real one runs in tests/links-browser.cjs) */
@@ -636,7 +657,7 @@ test('extractPage: more controls are files - a "#" link or a link without an add
   Object.assign(doc, { body, documentElement: body, title: 'T', readyState: 'complete', querySelectorAll: (sel) => (sel === '*' ? flat(body) : []), querySelector: () => null });
   const sandbox = { document: doc, location: { href: abs('/t/1'), origin: abs('') }, performance: { now: () => 0 }, CSS: { escape: (x) => x }, URL, URLSearchParams };
   const out = JSON.parse(JSON.stringify(vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS, toggleRe: TOGGLE_LABEL_RE.source })})`, sandbox)));
-  assert.deepEqual(out.links.map((l) => [l.text, l.why]), [['Budget_2025.xlsx', ['extension', 'path']]], 'a link called like a file counts; javascript: code and "Annual report v1.2" do not');
+  assert.deepEqual(out.links.map((l) => [l.text, l.why]), [['Budget_2025.xlsx', ['text-extension', 'path']]], 'a link called like a file counts; javascript: code and "Annual report v1.2" do not');
   assert.deepEqual(out.buttons.map((b) => [b.text, b.inForm]), [
     ['Download', false], ['Download', false], ['Download', false], ['Download the notes', false], ['Download Budget5.xlsx', false],
     ['Download', false], ['Download', true], ['Download', true], ['Download', true], ['Download', false], ['Download', false]], 'type=button and reset cannot submit; a default button, a submit input and a formaction can');
@@ -806,6 +827,32 @@ test('waitForSettled: a request that answered and sends nothing (a beacon) or ne
   assert.equal((await waitForSettled(stuck, { maxMs: 300, pollMs: 20, stalledMs: 5000 })).settled, false, 'a stuck script is a real unsettled page');
 });
 
+test('waitForSettled: not quiet before the grace after a click; patient for an API answer past maxMs; says how many requests that the step started were still waiting', async () => {
+  const { waitForSettled } = require('../backend/links/tab.cjs');
+  const fake = (entries = []) => ({ net: { inflight: new Map(entries), quiet: new Set(), lastActivityAt: 0 }, evalIsolated: async () => ({ readyState: 'complete', quiet: 99999, count: 0 }) });
+  const t0 = Date.now();
+  await waitForSettled(fake(), { maxMs: 2000, since: Date.now() - 50, graceMs: 250, pollMs: 20 });
+  assert.ok(Date.now() - t0 >= 190, 'just after a click the request it started is not in the log yet');
+  const quickRun = Date.now();
+  await waitForSettled(fake(), { maxMs: 2000, pollMs: 20 });
+  assert.ok(Date.now() - quickRun < 100, 'no click, no grace');
+  const slow = fake([['a', { type: 'Fetch', startedAt: Date.now() - 50, responded: false, lastDataAt: Date.now() }]]);
+  setTimeout(() => slow.net.inflight.delete('a'), 400);
+  const t1 = Date.now();
+  const r1 = await waitForSettled(slow, { maxMs: 100, patientMs: 3000, since: Date.now() - 100, pollMs: 20 });
+  assert.equal(r1.settled, true);
+  assert.ok(Date.now() - t1 >= 350, 'past maxMs it kept waiting for the answer');
+  assert.ok(!r1.lost);
+  const never = fake([['a', { type: 'Fetch', startedAt: Date.now() - 50, responded: false, lastDataAt: Date.now() }], ['old', { type: 'Fetch', startedAt: Date.now() - 5000, responded: false, lastDataAt: Date.now() - 5000 }]]);
+  const r2 = await waitForSettled(never, { maxMs: 100, patientMs: 400, since: Date.now() - 100, pollMs: 20 });
+  assert.deepEqual([r2.settled, r2.apiPending, r2.lost], [true, 2, 1], 'two were waiting, one of them started by this step');
+  const ticker = fake();
+  ticker.evalIsolated = async () => ({ readyState: 'complete', quiet: 0, count: 1 });
+  const t2 = Date.now();
+  const r3 = await waitForSettled(ticker, { maxMs: 200, patientMs: 5000, pollMs: 20 });
+  assert.equal(r3.settled, false);
+  assert.ok(Date.now() - t2 < 600, 'a DOM that never goes quiet still ends at maxMs when no request is waiting');
+});
 function scriptedTab(script) {
   const { extractPage, pageOps } = require('../backend/links/page.cjs');
   const log = []; const snaps = [];
@@ -900,6 +947,31 @@ test('discover gather: EVERY tab gets "Load more" and scrolling, not only the op
   assert.ok(limited.capped.some((t) => /"Load more" in the tab "A" stopped at 1 presses and may have more files/.test(t)), limited.capped.join(' | '));
   assert.ok(limited.capped.some((t) => /in the tab "B"/.test(t)), 'the note says which tab');
 });
+test('discover gather: a tab whose API has not answered when the step ends is waited for, and said so when it is still pending (a note, not silence)', async () => {
+  const state = { cur: 'A', pending: false };
+  const script = {
+    snapshot: () => fileSnap(...(state.cur === 'A' ? ['a1'] : state.pending ? [] : ['b1'])),
+    op: (arg) => {
+      if (arg.op === 'controls') return { tabs: ['A', 'B'].map((t) => ({ label: t, path: `tab${t}`, selected: state.cur === t })), more: [] };
+      if (arg.op === 'activate') { state.cur = arg.path.slice(3); if (state.cur === 'B') { state.pending = true; pending.tab.net.inflight.set('r', { type: 'Fetch', startedAt: Date.now(), responded: false, lastDataAt: Date.now() }); } return { ok: true }; }
+      return { opened: 0, expanded: 0 };
+    },
+  };
+  const pending = scriptedTab(script);
+  const did = await discover.gather(pending.tab, [fileSnap('a1')], { patientMs: 600, minPerTabMs: 1000 });
+  assert.ok(did.capped.some((t) => /a request of the page was still waiting for its answer after the tab "B" was opened, so some files may be missing/.test(t)), did.capped.join(' | '));
+  const answered = { cur: 'A' };
+  const ok = scriptedTab({
+    snapshot: () => fileSnap(...(answered.cur === 'A' ? ['a1'] : ['b1'])),
+    op: (arg) => {
+      if (arg.op === 'controls') return { tabs: ['A', 'B'].map((t) => ({ label: t, path: `tab${t}`, selected: answered.cur === t })), more: [] };
+      if (arg.op === 'activate') { answered.cur = arg.path.slice(3); if (answered.cur === 'B') { ok.tab.net.inflight.set('r', { type: 'Fetch', startedAt: Date.now(), responded: false, lastDataAt: Date.now() }); setTimeout(() => ok.tab.net.inflight.delete('r'), 700); } return { ok: true }; }
+      return { opened: 0, expanded: 0 };
+    },
+  });
+  const done = await discover.gather(ok.tab, [fileSnap('a1')], { patientMs: 5000, minPerTabMs: 1000 });
+  assert.deepEqual(done.capped, [], 'it answered in time: nothing to say');
+});
 test('discover replay: the tab, the "Load more" presses, then the scroll steps, in the order gather took them', async () => {
   const page = tabbedPage();
   const { tab, log } = scriptedTab(page.script);
@@ -926,7 +998,7 @@ test('discover expandAll: repeats until nothing new opens (a folder inside a fol
   const { tab } = scriptedTab({ snapshot: () => fileSnap('a', `b${n}`), op: () => { n += 1; return n <= 2 ? { opened: 0, expanded: 1 } : { opened: 0, expanded: 0 }; } });
   const snaps = [];
   const total = await discover.expandAll(tab, snaps, { view: { tab: null, more: 0, scroll: 0 } });
-  assert.deepEqual(total, { opened: 0, expanded: 2, passes: 2 });
+  assert.deepEqual(total, { opened: 0, expanded: 2, passes: 2, lost: 0 });
   assert.equal(snaps.length, 2);
   assert.deepEqual(snaps[0].view, { tab: null, more: 0, scroll: 0 });
   const stuck = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 1, expanded: 0 }) });
@@ -943,7 +1015,7 @@ test('discover expand: opens details and expanders, and takes a new look only wh
   assert.equal(s1.length, 1);
   const some = scriptedTab({ snapshot: () => fileSnap('a', 'b'), op: () => ({ opened: 1, expanded: 0 }) });
   const s2 = [fileSnap('a')];
-  assert.deepEqual(await discover.expand(some.tab, s2, {}), { opened: 1, expanded: 0 });
+  assert.deepEqual(await discover.expand(some.tab, s2, {}), { opened: 1, expanded: 0, lost: 0 });
   assert.equal(s2.length, 2);
 });
 

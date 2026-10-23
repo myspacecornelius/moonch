@@ -99,6 +99,28 @@ function extractPage(opts) {
     }
     return null;
   };
+  /* what a row says besides the control: its label (the row text without the control's own text), the file-name phrase it holds, and the
+     STABLE parts of it (cells and lines that are not a size, a date, a time or "5 min ago", cut where such a thing starts), which are
+     what tells two rows apart when their text changes every minute */
+  const VOLATILE_CELL = /^[\d\s.,:%$\/-]+$|^\d+(?:\.\d+)?\s*(?:b|kb|mb|gb|bytes?)$/i;
+  const VOLATILE_CUT = /\s*(?:\b(?:updated|modified|created|edited|uploaded|added|ago|today|yesterday|just now)\b|\b\d+\s*(?:s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|days?|weeks?|months?|years?)\b|\b\d+(?:\.\d+)?\s?(?:KB|MB|GB|bytes?)\b|\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\b\d{1,2}:\d{2}\b).*$/i;
+  const rowInfo = (el, text) => {
+    const row = rowOf(el, text);
+    const full = row ? norm(norm(row.innerText || row.textContent).replace(text, ' ')) : '';
+    if (!full) return null;
+    const raw = String(row.innerText || '');
+    const lines = (raw ? raw.split(/[\t\n\r]+/) : []).map(norm).filter(Boolean);
+    let nameHint = '';
+    for (const line of lines.length ? lines : [full]) { const m = NAME_RE.exec(line.replace(text, ' ').trim()); if (m) { nameHint = m[1]; break; } }
+    const parts = [];
+    for (const line of lines.length ? lines : [norm(row.textContent)]) {
+      const cell = norm(line.split(text).join(' '));
+      if (!cell || VOLATILE_CELL.test(cell)) continue;
+      const stable = norm(cell.replace(VOLATILE_CUT, ''));
+      if (stable) parts.push(clip(stable, 80));
+    }
+    return { label: clip(full, 160), nameHint, parts: parts.slice(0, 4) };
+  };
   const keyOf = (el) => { const id = el.getAttribute('id'); if (id) return 'id:' + clip(id, 80); const t = el.getAttribute('data-testid'); return t ? 'testid:' + clip(t, 80) : ''; };
   const withoutControls = (node) => { const c = node.cloneNode(true); c.querySelectorAll('input,select,textarea,button').forEach((n) => n.remove()); return norm(c.textContent); };
   /* the accessible name: aria-labelledby, aria-label, a <label>, the element's own text, a title; with `deep`, when that is empty: the
@@ -197,14 +219,17 @@ function extractPage(opts) {
       if (download !== null) why.push('download-attribute');
       const textExt = extOf(norm(el.textContent));
       if (ext && FILE_EXT.test(ext)) why.push('extension');
-      else if (textExt && FILE_EXT.test(textExt)) why.push('extension');   /* the link is called Budget_2025.xlsx; its address says nothing */
+      else if (textExt && FILE_EXT.test(textExt)) why.push('text-extension');   /* the link is called Budget_2025.xlsx; its address says nothing. Only a hint that it is a file: it never waives the rules about addresses */
       else if (ext && /[a-z]/i.test(ext) && /^[a-z0-9]{2,5}$/i.test(ext) && !WEB_EXT.test(ext)) why.push('extension-guess');   /* an unknown extension that is not a web page: probably a file (.bin, .dat) */
       if (u && /(^|\/)(download|downloads|attachments?|files?|blob|export|assets)\/[^/]/i.test(u.pathname)) why.push('path');   /* /files/12 yes; /files and /assets, the pages themselves, no */
       if (u && /(^|[?&])(x-amz-signature|signature|x-goog-signature|sig|se|sp)=/i.test(u.search)) why.push('signed-url');
       const fileLike = why.length > 0 && Boolean(u) && /^(https?|blob|data):$/.test(u.protocol);
       if (!fileLike || !visible(el)) continue;
       const text = clip(norm(el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.title) || (el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
-      out.links.push({ text, href: el.href, rawHref: clip(raw, 300), scheme: u.protocol, download, ext, nameHint: clip(nameHint, 160), fileLike, why, sameOrigin: u.origin === location.origin, path: cssPath(el), group });
+      /* a link that only says "Download": the row says which file it is */
+      let label = text; let parts = [];
+      if (/^(download|export)\b/i.test(text) && !(extOf(text) && FILE_EXT.test(extOf(text)))) { const info = rowInfo(el, text); if (info) { label = info.label; parts = info.parts; if (info.nameHint && !extOf(nameHint)) nameHint = info.nameHint; } }
+      out.links.push({ text, label, rowParts: parts, href: el.href, rawHref: clip(raw, 300), scheme: u.protocol, download, ext, nameHint: clip(nameHint, 160), fileLike, why, sameOrigin: u.origin === location.origin, path: cssPath(el), group });
       continue;
     }
     if (tag === 'BUTTON' || tag === 'A' || role === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type))) {
@@ -227,18 +252,12 @@ function extractPage(opts) {
       /* inForm: pressing it would SUBMIT a form (a button or input of a form that is not type=button or reset, or one with a formaction) */
       const btype = String(el.getAttribute('type') || '').toLowerCase();
       const submitsForm = el.hasAttribute('formaction') || (Boolean(el.form) && (tag === 'BUTTON' ? btype !== 'button' && btype !== 'reset' : tag === 'INPUT' && /^(submit|image)$/.test(btype)));
-      let label = text; let nameHint = text;
+      let label = text; let nameHint = text; let parts = [];
       if (!ext) {   /* "Download" says nothing: the text of its row says which file */
-        const row = rowOf(el, text);
-        const rowText = row ? norm(norm(row.innerText || row.textContent).replace(text, ' ')) : '';   /* innerText puts a space between table cells */
-        if (rowText) {
-          label = clip(rowText, 160);
-          /* the full name phrase of the first line or cell that holds a file name, not its last word */
-          const lines = String(row.innerText || '').split(/[\t\n\r]+/).map(norm).filter(Boolean);
-          for (const line of lines.length ? lines : [rowText]) { const m = NAME_RE.exec(line.replace(text, ' ').trim()); if (m) { nameHint = m[1]; break; } }
-        }
+        const info = rowInfo(el, text);
+        if (info) { label = info.label; parts = info.parts; if (info.nameHint) nameHint = info.nameHint; }
       }
-      out.buttons.push({ text, label, nameHint: clip(nameHint, 160), fileLike, ext, dataUrl: dataUrl ? clip(dataUrl, 500) : null, disabled: Boolean(el.disabled), inForm: submitsForm, path: cssPath(el), group });
+      out.buttons.push({ text, label, rowParts: parts, nameHint: clip(nameHint, 160), fileLike, ext, dataUrl: dataUrl ? clip(dataUrl, 500) : null, disabled: Boolean(el.disabled), inForm: submitsForm, path: cssPath(el), group });
       continue;
     }
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
@@ -426,8 +445,11 @@ function pageOps(opts) {
     if (typeof opts.label === 'string' && opts.label !== '' && text !== opts.label) return { ok: false, why: 'the element is no longer the one that was listed' };
     if (typeof opts.row === 'string' && opts.row !== '' && opts.row !== text) {   /* a "Download" button: which row is it in? */
       const rowEl = rowOf(el, text);
-      const rowText = rowEl ? clip(norm(norm(rowEl.innerText || rowEl.textContent).replace(text, ' ')), 160) : '';
-      if (rowText !== opts.row && !(typeof opts.name === 'string' && opts.name !== '' && rowText.includes(opts.name))) return { ok: false, why: 'the row of the element is no longer the one that was listed' };
+      const full = rowEl ? norm(norm(rowEl.innerText || rowEl.textContent).replace(text, ' ')) : '';
+      const rowText = clip(full, 160);
+      const parts = Array.isArray(opts.parts) ? opts.parts.filter((x) => typeof x === 'string' && x !== '') : [];
+      const same = rowText === opts.row || (typeof opts.name === 'string' && opts.name !== '' && full.includes(opts.name)) || (parts.length > 0 && parts.every((x) => full.includes(x)));   /* the stable parts survive a "5 min ago" that changed */
+      if (!rowEl || !same) return { ok: false, why: 'the row of the element is no longer the one that was listed' };
     }
     if (typeof opts.option === 'number' && el.tagName === 'SELECT') {
       el.selectedIndex = opts.option;
@@ -483,6 +505,8 @@ function classify(snap) {
   const drop = (label, group, reason) => dropped.push({ label: String(label || ''), group: String(group || ''), reason });
   for (const l of snap.links || []) {
     if (!l.fileLike) continue;
+    /* real: the ADDRESS says it is a file (an extension in its path) or the link has a download attribute. The link's own words do not count:
+       "Remove Q4.pdf" next to /api/files/13/remove is still an action. */
     const real = (l.why || []).some((w) => w === 'extension' || w === 'download-attribute');
     const blocked = real ? NEVER_ACTION_PARAM_RE.test(l.rawHref) : (NEVER_TEXT_RE.test(l.text) || NEVER_HREF_RE.test(l.rawHref));
     if (blocked) {
@@ -494,14 +518,15 @@ function classify(snap) {
       const k = `click|${l.path}|${l.text}`;
       if (seen.has(k)) continue;
       seen.add(k);
-      candidates.push({ mode: 'click', kind: 'link', download, text: l.text, href: null, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path, view });
+      candidates.push({ mode: 'click', kind: 'link', download, text: l.text, href: null, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.label || l.text || '', rowParts: l.rowParts || [], path: l.path, view });
       continue;
     }
     if (!/^https?:$/.test(l.scheme)) continue;
-    const k = navigateKey(l.href, l.text);
+    /* the same address listed twice on one page is one file; two addresses that differ in a token are two (CandidateSet pairs them across looks) */
+    const k = `n|${l.href}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    candidates.push({ mode: 'navigate', kind: 'link', download, text: l.text, href: l.href, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path, view });
+    candidates.push({ mode: 'navigate', kind: 'link', download, text: l.text, href: l.href, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.label || l.text || '', rowParts: l.rowParts || [], path: l.path, view });
   }
   const buttons = [];
   for (const b of snap.buttons || []) {
@@ -512,10 +537,10 @@ function classify(snap) {
     if (b.inForm) { if (!all) drop(b.label || b.text, b.group, 'would submit a form'); continue; }
     let href = null;
     if (b.dataUrl) { try { href = new URL(b.dataUrl, snap.url).href; } catch (e) { href = null; } }
-    if (href && seen.has(navigateKey(href, b.label || b.text))) continue;
-    if (href) seen.add(navigateKey(href, b.label || b.text));
+    if (href && seen.has(`n|${href}`)) continue;
+    if (href) seen.add(`n|${href}`);
     /* A button is clicked in the page (it may build a blob: URL), because its data-url, if any, is only a hint. */
-    buttons.push({ mode: 'click', kind: 'button', download: false, text: b.text, href, nameHint: b.nameHint || b.text, ext: b.ext, group: b.group || '', label: b.label || b.text, path: b.path, view });
+    buttons.push({ mode: 'click', kind: 'button', download: false, text: b.text, href, nameHint: b.nameHint || b.text, ext: b.ext, group: b.group || '', label: b.label || b.text, rowParts: b.rowParts || [], path: b.path, view });
   }
   const single = buttons.filter((b) => !ALL_BUTTON_RE.test(b.text));
   return { candidates: candidates.concat(candidates.length + single.length ? single : buttons), dropped };

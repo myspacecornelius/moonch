@@ -100,7 +100,7 @@ async function startPlatform() {
   const person = { signin: false, flips: new Set() };
   const flags = { openAccess: false, mfa: false };
   const requests = [];
-  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0, canaryHits: 0 };
+  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0, canaryHits: 0, apiActions: 0 };
   const servers = [];
   const listen = (handler, host) => new Promise((resolve, reject) => {
     const server = http.createServer(handler);
@@ -397,6 +397,53 @@ function render(k) { document.getElementById('t1').setAttribute('aria-selected',
   const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
   p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
 document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* links whose words say they are files but whose ADDRESSES are actions: none of them may be requested */
+    'safety-101': () => doc('Safety task', `<ul><li><a href="/data/ok.txt">ok.txt</a></li><li><a href="/api/files/13/remove">Remove Q4.pdf</a></li><li><a href="/api/revoke/99">Revoke access to notes.txt</a></li>
+<li><a href="/api/files/12/delete" aria-label="Delete Budget.xlsx"><svg width="10" height="10"></svg></a></li><li><a href="/api/items/7?action=delete">Delete log.txt</a></li><li><button type="button" id="b">Delete Budget.xlsx</button></li></ul>
+<script>document.getElementById('b').onclick = () => fetch('/api/files/12/delete');</script>`),
+    /* three rows, each a bare Download link whose address differs only in a token (the token IS the file id) */
+    'tokens-102': () => doc('Token task', `<table><tbody><tr><td>Budget Q1</td><td><a href="/dl?token=aaa111" download>Download</a></td></tr><tr><td>Budget Q2</td><td><a href="/dl?token=bbb222" download>Download</a></td></tr><tr><td>Budget Q3</td><td><a href="/dl?token=ccc333" download>Download</a></td></tr></tbody></table>`),
+    /* extension-less file names; each row carries a relative time that is rewritten every 700 ms */
+    'volatile-103': () => doc('Volatile task', `<div id="t"></div><script>
+const names = ['Variance Bridge', 'Board Memo', 'Sales Ledger']; let tick = 0;
+function draw() { tick += 1; document.getElementById('t').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td>updated ' + tick + ' min ago</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => { const f = b.dataset.n.replace(/ /g, '_') + '.txt'; const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['content of ' + f])); a.download = f; document.body.appendChild(a); a.click(); a.remove(); }; }); }
+draw(); setInterval(draw, 700);</script>`),
+    /* the Reference tab fills from an API that answers after 4 s */
+    'pendingtab-104': () => doc('Slow tab task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>
+let cur = 't1';
+function render() { document.getElementById('t1').setAttribute('aria-selected', cur === 't1'); document.getElementById('t2').setAttribute('aria-selected', cur === 't2'); const p = document.getElementById('panel');
+  if (cur === 't1') { p.innerHTML = '<ul><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul>'; return; }
+  p.innerHTML = '<p>Loading...</p>';
+  fetch('/api/ref?delay=4000').then((r) => r.json()).then((j) => { if (cur === 't2') p.innerHTML = '<ul>' + j.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('') + '</ul>'; }); }
+document.getElementById('t1').onclick = () => { cur = 't1'; render(); }; document.getElementById('t2').onclick = () => { cur = 't2'; render(); }; render();</script>`),
+    /* each "Load more" press fetches 10 files from an API that takes 3.5 s (30 files in all) */
+    'pendingmore-105': () => doc('Slow more task', `<ul id="l"></ul><button id="more">Load more</button><script>
+let shown = 0; const N = 30;
+function more() { fetch('/api/more?delay=3500&from=' + shown).then((r) => r.json()).then((next) => { shown += next.length; document.getElementById('l').insertAdjacentHTML('beforeend', next.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('')); if (shown >= N) document.getElementById('more').remove(); }); }
+document.getElementById('more').onclick = more; more();</script>`),
+    /* the switch is called "Everything"; the person turns it on; the router moves to a SIBLING path (not below the link's path) */
+    'flipmain-106': () => doc('Flip main task', `<label><input type="checkbox" id="all"> Everything</label><div id="list"></div><script>${BLOB}
+function render() { const on = location.pathname === '/tasks/flipall-106'; document.getElementById('all').checked = on;
+  const names = ['Person_Task.txt'].concat(on ? ['Person_A.txt', 'Person_B.txt'] : []);
+  document.getElementById('list').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('all').onchange = (e) => { history.pushState({}, '', e.target.checked ? '/tasks/flipall-106' : '/tasks/flipmain-106'); render(); };
+render();
+setInterval(async () => { const j = await (await fetch('/__person/flip?name=flipmain-106')).json(); if (j.go) document.getElementById('all').click(); }, 150);</script>`),
+    /* blob Download buttons INSIDE an iframe (the download names the iframe's frame), a closed details there, and two "Load more" buttons on the page */
+    'flipall-106': () => PAGES['flipmain-106'](),
+    'framebtn-107': () => {
+      const inner = `<table><tbody><tr><td>Frame_Btn_A.txt</td><td><button class="dl" data-n="Frame_Btn_A.txt">Download</button></td></tr><tr><td>Frame_Btn_B.txt</td><td><button class="dl" data-n="Frame_Btn_B.txt">Download</button></td></tr></tbody></table><script>function dl(n){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['content of ' + n])); a.download = n; document.body.appendChild(a); a.click(); a.remove(); }
+document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });<\/script>`;
+      return doc('Frame button task', `<iframe style="width:600px;height:200px" srcdoc="${inner.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"></iframe>`);
+    },
+    /* two sections with a "Load more" each: the first button never goes away and adds nothing after its first press; the second adds 5 files a press up to 15 */
+    'twomore-108': () => doc('Two more task', `<h2>Section A</h2><ul id="a"><li><a href="/data/Sec_A_01.txt">Sec_A_01.txt</a></li></ul><button id="ma">Load more</button><h2>Section B</h2><ul id="b"></ul><button id="mb">Load more</button><script>
+let nb = 0; function moreB() { const next = Array.from({ length: 5 }, (_, i) => 'Sec_B_' + String(nb + i + 1).padStart(2, '0') + '.txt'); nb += 5; document.getElementById('b').insertAdjacentHTML('beforeend', next.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('')); if (nb >= 15) document.getElementById('mb').remove(); }
+document.getElementById('mb').onclick = moreB; moreB(); document.getElementById('ma').onclick = () => {};</script>`),
+    /* addresses that end in an opaque segment, a pdf content type, and names that do not end in an extension ("3.2", "v2.1") */
+    'names-109': () => doc('Names task', `<ul><li><a href="/files/pdf/31/download">Policy 3.2</a></li><li><a href="/files/pdf/32/download">Budget v2.1</a></li><li><a href="/files/pdf/33/download">Variance Bridge</a></li></ul>`),
     /* a fire-and-forget beacon (keepalive fetch whose body nobody reads) and a long poll that never answers */
     'beacon-098': () => doc('Beacon task', `<ul><li><a href="/data/Beacon_A.txt">Beacon_A.txt</a></li></ul><script>fetch('/beacon', { method: 'POST', body: 'x', keepalive: true });</script>`),
     'hang-099': () => doc('Long poll task', `<ul><li><a href="/data/Hang_A.txt">Hang_A.txt</a></li></ul><script>fetch('/api/hang').then((r) => r.text());</script>`),
@@ -452,6 +499,16 @@ box.addEventListener('scroll', draw); draw();</script>`),
       return send(res, 200, 'text/plain', `content of ${name}`, { 'content-disposition': `attachment; filename="${name}"` });
     }
     if (u.pathname.startsWith('/hit/')) return send(res, 200, 'text/plain', 'ok');
+    if (u.pathname === '/dl') { const t = u.searchParams.get('token'); return send(res, 200, 'application/octet-stream', `content of file_${t}.txt`, { 'content-disposition': `attachment; filename="file_${t}.txt"` }); }
+    if (u.pathname === '/api/ref') { setTimeout(() => send(res, 200, 'application/json', JSON.stringify(['Ref_1.txt', 'Ref_2.txt'])), Number(u.searchParams.get('delay')) || 0); return undefined; }
+    if (u.pathname === '/api/more') {
+      const from = Number(u.searchParams.get('from')) || 0;
+      setTimeout(() => send(res, 200, 'application/json', JSON.stringify(Array.from({ length: 10 }, (_, i) => `Slow_${String(from + i + 1).padStart(3, '0')}.txt`))), Number(u.searchParams.get('delay')) || 0);
+      return undefined;
+    }
+    const pdf = /^\/files\/pdf\/(\d+)\/download$/.exec(u.pathname);
+    if (pdf) return send(res, 200, 'application/pdf', `%PDF-1.4 content of ${pdf[1]}`);
+    if (u.pathname.startsWith('/api/') && u.pathname !== '/api/world' && u.pathname !== '/api/hang') { stats.apiActions += 1; return send(res, 200, 'text/plain', 'done'); }   /* anything else under /api/ is an action the loader must never ask for */
     if (u.pathname === '/beacon') return send(res, 200, 'text/plain', 'ok');
     if (u.pathname === '/api/hang') return undefined;   /* a long poll: no answer, ever */
     const mime = /^\/mime\/(\d+)\/download$/.exec(u.pathname);
@@ -1160,6 +1217,54 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
       if (slug === 'beacon-098') assert.ok(Date.now() - t0 < 14000, `a beacon is not waited for until the 15 s deadline (${Date.now() - t0} ms)`);
     }
     ok('a beacon that nobody reads, and a long poll that never answers, are idle requests: the load is not held to the 15 s deadline for the beacon, and neither makes the done message say "settled:false"');
+
+    /* 11d. Round 4: addresses that are actions, tokens, volatile rows, slow tabs and pages, the person's flip, frames, names. */
+    const eighth = await batch([
+      { slug: 'safety-101' }, { slug: 'tokens-102' }, { slug: 'volatile-103' }, { slug: 'pendingtab-104' },
+      { slug: 'flipmain-106', handlers: (l) => ({ 'needs-person': async (state) => { platform.flip('flipmain-106'); await delay(1500); l.continue(state.id); } }) }, { slug: 'framebtn-107' },
+    ]);
+    const safe = get(eighth, 'safety-101');
+    assert.equal(safe.final.state, 'done', JSON.stringify(safe.final));
+    assert.deepEqual(fileNames(safe.final), ['ok.txt']);
+    assert.deepEqual(safe.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Delete Budget.xlsx', 'looks like an action'], ['Delete log.txt', 'looks like an action'], ['Remove Q4.pdf', 'looks like an action'], ['Revoke access to notes.txt', 'looks like an action']]);
+    assert.equal(platform.stats.apiActions, 0, 'no address under /api/ was requested');
+    assert.deepEqual(platform.requests.filter((r) => /^\/api\/(files|revoke|items)/.test(r.path)), [], 'not by a link, not by a click');
+    ok('links whose words say "file" ("Remove Q4.pdf", "Revoke access to notes.txt", an icon link called "Delete Budget.xlsx") but whose addresses are actions (/api/files/13/remove, /api/revoke/99, ?action=delete) are never requested; words alone never waive the address rules, and each is listed in skipped as "looks like an action"');
+    const tok = get(eighth, 'tokens-102');
+    assert.equal(tok.final.state, 'done', JSON.stringify(tok.final));
+    assert.deepEqual(fileNames(tok.final), ['file_aaa111.txt', 'file_bbb222.txt', 'file_ccc333.txt']);
+    assert.deepEqual(tok.final.skipped, []);
+    assert.equal(platform.count('/dl'), 3, 'three requests, one per token');
+    ok('three rows of bare "Download" links that differ only in a token (the token is the file id) are three files: a token is stripped only to pair a re-signed address with its earlier look, never to merge two addresses seen together');
+    clean(get(eighth, 'volatile-103'), ['Variance_Bridge.txt', 'Board_Memo.txt', 'Sales_Ledger.txt'], 'volatile rows');
+    assert.ok(get(eighth, 'volatile-103').final.message.indexOf('taken for another') < 0);
+    ok('extension-less names whose rows carry "updated N min ago", rewritten every 700 ms: the stable part of the row is the identity, so the 3 rows stay 3 candidates and all 3 files are saved');
+    const slowTab = get(eighth, 'pendingtab-104');
+    clean(slowTab, ['Task_A.txt', 'Ref_1.txt', 'Ref_2.txt'], 'slow tab');
+    assert.doesNotMatch(slowTab.final.message, /settled:false|still waiting/);
+    ok('a tab whose list comes from an API that answers after 4 s: the step waits for the answer (a short settle used to forget the pending request), and the Reference files are saved');
+    const flipped = get(eighth, 'flipmain-106');
+    assert.equal(flipped.final.state, 'done', JSON.stringify(flipped.final));
+    assert.deepEqual(fileNames(flipped.final), ['Person_A.txt', 'Person_B.txt', 'Person_Task.txt']);
+    assert.deepEqual(flipped.final.toggle, toggle(true, 'Everything', true, 1, 3, true));
+    assert.equal(platform.count('/tasks/flipmain-106'), 1, 'the task link was loaded once: the page the person left was not reloaded');
+    ok('the person turns on a switch whose router moves to a SIBLING path: the page they left is the task page, it is not reloaded (the flip would be lost), all 3 files are saved and the switch is learned');
+    clean(get(eighth, 'framebtn-107'), ['Frame_Btn_A.txt', 'Frame_Btn_B.txt'], 'frame buttons');
+    ok('blob Download buttons inside an iframe: a download that starts in a subframe is tracked like the tab\'s own, both files are saved');
+    for (const r of eighth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+    const ninth = await batch([
+      { slug: 'pendingmore-105', loader: { timeouts: { expand: 60000, settle: 15000 } } }, { slug: 'twomore-108' }, { slug: 'names-109' },
+    ]);
+    clean(get(ninth, 'pendingmore-105'), range('Slow_', 30, 3), 'slow more');
+    assert.doesNotMatch(get(ninth, 'pendingmore-105').final.message, /still waiting/);
+    ok('"Load more" served by an API that takes 3.5 s a press: each press waits for its answer, all 30 files are found');
+    clean(get(ninth, 'twomore-108'), ['Sec_A_01.txt', ...range('Sec_B_', 15)], 'two load more');
+    ok('two "Load more" buttons on one page, the first never goes away: every visible one is pressed each round, so the second list is not starved (16 files)');
+    const named = get(ninth, 'names-109');
+    assert.equal(named.final.state, 'done', JSON.stringify(named.final));
+    assert.deepEqual(fileNames(named.final), ['Budget v2.1.pdf', 'Policy 3.2.pdf', 'Variance Bridge.pdf']);
+    ok('link texts that end in "3.2" or "v2.1" are not extensions: the files keep the words and get the extension of their content type (Policy 3.2.pdf), and a name with no extension gets .pdf too');
+    for (const r of ninth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
     platform.flags.openAccess = false;
     for (const r of [...first5, ...second5]) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
 

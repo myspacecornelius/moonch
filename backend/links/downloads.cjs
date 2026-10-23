@@ -56,10 +56,23 @@ const INLINE_TYPE = (ct) => ct.startsWith('text/') || ct.startsWith('image/') ||
 const EXT_BY_TYPE = { 'application/pdf': '.pdf', 'application/zip': '.zip', 'text/csv': '.csv', 'text/plain': '.txt', 'application/json': '.json', 'image/png': '.png', 'image/jpeg': '.jpg',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx', 'application/msword': '.doc', 'application/vnd.ms-excel': '.xls' };
 const HAS_EXT = /\.[A-Za-z0-9]{1,8}$/;
-/* The best name the page gave for a candidate: nameHint, label or text, the first that ends in an extension; otherwise nameHint. */
-function bestName(candidate) {
-  const names = [candidate.nameHint, candidate.label, candidate.text].map((n) => String(n || '').trim()).filter(Boolean);
-  return names.find((n) => HAS_EXT.test(n)) || names[0] || '';
+/* An extension counts as one only when it is a known file extension or the one the content type stands for: "Policy 3.2" and
+   "Budget v2.1" do not end in an extension, "Q3.pdf" does. */
+const KNOWN_EXT = /^(pdf|docx?|xlsx?|xlsm|xlsb|csv|tsv|txt|md|json|zip|7z|tar|gz|tgz|rar|rtf|pptx?|odt|ods|odp|png|jpe?g|gif|svg|eml|msg|xml|parquet|html?|bin|dat|log|ya?ml|ics|vcf)$/i;
+function realExt(name, contentType = '') {
+  const m = HAS_EXT.exec(String(name || ''));
+  if (!m) return false;
+  const ext = m[0].slice(1).toLowerCase();
+  return KNOWN_EXT.test(ext) || EXT_BY_TYPE[contentType] === `.${ext}`;
+}
+/* The name with the extension of the content type added when it has no real one (when the type is one we know). */
+const withRealExt = (name, contentType) => (realExt(name, contentType) || !EXT_BY_TYPE[contentType] ? name : name + EXT_BY_TYPE[contentType]);
+/* The best name the page gave for a candidate: nameHint, the stable part of its row, label or text, the first that ends in a real
+   extension; otherwise the first that is not just "download". */
+function bestName(candidate, contentType = '') {
+  const stable = Array.isArray(candidate.rowParts) ? candidate.rowParts.join(' ') : '';
+  const names = [candidate.nameHint, stable, candidate.label, candidate.text].map((n) => String(n || '').trim()).filter(Boolean);
+  return names.find((n) => realExt(n, contentType)) || names.find((n) => !GENERIC_BASE.test(n)) || names[0] || '';
 }
 /* "download", "download (2)" with or without an extension: the name Chrome makes when the server gave none (it adds the extension of the
    content type itself, so "Archive_Pack.zip" arrives as "download.zip"). */
@@ -68,8 +81,8 @@ function pickName(suggested, candidate, contentType) {
   let name = suggested;
   const generic = !name || GENERIC_BASE.test(String(name).replace(HAS_EXT, ''));
   if (generic || !HAS_EXT.test(name)) {
-    const hint = bestName(candidate);
-    if (HAS_EXT.test(hint) && !GENERIC_BASE.test(hint.replace(HAS_EXT, ''))) name = hint;
+    const hint = bestName(candidate, contentType);
+    if (realExt(hint, contentType) && !GENERIC_BASE.test(hint.replace(HAS_EXT, ''))) name = hint;
     else if (!name) name = hint || 'download';
   }
   const picked = sanitizeFileName(name);
@@ -190,7 +203,7 @@ class DownloadManager {
       return { action: 'fail' };
     }
     if (!attachment && (INLINE_TYPE(job.contentType) || job.contentType === 'text/html')) {
-      return { action: 'attachment', filename: sanitizeFileName(bestName(job.candidate) || 'file').name };
+      return { action: 'attachment', filename: sanitizeFileName(withRealExt(bestName(job.candidate, job.contentType) || 'file', job.contentType)).name };
     }
     return { action: 'continue' };
   }
@@ -206,7 +219,7 @@ class DownloadManager {
       terminal: null, completed: null, browserCancelled: false, httpStatus: null, contentType: null, declared: null, tab: null,
     };
     const result = { id: job.id, href: safeUrl(candidate.href || ''), mode: candidate.mode, state: 'failed' };
-    let tab = null; let gate = null; let ownTab = false;
+    let tab = null; let gate = null; let ownTab = false; let frames = [];
     try {
       if (signal && signal.aborted) throw Object.assign(new Error('Cancelled.'), { code: 'CANCELLED' });
       if (candidate.mode === 'navigate') {
@@ -230,10 +243,12 @@ class DownloadManager {
         else if (this.ensurePage) await this.ensurePage();
         if (!where.ok) job.terminal = { state: 'failed', detail: safeText(where.why || 'the element could not be found again', 160) };
         else {
-          this.byFrame.set(tab.frameId, job);
+          /* a download that starts in an iframe of the task tab names the iframe's frame, not the tab's */
+          frames = typeof tab.frameIds === 'function' ? await tab.frameIds() : [tab.frameId];
+          for (const f of frames) this.byFrame.set(f, job);
           this.clickJob = job;
           /* the element must still be the one that was listed: its own text, and for a bare "Download" the text of its row */
-          const clicked = await pageOp(tab, 'activate', { path: where.path, label: candidate.text, row: candidate.label, name: candidate.nameHint, ...(candidate.kind === 'link' ? { never: '' } : {}) });
+          const clicked = await pageOp(tab, 'activate', { path: where.path, label: candidate.text, row: candidate.label, name: candidate.nameHint !== candidate.text ? candidate.nameHint : '', parts: candidate.rowParts || [], ...(candidate.kind === 'link' ? { never: '' } : {}) });
           if (!clicked.ok) job.terminal = { state: 'failed', detail: clicked.why };
         }
       }
@@ -246,6 +261,7 @@ class DownloadManager {
       this.clickJob = null;
       await this.closePopups();
       this.byFrame.delete(tab ? tab.frameId : '');
+      for (const f of frames) this.byFrame.delete(f);
       if (gate) await gate.stop().catch(() => {});
       if (ownTab && tab) await tab.close();
       if (job.guid) for (const name of [`${job.guid}.crdownload`, job.guid]) fs.rmSync(path.join(this.stageDir, name), { force: true });
@@ -360,4 +376,4 @@ function currentSize(dir, guid) {
   return 0;
 }
 
-module.exports = { DownloadManager, DEFAULT_LIMITS, pickName, bestName, sha256File };
+module.exports = { DownloadManager, DEFAULT_LIMITS, pickName, bestName, realExt, sha256File };
