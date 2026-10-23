@@ -83,7 +83,8 @@
        design: { attempt, repaired, traps: [{ id, title, mechanism, files, decoy, correctValue, wrongValue }], newFiles: [{ name }],
                  editedFiles: [{ name, reason, beforeBytes, bytes, diff }], prompt, guideline, goldenAnswer, gold: { decision, figures: [{ label, value, tolerance }] },
                  fingerprints: [{ id, label, tokens, figures }], notes (checks on the files), calibration: { score, verdict, reason },
-                 fairness: { status ('ok' | 'unfair' | 'unusable'), unfair: [{ item, why }] }, guidelineDiff, rubricChanges: [{ change, reason }] }
+                 fairness: { status ('ok' | 'unfair' | 'unusable'), unfair: [{ item, why }] }, guidelineDiff, rubricChanges: [{ change, reason }],
+                 unscanned: [{ name, kind ('new' | 'edited') }] (designer files whose text could not be checked for guideline or golden-answer passages) }
                  a diff (guidelineDiff, editedFiles[].diff): { available, kind ('text' | 'binary'), added, removed, before, after, truncated, lines: [{ op, text }] } or text
        attempts: every design attempt, the last one the current one: [{ n, outcome, repaired, note, traps: [{ id, title }], calibration, fairness: { status, count },
                  rejection: { kind ('design' | 'checks'), reasons } | null, screen, test }] where
@@ -136,6 +137,7 @@
       prompt:cell(d.prompt),guideline:cell(d.guideline),golden:cell(d.goldenAnswer),gold,fingerprints:prints,
       repaired:isWithheld(d.repaired)?WITHHELD:d.repaired===true,calibration:adaptCalibration(d.calibration),fairness:adaptFairness(d.fairness),
       guidelineDiff:diffCell(d.guidelineDiff),
+      unscanned:isWithheld(d.unscanned)?WITHHELD:arr(d.unscanned).map(x=>isWithheld(x)?{name:WITHHELD,kind:''}:isObj(x)?{name:cell(x.name),kind:x.kind==='new'||x.kind==='edited'?x.kind:''}:{name:text(x),kind:''}).filter(x=>isWithheld(x.name)||x.name!==''),
       rubricChanges:isWithheld(rub)?WITHHELD:Array.isArray(rub)?rub.filter(x=>isObj(x)||typeof x==='string').map(x=>isObj(x)?{change:cell(x.change),reason:cell(x.reason)}:{change:x,reason:''}):null};
   }
   function adapt(raw,fallbackId){
@@ -588,11 +590,17 @@
       :html`<h3>Rubric changes (${rub.length})</h3>${rub.length?html`<ul class="pl-names">${rub.map(r=>html`<li>${isWithheld(r.change)?inline(r.change):r.change||'A change'}${r.reason!==''?html` <span class="muted">Why: ${inline(r.reason)}</span>`:''}</li>`)}</ul>`:html`<p class="muted">The designer listed no rubric change.</p>`}`;
     return html`<details class="pl-changes"><summary>What the designer changed in the grader guideline</summary>${rubric}${diff===null?'':html`<h3>Line changes</h3>${diffBlock(diff)}`}</details>`;
   }
+  /* New or edited files of the designer whose text the companion could not read as text, so it could not look for passages of the guideline or the golden answer. */
+  function unscannedHtml(d){
+    if(isWithheld(d.unscanned))return html`<p class="pl-class-note pl-unscanned">New or edited files whose text could not be checked for guideline or golden-answer passages: ${inline(d.unscanned)}.</p>`;
+    if(!d.unscanned.length)return '';
+    return html`<p class="pl-class-note pl-unscanned">The text of these new or edited files could not be checked for guideline or golden-answer passages: ${d.unscanned.map((x,i)=>html`${i?', ':''}${inline(x.name)}${x.kind?' ('+x.kind+')':''}`)}.</p>`;
+  }
   function designHtml(){
     const v=S.run;
     if(!v)return '';
     const d=v.design;
-    if(!d.traps.length&&!d.trapsWithheld&&!d.newFiles.length&&!d.edited.length&&d.calibration===null&&d.fairness===null)return '';
+    if(!d.traps.length&&!d.trapsWithheld&&!d.newFiles.length&&!d.edited.length&&d.calibration===null&&d.fairness===null&&!isWithheld(d.unscanned)&&!d.unscanned.length)return '';
     const repaired=d.repaired===true?html`<p class="muted pl-repaired">The designer needed one repair turn to fix its files.</p>`:isWithheld(d.repaired)?html`<p class="muted pl-repaired">Whether a repair turn was needed: ${inline(d.repaired)}</p>`:'';
     return html`<div class="card-title"><div><div class="eyebrow">Design</div><h2>The traps</h2></div>${d.attempt?pill('Attempt '+d.attempt,'violet'):v.redesigns>0?pill('Attempt '+(v.redesigns+1),'violet'):''}</div>
       ${d.trapsWithheld?html`<p class="pl-withheld">${WITHHELD_TEXT}</p>`:d.traps.length?html`<ol class="pl-traps">${d.traps.map(trapHtml)}</ol>`:html`<p class="muted">No trap has been recorded yet.</p>`}
@@ -601,6 +609,7 @@
       ${calibrationHtml(d)}
       ${fairnessHtml(d)}
       ${repaired}
+      ${unscannedHtml(d)}
       ${isWithheld(d.notes)?html`<h3>Checks on the designer’s files</h3><p class="pl-withheld">${WITHHELD_TEXT}</p>`:d.notes.length?html`<h3>Checks on the designer’s files</h3><ul class="pl-names">${d.notes.map(n=>html`<li>${n}</li>`)}</ul>`:''}
       ${guidelineChangesHtml(d)}
       <details><summary>Revised prompt, grader guideline and golden answer</summary><h3>Prompt</h3>${blockText(d.prompt)}<h3>Grader guideline</h3>${blockText(d.guideline)}<h3>Golden answer</h3>${blockText(d.golden)}</details>

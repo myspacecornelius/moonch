@@ -1031,6 +1031,42 @@ test('while a round runs the new fields, trap titles and files and edited file n
   assert.match(r, /<th scope="row">Attempt 2 \(latest\)<\/th><td data-label="Traps">Withheld while a round runs<\/td>/);
 });
 
+test('design.unscanned: new or edited files whose text could not be checked are named in the traps card, worded like the classification note', async t => {
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', design: designFacts({ unscanned: [{ name: 'Atlas_Amendment_2.pdf', kind: 'new' }, { name: 'Facility_Terms.rtf', kind: 'edited' }, { name: 'Meridian_Note.bin' }] }) })]);
+  let d = page.region('design');
+  assert.match(d, /<p class="pl-class-note pl-unscanned">The text of these new or edited files could not be checked for guideline or golden-answer passages: Atlas_Amendment_2\.pdf \(new\), Facility_Terms\.rtf \(edited\), Meridian_Note\.bin\.<\/p>/);
+  assert.ok(d.indexOf('pl-unscanned') > d.indexOf('Edited world files'), 'it sits in the traps card after the files');
+  /* the classification's own note says the same of the original files */
+  const { page: cls } = await bootWith(t, [baseState({ stage: 'design', import: importFacts(), classification: { ...classification(), unscanned: ['Atlas_Supplement.pdf'] } })]);
+  assert.match(cls.region('classify'), /The text of these files could not be checked for guideline or golden-answer passages: Atlas_Supplement\.pdf\./);
+  /* none, an empty list, or a field of the wrong type: no note */
+  for (const none of [undefined, null, [], 'Atlas.pdf', 7, [{}], [{ name: '' }], {}]) {
+    companion.update('pl-atlas-0001', { design: designFacts({ unscanned: none }) });
+    await page.tick();
+    assert.doesNotMatch(page.region('design'), /could not be checked/, JSON.stringify(none));
+  }
+  /* a name that is markup is text */
+  companion.update('pl-atlas-0001', { design: designFacts({ unscanned: [{ name: '<img src=x onerror=1>.pdf', kind: 'new' }] }) });
+  await page.tick();
+  assert.match(page.region('design'), /&lt;img src=x onerror=1&gt;\.pdf \(new\)/);
+  assert.doesNotMatch(page.region('design'), /<img/);
+  /* the note alone is enough to show the card */
+  const { page: only } = await bootWith(t, [baseState({ stage: 'screen', design: { attempt: 1, unscanned: [{ name: 'Atlas_Amendment_2.pdf', kind: 'new' }] } })]);
+  assert.match(only.region('design'), /Atlas_Amendment_2\.pdf \(new\)/);
+});
+
+test('design.unscanned while a round runs: withheld as a whole, or name by name, it reads "Withheld while a round runs" and does not break the page', async t => {
+  const W = { withheld: true };
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, design: designFacts({ unscanned: W }) })]);
+  assert.match(page.region('design'), /<p class="pl-class-note pl-unscanned">New or edited files whose text could not be checked for guideline or golden-answer passages: <span class="pl-withheld">Withheld while a round runs<\/span>\.<\/p>/);
+  companion.update('pl-atlas-0001', { design: designFacts({ unscanned: [{ name: W, kind: 'edited' }, W, { name: 'Meridian_Note.pdf', kind: 'new' }] }) });
+  await page.tick();
+  const d = page.region('design');
+  assert.match(d, /could not be checked for guideline or golden-answer passages: <span class="pl-withheld">Withheld while a round runs<\/span> \(edited\), <span class="pl-withheld">Withheld while a round runs<\/span>, Meridian_Note\.pdf \(new\)\.<\/p>/);
+  assert.doesNotMatch(d, /\[object Object\]|undefined|>null</);
+  assert.equal(page.statusIsError(), false);
+});
+
 test('a withheld list of edited files, of new files, a withheld calibration score and a withheld fairness list are each shown as withheld, not as empty', async t => {
   const W = { withheld: true };
   const { page } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, design: designFacts({ editedFiles: W, newFiles: W, calibration: { score: W, verdict: W, reason: W }, fairness: { unfair: W }, rubricChanges: W, guidelineDiff: undefined }) })]);

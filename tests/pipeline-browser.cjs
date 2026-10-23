@@ -37,6 +37,7 @@ const design = (withheld = false) => ({
   calibration: withheld ? W : { score: 0.97, verdict: 'meets-guidance', reason: 'Matches every rubric line.' },
   fairness: withheld ? W : { status: 'unfair', unfair: [{ item: 'The amended date is only in a footnote', why: 'A careful solver has no way to know which schedule governs.' }] },
   guidelineDiff: withheld ? W : GUIDELINE_DIFF,
+  unscanned: withheld ? W : [{ name: 'Atlas_Scan_Note.pdf', kind: 'new' }, { name: 'Atlas_Facility_Schedule.rtf', kind: 'edited' }],
   rubricChanges: withheld ? W : [{ change: 'Added a line about the amended facility date', reason: 'The new trap turns on that date.' }],
   traps: [{ id: 't1', title: withheld ? W : 'Superseded facility schedule', mechanism: 'A later amendment replaces the schedule that stays in the folder.', files: withheld ? W : ['Atlas_Amendment_2.txt'], decoy: 'Atlas_Facility_Schedule.csv', correctValue: withheld ? { withheld: true } : '1,250', wrongValue: withheld ? { withheld: true } : '1,900' }],
   newFiles: [{ name: 'Atlas_Amendment_2.txt', bytes: 900 }, { name: 'Meridian_Note.txt', bytes: 400 }], editedFiles: [withheld ? { name: W, reason: W, diff: W, sizeChange: W } : { name: 'Atlas_Facility_Schedule.csv', reason: 'The decoy needs the old rate in column C.', diff: DIFF, bytes: 2120, beforeBytes: 2000 }], notes: [],
@@ -338,6 +339,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-design'), /Calibration passed\s*The golden answer scored 0\.97 against the revised grader guideline\. It needs 0\.90 or more\./);
     assert.match(await text('#pl-design'), /Fairness review[\s\S]*1 unfair item[\s\S]*The amended date is only in a footnote/);
     assert.match(await text('#pl-design'), /Size change: \+120 bytes/);
+    assert.equal(await text('#pl-design .pl-unscanned'), 'The text of these new or edited files could not be checked for guideline or golden-answer passages: Atlas_Scan_Note.pdf (new), Atlas_Facility_Schedule.rtf (edited).');
     assert.equal(await evaluate('[...document.querySelectorAll("#pl-design details.pl-changes, #pl-design details.pl-diff-box")].map(d=>d.open).join()'), 'false,false', 'the guideline changes and the file diff start collapsed');
     assert.equal(await evaluate('document.querySelector("#pl-design details.pl-changes pre").checkVisibility()'), false, 'and their text is not on screen');
     /* open the guideline changes with the keyboard: Enter on the summary */
@@ -366,7 +368,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-withheld'), /A round is running, so this page does not show the prompt/);
     await evaluate('document.querySelectorAll("#pl-design details").forEach(d=>{d.open=true;})');
     await delay(60);
-    assert.equal(await evaluate('document.querySelector("#pl-design").innerText.split("Withheld while a round runs").length - 1'), 17, 'the trap title and files, the file name, size change, reason and diff, calibration, fairness, the rubric changes and the guideline diff, the correct and wrong value, the prompt, the guideline, the golden answer, the gold and the fingerprints each say so');
+    assert.equal(await evaluate('document.querySelector("#pl-design").innerText.split("Withheld while a round runs").length - 1'), 18, 'the trap title and files, the file name, size change, reason and diff, calibration, fairness, the rubric changes and the guideline diff, the correct and wrong value, the prompt, the guideline, the golden answer, the gold and the fingerprints and the unscanned files each say so');
     assert.equal(await evaluate('document.body.innerText.includes("Usable cash is 1,250")'), false, 'the golden answer is not on the page');
     assert.equal(await exists('[data-pl=export]'), false);
     await shot('03-screen-withheld-1440', 1440, 1000);
