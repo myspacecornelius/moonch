@@ -845,10 +845,13 @@ function buildGraderPrompt(guidelineText, answerText) {
   ].join('\n');
 }
 
-/* The optional score and items of a grader answer. A score is a JSON number, clamped to [0, 1]; anything else (a string, a
-   missing key) is null rather than guessed. Items are objects only, at most 20, their text trimmed and capped. */
+/* The optional score and items of a grader answer. A score is a JSON number from 0 to 1 (a rounding error of 1e-9 past either end
+   is read as the end); anything else (a string, a missing key, 85 or 9.5, which are not scores on this scale) is null rather than
+   guessed or clamped, so a miscalibrated reference cannot read as a perfect one. Items are objects only, at most 20, their text
+   trimmed and capped. */
 const GRADER_ITEMS_MAX = 20;
-const graderScore = value => (typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null);
+const GRADER_SCORE_SLACK = 1e-9;
+const graderScore = value => (typeof value === 'number' && Number.isFinite(value) && value >= -GRADER_SCORE_SLACK && value <= 1 + GRADER_SCORE_SLACK ? Math.min(1, Math.max(0, value)) : null);
 const graderText = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
 const graderItems = list => (Array.isArray(list) ? list.filter(isObject).slice(0, GRADER_ITEMS_MAX)
   .map(entry => ({ item: graderText(entry.item, 300), met: typeof entry.met === 'boolean' ? entry.met : null, reason: graderText(entry.reason, 600) })) : []);

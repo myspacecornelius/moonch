@@ -2249,6 +2249,7 @@ test('the pilot gate card pools the rounds of one design, says it is pilot-based
   assert.match(text, /Pilot-based and directional/);
   assert.match(text, /The platform's gate is at least six completed runs averaging 0\.60 or lower/);
   assert.match(text, /matched a platform batch once and is untested elsewhere/);
+  assert.match(text, /the same packet, the same prompt, the same frozen gold, the same gaf setting, the same model and the same effort\./, 'the card says everything the pool shares');
   assert.match(text, new RegExp(`Rounds of this design 2: ${second}, ${first}`), 'the selected round first, then the other round of its design');
   assert.ok(!card.includes(other), 'a round with another prompt is another design');
   assert.match(text, /Wrong \(lands on a frozen fingerprint\) 2 of 3/);
@@ -2315,6 +2316,49 @@ test('a round of another design selected while the gate is still reading gets it
   assert.match(page.section('pilot-gate'), /Wrong \(lands on a frozen fingerprint\)<\/dt><dd>1 of 2/);
   assert.doesNotMatch(page.section('pilot-gate'), /Reading \d+ more/);
 });
+
+/* The packet hash does not cover the gaf setting, and the freeze does not hold the model or the effort, so the page adds them to the
+   design: a round that differs in one of them is another design even with the same packet, prompt and frozen gold. */
+for (const [name, differs] of [['gaf setting', { gafVisible: false }], ['model', { config: { model: 'claude-sonnet-5-5' } }], ['effort', { config: { effort: 'high' } }]]) {
+  test(`the pilot gate does not pool rounds that differ in the ${name}: three correct in a row across them does not stop the design`, async t => {
+    const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+    const base = { gafVisible: true, config: { model: 'claude-opus-5-5', effort: 'medium', count: 2 } };
+    const odd = { ...base, ...differs, config: { ...base.config, ...(differs.config || {}) } };
+    const classifyAll = async (id, n) => { for (let run = 1; run <= n; run++) await w.service.classifyRun(id, run, { verdict: GOLD_V }); };
+    const same = await finishedRoundViaService(w, base);
+    await classifyAll(same, 2);
+    const changed = await finishedRoundViaService(w, { ...odd, config: { ...odd.config, count: 1 } });
+    await classifyAll(changed, 1);
+    const roundOf = id => w.service.getRound(id);
+    const a = await roundOf(same), b = await roundOf(changed);
+    assert.equal(a.packet.packetSha256, b.packet.packetSha256, 'the same packet');
+    assert.equal(a.packet.promptSha256, b.packet.promptSha256, 'the same prompt');
+    assert.equal(a.freeze.contentSha256, b.freeze.contentSha256, 'the same frozen gold');
+
+    const page = makePage(t, w);
+    await page.boot();
+    const gateRead = () => { const card = page.section('pilot-gate'); return /Rounds of this design/.test(card) && !/Reading \d+ more/.test(card); };
+    await waitFor(gateRead, { label: 'the gate to read the other round', timeout: 10000 });
+    const card = page.section('pilot-gate');
+    assert.ok(page.requests.some(r => r.method === 'GET' && r.url === `/api/agents/rounds/${same}`), 'the other round was read, and left out');
+    assert.match(card, new RegExp(`Rounds of this design</dt><dd>1: ${changed}<`), 'only the selected round');
+    assert.ok(!card.includes(same), 'a round that differs in the ' + name + ' is another design');
+    assert.match(card, /Correct \(matches the frozen gold\)<\/dt><dd>1 of 1/);
+    assert.doesNotMatch(card, /id="ag-pilot-gate-stop"/, 'one correct run is not three in a row');
+    assert.match(card, /<dt>Correct in a row, latest runs<\/dt><dd>1</);
+
+    /* a round of the selected round's own design joins it: three correct in a row, and the other design is still left out */
+    const twin = await finishedRoundViaService(w, odd);
+    await classifyAll(twin, 2);
+    const again = makePage(t, w);
+    await again.boot();
+    await waitFor(() => { const c = again.section('pilot-gate'); return new RegExp(`Rounds of this design</dt><dd>2: ${twin}, ${changed}<`).test(c) && !/Reading \d+ more/.test(c); }, { label: 'the gate to pool the rounds of one design', timeout: 10000 });
+    const pooled = again.section('pilot-gate');
+    assert.ok(!pooled.includes(same));
+    assert.match(pooled, /<dt>Correct in a row, latest runs<\/dt><dd>3</);
+    assert.match(pooled, /id="ag-pilot-gate-stop"/, 'the same design, three in a row');
+  });
+}
 
 test('a ship bar typed in the Freeze card is checked, frozen, shown in the approval and the gate, and filled again by Start next round', async t => {
   const w = await makeWorld(t, [{ resultText: GOLD_ANSWER }, { resultText: WRONG_ANSWER }, { resultText: WRONG_ANSWER }]);
@@ -2446,4 +2490,93 @@ test('the simulated grader offers the grading model first, grades a pasted refer
   assert.doesNotMatch(pilot, /id="ag-calibration"/);
   const last = page.requests.filter(r => r.method === 'POST' && r.url === '/api/agents/grader-sim').map(r => JSON.parse(r.body)).pop();
   assert.ok(last.answerText.startsWith(GOLD_ANSWER), 'the pilot\'s final answer is graded');
+});
+
+test('a calibration says the guidance reads the reference as meeting it only for the verdict meets-guidance and a displayed score at or above the floor; a score outside 0 to 1 is no score', async t => {
+  const w = await makeWorld(t, { resultText: GOLD_ANSWER });
+  await finishedRoundViaService(w);
+  const page = makePage(t, w);
+  await page.boot();
+  await page.click('open-grader');
+  await page.type('answer-run', { value: 'ref', event: 'change' });
+  await page.type('guideline', { value: 'You are grading a liquidity answer. Usable cash is 1,250.' });
+  await page.type('reference', { value: 'Synthetic reference: usable cash is 1,250, so hold the borrowing.' });
+  for (const id of ['run', 'network', 'notools']) await page.type('overlay-ack', { checked: true, dataset: { id }, event: 'change' });
+  /* the companion's answer is set by the test; an older companion (or a changed one) may send a number the page must not clamp */
+  let reply = null;
+  const pass = page.context.fetch;
+  page.context.fetch = async (url, init) => (url === '/api/agents/grader-sim'
+    ? { ok: true, status: 200, text: async () => JSON.stringify({ result: reply }) }
+    : pass(url, init));
+  const calibrate = async (verdict, score) => {
+    reply = { verdict, reason: 'Synthetic reason.', items: [] };
+    if (score !== undefined) reply.score = score;
+    await page.click('run-grader');
+    const modal = page.modal();
+    assert.match(modal, /Calibration: the simulated grader on your reference answer/);
+    const notice = (modal.match(/<div class="notice[^"]*" role="[a-z]+" id="ag-calibration">[\s\S]*?<\/div>/) || [''])[0];
+    assert.ok(notice, 'a calibration always ends in a notice: ' + verdict + ' ' + score);
+    return { modal, notice, scoreLine: (modal.match(/<br>Score: ([0-9.]+)/) || [])[1] };
+  };
+  const meetsIt = /reads your reference as meeting it/;
+
+  /* a score outside 0 to 1 is not a score: never clamped to a perfect one */
+  for (const score of [85, 9.5, -0.1, 1.01]) {
+    const out = await calibrate('meets-guidance', score);
+    assert.equal(out.scoreLine, undefined, `${score}: no Score line`);
+    assert.match(out.notice, /The grader returned no usable score \(none, or a number outside 0 to 1\)/, String(score));
+    assert.match(out.notice, /role="status"/);
+    assert.doesNotMatch(out.notice, meetsIt, String(score));
+    assert.doesNotMatch(out.modal, /Score: 1\.00|Score: 0\.00/, `${score}: not clamped`);
+  }
+  const absent = await calibrate('meets-guidance');
+  assert.match(absent.notice, /returned no usable score/);
+
+  /* a high score with a verdict that is not meets-guidance does not read as meeting it */
+  const against = await calibrate('does-not-meet-guidance', 0.97);
+  assert.equal(against.scoreLine, '0.97');
+  assert.match(against.notice, /role="alert"/);
+  assert.match(against.notice, /<strong>Your reference answer scored 0\.97, but the verdict was does-not-meet-guidance, not meets-guidance\.<\/strong>/);
+  assert.match(against.notice, /The score and the verdict disagree, so this calibration does not show that the guidance reads your reference as meeting it\./);
+  assert.doesNotMatch(against.notice, /The guidance reads your reference as meeting it, in this one sample/);
+  const unclear = await calibrate('unclear', 0.99);
+  assert.match(unclear.notice, /but the verdict was unclear, not meets-guidance/);
+  assert.doesNotMatch(unclear.notice, /in this one sample/);
+  const none = await calibrate('', 0.99);
+  assert.match(none.notice, /but the verdict was \(none returned\), not meets-guidance/);
+  const markup = await calibrate('<b>meets</b>', 0.99);
+  assert.match(markup.notice, /but the verdict was &lt;b&gt;meets&lt;\/b&gt;, not meets-guidance/, 'the verdict is escaped');
+
+  /* the floor is compared on the rounded score the notice shows: 0.946 shows as 0.95, so it is not "below 0.95" */
+  const edge = await calibrate('meets-guidance', 0.946);
+  assert.equal(edge.scoreLine, '0.95');
+  assert.match(edge.notice, /role="status"/);
+  assert.match(edge.notice, /Your reference answer scored 0\.95; about 0\.98 is expected\. The guidance reads your reference as meeting it, in this one sample\./);
+  assert.doesNotMatch(edge.notice, /below/);
+  const exact = await calibrate('meets-guidance', 0.95);
+  assert.match(exact.notice, /scored 0\.95; about 0\.98 is expected\. The guidance reads your reference as meeting it/);
+  const high = await calibrate('meets-guidance', 0.97);
+  assert.match(high.notice, meetsIt);
+  assert.match(high.notice, /role="status"/);
+  const perfect = await calibrate('meets-guidance', 1);
+  assert.equal(perfect.scoreLine, '1.00');
+  assert.match(perfect.notice, meetsIt);
+
+  /* below the floor on the rounded score: the guidance needs fixing, whatever the verdict says */
+  const low = await calibrate('meets-guidance', 0.944);
+  assert.equal(low.scoreLine, '0.94');
+  assert.match(low.notice, /role="alert"/);
+  assert.match(low.notice, /<strong>Your reference answer scored 0\.94, below 0\.95\.<\/strong>/);
+  assert.doesNotMatch(low.notice, meetsIt);
+  const lowAndAgainst = await calibrate('does-not-meet-guidance', 0.4);
+  assert.match(lowAndAgainst.notice, /scored 0\.40, below 0\.95\./);
+  assert.doesNotMatch(lowAndAgainst.notice, /but the verdict was/, 'the score already says it');
+  assert.ok(!page.modal().includes('%'));
+
+  /* a pilot's answer carries no calibration notice, whatever its score */
+  await page.type('answer-run', { value: '1', event: 'change' });
+  reply = { verdict: 'meets-guidance', reason: 'r', score: 85, items: [] };
+  await page.click('run-grader');
+  assert.doesNotMatch(page.modal(), /id="ag-calibration"/);
+  assert.doesNotMatch(page.modal(), /Score:/, 'an out-of-range score is not shown as a score either');
 });

@@ -243,6 +243,22 @@ test('cleanGuidance keeps the A/B/C template lines verbatim and cleans everythin
   assert.ok(c.text.includes('- A trade, from'));
   assert.equal(C.cleanGuidance(ABC_GUIDELINE).text,ABC_GUIDELINE);
 });
+test('the working document\'s Deterministic cleanup is clean for A/B/C-template guidance and pending only for a writer\'s own dash',()=>{
+  const cleanup=p=>C.workingDocument(p).match(/Deterministic cleanup: (\S+)/)[1];
+  const p=complete();p.guidance=ABC_GUIDELINE;
+  assert.ok(ABC_GUIDELINE.includes('—')&&C.cleanText(ABC_GUIDELINE).replacements>0,'the template lines carry the em dash that cleanText alone would count');
+  assert.equal(C.cleanGuidance(ABC_GUIDELINE).replacements,0,'and cleanGuidance leaves them alone');
+  assert.equal(cleanup(p),'clean','nothing is left to clean in the template');
+  p.guidance=ABC_GUIDELINE.replace('- A trade from','- A trade — from');
+  assert.equal(C.cleanGuidance(p.guidance).replacements,1);
+  assert.equal(cleanup(p),'pending','a dash in the writer\'s own line is still pending');
+  const q=complete();q.guidance=ABC_GUIDELINE;q.business.prompt='Assess the note — then decide.';
+  assert.equal(cleanup(q),'pending','the prompt is still checked');
+  const r=complete();r.guidance=ABC_GUIDELINE;r.thesis='A thesis — with a dash.';
+  assert.equal(cleanup(r),'pending','and so is the thesis');
+  const plain=complete();plain.guidance='The bridge adds the facility — in error.';
+  assert.equal(cleanup(plain),'pending','guidance that is not the template is checked line by line as before');
+});
 test('layout checks: named sections, answer file, a checkable must-have, and common failures with figures',()=>{
   const codes=(t,o)=>C.lintGuidance(t,o).map(x=>x.code);
   const sections=C.lintGuidance('Context\nThe note.\n\nGolden Response\nApprove it.').find(x=>x.code==='guidance-sections');

@@ -52,14 +52,16 @@
      Files are copied byte for byte and their properties are not rewritten, because pilots must run on the bytes that ship; the
      upload checks on Overview flag properties to scrub. It refuses what the form refuses or what must never be resent. */
   const PACK_ANSWER_TYPES=/\.(?:xlsx|xlsm|docx|pptx|pdf)$/i;
-  async function buildUploadPack({folder,prompt,guidance,inputs=[],answers=[],now}={}){
+  async function buildUploadPack({folder,prompt,guidance,inputs=[],answers=[],promptBlockers=[],now}={}){
     const base=(String(folder??'').replace(/[^A-Za-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,80))||'upload_pack',leaf=f=>String(f?.name??'').split('/').pop();
     const promptText=String(prompt??'').trim(),guidanceText=String(guidance??'').replace(/\s+$/,'');
     if(!promptText)fail('Write the business prompt before building the upload pack.');if(!guidanceText.trim())fail('Write the grader guidance before building the upload pack.');if(!answers.length)fail('Add the answer file before building the upload pack.');
+    const blocked=(Array.isArray(promptBlockers)?promptBlockers:[]).map(b=>String(b?.message??b).trim()).filter(Boolean);if(blocked.length)fail('The business prompt has '+blocked.length+' blocker'+(blocked.length>1?'s':'')+' and is not packed: '+blocked.join(' ')+' Fix '+(blocked.length>1?'them':'it')+' in the Workspace first.');
     const files=[...inputs.map(f=>({card:'1.3',name:leaf(f),bytes:f.bytes})),...answers.map(f=>({card:'1.4',name:leaf(f),bytes:f.bytes}))];
     const spaced=files.filter(f=>/\s/.test(f.name));if(spaced.length)fail('The platform refuses a file name with a space: '+spaced.map(f=>f.name).join('; ')+'. Rename it with underscores.');
     const seen=new Set();for(const f of files){if(!f.name)fail('A file has no name.');const k=f.name.toLowerCase();if(seen.has(k))fail('Two files share the name '+f.name+'.');seen.add(k);}
     const gaf=inputs.filter(f=>GAF_PATTERN.test(String(f?.name??'')));if(gaf.length)fail('A gaf file is the parent\'s and is never resent: '+gaf.map(leaf).join('; ')+'.');
+    const withheld=inputs.map(f=>[leaf(f),classifyPath(leaf(f))]).filter(([,c])=>WITHHELD_ROLES.includes(c.role));if(withheld.length)fail('An input file reaches the solver, but its name marks it as withheld material: '+withheld.map(([n,c])=>n+' ('+c.reason.replace(/^Withheld by default: /,'').replace(/\.$/,'')+')').join('; ')+'. Rename it if it is an ordinary source file; otherwise leave it out of the pack.');
     const notOffice=answers.map(leaf).filter(n=>!PACK_ANSWER_TYPES.test(n));if(notOffice.length)fail('An answer file must be Excel, Word, PowerPoint or PDF: '+notOffice.join('; ')+'.');
     const warnings=[];
     for(const n of answers.map(leaf)){if(pathWords(n.replace(/\.[^.]+$/,'')).some(w=>ANSWER_NAME_WORDS.has(w))||/(?:^|[_-])v\d+(?=[_.-]|$)/i.test(n))warnings.push('Answer file '+n+' breaks the naming rule (company, document type and period; never GAF, SAF, a version, Final, Untitled or Copy).');if(!guidanceText.includes(n))warnings.push('The grader guidance does not name the answer file '+n+' exactly.');}
@@ -104,10 +106,13 @@
   const GAF_PATTERN=/(?:^|[/_ -])gaf(?:[/_. -]|$)/i;
   function pathWords(name){return String(name??'').replace(/(\p{Ll})(\p{Lu})/gu,'$1 $2').replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu,'$1 $2').replace(/(\p{L})(\p{N})/gu,'$1 $2').replace(/(\p{N})(\p{L})/gu,'$1 $2').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);}
   /* Guideline and guidance also name ordinary business documents (investment guidelines, revenue guidance). They mark grading
-     material in a plain-text or markdown file, in a name with no other content word, or beside another grading word (which is
-     caught on its own); in a named Office or PDF document they do not. */
+     material in a plain-text or markdown file, and in an Office or PDF file unless its own name (never a folder name) carries a
+     content word besides them: single letters, digits, version words (v2, final, draft, copy, rev, updated) and grading-adjacent words
+     (key, scoring, grader, answer, rubric, instructions, ...) do not count, so Guidelines_Key.docx, Guidelines_v2.docx, Scoring_Guidelines.pdf
+     and inputs/Guidelines.docx stay withheld while Lending_Guidelines.pdf is a source. A word beside another grading word is caught on its own. */
   const SOFT_GRADING_WORDS=words('guideline guidelines guidance');
-  function businessDocument(name,t){if(!/\.(?:docx?|docm|pdf|xlsx?|xlsm|pptx?)$/i.test(String(name??'')))return false;return t.slice(0,-1).some(w=>!SOFT_GRADING_WORDS.has(w)&&!/^\d+$/.test(w));}
+  const NOT_CONTENT_WORDS=words('draft final copy rev revised updated key keys scoring score scores evaluation evaluator marking mark marks grader grading rubric answer response responses solution reference gold golden criteria review reviews instruction instructions task tasks sheet sheets set sets');
+  function businessDocument(name){const m=String(name??'').split('/').pop().match(/^(.*)\.(?:docx?|docm|pdf|xlsx?|xlsm|pptx?)$/i);return !!m&&pathWords(m[1]).some(w=>w.length>1&&!/^\d+$/.test(w)&&!SOFT_GRADING_WORDS.has(w)&&!NOT_CONTENT_WORDS.has(w));}
   function gradingWord(w){if(GRADING_WORDS.has(w))return w;for(let i=2;i<=w.length-2;i++){const a=w.slice(0,i),b=w.slice(i);if(GRADING_WORDS.has(a)&&(GRADING_WORDS.has(b)||GRADING_AFFIXES.has(b)))return a;if(GRADING_AFFIXES.has(a)&&GRADING_WORDS.has(b))return b;}return '';}
   function runPhrase(t){for(let i=0;i<t.length;i++){const w=t[i],prev=t[i-1]||'',next=t[i+1]||'';if(w==='trajectory'||w==='trajectories')return w;if(RUN_WORDS.has(w)&&/^\d{1,3}$/.test(next))return w+' '+next;if((w==='run'||w==='runs')&&(RUN_EVIDENCE.has(next)||RUN_FILES.has(next)))return w+' '+next;if((w==='run'||w==='runs')&&RUN_ACTORS.has(prev))return prev+' '+w;if(RUN_ACTORS.has(w)&&RUN_EVIDENCE.has(next))return w+' '+next;}return '';}
   function auditWord(t){for(let i=0;i<t.length;i++){const w=t[i];if(!AUDIT_WORDS.has(w))continue;if(/^audits?$/.test(w)&&ORDINARY_AFTER_AUDIT.has(t[i+1]))continue;if(/^reviews?$/.test(w)&&ORDINARY_BEFORE_REVIEW.has(t[i-1]))continue;return w;}return '';}
@@ -117,7 +122,7 @@
     if(folder)return withheld('evaluator','it is under '+folder+'/, a folder that by convention holds grading or private material.');
     if(folders.includes('gaf'))return kept('template');
     const t=pathWords(name);let hit;
-    const document=businessDocument(name,t);
+    const document=businessDocument(name);
     if((hit=t.map(gradingWord).find(w=>w&&!(document&&SOFT_GRADING_WORDS.has(w)))))return withheld('evaluator','the name contains the word "'+hit+'", which usually marks grading or private material.');
     if(GAF_PATTERN.test(String(name??''))||t.some(w=>w==='template'||w==='templates'))return kept('template');
     if(t.some((w,i)=>/^(?:prompts?|instructions?)$/.test(w)||w==='task'&&t[i+1]==='request'))return kept('prompt');
@@ -190,7 +195,7 @@
   const LOOKALIKE=/[\u2018\u2019\u201c\u201d\u2013\u2014\u2026\u00a0\u2009\u202f]/;
   function termsMatcher(terms){const list=(Array.isArray(terms)?terms:[]).filter(t=>typeof t==='string'&&t.trim()).map(t=>t.trim().replace(/[.*+?^${}()|[\]\\/]/g,'\\$&').replace(/\s+/g,'\\s+'));return list.length?new RegExp('(?<![\\p{L}\\p{N}_])(?:'+list.join('|')+')(?![\\p{L}\\p{N}_])','iu'):null;}
   function uploadChecks(pkg,add,privateTerms){
-    const base=d=>d.name.split('/').pop(),office=/\.(?:xlsx|xlsm|docx|pptx|pdf)$/i,mine=termsMatcher(privateTerms);
+    const base=d=>d.name.split('/').pop().trim(),office=/\.(?:xlsx|xlsm|docx|pptx|pdf)$/i,mine=termsMatcher(privateTerms);
     /* Files that are uploaded: new or changed solver files, and answer files. The gaf/ template is the parent's and is never changed. */
     const uploads=pkg.documents.filter(d=>['source','proposal'].includes(d.role)||d.role==='evaluator'&&office.test(d.name));
     const spaced=uploads.filter(d=>/\s/.test(base(d)));if(spaced.length)add('error','structural','File names with spaces',spaced.map(base).join('; ')+'. The platform refuses an upload whose file name has a space (project guide pp. 38, 41).',[],'Rename these files with underscores before upload.');

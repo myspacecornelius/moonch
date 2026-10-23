@@ -1011,9 +1011,11 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
       range:total?{low:mean(GATE.correct.low,GATE.wrong.low),high:mean(GATE.correct.high,GATE.wrong.high)}:null,
       point:mean(GATE.correct.point,GATE.wrong.point),chance:total?batchChance(correct,wrong):null};
   }
-  /* A design is the packet, the prompt and the frozen gold: the packet hash, the prompt hash and the content hash of the original
-     freeze (which holds the ship bar when one was frozen). A post-hoc version does not move a round to another design. */
-  const designKeyOf=r=>{const p=r&&r.packet,fr=r&&r.freeze;return p&&fr&&p.packetSha256&&p.promptSha256&&fr.contentSha256?p.packetSha256+' '+p.promptSha256+' '+fr.contentSha256:'';};
+  /* A design is the packet, the prompt, the frozen gold and how a pilot is run on them: the packet hash, the prompt hash, the content
+     hash of the original freeze (which holds the ship bar when one was frozen), whether the solver sees gaf/ (the packet hash does not
+     cover it), and the model and effort. A post-hoc version does not move a round to another design; the pilot count, spending cap
+     and concurrency do not matter. */
+  const designKeyOf=r=>{const p=r&&r.packet,fr=r&&r.freeze,c=r&&r.config;return p&&fr&&c&&p.packetSha256&&p.promptSha256&&fr.contentSha256&&c.model&&c.effort?[p.packetSha256,p.promptSha256,fr.contentSha256,p.gafVisible?'gaf':'no-gaf',c.model,c.effort].join(' '):'';};
   /* The listed rounds that may share the selected round's design and have runs. The list row has no prompt or content hash, so the
      packet hash narrows the reads and the round view decides. Only rounds already listed are read. */
   function designCandidates(){
@@ -1059,7 +1061,7 @@ ${fp.tokens}</textarea><small>A hit needs every token (or every figure) of the f
     if(!g.total)return html`${head}<p class="muted" id="ag-pilot-gate-empty">No classified runs of this design yet${g.unclear?' ('+g.unclear+' unclear, left out)':''}. Classify clean runs as matching the frozen gold or landing on a fingerprint, and the gate appears here.</p>${reading}`;
     const bar=g.bar?'Ship bar: '+barText(g.bar)+', '+(g.bar.met?'met':'not met yet')+' ('+g.bar.n+(g.bar.n===1?' run':' runs')+' so far)':'No ship bar was frozen with this design';
     return html`${head}
-      <p class="muted">Pilot-based and directional. It pools your verdicts on the completed, clean runs of every round of this design: the same packet, the same prompt and the same frozen gold. The platform's gate is at least six completed runs averaging 0.60 or lower. This instrument matched a platform batch once and is untested elsewhere.</p>
+      <p class="muted">Pilot-based and directional. It pools your verdicts on the completed, clean runs of every round of this design: the same packet, the same prompt, the same frozen gold, the same gaf setting, the same model and the same effort. The platform's gate is at least six completed runs averaging 0.60 or lower. This instrument matched a platform batch once and is untested elsewhere.</p>
       <dl class="history-details" id="ag-pilot-gate-facts"><dt>Rounds of this design</dt><dd>${rounds.length}: ${rounds.map(x=>x.id).join(', ')}</dd>
         <dt>Wrong (lands on a frozen fingerprint)</dt><dd>${g.wrong} of ${g.total}</dd>
         <dt>Correct (matches the frozen gold)</dt><dd>${g.correct} of ${g.total}</dd>
@@ -1498,13 +1500,16 @@ ${o.reference}</textarea><small>Calibration: your own answer that meets the guid
   function graderResultHtml(r){
     return html`<div class="notice neutral" role="status" id="ag-grader-result"><strong>${r.calibration?'Calibration: the simulated grader on your reference answer':'Simulated grader, not Studio grading'}</strong><br>Verdict: ${r.verdict||'(none returned)'}<br>Reason: ${r.reason||'(none returned)'}${r.score===null?'':html`<br>Score: ${dec(r.score)}`}
       ${r.items.length?html`<ul class="plain-list" id="ag-grader-items">${r.items.map(i=>html`<li><strong>${i.met===true?'Met':i.met===false?'Not met':'Not judged'}:</strong> ${i.item||'(no item named)'}${i.reason?' · '+i.reason:''}</li>`)}</ul>`:''}</div>
-      ${r.calibration?calibrationHtml(r.score):''}`;
+      ${r.calibration?calibrationHtml(r.score,r.verdict):''}`;
   }
-  /* What a calibration says about the guidance. It grades the writer's own reference answer, so a low score points at the guidance. */
-  function calibrationHtml(score){
-    if(score===null)return html`<div class="notice" role="status" id="ag-calibration">The grader returned no score, so this calibration says nothing about the guidance yet. Run it again.</div>`;
-    if(score<CALIBRATION.floor)return html`<div class="notice" role="alert" id="ag-calibration"><strong>Your reference answer scored ${dec(score)}, below ${dec(CALIBRATION.floor)}.</strong> A reference answer should score about ${dec(CALIBRATION.expected)}, so the guidance likely needs fixing before any pilot score means anything.</div>`;
-    return html`<div class="notice neutral" role="status" id="ag-calibration">Your reference answer scored ${dec(score)}; about ${dec(CALIBRATION.expected)} is expected. The guidance reads your reference as meeting it, in this one sample.</div>`;
+  /* What a calibration says about the guidance. It grades the writer's own reference answer, so a low score points at the guidance.
+     "Meets" needs the verdict as well as the score, and the floor is compared on the rounded score the notice shows. */
+  function calibrationHtml(score,verdict){
+    if(score===null)return html`<div class="notice" role="status" id="ag-calibration">The grader returned no usable score (none, or a number outside 0 to 1), so this calibration says nothing about the guidance yet. Run it again.</div>`;
+    const shown=dec(score);
+    if(Number(shown)<Number(dec(CALIBRATION.floor)))return html`<div class="notice" role="alert" id="ag-calibration"><strong>Your reference answer scored ${shown}, below ${dec(CALIBRATION.floor)}.</strong> A reference answer should score about ${dec(CALIBRATION.expected)}, so the guidance likely needs fixing before any pilot score means anything.</div>`;
+    if(verdict!=='meets-guidance')return html`<div class="notice" role="alert" id="ag-calibration"><strong>Your reference answer scored ${shown}, but the verdict was ${verdict||'(none returned)'}, not meets-guidance.</strong> The score and the verdict disagree, so this calibration does not show that the guidance reads your reference as meeting it. Read the reason and run it again.</div>`;
+    return html`<div class="notice neutral" role="status" id="ag-calibration">Your reference answer scored ${shown}; about ${dec(CALIBRATION.expected)} is expected. The guidance reads your reference as meeting it, in this one sample.</div>`;
   }
   function openGrader(){
     if(anyRunning()){say(RUNNING_TOOL_LESS,true);return;}
@@ -1515,7 +1520,7 @@ ${o.reference}</textarea><small>Calibration: your own answer that meets the guid
   }
   /* The companion cleans score and items (parseGraderOutput in backend/agents/rounds.cjs); they are read the same way here, so an
      older companion that sends neither shows a verdict and a reason as before. */
-  const resultScore=value=>typeof value==='number'&&Number.isFinite(value)?Math.min(1,Math.max(0,value)):null;
+  const resultScore=value=>typeof value==='number'&&Number.isFinite(value)&&value>=-1e-9&&value<=1+1e-9?Math.min(1,Math.max(0,value)):null;
   const resultItems=list=>Array.isArray(list)?list.filter(i=>i&&typeof i==='object').slice(0,20).map(i=>({item:typeof i.item==='string'?i.item:'',met:typeof i.met==='boolean'?i.met:null,reason:typeof i.reason==='string'?i.reason:''})):[];
   async function runGrader(){
     const o=S.overlay;

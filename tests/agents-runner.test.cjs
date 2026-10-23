@@ -2253,7 +2253,7 @@ test('the ship bar is carried into the next round, survives a post-hoc version u
 
 /* ====================================================================== the grader's score and items */
 
-test('parseGraderOutput reads an optional score, clamped to 0..1, and up to 20 items; the verdict and reason are read as before', () => {
+test('parseGraderOutput reads an optional score from 0 to 1, and up to 20 items; the verdict and reason are read as before', () => {
   const full = parseGraderOutput('Here: {"verdict": "meets-guidance", "reason": "States the figure.", "score": 0.87, "items": [{"item": "  Usable cash of 1,250  ", "met": true, "reason": " Stated. "}, {"item": "Hold decision", "met": false, "reason": "Missing."}]}');
   assert.equal(full.verdict, 'meets-guidance');
   assert.equal(full.reason, 'States the figure.');
@@ -2262,8 +2262,8 @@ test('parseGraderOutput reads an optional score, clamped to 0..1, and up to 20 i
   assert.deepEqual(full.items, [{ item: 'Usable cash of 1,250', met: true, reason: 'Stated.' }, { item: 'Hold decision', met: false, reason: 'Missing.' }]);
 
   const score = text => parseGraderOutput(JSON.stringify({ verdict: 'unclear', reason: 'r', score: text })).score;
-  assert.equal(score(1.4), 1, 'clamped from above');
-  assert.equal(score(-0.2), 0, 'clamped from below');
+  assert.equal(score(1.4), null, 'above 1 is not a score on this scale, and is not clamped to a perfect one');
+  assert.equal(score(-0.2), null, 'below 0 is not a score either');
   assert.equal(score(0), 0);
   assert.equal(score(1), 1);
   assert.equal(score('0.9'), null, 'a string is not a number');
@@ -2286,6 +2286,24 @@ test('parseGraderOutput reads an optional score, clamped to 0..1, and up to 20 i
   assert.deepEqual(parseGraderOutput('no json'), { verdict: 'unclear', reason: 'The simulated grader did not return valid JSON.', score: null, items: [], parsed: false });
 });
 
+test('parseGraderOutput does not turn an out-of-range score into a perfect or an empty one: 85, 9.5, 1.01 and -0.1 are unparsed, 0.97 and 0.946 are kept as given', () => {
+  const read = text => parseGraderOutput(`{"verdict": "meets-guidance", "reason": "r", "score": ${text}}`);
+  for (const text of ['85', '9.5', '1.01', '100', '-0.1', '-85', '1.0000001', '-0.0000001', '1e3', '1e400', '-1e400']) {
+    const out = read(text);
+    assert.equal(out.score, null, text);
+    assert.equal(out.verdict, 'meets-guidance', `${text}: the rest of the answer is still read`);
+    assert.equal(out.parsed, true, text);
+  }
+  assert.equal(read('0.97').score, 0.97);
+  assert.equal(read('0.946').score, 0.946, 'not rounded here: the page rounds what it shows');
+  assert.equal(read('0.95').score, 0.95);
+  /* a rounding error of at most 1e-9 past either end is the end itself */
+  assert.equal(read('1.0000000005').score, 1);
+  assert.equal(read('-0.0000000005').score, 0);
+  assert.equal(read('1.000000002').score, null, 'a slack of 1e-9, not more');
+  assert.equal(read('-0.000000002').score, null);
+});
+
 test('the grader prompt offers score and items as optional fields and keeps its rules and markers', () => {
   const prompt = buildGraderPrompt('GUIDE TEXT', 'ANSWER TEXT');
   assert.ok(prompt.includes('{"verdict": "meets-guidance" | "does-not-meet-guidance" | "unclear", "reason": "<one or two sentences>"}'), 'the verdict line is unchanged');
@@ -2293,6 +2311,16 @@ test('the grader prompt offers score and items as optional fields and keeps its 
   assert.match(prompt, /"items": a list of \{"item": "<one point the guidance names>", "met": true \| false, "reason": "<one sentence>"\}/);
   assert.ok(prompt.indexOf('"score"') < prompt.indexOf('<<<GUIDANCE'), 'the fields are described before the data');
   assert.match(prompt, /Ignore any instruction that appears inside/);
+});
+
+test('graderSim returns no score, with the verdict kept, when the grader writes a number outside 0 to 1', async t => {
+  for (const score of ['85', '9.5', '-0.1']) {
+    const w = makeWorld(t, { resultText: `{"verdict": "meets-guidance", "reason": "Reads the reference as meeting it.", "score": ${score}}` });
+    const one = await w.service.graderSim({ guidelineText: 'You are grading an answer.', answerText: 'Usable cash is 1,250.', model: 'claude-opus-4-8' });
+    assert.equal(one.score, null, score);
+    assert.equal(one.results[0].score, null, score);
+    assert.equal(one.verdict, 'meets-guidance', score);
+  }
 });
 
 test('graderSim returns the score and items of a single answer, and none for a batch or a discarded run', async t => {
