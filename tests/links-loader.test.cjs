@@ -15,12 +15,12 @@ const { sanitizeFileName, uniqueName, insideDir, collisionKey } = require('../ba
 const chrome = require('../backend/links/chrome.cjs');
 const { chromeArgs, browserEnv, findChromeBinary, usableBinary, prepareProfile, scrubProfile } = chrome;
 const { gateTab, attachmentHeader } = require('../backend/links/gate.cjs');
-const { fileCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, NEVER_TEXT_RE, NEVER_HREF_RE } = require('../backend/links/page.cjs');
+const { fileCandidates, droppedCandidates, navigateKey, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, NEVER_TEXT_RE, NEVER_HREF_RE } = require('../backend/links/page.cjs');
 const discover = require('../backend/links/discover.cjs');
 const { validateLink, fileUrlAllowed, hostProblem } = require('../backend/links/url.cjs');
 const store = require('../backend/links/store.cjs');
 const { Tab, safeUrl, safeText, cleanLabel } = require('../backend/links/tab.cjs');
-const { DownloadManager, pickName } = require('../backend/links/downloads.cjs');
+const { DownloadManager, pickName, bestName } = require('../backend/links/downloads.cjs');
 const { createLinkLoader, LinkError, changedToggle, findAllFilesToggle: exportedFinder, TOGGLE_LABEL_RE: exportedRe } = require('../backend/links/index.cjs');
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'links-loader-test-'));
@@ -298,6 +298,13 @@ test('names: Chrome\'s placeholder "download" is replaced by the page\'s name, a
   assert.equal(pickName('x.bin', { nameHint: 'whatever.pdf' }, 'application/pdf').name, 'x.bin');
   assert.equal(pickName('', { nameHint: '' }, 'application/zip').name, 'download.zip');
   assert.equal(pickName('../../etc/passwd', { nameHint: '' }, '').name, 'passwd');
+  assert.equal(pickName('download', { nameHint: 'download', label: 'Variance_Bridge.xlsx', text: 'Variance_Bridge.xlsx' }, 'application/octet-stream').name, 'Variance_Bridge.xlsx', 'an opaque tail of the address: the link text has the real name');
+  assert.equal(pickName('download', { nameHint: 'download', label: 'Grader Guideline.pdf' }, 'application/pdf').name, 'Grader Guideline.pdf', 'not download.pdf');
+  assert.equal(pickName('21', { nameHint: '21', label: 'Atlas_Rows.csv 1 KB', text: 'Download' }, 'text/csv').name, '21.csv', 'no name with an extension anywhere: the content type is the last resort');
+  assert.equal(pickName('', { nameHint: 'download', label: 'Row 3', text: 'Board_Memo.docx' }, 'application/octet-stream').name, 'Board_Memo.docx', 'the text counts too');
+  assert.equal(bestName({ nameHint: 'download', label: 'Q3.pdf', text: 'Download' }), 'Q3.pdf');
+  assert.equal(bestName({ nameHint: 'doc42', label: 'no extension', text: 'x' }), 'doc42');
+  assert.equal(bestName({}), '');
 });
 
 /* ---------------------------------------------------------------- links */
@@ -383,23 +390,45 @@ test('changedToggle: the switch that went from off to on, found by its path', ()
 });
 
 /* ---------------------------------------------------------------- file candidates */
-test('candidates: files, not actions; Archive_2026.zip stays, "Delete file" and /logout go; buttons in forms go; the group and label come along', () => {
+test('candidates: files, not actions; Archive_2026.zip stays, "Delete file" and /logout go; buttons that would submit go; the group, label, kind and view come along', () => {
   const link = (text, href, extra = {}) => ({ text, href, rawHref: href, scheme: 'https:', fileLike: true, why: ['extension'], nameHint: text, ext: 'zip', path: 'a', download: null, group: 'Task files', ...extra });
   const s = {
-    url: 'https://x.example/t',
-    links: [link('Archive_2026.zip', 'https://x.example/f/Archive_2026.zip'), link('Delete file', 'https://x.example/f/1/delete'), link('Sign out', 'https://x.example/logout'), link('Approved_Budget.xlsx', 'https://x.example/f/b.xlsx', { group: 'World files' }), link('same', 'https://x.example/f/b.xlsx'),
+    url: 'https://x.example/t', view: { tab: null, more: 1, scroll: 2 },
+    links: [link('Archive_2026.zip', 'https://x.example/f/Archive_2026.zip'), link('Delete file', 'https://x.example/f/1/delete', { why: ['path'], ext: null }), link('Sign out', 'https://x.example/logout', { why: ['path'], ext: null }), link('Approved_Budget.xlsx', 'https://x.example/f/b.xlsx', { group: 'World files' }), link('same', 'https://x.example/f/b.xlsx'),
       link('Odd', 'javascript:alert(1)', { scheme: 'javascript:' }), link('Plain page', 'https://x.example/about', { fileLike: false })],
-    buttons: [{ text: 'Notes.txt', fileLike: true, disabled: false, inForm: false, dataUrl: '/f/n.txt', ext: 'txt', path: 'button', group: 'Task files' }, { text: 'Download all', fileLike: true, disabled: false, inForm: true, dataUrl: null, path: 'b2' }, { text: 'Remove Notes.txt', fileLike: true, disabled: false, inForm: false, path: 'b3' }, { text: 'Gone.txt', fileLike: true, disabled: true, path: 'b4' }],
+    buttons: [{ text: 'Notes.txt', fileLike: true, disabled: false, inForm: false, dataUrl: '/f/n.txt', ext: 'txt', path: 'button', group: 'Task files' }, { text: 'Download all', fileLike: true, disabled: false, inForm: true, dataUrl: null, path: 'b2' }, { text: 'Remove Notes.txt', fileLike: true, disabled: false, inForm: false, ext: 'txt', path: 'b3' }, { text: 'Gone.txt', fileLike: true, disabled: true, path: 'b4' }],
   };
   const list = fileCandidates(s);
   assert.deepEqual(list.map((c) => c.text), ['Archive_2026.zip', 'Approved_Budget.xlsx', 'Notes.txt']);
-  assert.deepEqual(list.map((c) => [c.mode, c.group, c.label]), [['navigate', 'Task files', 'Archive_2026.zip'], ['navigate', 'World files', 'Approved_Budget.xlsx'], ['click', 'Task files', 'Notes.txt']]);
+  assert.deepEqual(list.map((c) => [c.mode, c.kind, c.group, c.label]), [['navigate', 'link', 'Task files', 'Archive_2026.zip'], ['navigate', 'link', 'World files', 'Approved_Budget.xlsx'], ['click', 'button', 'Task files', 'Notes.txt']]);
+  assert.deepEqual(list[0].view, { tab: null, more: 1, scroll: 2 }, 'the view of the snapshot comes along');
   assert.equal(list[2].href, 'https://x.example/f/n.txt');
+  assert.deepEqual(droppedCandidates(s), [{ label: 'Remove Notes.txt', group: '', reason: 'looks like an action' }, { label: 'Gone.txt', group: '', reason: 'the button is disabled' }], '"Delete file" has no file name: an action, not a file; the others are reported');
   assert.ok(NEVER_TEXT_RE.test('Cancel booking') && !NEVER_TEXT_RE.test('Cancelled_Orders.csv'));
   assert.ok(NEVER_TEXT_RE.test('Delete file') && NEVER_TEXT_RE.test('Sign out') && !NEVER_TEXT_RE.test('Archive_2026.zip') && !NEVER_TEXT_RE.test('Approved_Budget.xlsx'));
   assert.ok(NEVER_HREF_RE.test('/x?action=delete') && NEVER_HREF_RE.test('/files/12/remove') && NEVER_HREF_RE.test('/logout') && !NEVER_HREF_RE.test('/files/removed.csv'));
   assert.deepEqual(fileCandidates({ url: 'https://x.example/', links: [], buttons: [] }), []);
   assert.deepEqual(fileCandidates({ url: 'https://x.example/' }), []);
+});
+test('candidates: a real file (an extension or a download attribute) is never dropped for the words in its name or its folder; an action parameter still stops it; a button that cannot submit is kept', () => {
+  const mk = (text, rawHref, extra = {}) => ({ text, href: `https://x.test${rawHref}`, rawHref, scheme: 'https:', fileLike: true, why: ['extension'], nameHint: rawHref.split('/').pop(), ext: 'pdf', group: 'Files', path: 'a', download: null, ...extra });
+  const names = ['Archive 2025 Q4.zip', 'Reset policy.pdf', 'Submit-W9.pdf', 'Reject codes.csv', 'Cancel policy.pdf', 'Remove duplicates.xlsx', 'Publish calendar.xlsx', 'Delete log.txt', 'Approve matrix.xlsx'];
+  const snap = { url: 'https://x.test/t', buttons: [], links: [...names.map((n, i) => mk(n, `/f/${i}.pdf`)), mk('Policy.pdf', '/f/publish/2025/policy.pdf'), mk('Memo', '/f/approve/memo', { why: ['download-attribute'], download: '' }),
+    mk('Danger.pdf', '/api?action=delete&file=x.pdf'), mk('Delete everything', '/files/9/delete', { why: ['path'], ext: null }), mk('Delete log.txt', '/files/9/delete', { why: ['path'], ext: 'txt' })] };
+  assert.deepEqual(fileCandidates(snap).map((c) => c.label), [...names, 'Policy.pdf', 'Memo']);
+  assert.deepEqual(droppedCandidates(snap), [{ label: 'Danger.pdf', group: 'Files', reason: 'looks like an action' }, { label: 'Delete log.txt', group: 'Files', reason: 'looks like an action' }], 'what a rule still drops is reported, an action with no file name is not');
+  const buttons = [{ text: 'Download', label: 'Task_A.txt', fileLike: true, disabled: false, inForm: false, group: 'F', path: 'x' }, { text: 'Download', label: 'Task_B.txt', fileLike: true, disabled: false, inForm: true, group: 'F', path: 'y' }, { text: 'Delete Atlas.txt', label: 'Delete Atlas.txt', fileLike: true, disabled: false, ext: 'txt', group: 'F', path: 'z' }];
+  assert.deepEqual(fileCandidates({ url: 'https://x.test/', links: [], buttons }).map((c) => c.label), ['Task_A.txt']);
+  assert.deepEqual(droppedCandidates({ url: 'https://x.test/', links: [], buttons }).map((d) => [d.label, d.reason]), [['Task_B.txt', 'would submit a form'], ['Delete Atlas.txt', 'looks like an action']]);
+});
+test('candidates: the same file signed twice is one candidate (origin and path, without the signature); two files that differ in a real parameter are two', () => {
+  const mk = (href, text) => ({ text, href, rawHref: href, scheme: 'https:', fileLike: true, why: ['extension'], nameHint: text, ext: 'txt', group: 'F', path: 'a', download: null });
+  const one = fileCandidates({ url: 'https://x.test/', buttons: [], links: [mk('https://x.test/f/A.txt?X-Amz-Signature=1&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/f/A.txt?X-Amz-Signature=2&X-Amz-Expires=60', 'A.txt'), mk('https://x.test/dl?id=1', 'B.txt'), mk('https://x.test/dl?id=2', 'C.txt'), mk('https://x.test/dl?token=a', 'D.txt'), mk('https://x.test/dl?token=b', 'E.txt')] });
+  assert.deepEqual(one.map((c) => c.label), ['A.txt', 'B.txt', 'C.txt', 'D.txt', 'E.txt']);
+  assert.equal(navigateKey('https://x.test/f/A.txt?sig=1&b=2&a=1', 'A'), navigateKey('https://x.test/f/A.txt?a=1&sig=9&b=2', 'A'));
+  const merged = discover.unionCandidates([[{ ...one[0], href: 'https://x.test/f/A.txt?X-Amz-Signature=old' }], [{ ...one[0], href: 'https://x.test/f/A.txt?X-Amz-Signature=new' }]]);
+  assert.equal(merged.length, 1);
+  assert.match(merged[0].href, /new$/, 'the newest address is kept');
 });
 
 /* ---------------------------------------------------------------- the page reader, on a tiny fake document (the real one runs in tests/links-browser.cjs) */
@@ -568,6 +597,100 @@ test('pageOps activate: clicks the element it was told to, but not one that is g
   assert.equal(vm.runInNewContext(`(${pageOps.toString()})(${JSON.stringify({ op: 'nothing' })})`, box.sandbox).ok, false);
 });
 
+/* a tiny DOM builder for the page-side functions: elements with a parent, siblings, text, and the few fields they read */
+function tinyDom() {
+  const doc = {};
+  const text = (nodeValue) => ({ nodeType: 3, nodeValue });
+  const el = (tagName, attrs = {}, children = [], fields = {}) => {
+    const node = {
+      nodeType: 1, tagName, attrs, childNodes: children, shadowRoot: null, parentElement: null, previousElementSibling: null, nextElementSibling: null, id: attrs.id || '', name: attrs.name || '', autocomplete: '', title: attrs.title || '', labels: undefined,
+      getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }, hasAttribute(name) { return name in this.attrs; }, getRootNode: () => doc, querySelector: () => null, querySelectorAll: () => [], cloneNode() { return this; }, closest: () => null, ...fields,
+    };
+    Object.defineProperty(node, 'textContent', { get: () => children.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join(''), configurable: true });
+    children.forEach((c, i) => { if (c.nodeType === 1) { c.parentElement = node; c.previousElementSibling = children.slice(0, i).filter((x) => x.nodeType === 1).pop() || null; c.nextElementSibling = children.slice(i + 1).find((x) => x.nodeType === 1) || null; } });
+    return node;
+  };
+  const flat = (node) => node.childNodes.filter((c) => c.nodeType === 1).flatMap((c) => [c, ...flat(c)]);
+  return { doc, el, text, flat };
+}
+test('extractPage: more controls are files - a "#" link or a link without an address called Download, an icon-only button with a title, a link named like a file whose address says nothing; javascript: code never; a button counts as submitting only when it can submit', () => {
+  const { extractPage, LIMITS } = require('../backend/links/page.cjs');
+  const { doc, el, text, flat } = tinyDom();
+  const form = {};
+  const abs = (href) => `https://tasks.atlas.example${href}`;
+  const body = el('BODY', {}, [
+    el('H2', {}, [text('Files')]),
+    el('A', { href: '#', role: 'button' }, [text('Download')]), el('A', { role: 'button' }, [text('Download')]), el('A', { href: 'javascript:void(0)' }, [text('Download')]),
+    el('A', { href: 'javascript:alert(1)', download: '' }, [text('evil.pdf')], { href: 'javascript:alert(1)' }),
+    el('BUTTON', { title: 'Download the notes' }, [el('SVG', {}, [])]), el('BUTTON', { 'aria-label': 'Download Budget5.xlsx' }, []),
+    el('A', { href: '/files/doc42' }, [text('Budget_2025.xlsx')], { href: abs('/files/doc42') }),
+    el('A', { href: '/about' }, [text('Annual report v1.2')], { href: abs('/about') }),
+    el('BUTTON', { type: 'button' }, [text('Download')], { form }), el('BUTTON', {}, [text('Download')], { form }), el('INPUT', { type: 'submit', value: 'Download' }, [], { type: 'submit', value: 'Download', form }),
+    el('BUTTON', { type: 'button', formaction: '/x' }, [text('Download')], { form }), el('BUTTON', {}, [text('Download')], { form: null }), el('BUTTON', { type: 'reset' }, [text('Download')], { form }),
+  ]);
+  Object.assign(doc, { body, documentElement: body, title: 'T', readyState: 'complete', querySelectorAll: (sel) => (sel === '*' ? flat(body) : []), querySelector: () => null });
+  const sandbox = { document: doc, location: { href: abs('/t/1'), origin: abs('') }, performance: { now: () => 0 }, CSS: { escape: (x) => x }, URL, URLSearchParams };
+  const out = JSON.parse(JSON.stringify(vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify({ limits: LIMITS, toggleRe: TOGGLE_LABEL_RE.source })})`, sandbox)));
+  assert.deepEqual(out.links.map((l) => [l.text, l.why]), [['Budget_2025.xlsx', ['extension', 'path']]], 'a link called like a file counts; javascript: code and "Annual report v1.2" do not');
+  assert.deepEqual(out.buttons.map((b) => [b.text, b.inForm]), [
+    ['Download', false], ['Download', false], ['Download', false], ['Download the notes', false], ['Download Budget5.xlsx', false],
+    ['Download', false], ['Download', true], ['Download', true], ['Download', true], ['Download', false], ['Download', false]], 'type=button and reset cannot submit; a default button, a submit input and a formaction can');
+  assert.ok(!out.buttons.some((b) => b.text === 'evil.pdf'));
+});
+function opsDom(setup) {
+  const { doc, el, text, flat } = tinyDom();
+  const clicks = [];
+  const built = setup({ el, text, clicks });
+  const roots = built.roots || [];
+  Object.assign(doc, { querySelectorAll: (sel) => (sel === '*' ? built.all || [] : (built.by || {})[sel] || []), querySelector: (sel) => (built.find || {})[sel] || null, scrollingElement: null, documentElement: {} });
+  return { sandbox: { document: doc, window: { innerHeight: 800 }, Event: class { constructor(type) { this.type = type; } }, getComputedStyle: () => ({ overflowY: 'visible' }), CSS: { escape: (x) => x } }, clicks, built, flat, roots };
+}
+const runOp = (dom, arg) => JSON.parse(JSON.stringify(vm.runInNewContext(`(${require('../backend/links/page.cjs').pageOps.toString()})(${JSON.stringify(arg)})`, dom.sandbox)));
+test('pageOps activate: a "Download" button is pressed only when its ROW is still the one that was listed (or still holds the file name); a plain file link is not refused for the words in its name', () => {
+  const { NEVER_TEXT_RE } = require('../backend/links/page.cjs');
+  const dom = opsDom(({ el, text, clicks }) => {
+    const row = (content) => ({ innerText: content, textContent: content });
+    const button = (id, rowText) => el('BUTTON', { id }, [text('Download')], { click: () => clicks.push(id), closest: () => (rowText === null ? null : row(rowText)) });
+    const link = el('A', { id: 'archive' }, [text('Archive 2025 Q4.zip')], { click: () => clicks.push('archive') });
+    return { find: { '#b1': button('b1', 'Atlas_Rows.csv Download 1 KB'), '#b2': button('b2', 'Other_File.csv Download'), '#b3': button('b3', null), '#archive': link } };
+  });
+  const press = (arg) => runOp(dom, { op: 'activate', never: NEVER_TEXT_RE.source, ...arg });
+  assert.deepEqual(press({ path: '#b1', label: 'Download', row: 'Atlas_Rows.csv 1 KB' }), { ok: true });
+  assert.match(press({ path: '#b2', label: 'Download', row: 'Atlas_Rows.csv 1 KB' }).why, /row of the element is no longer the one that was listed/, 'the same button text, another row: refused, not pressed');
+  assert.equal(press({ path: '#b2', label: 'Download', row: 'Atlas_Rows.csv 1 KB (new)', name: 'Other_File.csv' }).ok, true, 'a row whose other words changed still holds the file name');
+  assert.match(press({ path: '#b3', label: 'Download', row: 'Atlas_Rows.csv' }).why, /row of the element/, 'no row at all is no match');
+  assert.deepEqual(dom.clicks, ['b1', 'b2']);
+  assert.match(press({ path: '#archive', label: 'Archive 2025 Q4.zip' }).why, /destructive/, 'the default rule refuses it');
+  assert.equal(press({ path: '#archive', label: 'Archive 2025 Q4.zip', never: '' }).ok, true, 'a file link is pressed under its own words');
+  assert.equal(press({ path: '#b1', label: 'Download', row: 'Download' }).ok, true, 'row equal to the text: no row to compare');
+});
+test('pageOps: a path is one CSS path per document joined with >>> - it goes through an iframe and through a shadow root; expand, controls and scroll look in them too; a link that goes somewhere is not a "Load more" button', () => {
+  const { NEVER_TEXT_RE } = require('../backend/links/page.cjs');
+  const dom = opsDom(({ el, text, clicks }) => {
+    const innerBtn = el('BUTTON', { id: 'inner' }, [text('Download')], { click: () => clicks.push('inner') });
+    const shadowBtn = el('BUTTON', { id: 'sh' }, [text('Download')], { click: () => clicks.push('sh') });
+    const frame = el('IFRAME', { id: 'f' }, [], { contentDocument: { nodeType: 9, documentElement: {}, querySelector: (sel) => (sel === '#inner' ? innerBtn : null), querySelectorAll: (sel) => (sel === '*' ? [innerBtn] : sel === 'details:not([open])' ? [details] : sel === 'button,a,[role=button]' ? [moreInFrame, navMore] : []), scrollingElement: { scrollTop: 0, scrollHeight: 5000, clientHeight: 800 }, defaultView: { innerHeight: 600 } } });
+    const host = el('DIV', { id: 'host' }, [], { shadowRoot: { nodeType: 11, host: null, querySelector: (sel) => (sel === '#sh' ? shadowBtn : null), querySelectorAll: (sel) => (sel === '*' ? [shadowBtn] : sel === '[aria-expanded="false"]' ? [expander] : []) } });
+    const details = { open: false, tagName: 'DETAILS' };
+    const expander = el('BUTTON', { 'aria-expanded': 'false' }, [text('Folder')], { click: () => clicks.push('expander') });
+    const moreInFrame = el('BUTTON', {}, [text('Load more files')], { click: () => clicks.push('more') });
+    const navMore = el('A', { href: '/next' }, [text('Show more')], { click: () => clicks.push('nav') });
+    const tabInHost = el('BUTTON', { role: 'tab', 'aria-selected': 'false' }, [text('Archive tab')]);
+    return { all: [frame, host], find: { '#f': frame, '#host': host }, by: { '[role=tab]': [] }, extra: { tabInHost } };
+  });
+  assert.deepEqual(runOp(dom, { op: 'activate', never: NEVER_TEXT_RE.source, path: '#f >>> #inner', label: 'Download' }), { ok: true });
+  assert.deepEqual(runOp(dom, { op: 'activate', never: NEVER_TEXT_RE.source, path: '#host >>> #sh', label: 'Download' }), { ok: true });
+  assert.match(runOp(dom, { op: 'activate', never: '', path: '#f >>> #nope' }).why, /gone/);
+  assert.match(runOp(dom, { op: 'activate', never: '', path: '#nohost >>> #sh' }).why, /gone/);
+  assert.deepEqual(dom.clicks, ['inner', 'sh']);
+  const expanded = runOp(dom, { op: 'expand', never: NEVER_TEXT_RE.source });
+  assert.deepEqual(expanded, { opened: 1, expanded: 1 }, 'the closed <details> of the iframe and the expander of the shadow root');
+  assert.deepEqual(dom.clicks.slice(2), ['expander']);
+  const controls = runOp(dom, { op: 'controls', never: NEVER_TEXT_RE.source });
+  assert.deepEqual(controls.more.map((m) => m.label), ['Load more files'], 'the wider label is a button; "Show more" that links to /next is not pressed');
+  assert.deepEqual(runOp(dom, { op: 'scroll', never: '' }), { moved: true }, 'the iframe scrolls too');
+});
+
 /* ---------------------------------------------------------------- several looks at a page */
 test('discover: sections merge by heading and line, candidates by address; a signature changes when the page does', () => {
   const a = [{ heading: 'Files', text: 'row 1\nrow 2' }, { heading: 'Notes', text: 'one' }, { heading: 'Files', text: 'second list' }];
@@ -585,6 +708,19 @@ test('discover: sections merge by heading and line, candidates by address; a sig
   }
 });
 
+test('discover: a button is the same button when the heading above it changed between two looks (a switch added a section); two files with one name in two groups at once stay two', () => {
+  const b = (group, label = 'Atlas_Blob.txt') => ({ mode: 'click', kind: 'button', text: label, label, nameHint: label, href: null, group, path: 'p', view: null });
+  const merged = discover.unionCandidates([[b('Task files')], [b('World files')]]);
+  assert.deepEqual(merged.map((c) => [c.label, c.group]), [['Atlas_Blob.txt', 'World files']], 'one button, under the heading it has now');
+  const both = discover.unionCandidates([[b('Task files'), b('World files')]]);
+  assert.equal(both.length, 2, 'both there at once: two files that share a name');
+  const later = discover.unionCandidates([[b('Task files'), b('World files')], [b('Task files'), b('World files')]]);
+  assert.equal(later.length, 2, 'and they stay two when seen again');
+  const set = new discover.CandidateSet();
+  assert.equal(set.add([b('A')]), 1);
+  assert.equal(set.add([b('A'), b('A', 'Other.txt')]), 1, 'add() tells how many are new');
+  assert.equal(set.size, 2);
+});
 function scriptedTab(script) {
   const { extractPage, pageOps } = require('../backend/links/page.cjs');
   const log = []; const snaps = [];
@@ -630,18 +766,85 @@ test('discover gather: tabs one at a time (the open one is put back), "Load more
   const snaps = [fileSnap('home')];
   const did = await discover.gather(tab, snaps, {});
   const activated = log.filter((a) => a.op === 'activate').map((a) => a.path);
-  assert.deepEqual(activated, ['tab2', 'tab1', 'more', 'more'], 'the other tab, then the first one again, then Load more until it is gone');
+  assert.deepEqual(activated, ['more', 'more', 'tab2', 'tab1'], 'Load more on the open tab until it is gone, then the other tab, then the first one again');
   assert.equal(did.tabs, 1);
   assert.equal(did.more, 2);
   assert.ok(did.scrolls >= 1 && did.scrolls <= 6, 'scrolling stopped when nothing new came');
   assert.ok(log.some((a) => a.op === 'scroll' && a.reset), 'the page is scrolled back to the top');
   assert.ok(snaps.length > 4);
+  assert.deepEqual(did.capped, []);
   const capped = scriptedTab({ snapshot: (step) => fileSnap('x', `s${step}`), op: (arg) => (arg.op === 'scroll' ? { moved: true } : arg.op === 'controls' ? { tabs: [], more: [] } : {}) });
-  await discover.gather(capped.tab, [fileSnap('x')], { maxScroll: 5 });
+  const cappedDid = await discover.gather(capped.tab, [fileSnap('x')], { maxScroll: 5 });
   assert.equal(capped.log.filter((a) => a.op === 'scroll' && !a.reset).length <= 5, true);
+  assert.match(cappedDid.capped.join(' '), /scrolling stopped at 5 steps while the page may still have more files/, 'a limit that ended a step is told, not silent');
   const timed = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'A', path: 'a', selected: false }], more: [] } : { ok: true }) });
-  await discover.gather(timed.tab, [fileSnap('x')], { budgetMs: -1 });
-  assert.deepEqual(timed.log.filter((a) => a.op === 'activate'), [], 'no time left: no tab is opened');
+  await discover.gather(timed.tab, [fileSnap('x')], { budgetMs: -1, minPerTabMs: 5000 });
+  assert.deepEqual(timed.log.filter((a) => a.op === 'activate').map((a) => a.path), ['a'], 'no time left, but every tab still gets its minimum');
+});
+function tabbedPage() {
+  const state = { cur: 'A', more: { A: 2, B: 3 }, shown: { A: 1, B: 1 }, scroll: 0 };
+  const scrollMax = { A: 2, B: 1 };
+  return {
+    state,
+    script: {
+      snapshot: () => fileSnap(...Array.from({ length: state.shown[state.cur] + state.scroll }, (_, i) => `${state.cur}${i + 1}`)),
+      op: (arg) => {
+        if (arg.op === 'controls') return { tabs: ['A', 'B'].map((t) => ({ label: t, path: `tab${t}`, selected: state.cur === t })), more: state.more[state.cur] > 0 ? [{ label: 'Load more', path: 'more' }] : [] };
+        if (arg.op === 'activate') { if (arg.path === 'more') { state.more[state.cur] -= 1; state.shown[state.cur] += 1; } else { state.cur = arg.path.slice(3); state.scroll = 0; } return { ok: true }; }
+        if (arg.op === 'scroll') { if (arg.reset) { state.scroll = 0; return { moved: false }; } if (state.scroll >= scrollMax[state.cur]) return { moved: false }; state.scroll += 1; return { moved: true }; }
+        return { opened: 0, expanded: 0 };
+      },
+    },
+  };
+}
+test('discover gather: EVERY tab gets "Load more" and scrolling, not only the open one; each snapshot knows its view (tab, presses, steps); the open tab is put back', async () => {
+  const page = tabbedPage();
+  const { tab, log } = scriptedTab(page.script);
+  const snaps = [fileSnap('A1')];
+  const did = await discover.gather(tab, snaps, {});
+  assert.deepEqual(log.filter((a) => a.op === 'activate').map((a) => a.path), ['more', 'more', 'tabB', 'more', 'more', 'more', 'tabA']);
+  assert.deepEqual([did.tabs, did.more, did.scrolls, did.home, did.capped], [1, 5, 3, { label: 'A', path: 'tabA' }, []]);
+  const all = discover.unionCandidates(snaps.map(fileCandidates));
+  assert.deepEqual(all.map((c) => c.label).sort(), ['A1', 'A2', 'A3', 'A4', 'A5', 'B1', 'B2', 'B3', 'B4', 'B5']);
+  assert.deepEqual(all.find((c) => c.label === 'B5').view, { tab: { label: 'B', path: 'tabB' }, more: 3, scroll: 1 }, 'the tab, the presses and the steps it took to see it');
+  assert.deepEqual(all.find((c) => c.label === 'A3').view, { tab: { label: 'A', path: 'tabA' }, more: 2, scroll: 0 });
+  assert.equal(page.state.cur, 'A');
+  const small = tabbedPage();
+  const s = scriptedTab(small.script);
+  const limited = await discover.gather(s.tab, [fileSnap('A1')], { maxMore: 1 });
+  assert.ok(limited.capped.some((t) => /"Load more" in the tab "A" stopped at 1 presses and may have more files/.test(t)), limited.capped.join(' | '));
+  assert.ok(limited.capped.some((t) => /in the tab "B"/.test(t)), 'the note says which tab');
+});
+test('discover replay: the tab, the "Load more" presses, then the scroll steps, in the order gather took them', async () => {
+  const page = tabbedPage();
+  const { tab, log } = scriptedTab(page.script);
+  const r = await discover.replay(tab, { tab: { label: 'B', path: 'tabB' }, more: 2, scroll: 1 }, { label: 'A', path: 'tabA' }, {});
+  assert.deepEqual(r, { ok: true });
+  const trace = log.map((a) => `${a.op}${a.path ? `:${a.path}` : ''}${a.reset ? ':reset' : ''}`);
+  assert.deepEqual(trace.filter((t) => !t.startsWith('controls') && !t.startsWith('expand')), ['activate:tabB', 'activate:more', 'activate:more', 'scroll:reset', 'scroll']);
+  assert.deepEqual([page.state.cur, page.state.shown.B, page.state.scroll], ['B', 3, 1]);
+  const again = scriptedTab(page.script);
+  await discover.replay(again.tab, { tab: { label: 'B', path: 'tabB' }, more: 0, scroll: 0 }, null, {});
+  assert.ok(!again.log.some((a) => a.op === 'activate' && a.path === 'tabB'), 'already on that tab: not pressed again');
+  const gone = scriptedTab({ snapshot: () => fileSnap('x'), op: (arg) => (arg.op === 'controls' ? { tabs: [{ label: 'A', path: 'a', selected: true }], more: [] } : arg.op === 'activate' ? { ok: false, why: 'the element is gone from the page' } : {}) });
+  const failed = await discover.replay(gone.tab, { tab: { label: 'B', path: 'b' }, more: 0, scroll: 0 }, null, {});
+  assert.equal(failed.ok, false);
+  assert.match(failed.why, /tab "B" could not be opened again/);
+});
+test('discover expandAll: repeats until nothing new opens (a folder inside a folder), at most `passes` times, every pass a stamped snapshot', async () => {
+  let n = 0;
+  const { tab } = scriptedTab({ snapshot: () => fileSnap('a', `b${n}`), op: () => { n += 1; return n <= 2 ? { opened: 0, expanded: 1 } : { opened: 0, expanded: 0 }; } });
+  const snaps = [];
+  const total = await discover.expandAll(tab, snaps, { view: { tab: null, more: 0, scroll: 0 } });
+  assert.deepEqual(total, { opened: 0, expanded: 2, passes: 2 });
+  assert.equal(snaps.length, 2);
+  assert.deepEqual(snaps[0].view, { tab: null, more: 0, scroll: 0 });
+  const stuck = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 1, expanded: 0 }) });
+  assert.equal((await discover.expandAll(stuck.tab, [], { passes: 3 })).passes, 3);
+  const quiet = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 1, expanded: 0 }) });
+  const none = [];
+  await discover.expandAll(quiet.tab, none, { passes: 2, snapshots: false });
+  assert.equal(none.length, 0, 'snapshots:false only puts the page into the state');
 });
 test('discover expand: opens details and expanders, and takes a new look only when it did something', async () => {
   const none = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 0, expanded: 0 }) });
@@ -1300,6 +1503,67 @@ test('downloads: a window a click opens is adopted so its download is tracked, a
   assert.equal(m.dm.popups.size, 0);
 });
 
+/* ---------------------------------------------------------------- click candidates: where they are found, what is checked, what is retried */
+function clickTab(results = [{ ok: true }]) {
+  const calls = [];
+  return { calls, frameId: 'F1', net: { hops: [] }, evalFn: async (fn, arg) => { calls.push(arg); return results[Math.min(calls.length - 1, results.length - 1)]; } };
+}
+test('downloads: a click candidate is located first (the page is put into its view), then pressed with its text, its row and its file name; a plain link may press anything but a button is checked', async () => {
+  const m = manager({ gapMs: 0, beginTimeoutMs: 20, pollMs: 5 });
+  const tab = clickTab();
+  const seen = [];
+  m.dm.locate = async (c) => { seen.push(c.label); return { ok: true, path: 'table > tr:nth-of-type(7) > button' }; };
+  const button = { mode: 'click', kind: 'button', text: 'Download', label: 'Atlas_Rows.csv 1 KB', nameHint: 'Atlas_Rows.csv', path: 'old > path', pageTab: tab };
+  const r = await m.dm.fetchOne({ ...button, reclicked: true });
+  assert.equal(r.state, 'no-download', 'nothing began: reported, not hidden');
+  assert.deepEqual(seen, ['Atlas_Rows.csv 1 KB']);
+  assert.equal(tab.calls[0].op, 'activate');
+  assert.deepEqual([tab.calls[0].path, tab.calls[0].label, tab.calls[0].row, tab.calls[0].name], ['table > tr:nth-of-type(7) > button', 'Download', 'Atlas_Rows.csv 1 KB', 'Atlas_Rows.csv'], 'the path is the one found NOW, not the old one');
+  assert.match(tab.calls[0].never, /delete/, 'a button is checked against the destructive words');
+  const link = clickTab();
+  await m.dm.fetchOne({ mode: 'click', kind: 'link', text: 'Reset policy.pdf', label: 'Reset policy.pdf', nameHint: 'Reset policy.pdf', path: 'a', pageTab: link, reclicked: true });
+  assert.equal(link.calls[0].never, '', 'a file link is not refused for the words in its name');
+  const lost = clickTab();
+  m.dm.locate = async () => ({ ok: false, why: 'the file is no longer on the page (its row could not be found again)' });
+  const gone = await m.dm.fetchOne({ ...button, pageTab: lost });
+  assert.deepEqual([gone.state, gone.detail], ['failed', 'the file is no longer on the page (its row could not be found again)']);
+  assert.equal(lost.calls.length, 0, 'a row that cannot be found is never clicked');
+  const wrong = clickTab([{ ok: false, why: 'the row of the element is no longer the one that was listed' }]);
+  m.dm.locate = async () => ({ ok: true, path: 'p' });
+  const refused = await m.dm.fetchOne({ ...button, pageTab: wrong });
+  assert.deepEqual([refused.state, refused.detail], ['failed', 'the row of the element is no longer the one that was listed']);
+});
+test('downloads: a click that began no download is tried once more (Chrome drops a download that starts too soon after others); downloads are paced', async () => {
+  const m = manager({ gapMs: 40, beginTimeoutMs: 15, pollMs: 5 });
+  m.dm.limits.reclickMs = 10;
+  const tab = clickTab();
+  m.dm.locate = async () => ({ ok: true, path: 'p' });
+  const t0 = Date.now();
+  const r = await m.dm.fetchOne({ mode: 'click', kind: 'button', text: 'Download', label: 'A.txt', nameHint: 'A.txt', path: 'p', pageTab: tab });
+  assert.equal(r.state, 'no-download');
+  assert.equal(tab.calls.length, 2, 'pressed twice, then given up');
+  assert.ok(Date.now() - t0 >= 40, 'the second job waited out the gap');
+  const link = clickTab();
+  const nav = await m.dm.fetchOne({ mode: 'click', kind: 'link', text: 'x', label: 'x', path: 'p', pageTab: link, reclicked: true });
+  assert.equal(nav.state, 'no-download');
+  assert.equal(link.calls.length, 1, 'a candidate that was already pressed twice is not pressed again');
+});
+
+/* ---------------------------------------------------------------- the Chrome that cannot start, the profile that is scrubbed on every way out */
+test('a Chrome that does not start is reported as that, with its output (cut down), not as a window the owner closed; the profile is scrubbed', async () => {
+  const root = fresh('root');
+  const profile = path.join(root, 'private', 'link-profile');
+  fs.mkdirSync(path.join(profile, 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(profile, 'Default', 'History'), 'https://tasks.atlas.example/t/1?X-Signature=CANARYHIST');
+  const log = { stderr: 'Missing X server or $DISPLAY\nThe platform failed to initialize. Exiting. https://tasks.atlas.example/t/1?sig=CANARYERR' };
+  const loader = createLinkLoader({ root, chromePath: exe(), spawnFn: fakeChrome(log), headless: false });
+  const final = await loader.waitFor(loader.start('https://tasks.atlas.example/t/1'));
+  assert.equal(final.state, 'failed');
+  assert.match(final.message, /^Chrome did not start\. Missing X server or \$DISPLAY/);
+  assert.doesNotMatch(final.message, /closed before the load finished|CANARYERR|sig=/);
+  assert.equal(final.error, final.message);
+  assert.ok(!fs.existsSync(path.join(profile, 'Default', 'History')), 'a launch that failed still forgets where the profile has been');
+});
 /* ---------------------------------------------------------------- source rules */
 const sources = fs.readdirSync(path.join(__dirname, '..', 'backend', 'links')).filter((n) => n.endsWith('.cjs')).map((n) => [n, fs.readFileSync(path.join(__dirname, '..', 'backend', 'links', n), 'utf8')]);
 const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

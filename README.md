@@ -126,7 +126,7 @@ A step rail on the left (a stepper across the top on narrow screens) marks each 
 
 The **Pipeline** page (top of the sidebar, Local agents edition only) runs a whole design loop from one task link or one task folder. You approve it once, with a total spending cap, and it stops by itself.
 
-1. **Import.** Paste the task link, or the full path of a folder that holds the task's files. The [link loader](#the-link-loader) opens the page in its own Chrome window, waits for you to sign in, turns on the option that shows all files, and downloads every file, world files included, not only the files added for the task. Files it could not download are listed as skipped, never dropped in silence.
+1. **Import.** Paste the task link, or the full path of a folder that holds the task's files. The [link loader](#the-link-loader) opens the page in its own Chrome window, waits for you to sign in, turns on the option that shows all files, and downloads every file on the page: the world files as well as the files added for the task. Any file it could not download is listed as skipped.
 2. **Classify.** One tool-less run sorts the import into the prompt, the grader guideline, the golden answer, the world files and the task files. Classification fails closed:
    - A file whose name, group or label names an answer, a solution, a rubric, a guideline or grading is withheld from the pilots, whatever the model said.
    - A file that holds a long passage of the guideline or the golden answer is withheld too.
@@ -148,11 +148,11 @@ While any round runs, the page withholds the prompt, the guideline, the golden a
 
 ### The link loader
 
-The link loader is part of the companion and calls no model. It drives a dedicated Chrome profile in `private/link-profile/` (Chrome or Chromium must be installed; set `FINANCE_STUDIO_CHROME` to its path if it is not found), never your everyday profile:
+The link loader is part of the companion and calls no model. It drives a dedicated Chrome profile in `private/link-profile/` (Chrome or Chromium must be installed; set `FINANCE_STUDIO_CHROME` to its path if it is not found). Your everyday Chrome profile is never used.
 
-- **Sign in.** You sign in in a plain Chrome window that the loader does not control, so the platform sees an ordinary browser. Press *Continue* on the Pipeline page once you are signed in. The loader closes that window, reopens the page under its own control and carries on. If the page still asks for a sign-in, it tries once more, then stops and suggests importing from a folder.
+- **Sign in.** You sign in through a plain Chrome window that the loader does not control, so the platform sees an ordinary browser. Press *Continue* on the Pipeline page once you are signed in. The loader closes that window, reopens the page under its own control and carries on. If the page still asks for a sign-in, it tries once more, then stops and suggests importing from a folder.
 - **All files.** The loader looks for the option that shows all files and turns it on. If it cannot find the option, it asks you to turn it on in the Chrome window and press *Continue*. The option's label is remembered per site in `private/link-mappings.json`, so the next load turns it on by itself.
-- **The whole page.** Before it lists the files, it opens collapsed sections, expanders and every tab, presses *Load more*, scrolls long lists and reads same-origin frames.
+- **The whole page.** Before it lists the files, it opens collapsed sections, expanders and every tab, presses *Load more* in each tab, scrolls long lists and reads same-origin frames. It does this again after turning on the all-files option. When a time limit cuts a step short, the result says so.
 - **Downloads.** Files are saved to `private/links/<id>/files/` and the page text to `page.json`. When some files fail, the loader lists them and waits: download them yourself and use the folder import, or press *Continue* to go on without them.
 - **Privacy.** The link, its query and any token are never written to a command line, a log or a stored state, and the profile's history is cleared when the load ends.
 

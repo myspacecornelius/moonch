@@ -18,7 +18,8 @@
    "load more" buttons, scroll the scrollable boxes one step, and activate ONE element (a click, or choosing a <select> option) after
    checking that it is still the element that was listed and is not a destructive one.
 
-   Exports: extractPage, pageOps, takePage, fileCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE. */
+   Exports: extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, findAllFilesToggle,
+   findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE. */
 
 const LIMITS = {
   maxMs: 2500, maxElements: 40000, maxRoots: 40, sections: 200, sectionChars: 20000, valueChars: 400,
@@ -30,6 +31,11 @@ const LIMITS = {
    qualifies; the address rule looks for the verb as a whole path segment or as an action parameter. */
 const NEVER_TEXT_RE = /^(delete|remove|log ?out|sign ?out|cancel|revoke|reset|unsubscribe|submit|approve|reject|publish|archive)\b/i;
 const NEVER_HREF_RE = /(^|\/)(delete|remove|logout|log-out|signout|sign-out|revoke|unsubscribe|reset|approve|reject|publish)(\/|$|\?|#)|[?&](action|op|do|cmd)=(delete|remove|logout|revoke|approve|reject|publish)/i;
+/* A link that is plainly a FILE (its name ends in a file extension, or it has a download attribute) is a GET of a document, whatever the
+   words in its name or its folder: "Reset policy.pdf", /publish/2025/policy.pdf. Only an action parameter still stops it. */
+const NEVER_ACTION_PARAM_RE = /[?&](action|op|do|cmd)=(delete|remove|logout|revoke|approve|reject|publish)/i;
+/* Query parameters that sign or time-limit an address and change every time it is issued. */
+const SIGNATURE_PARAM_RE = /^(x-amz-.*|x-goog-.*|x-ms-.*|x-sig.*|x-expires|x-token|signature|sig|se|sp|sv|sr|st|spr|skoid|sktid|expires?|token|policy|key-pair-id|awsaccesskeyid|googleaccessid)$/i;
 
 /* The label of the "show all files" control: show, include, display or view (with all, every, the, world or available) before files,
    attachments, documents or downloads; or all, every or world before them. "Show only added files" and "Show details" do not match.
@@ -68,16 +74,30 @@ function extractPage(opts) {
   };
   collect(document);
 
-  const cssPath = (el) => {
-    if (el.getRootNode() !== document) return null;
+  /* A path that finds the element again: one CSS path per document it sits in (anchored at the root or at an element with a unique id),
+     joined with " >>> " (the host of a shadow root, or the iframe, is the next link of the chain). null when there is no way back. */
+  const segmentOf = (n, rootNode) => {
     const parts = [];
-    for (let n = el; n && n.nodeType === 1 && parts.length < 7; n = n.parentElement) {
-      const t = n.tagName.toLowerCase();
-      if (n.id && document.querySelectorAll('#' + CSS.escape(n.id)).length === 1) { parts.unshift(t + '#' + CSS.escape(n.id)); break; }
-      let idx = 1; for (let s = n.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === n.tagName) idx += 1;
+    for (let m = n; m && m.nodeType === 1 && parts.length < 40; m = m.parentElement) {
+      const t = m.tagName.toLowerCase();
+      if (m.id && rootNode.querySelectorAll('#' + CSS.escape(m.id)).length === 1) { parts.unshift(t + '#' + CSS.escape(m.id)); break; }
+      let idx = 1; for (let s = m.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === m.tagName) idx += 1;
       parts.unshift(t + ':nth-of-type(' + idx + ')');
     }
     return parts.join(' > ');
+  };
+  const cssPath = (el) => {
+    const segs = [];
+    let node = el;
+    for (let depth = 0; depth < 8 && node; depth += 1) {
+      const rootNode = node.getRootNode();
+      segs.unshift(segmentOf(node, rootNode));
+      if (rootNode === document) return segs.join(' >>> ');
+      if (rootNode.host) node = rootNode.host;
+      else if (rootNode.defaultView && rootNode.defaultView.frameElement) node = rootNode.defaultView.frameElement;
+      else return null;
+    }
+    return null;
   };
   const keyOf = (el) => { const id = el.getAttribute('id'); if (id) return 'id:' + clip(id, 80); const t = el.getAttribute('data-testid'); return t ? 'testid:' + clip(t, 80) : ''; };
   const withoutControls = (node) => { const c = node.cloneNode(true); c.querySelectorAll('input,select,textarea,button').forEach((n) => n.remove()); return norm(c.textContent); };
@@ -144,11 +164,12 @@ function extractPage(opts) {
       Array.from(el.options || []).slice(0, L.selectOptions).forEach((o, i) => addToggle({ label: clip(norm(o.textContent), 120), checked: Boolean(o.selected), kind: 'option', disabled: Boolean(el.disabled || o.disabled), path, option: i, key }));
       continue;
     }
-    if (tag === 'A') {
-      if (!el.hasAttribute('href')) continue;
+    const rawHref = tag === 'A' ? el.getAttribute('href') : null;
+    /* an anchor without a real address ("#", "#top", "", javascript:void(0)) is a button in disguise (below); javascript: code is never a file */
+    if (tag === 'A' && rawHref !== null && !/^\s*(#.*)?$|^\s*javascript:\s*(void\s*\(\s*0?\s*\)|undefined|;)?\s*;?\s*$/i.test(rawHref)) {
       linkCount += 1;
       if (out.links.length >= L.linksMax) { trunc.links = true; continue; }
-      const raw = el.getAttribute('href');
+      const raw = rawHref;
       let u = null; try { u = new URL(el.href); } catch (e) { /* javascript: and friends */ }
       const download = el.hasAttribute('download') ? el.getAttribute('download') : null;
       let lastSeg = ''; try { lastSeg = u ? decodeURIComponent(u.pathname.split('/').pop() || '') : ''; } catch (e) { lastSeg = ''; }
@@ -156,7 +177,9 @@ function extractPage(opts) {
       const ext = extOf(nameHint) || extOf(lastSeg);
       const why = [];
       if (download !== null) why.push('download-attribute');
+      const textExt = extOf(norm(el.textContent));
       if (ext && FILE_EXT.test(ext)) why.push('extension');
+      else if (textExt && FILE_EXT.test(textExt)) why.push('extension');   /* the link is called Budget_2025.xlsx; its address says nothing */
       else if (ext && /[a-z]/i.test(ext) && /^[a-z0-9]{2,5}$/i.test(ext) && !WEB_EXT.test(ext)) why.push('extension-guess');   /* an unknown extension that is not a web page: probably a file (.bin, .dat) */
       if (u && /(^|\/)(download|downloads|attachments?|files?|blob|export|assets)\/[^/]/i.test(u.pathname)) why.push('path');   /* /files/12 yes; /files and /assets, the pages themselves, no */
       if (u && /(^|[?&])(x-amz-signature|signature|x-goog-signature|sig|se|sp)=/i.test(u.search)) why.push('signed-url');
@@ -166,30 +189,33 @@ function extractPage(opts) {
       out.links.push({ text, href: el.href, rawHref: clip(raw, 300), scheme: u.protocol, download, ext, nameHint: clip(nameHint, 160), fileLike, why, sameOrigin: u.origin === location.origin, path: cssPath(el), group });
       continue;
     }
-    if (tag === 'BUTTON' || role === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type))) {
+    if (tag === 'BUTTON' || tag === 'A' || role === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type))) {
       const pressed = el.getAttribute('aria-pressed');
       if (pressed === 'true' || pressed === 'false') {   /* a toggle button */
         addToggle({ label: clip(labelOf(el, true), 120), checked: pressed === 'true', kind: 'pressed', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el) });
         continue;
       }
-      const text = clip(norm(tag === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')), 160);
+      const text = clip(norm(tag === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
       if (!text) continue;
       if (toggleRe.test(text) && !/^(download|export|delete|remove|archive|cancel)\b/i.test(text) && !el.disabled && visible(el)) {   /* a plain "Show all files" button */
         addToggle({ label: text, checked: false, kind: 'button', path: cssPath(el), key: keyOf(el) });
         continue;
       }
       if (out.buttons.length >= L.buttonsMax || !visible(el)) continue;
-      const dataUrl = el.getAttribute('data-url') || el.getAttribute('data-href') || el.getAttribute('data-download-url') || el.getAttribute('data-file') || el.getAttribute('formaction') || null;
+      const dataUrl = el.getAttribute('data-url') || el.getAttribute('data-href') || el.getAttribute('data-download-url') || el.getAttribute('data-file') || null;
       const ext = extOf(text);
       const fileLike = Boolean((ext && FILE_EXT.test(ext)) || /^(download|export)\b/i.test(text) || (dataUrl && FILE_EXT.test(extOf(dataUrl.split('?')[0]) || '')));
       if (!fileLike) continue;
+      /* inForm: pressing it would SUBMIT a form (a button or input of a form that is not type=button or reset, or one with a formaction) */
+      const btype = String(el.getAttribute('type') || '').toLowerCase();
+      const submitsForm = el.hasAttribute('formaction') || (Boolean(el.form) && (tag === 'BUTTON' ? btype !== 'button' && btype !== 'reset' : tag === 'INPUT' && /^(submit|image)$/.test(btype)));
       let label = text; let nameHint = text;
       if (!ext) {   /* "Download" says nothing: the text of its table row or list item says which file */
         const row = el.closest ? el.closest('tr,li,[role=row]') : null;
         const rowText = row ? norm(norm(row.innerText || row.textContent).replace(text, ' ')) : '';   /* innerText puts a space between table cells */
         if (rowText) { label = clip(rowText, 160); const m = /[^\s"'<>:|?*\\/]+\.([A-Za-z0-9]{1,8})\b/.exec(rowText); if (m && FILE_EXT.test(m[1])) nameHint = m[0]; }
       }
-      out.buttons.push({ text, label, nameHint: clip(nameHint, 160), fileLike, ext, dataUrl: dataUrl ? clip(dataUrl, 500) : null, disabled: Boolean(el.disabled), inForm: Boolean(el.form), path: cssPath(el), group });
+      out.buttons.push({ text, label, nameHint: clip(nameHint, 160), fileLike, ext, dataUrl: dataUrl ? clip(dataUrl, 500) : null, disabled: Boolean(el.disabled), inForm: submitsForm, path: cssPath(el), group });
       continue;
     }
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
@@ -254,68 +280,120 @@ function extractPage(opts) {
   return out;
 }
 
-/* Page side, constant, self-contained. opts.op:
-     expand    open every closed <details>, click expanders (aria-expanded=false with aria-controls, no popup menu, not destructive)
+/* Page side, constant, self-contained. Every op looks at the document, at its open shadow roots and at its same-origin iframes. opts.op:
+     expand    open every closed <details>, click expanders (aria-expanded=false, no popup menu, no navigation link, not destructive)
      controls  list tabs and "Load more" / "Show more" buttons: { tabs: [{ label, path, selected }], more: [{ label, path }] }
-     scroll    scroll the window and every scrollable box by 90 percent of its height; { moved }; opts.reset puts them back at the top
-     activate  { path, option?, label?, never } click one element, or choose option number `option` of a <select>; refused when the
-               element is gone, when its text is no longer `label` (when a label is given), or when its text is a destructive verb */
+     scroll    scroll the windows and every scrollable box by 90 percent of its height; { moved }; opts.reset puts them back at the top
+     activate  { path, option?, label?, row?, name?, never } click one element, or choose option number `option` of a <select>; refused
+               when the element is gone, when its text is no longer `label` (when a label is given), when the text of its table row or
+               list item is no longer `row` (when a row is given; `name`, a file name inside that text, is enough), or when its text is a
+               destructive verb (`never`; an empty pattern lets a plain file link through)
+   A path is one CSS path per document, joined with " >>> " (see extractPage). */
 function pageOps(opts) {
   const HIDDEN = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]', 'g');
   const norm = (s) => String(s == null ? '' : s).replace(HIDDEN, ' ').replace(/\s+/g, ' ').trim();
   const clip = (s, n) => (s.length > n ? s.slice(0, n) : s);
   const never = new RegExp(opts.never || '(?!)', 'i');
   const visible = (el) => { try { return typeof el.checkVisibility === 'function' ? el.checkVisibility() : true; } catch (e) { return true; } };
-  const cssPath = (el) => {
-    if (el.getRootNode() !== document) return null;
+  const segmentOf = (n, rootNode) => {
     const parts = [];
-    for (let n = el; n && n.nodeType === 1 && parts.length < 7; n = n.parentElement) {
-      const t = n.tagName.toLowerCase();
-      if (n.id && document.querySelectorAll('#' + CSS.escape(n.id)).length === 1) { parts.unshift(t + '#' + CSS.escape(n.id)); break; }
-      let idx = 1; for (let s = n.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === n.tagName) idx += 1;
+    for (let m = n; m && m.nodeType === 1 && parts.length < 40; m = m.parentElement) {
+      const t = m.tagName.toLowerCase();
+      if (m.id && rootNode.querySelectorAll('#' + CSS.escape(m.id)).length === 1) { parts.unshift(t + '#' + CSS.escape(m.id)); break; }
+      let idx = 1; for (let s = m.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === m.tagName) idx += 1;
       parts.unshift(t + ':nth-of-type(' + idx + ')');
     }
     return parts.join(' > ');
   };
+  const cssPath = (el) => {
+    const segs = [];
+    let node = el;
+    for (let depth = 0; depth < 8 && node; depth += 1) {
+      const rootNode = node.getRootNode();
+      segs.unshift(segmentOf(node, rootNode));
+      if (rootNode === document) return segs.join(' >>> ');
+      if (rootNode.host) node = rootNode.host;
+      else if (rootNode.defaultView && rootNode.defaultView.frameElement) node = rootNode.defaultView.frameElement;
+      else return null;
+    }
+    return null;
+  };
+  const resolve = (p) => {
+    if (typeof p !== 'string' || !p) return null;
+    let ctx = document; let el = null;
+    for (const seg of p.split(' >>> ')) {
+      if (!ctx) return null;
+      try { el = ctx.querySelector(seg); } catch (e) { return null; }
+      if (!el) return null;
+      if (el.tagName === 'IFRAME') { try { ctx = el.contentDocument; } catch (e) { ctx = null; } } else ctx = el.shadowRoot;
+    }
+    return el;
+  };
+  /* the document, its open shadow roots and its same-origin iframes */
+  const roots = () => {
+    const found = [document];
+    for (let i = 0; i < found.length && found.length < 40; i += 1) {
+      let seen = 0;
+      for (const el of found[i].querySelectorAll('*')) {
+        seen += 1;
+        if (seen > 20000 || found.length >= 40) break;
+        if (el.shadowRoot) found.push(el.shadowRoot);
+        if (el.tagName === 'IFRAME') { try { if (el.contentDocument && el.contentDocument.documentElement) found.push(el.contentDocument); } catch (e) { /* another origin */ } }
+      }
+    }
+    return found;
+  };
+  const every = (selector) => roots().flatMap((r) => Array.from(r.querySelectorAll(selector)));
   const textOf = (el) => clip(norm(el.tagName === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.title) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
+  /* a link that goes somewhere is not a button: pressing it would leave the page */
+  const pressable = (el) => el.tagName !== 'A' || !el.hasAttribute('href') || /^\s*(#.*)?$|^\s*javascript:\s*(void\s*\(\s*0?\s*\)|undefined|;)?\s*;?\s*$/i.test(el.getAttribute('href') || '');
   if (opts.op === 'expand') {
     let opened = 0; let expanded = 0;
-    for (const d of document.querySelectorAll('details:not([open])')) { if (opened >= 50) break; d.open = true; opened += 1; }
-    for (const el of document.querySelectorAll('[aria-expanded="false"][aria-controls]')) {
+    for (const d of every('details:not([open])')) { if (opened >= 50) break; d.open = true; opened += 1; }
+    for (const el of every('[aria-expanded="false"]')) {
       if (expanded >= 30) break;
       const popup = el.getAttribute('aria-haspopup');
-      if ((popup && popup !== 'false') || el.disabled || never.test(textOf(el)) || !visible(el)) continue;
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      if ((popup && popup !== 'false') || el.disabled || /^(combobox|menuitem|menu|option|listbox)$/.test(role) || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || !pressable(el) || never.test(textOf(el)) || !visible(el)) continue;
       el.click(); expanded += 1;
     }
     return { opened, expanded };
   }
   if (opts.op === 'controls') {
     const tabs = []; const more = [];
-    for (const el of document.querySelectorAll('[role=tab]')) { if (tabs.length >= 8) break; if (!el.disabled && visible(el)) tabs.push({ label: textOf(el), path: cssPath(el), selected: el.getAttribute('aria-selected') === 'true' }); }
-    for (const el of document.querySelectorAll('button,a,[role=button]')) { if (more.length >= 3) break; if (!el.disabled && /^(load|show) more$/i.test(textOf(el)) && visible(el)) more.push({ label: textOf(el), path: cssPath(el) }); }
+    for (const el of every('[role=tab]')) { if (tabs.length >= 12) break; if (!el.disabled && visible(el)) tabs.push({ label: textOf(el), path: cssPath(el), selected: el.getAttribute('aria-selected') === 'true' }); }
+    for (const el of every('button,a,[role=button]')) { if (more.length >= 3) break; if (!el.disabled && pressable(el) && /^(load|show|view|see)\s+(\d+\s+)?more\b/i.test(textOf(el)) && visible(el)) more.push({ label: textOf(el), path: cssPath(el) }); }
     return { tabs, more };
   }
   if (opts.op === 'scroll') {
     const boxes = [];
-    const base = document.scrollingElement || document.documentElement;
-    boxes.push(base);
-    let seen = 0;
-    for (const el of document.querySelectorAll('*')) {
-      if (seen >= 5000 || boxes.length >= 20) break;
-      seen += 1;
-      if (el.scrollHeight > el.clientHeight + 40 && el.clientHeight > 40) { const oy = getComputedStyle(el).overflowY; if (oy === 'auto' || oy === 'scroll') boxes.push(el); }
+    const styleOf = (el) => { const v = el.ownerDocument && el.ownerDocument.defaultView; return (v && v.getComputedStyle ? v : globalThis).getComputedStyle(el); };
+    for (const r of roots()) {
+      const doc = r.nodeType === 9 ? r : null;
+      if (doc) { const base = doc.scrollingElement || doc.documentElement; if (base) boxes.push({ el: base, step: Math.max(40, Math.floor(((doc.defaultView || window).innerHeight || 800) * 0.9)) }); }
+      let seen = 0;
+      for (const el of r.querySelectorAll('*')) {
+        if (seen >= 5000 || boxes.length >= 30) break;
+        seen += 1;
+        if (el.scrollHeight > el.clientHeight + 40 && el.clientHeight > 40) { const oy = styleOf(el).overflowY; if (oy === 'auto' || oy === 'scroll') boxes.push({ el, step: Math.max(40, Math.floor(el.clientHeight * 0.9)) }); }
+      }
     }
-    if (opts.reset) { for (const el of boxes) el.scrollTop = 0; return { moved: false }; }
+    if (opts.reset) { for (const b of boxes) b.el.scrollTop = 0; return { moved: false }; }
     let moved = false;
-    for (const el of boxes) { const before = el.scrollTop; el.scrollTop = before + Math.max(40, Math.floor((el === base ? window.innerHeight : el.clientHeight) * 0.9)); if (el.scrollTop !== before) moved = true; }
+    for (const b of boxes) { const before = b.el.scrollTop; b.el.scrollTop = before + b.step; if (b.el.scrollTop !== before) moved = true; }
     return { moved };
   }
   if (opts.op === 'activate') {
-    const el = opts.path ? document.querySelector(opts.path) : null;
+    const el = resolve(opts.path);
     if (!el) return { ok: false, why: 'the element is gone from the page' };
     const text = textOf(el);
     if (never.test(text)) return { ok: false, why: 'the element is a destructive action' };
     if (typeof opts.label === 'string' && opts.label !== '' && text !== opts.label) return { ok: false, why: 'the element is no longer the one that was listed' };
+    if (typeof opts.row === 'string' && opts.row !== '' && opts.row !== text) {   /* a "Download" button: which row is it in? */
+      const rowEl = el.closest ? el.closest('tr,li,[role=row]') : null;
+      const rowText = rowEl ? clip(norm(norm(rowEl.innerText || rowEl.textContent).replace(text, ' ')), 160) : '';
+      if (rowText !== opts.row && !(typeof opts.name === 'string' && opts.name !== '' && rowText.includes(opts.name))) return { ok: false, why: 'the row of the element is no longer the one that was listed' };
+    }
     if (typeof opts.option === 'number' && el.tagName === 'SELECT') {
       el.selectedIndex = opts.option;
       el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -331,42 +409,80 @@ function pageOps(opts) {
 async function takePage(tab, limits = {}) {
   return tab.evalFn(extractPage, { limits: { ...LIMITS, ...limits }, toggleRe: TOGGLE_LABEL_RE.source }, { timeout: 12000 });
 }
-const pageOp = (tab, op, extra = {}) => tab.evalFn(pageOps, { op, never: NEVER_TEXT_RE.source, ...extra }, { timeout: 8000 });
+const pageOp = (tab, op, extra = {}) => tab.evalFn(pageOps, { op, never: NEVER_TEXT_RE.source, ...extra }, { timeout: 8000, userGesture: op === 'activate' });
 
 const ALL_BUTTON_RE = /^(download|export)\s+(all|everything|zip|archive|bundle)\b/i;
+const FILE_NAME_END = /\.([A-Za-z0-9]{1,8})$/;
+const FILE_EXTENSIONS = /^(pdf|docx?|xlsx?|xlsm|xlsb|csv|tsv|txt|md|json|zip|7z|tar|gz|tgz|rar|rtf|pptx?|odt|ods|odp|png|jpe?g|gif|svg|eml|msg|xml|parquet)$/i;
+const endsInFileExtension = (text) => { const m = FILE_NAME_END.exec(String(text || '')); return Boolean(m && FILE_EXTENSIONS.test(m[1])); };
 
-/* The ordered list of things worth downloading, from links and buttons. Pure; the page URL only resolves data-url values.
-   Every candidate carries the heading above it (group) and a label (the link's text; for a plain "Download" button the text of its row).
-   mode 'navigate' opens the address in a tab of its own; mode 'click' clicks the element in the task page (a button, or a blob: or data:
-   link, which only exist inside the page). A "Download all" button is dropped when individual files are listed. */
-function fileCandidates(snap) {
+/* The address of a file link without what changes each time it is issued (a signature, an expiry): two copies of the same file that were
+   signed twice have the same key. When something was removed the label is part of the key, so two files that differ only in a token
+   ("/download?token=a" and "/download?token=b") stay two files as long as their names differ. */
+function navigateKey(href, label = '') {
+  let u = null;
+  try { u = new URL(href); } catch (e) { return `n|${href}`; }
+  const kept = []; let removed = false;
+  for (const [k, v] of u.searchParams) { if (SIGNATURE_PARAM_RE.test(k)) removed = true; else kept.push(`${k}=${v}`); }
+  kept.sort();
+  return `n|${u.origin}${u.pathname}${kept.length ? `?${kept.join('&')}` : ''}${removed ? `|${label}` : ''}`;
+}
+
+/* The ordered list of things worth downloading, from links and buttons, and the ones that were left out although they look like files.
+   Pure; the page URL only resolves data-url values. Every candidate carries the heading above it (group), a label (the link's text; for
+   a plain "Download" button the text of its row), its kind (link or button) and the view of the page it was seen in (snap.view, see
+   discover.cjs). mode 'navigate' opens the address in a tab of its own; mode 'click' clicks the element in the task page (a button, or
+   a blob: or data: link, which only exist inside the page). A "Download all" button is dropped when individual files are listed (the
+   files themselves are the list). dropped: [{ label, group, reason }] for a file-looking control the loader will not press: a name that
+   starts with a destructive verb (unless it is plainly a file), a button that would submit a form, a disabled button. A control with no
+   file name at all ("Delete file" next to an address that is not a document) is an action, not a file, and is not reported. */
+function classify(snap) {
   const seen = new Set();
-  const out = [];
+  const candidates = [];
+  const dropped = [];
+  const view = snap.view || null;
+  const drop = (label, group, reason) => dropped.push({ label: String(label || ''), group: String(group || ''), reason });
   for (const l of snap.links || []) {
-    if (!l.fileLike || NEVER_TEXT_RE.test(l.text) || NEVER_HREF_RE.test(l.rawHref)) continue;
-    if (/^(blob|data):$/.test(l.scheme)) {
-      if (seen.has(`click|${l.path}|${l.text}`)) continue;
-      seen.add(`click|${l.path}|${l.text}`);
-      out.push({ mode: 'click', text: l.text, href: null, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path });
+    if (!l.fileLike) continue;
+    const real = (l.why || []).some((w) => w === 'extension' || w === 'download-attribute');
+    const blocked = real ? NEVER_ACTION_PARAM_RE.test(l.rawHref) : (NEVER_TEXT_RE.test(l.text) || NEVER_HREF_RE.test(l.rawHref));
+    if (blocked) {
+      if (real || endsInFileExtension(l.text) || FILE_EXTENSIONS.test(l.ext || '')) drop(l.text, l.group, 'looks like an action');
       continue;
     }
-    if (!/^https?:$/.test(l.scheme) || seen.has(l.href)) continue;
-    seen.add(l.href);
-    out.push({ mode: 'navigate', text: l.text, href: l.href, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path });
+    const download = l.download !== null && l.download !== undefined;
+    if (/^(blob|data):$/.test(l.scheme)) {
+      const k = `click|${l.path}|${l.text}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      candidates.push({ mode: 'click', kind: 'link', download, text: l.text, href: null, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path, view });
+      continue;
+    }
+    if (!/^https?:$/.test(l.scheme)) continue;
+    const k = navigateKey(l.href, l.text);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    candidates.push({ mode: 'navigate', kind: 'link', download, text: l.text, href: l.href, nameHint: l.nameHint || l.text, ext: l.ext, group: l.group || '', label: l.text || '', path: l.path, view });
   }
   const buttons = [];
   for (const b of snap.buttons || []) {
-    if (!b.fileLike || b.disabled || b.inForm || NEVER_TEXT_RE.test(b.text)) continue;
+    if (!b.fileLike) continue;
+    const all = ALL_BUTTON_RE.test(b.text);
+    if (b.disabled) { if (!all) drop(b.label || b.text, b.group, 'the button is disabled'); continue; }
+    if (NEVER_TEXT_RE.test(b.text)) { if (endsInFileExtension(b.text) || FILE_EXTENSIONS.test(b.ext || '')) drop(b.label || b.text, b.group, 'looks like an action'); continue; }
+    if (b.inForm) { if (!all) drop(b.label || b.text, b.group, 'would submit a form'); continue; }
     let href = null;
     if (b.dataUrl) { try { href = new URL(b.dataUrl, snap.url).href; } catch (e) { href = null; } }
-    if (href && seen.has(href)) continue;
-    if (href) seen.add(href);
+    if (href && seen.has(navigateKey(href, b.label || b.text))) continue;
+    if (href) seen.add(navigateKey(href, b.label || b.text));
     /* A button is clicked in the page (it may build a blob: URL), because its data-url, if any, is only a hint. */
-    buttons.push({ mode: 'click', text: b.text, href, nameHint: b.nameHint || b.text, ext: b.ext, group: b.group || '', label: b.label || b.text, path: b.path });
+    buttons.push({ mode: 'click', kind: 'button', download: false, text: b.text, href, nameHint: b.nameHint || b.text, ext: b.ext, group: b.group || '', label: b.label || b.text, path: b.path, view });
   }
   const single = buttons.filter((b) => !ALL_BUTTON_RE.test(b.text));
-  return out.concat(out.length + single.length ? single : buttons);
+  return { candidates: candidates.concat(candidates.length + single.length ? single : buttons), dropped };
 }
+const fileCandidates = (snap) => classify(snap).candidates;
+const droppedCandidates = (snap) => classify(snap).dropped;
 
 /* toggles: [{ label, checked, disabled, path, key }] as extractPage lists them. learned: what was taught for this host: a label (text),
    or { label, key }. Returns the control to switch ON (an UNCHECKED, enabled one) or null: first the learned key (an id or data-testid),
@@ -396,4 +512,4 @@ function findAllFilesState(toggles, learned) {
   return hit ? { toggle: hit, on: true } : null;
 }
 
-module.exports = { extractPage, pageOps, pageOp, takePage, fileCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE };
+module.exports = { extractPage, pageOps, pageOp, takePage, fileCandidates, droppedCandidates, classify, navigateKey, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, LIMITS, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE };

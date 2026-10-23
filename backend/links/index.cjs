@@ -9,7 +9,7 @@
        clock          () => Date or milliseconds
        headless       false (default): visible Chrome windows, where the owner signs in once; true: no window (tests)
        timeouts       change a wait, in ms: { navigation, settle, signIn, person, poll, stall, file, begin, phase, stable: [1000, 2000],
-                      grow, expand }
+                      grow, expand: 60000 (the time for "Load more" and scrolling; every tab gets at least 8 s) }
        signIn         'window' (default): the person signs in in a separate Chrome with no debugging channel; 'piped': in the window the
                       loader drives (the fallback; it cannot be used with platforms that refuse an automated browser)
        allowLoopback  test only: also accept http://127.0.0.1 and http://localhost links
@@ -30,8 +30,17 @@
      toggle.flipped: the control is on (the loader clicked it, it was already on, or the person turned it on). toggle.learned: its
             label (or id) came from, or was just stored in, <root>/private/link-mappings.json for this host. error: null, or the same
             sentence as message when failed. skipped: every file that was NOT kept, with the reason (also in page.json).
-   Files land in <folder>/files/<sanitised unique name>; <folder>/page.json holds { sections: [{ heading, text }], fileList, skipped, page,
-   loadedAt } (text capped at 20,000 characters per section, 200 sections). Caps: 300 files, 200 MB per file, 2 GB in all.
+   Files land in <folder>/files/<sanitised unique name>; <folder>/page.json holds { sections: [{ heading, text }], fileList, skipped, notes,
+   page, loadedAt } (text capped at 20,000 characters per section, 200 sections). Caps: 300 files, 200 MB per file, 2 GB in all.
+   Every file the page offers is downloaded or listed in skipped with the reason, never dropped without a word: a file that cannot be
+   fetched, a control that looks like a file but would submit a form or starts with a destructive verb ("looks like an action"), a row
+   that is gone when its turn comes. notes (also at the end of the done message) says when a step was cut off while the page still
+   had more to show: "Load more" or scrolling at its time limit, a tab that could not be opened.
+   How the files are found: look again after the page settled; open <details> and expanders (repeated until nothing new opens); turn on
+   the "show all files" switch (also when it is learned, or already on) and open what it revealed; in the open tab and in every other
+   tab press "Load more" and scroll until nothing new comes. A file that is a button is identified by the name or the text of its row, its
+   heading and its text, remembered together with the view it was seen in (tab, presses, scroll steps); before each press the page is
+   put back into that view and the element is found again, and activate refuses a row that is not the one that was listed.
 
    The link (it can carry a signature) lives in this module's memory for the length of the load: not on Chrome's command line (the
    sign-in window gets the platform's ORIGIN only), not in a log, an error, the state or a file; only origin and path are ever shown. */
@@ -39,12 +48,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { findChrome, checkBinary, resolveBinary, missingChromeMessage, launchBrowser, launchWindow, syncWarning, protectStorage, PROFILE_IN_USE_MESSAGE } = require('./chrome.cjs');
+const { findChrome, checkBinary, resolveBinary, missingChromeMessage, launchBrowser, launchWindow, syncWarning, protectStorage, holdsProfile, scrubProfile, PROFILE_IN_USE_MESSAGE } = require('./chrome.cjs');
 const { Tab, safeText, cleanLabel, waitForSettled } = require('./tab.cjs');
-const { takePage, pageOp, fileCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE } = require('./page.cjs');
+const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE } = require('./page.cjs');
 const { classifyPage, LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('./auth-wall.cjs');
 const { DownloadManager } = require('./downloads.cjs');
-const { stabilize, expand, gather, unionCandidates, mergeSections } = require('./discover.cjs');
+const { stabilize, expandAll, gather, replay, candidateKey, unionCandidates, unionDropped, mergeSections } = require('./discover.cjs');
 const { validateLink, fileUrlAllowed } = require('./url.cjs');
 const store = require('./store.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
@@ -52,7 +61,7 @@ const { CdpError, sleep } = require('./cdp.cjs');
 const LIMITS = { files: 300, fileBytes: 200 * 1024 * 1024, totalBytes: 2 * 1024 * 1024 * 1024, sections: 200, sectionChars: 20000 };
 const TIMEOUTS = {
   navigation: 30000, settle: 15000, signIn: 10 * 60 * 1000, person: 10 * 60 * 1000, poll: 1000, stall: 60000, file: 10 * 60 * 1000, begin: 15000,
-  phase: 15 * 60 * 1000, stable: [1000, 2000], grow: 5000, expand: 30000,
+  phase: 15 * 60 * 1000, stable: [1000, 2000], grow: 5000, expand: 60000,
 };
 const ID_RE = /^lnk-[0-9a-f]{12}$/;
 const FINAL = new Set(['done', 'failed', 'cancelled']);
@@ -95,6 +104,14 @@ function changedToggle(before, after) {
 /* Same page: same origin and same path (the query and the fragment may differ). */
 function samePage(a, b) {
   try { const x = new URL(a); const y = new URL(b); return x.origin === y.origin && x.pathname === y.pathname; } catch (e) { return false; }
+}
+
+/* The task page or a page of it: the same origin, and the same path or a path below it (a single-page app may add /all to the address). */
+function withinPage(current, original) {
+  try {
+    const x = new URL(current); const y = new URL(original);
+    return x.origin === y.origin && (x.pathname === y.pathname || x.pathname.startsWith(`${y.pathname.replace(/\/$/, '')}/`));
+  } catch (e) { return false; }
 }
 
 const listLabels = (items, max = 5) => `${items.slice(0, max).map((i) => i.label || '(no name)').join(', ')}${items.length > max ? ` and ${items.length - max} more` : ''}`;
@@ -260,7 +277,9 @@ function createLinkLoader(options = {}) {
           }, timeouts.signIn, `Sign-in did not finish within ${waited(timeouts.signIn)}.`);
         } finally {
           job.windowProc = null;
-          await win.stop();
+          const left = await win.stop();
+          /* the window visited the platform's sign-in pages: forget them (the sign-in itself stays), once nothing holds the profile */
+          try { if (!left.length && !holdsProfile(profileDir)) scrubProfile(profileDir); } catch (e) { /* the final scrub tries again */ }
         }
         job.pressed = false; job.said = true;
         await openPiped();
@@ -291,12 +310,33 @@ function createLinkLoader(options = {}) {
       if (!headless) await job.tab.front();
 
       /* The page may still be filling in: look again 1 s and 3 s after it settled, until two looks in a row agree. Then the cheap
-         expansion (closed <details>, expanders). All snapshots are kept: the files and the text are the UNION of what they show. */
+         expansion (closed <details>, expanders, repeated until nothing new opens). All snapshots are kept: the files and the text are
+         the UNION of what they show. */
+      /* The view a snapshot was taken in: which tab was open (a switch that is a tab changes it). */
+      const viewNow = async () => {
+        const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
+        return { tab: open ? { label: open.label, path: open.path } : null, more: 0, scroll: 0 };
+      };
+      const stamp = (list, view) => { for (const x of list) x.view = { tab: view.tab ? { ...view.tab } : null, more: 0, scroll: 0 }; };
       const snaps = await stabilize(job.tab, page.snap, { signal, waits: timeouts.stable });
-      await expand(job.tab, snaps, { signal });
+      let BASE = await viewNow();
+      stamp(snaps, BASE);
+      await expandAll(job.tab, snaps, { signal, view: BASE });
       let snap = snaps[snaps.length - 1];
 
-      /* "Show all files": the control learned for this host, or one whose label says so; click it, wait for the list to grow. */
+      /* What it took to build the list of files, for when the page has to be rebuilt (it was reloaded, or a download click left it): the
+         switch, and the home tab. A candidate's own tab, "Load more" presses and scroll steps are in its view. */
+      const recipe = { toggle: null, home: null, afterClick: 0 };
+      const growWait = async (than) => {   /* a page may take a few seconds to add the files */
+        const end = Date.now() + timeouts.grow;
+        let latest = await takePage(job.tab);
+        while (fileCandidates(latest).length <= than && Date.now() < end) { check(); await sleep(400); latest = await takePage(job.tab); }
+        return latest;
+      };
+      const sameControl = (want, t) => t.option === want.option && (want.key ? t.key === want.key : t.label === want.label);
+
+      /* "Show all files": the control learned for this host, or one whose label says so; click it, wait for the list to grow, open what
+         it revealed. A switch that is already on gets the same wait: the platform may remember it and still be fetching the files. */
       const before = fileCandidates(snap);
       const learned = store.learnedToggleInfo(mappingsFile, job.host);
       const found = findAllFilesState(snap.toggles, learned);
@@ -305,28 +345,88 @@ function createLinkLoader(options = {}) {
       const alreadyOn = Boolean(found && found.on);
       let list = before;
       Object.assign(st.toggle, { filesBefore: before.length, filesAfter: before.length, found: Boolean(pick), label: pick ? pick.label : '', learned: usedLearned, flipped: alreadyOn });
+      if (pick) recipe.toggle = { key: pick.key, label: pick.label, path: pick.path, option: pick.option, kind: pick.kind };
       if (pick && !alreadyOn && pick.path) {
         const clicked = await pageOp(job.tab, 'activate', { path: pick.path, option: pick.option });
         if (clicked.ok) {
           await settle();
-          const end = Date.now() + timeouts.grow;   /* a page may take a few seconds to add the files */
-          snap = await takePage(job.tab);
-          while (fileCandidates(snap).length <= before.length && Date.now() < end) { check(); await sleep(400); snap = await takePage(job.tab); }
+          snap = await growWait(before.length);
+          BASE = await viewNow();
+          stamp([snap], BASE);
           snaps.push(snap);
-          list = fileCandidates(snap);
+          recipe.afterClick = fileCandidates(snap).length;
           const now2 = snap.toggles.find((t) => t.path === pick.path && t.option === pick.option && t.label === pick.label);
+          await expandAll(job.tab, snaps, { signal, view: BASE });
+          snap = snaps[snaps.length - 1];
+          list = fileCandidates(snap);
           st.toggle.flipped = Boolean((now2 && now2.checked) || list.length > before.length);
           st.toggle.filesAfter = list.length;
         }
+      } else if (pick && alreadyOn) {
+        snap = await growWait(unionCandidates(snaps.map(fileCandidates)).length);
+        stamp([snap], BASE);
+        snaps.push(snap);
+        recipe.afterClick = fileCandidates(snap).length;
+        await expandAll(job.tab, snaps, { signal, view: BASE });
+        snap = snaps[snaps.length - 1];
+        list = fileCandidates(snap);
+        st.toggle.filesAfter = list.length;
       }
-      /* Where the page is, after the person has used the window: back on the task page, or the loader goes back once and looks again. */
+
+      /* The switch is on again, the way it was when the list was built (a reload, or a page that forgot it). */
+      const ensureToggle = async (current) => {
+        const want = recipe.toggle;
+        if (!want || want.kind === 'tab') return current;   /* a tab is a view: each candidate brings its own */
+        const t = current.toggles.find((x) => sameControl(want, x)) || current.toggles.find((x) => x.label === want.label && x.option === want.option);
+        if (!t || t.checked || t.disabled || !t.path) return current;
+        const r = await pageOp(job.tab, 'activate', { path: t.path, option: t.option });
+        if (!r.ok) return current;
+        await settle();
+        return growWait(Math.max(0, recipe.afterClick - 1));
+      };
+      /* Where the page is, after the person has used the window or a download left it: back on the task page (or below it), or the
+         loader goes back once, looks again and puts the switch and the open folders back. */
       const backToPage = async () => {
         const probe = await where();
-        if (probe && samePage(probe.href, href)) return;
+        if (probe && withinPage(probe.href, href)) return;
         const again = await loadOnce();
         if (again.cls.state === 'needs-sign-in' || again.cls.state === 'needs-person') throw new LinkError(`The platform asks you to sign in again. ${IMPORT_HINT}`, 502, 'sign-in-loop');
         if (again.cls.state !== 'ready') throw new LinkError(again.cls.reason, 502, again.cls.state);
+        await ensureToggle(await takePage(job.tab));
+        await expandAll(job.tab, [], { signal, snapshots: false });
       };
+      /* A click candidate again: the page is made the way it was when the candidate was seen (the switch, its tab, its "Load more"
+         presses, its scroll steps), and the element is found by what it is, not where it was. */
+      const findOn = (current, c) => {
+        const mode = c.retried ? 'navigate' : 'click';
+        const there = fileCandidates(current).filter((x) => x.mode === mode && x.path);
+        const pick = (hits) => (hits.length ? hits[Math.min(Math.max(1, c.occ || 1), hits.length) - 1] : null);
+        const want = candidateKey(c.retried ? { ...c, mode: 'navigate' } : c);
+        return pick(there.filter((x) => candidateKey(x) === want))
+          || (c.retried ? null : pick(there.filter((x) => candidateKey(x, { withGroup: false }) === candidateKey(c, { withGroup: false }))));   /* its heading may have changed */
+      };
+      const locate = async (c) => {
+        await backToPage();
+        let current = await ensureToggle(await takePage(job.tab));
+        let hit = findOn(current, c);
+        if (!hit) {
+          const r = await replay(job.tab, c.view || BASE, recipe.home, { signal });
+          if (!r.ok) return { ok: false, why: r.why };
+          current = await takePage(job.tab);
+          hit = findOn(current, c);
+          /* the view was not exact (the page changed its mind): every tab, one after the other */
+          if (!hit) {
+            for (const t of (await pageOp(job.tab, 'controls')).tabs) {
+              const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal });
+              if (!r2.ok) continue;
+              hit = findOn(await takePage(job.tab), c);
+              if (hit) break;
+            }
+          }
+        }
+        return hit ? { ok: true, path: hit.path } : { ok: false, why: 'the file is no longer on the page (its row could not be found again)' };
+      };
+
       if (!alreadyOn && (!st.toggle.flipped || (list.length <= before.length && !usedLearned))) {
         set(job, 'needs-person', PERSON_MESSAGE);
         if (!headless) await job.tab.front();
@@ -335,33 +435,44 @@ function createLinkLoader(options = {}) {
         await backToPage();
         await settle();
         snap = await takePage(job.tab);
+        BASE = await viewNow();
+        stamp([snap], BASE);
         snaps.push(snap);
+        await expandAll(job.tab, snaps, { signal, view: BASE });
+        snap = snaps[snaps.length - 1];
         list = fileCandidates(snap);
         st.toggle.filesAfter = list.length;
         const changed = changedToggle(baseline, snap.toggles);
         if (changed) {
           Object.assign(st.toggle, { found: true, label: changed.label, flipped: true });
+          recipe.toggle = { key: changed.key, label: changed.label, path: changed.path, option: changed.option, kind: changed.kind };
+          recipe.afterClick = Math.max(0, list.length - 1);
           if (list.length > before.length && store.learnToggle(mappingsFile, job.host, changed.label, new Date(now()).toISOString(), changed.key)) st.toggle.learned = true;
         }
       }
 
-      /* Tabs, "Load more", scrolling; then the files of every snapshot as one list. */
+      /* Tabs, "Load more", scrolling; then the files of every snapshot as one list. A limit that ended a step is told in a note. */
       set(job, 'loading', `Looking for every file.${KEEP_OPEN}`);
-      await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand });
+      const capNotes = [];
+      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand }); recipe.home = info.home; capNotes.push(...info.capped); };
+      await explore();
       let candidatesAll = unionCandidates(snaps.map(fileCandidates));
-      if (!candidatesAll.length) {
+      if (!candidatesAll.length && !snaps.some((s) => droppedCandidates(s).length)) {
         set(job, 'needs-person', NO_FILES_MESSAGE);
         if (!headless) await job.tab.front();
         await waitPerson(async () => job.st.state !== 'needs-person', timeouts.person, `No answer within ${waited(timeouts.person)}.`);
         await backToPage();
         await settle();
         const again = await stabilize(job.tab, await takePage(job.tab), { signal, waits: timeouts.stable });
+        BASE = await viewNow();
+        stamp(again, BASE);
         snaps.push(...again);
-        await expand(job.tab, snaps, { signal });
-        await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand });
+        await expandAll(job.tab, snaps, { signal, view: BASE });
+        await explore();
         candidatesAll = unionCandidates(snaps.map(fileCandidates));
         st.toggle.filesAfter = Math.max(st.toggle.filesAfter, candidatesAll.length);
       }
+      const droppedAll = unionDropped(snaps.map(droppedCandidates));
       const merged = mergeSections(snaps.map((s) => s.sections), limits);
       const sections = merged.map((s) => ({ heading: cleanLabel(s.heading, 160), text: s.text }));
       st.sections = sections.map((s) => ({ heading: s.heading, chars: s.text.length }));
@@ -374,6 +485,7 @@ function createLinkLoader(options = {}) {
       const wanted = candidatesAll.filter(allowed);
       const candidates = wanted.slice(0, limits.files);
       for (const c of candidatesAll) if (!allowed(c)) st.skipped.push({ label: cleanLabel(c.label, 160), group: cleanLabel(c.group, 120), reason: 'the address is not one the loader opens' });
+      for (const d of droppedAll) st.skipped.push({ label: cleanLabel(d.label, 160), group: cleanLabel(d.group, 120), reason: d.reason });
       for (const c of wanted.slice(limits.files)) st.skipped.push({ label: cleanLabel(c.label, 160), group: cleanLabel(c.group, 120), reason: `over the limit of ${limits.files} files` });
       for (const c of candidates) c.pageTab = job.tab;
       set(job, 'downloading', candidates.length ? `Downloading ${candidates.length} file${candidates.length === 1 ? '' : 's'}.${KEEP_OPEN}` : 'No files were offered on this page.');
@@ -381,7 +493,7 @@ function createLinkLoader(options = {}) {
       fs.mkdirSync(stageDir, { recursive: true, mode: 0o700 });
       fs.mkdirSync(destDir, { recursive: true, mode: 0o700 });
       const dl = new DownloadManager(job.browser.cdp, {
-        stageDir, destDir, isAllowed, newWindow: job.browser.headless, ensurePage: backToPage,
+        stageDir, destDir, isAllowed, newWindow: job.browser.headless, ensurePage: backToPage, locate,
         limits: { maxFileBytes: limits.fileBytes, maxTotalBytes: limits.totalBytes, idleMs: timeouts.stall, fileTimeoutMs: timeouts.file, beginTimeoutMs: timeouts.begin, phaseMs: timeouts.phase },
       });
       job.dl = dl;
@@ -411,11 +523,12 @@ function createLinkLoader(options = {}) {
       const fileList = st.files.map((f) => ({ ...f }));
       store.writeJsonAtomic(path.join(st.folder, 'page.json'), {
         sections: sections.slice(0, limits.sections).map((s) => ({ heading: String(s.heading).slice(0, 160), text: String(s.text).slice(0, limits.sectionChars) })),
-        fileList, skipped: st.skipped.map((s) => ({ ...s })), page: st.page, loadedAt: new Date(now()).toISOString(),
+        fileList, skipped: st.skipped.map((s) => ({ ...s })), notes: capNotes.slice(), page: st.page, loadedAt: new Date(now()).toISOString(),
       });
       const notes = [];
       if (st.skipped.length) notes.push(`${st.skipped.length} not kept (listed in skipped)`);
       if (job.unsettled) notes.push('settled:false, the page kept changing, so some files or text may be missing');
+      for (const n of capNotes) notes.push(n);
       if (warning) notes.push(warning);
       outcome = { state: 'done', message: `${st.files.length} file${st.files.length === 1 ? '' : 's'} and ${st.sections.length} text section${st.sections.length === 1 ? '' : 's'} loaded${notes.length ? ` (${notes.join('; ')})` : ''}.` };
       set(job, 'downloading', 'Closing Chrome.');
@@ -426,6 +539,7 @@ function createLinkLoader(options = {}) {
         const text = error instanceof LinkError ? error.message
           : error instanceof CdpError && error.code === 'PIPE_CLOSED' ? 'The Chrome window was closed before the load finished.'
           : error instanceof CdpError && error.code === 'PROFILE_IN_USE' ? error.message
+          : error instanceof CdpError && error.code === 'LAUNCH' ? safeText(error.message, 300)
           : error instanceof CdpError && error.code === 'SPAWN' ? safeText(error.message, 200)
           : `The load stopped: ${safeText(error && error.message, 200)}`;
         outcome = { state: 'failed', message: text };
@@ -437,6 +551,7 @@ function createLinkLoader(options = {}) {
       try { if (job.dl) await job.dl.stop(); } catch (e) { /* the browser is going away */ }
       try { if (job.windowProc) await job.windowProc.stop({ graceMs: 2000 }); } catch (e) { /* nothing more to do */ }
       try { if (job.browser) await job.browser.close({ graceful: true, graceMs: job.cancelling ? 2000 : 4000, scrub: true }); } catch (e) { /* nothing more to do */ }
+      try { if (!holdsProfile(profileDir)) scrubProfile(profileDir); } catch (e) { /* the next load tries again */ }   /* every way out forgets where the profile has been */
       fs.rmSync(stageDir, { recursive: true, force: true });
       st.state = outcome ? outcome.state : 'failed';
       st.message = outcome ? outcome.message : 'The load stopped unexpectedly.';

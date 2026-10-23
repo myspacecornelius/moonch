@@ -44,19 +44,28 @@ const DEFAULT_LIMITS = {
   beginTimeoutMs: 15000,  /* the click or navigation produced no download */
   navTimeoutMs: 30000,
   pollMs: 40,
+  reclickMs: 1500,        /* the pause before a click that began nothing is tried once more */
+  gapMs: 250,             /* Chrome drops a download that starts within a few milliseconds of the end of ten others (measured: the 11th); one every 250 ms is never dropped */
 };
 
 const INLINE_TYPE = (ct) => ct.startsWith('text/') || ct.startsWith('image/') || ct.startsWith('audio/') || ct.startsWith('video/') || ct === 'application/pdf' || ct === 'application/json' || ct.endsWith('+json') || ct.endsWith('+xml') || ct === 'application/xml' || ct === 'application/javascript';
 
-/* Chrome's placeholder for a name it could not use is the word "download" (no extension). Then the name the page showed is better, and
-   a missing extension is added from the content type when it is one we know. */
+/* Chrome's placeholder for a name it could not use is the word "download" (no extension). The same goes for an opaque tail of the
+   address (/files/21/download, /documents/42). Then the name the page showed is better: the link's name, its label or its text, when it
+   ends in an extension. A missing extension is added from the content type, as a last resort, when it is one we know. */
 const EXT_BY_TYPE = { 'application/pdf': '.pdf', 'application/zip': '.zip', 'text/csv': '.csv', 'text/plain': '.txt', 'application/json': '.json', 'image/png': '.png', 'image/jpeg': '.jpg',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx', 'application/msword': '.doc', 'application/vnd.ms-excel': '.xls' };
+const HAS_EXT = /\.[A-Za-z0-9]{1,8}$/;
+/* The best name the page gave for a candidate: nameHint, label or text, the first that ends in an extension; otherwise nameHint. */
+function bestName(candidate) {
+  const names = [candidate.nameHint, candidate.label, candidate.text].map((n) => String(n || '').trim()).filter(Boolean);
+  return names.find((n) => HAS_EXT.test(n)) || names[0] || '';
+}
 function pickName(suggested, candidate, contentType) {
   let name = suggested;
-  if (!name || name === 'download') name = (candidate.nameHint && /\.[A-Za-z0-9]{1,8}$/.test(candidate.nameHint) ? candidate.nameHint : name) || 'download';
+  if (!name || name === 'download' || !HAS_EXT.test(name)) { const hint = bestName(candidate); if (HAS_EXT.test(hint) || !name) name = hint || name || 'download'; }
   const picked = sanitizeFileName(name);
-  if (!/\.[A-Za-z0-9]{1,8}$/.test(picked.name) && EXT_BY_TYPE[contentType]) picked.name += EXT_BY_TYPE[contentType];
+  if (!HAS_EXT.test(picked.name) && EXT_BY_TYPE[contentType]) picked.name += EXT_BY_TYPE[contentType];
   return picked;
 }
 
@@ -68,9 +77,10 @@ async function sha256File(file) {
 
 class DownloadManager {
   /* cdp: the connection. stageDir: where Chrome writes (0700, private). destDir: where the kept files go (same file system).
-     options: { limits, isAllowed(URL) -> boolean, newWindow, ensurePage() } ensurePage runs before every click in the task tab and
-     brings the tab back to the task page if it left it. */
-  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false, ensurePage = null } = {}) {
+     options: { limits, isAllowed(URL) -> boolean, newWindow, ensurePage(), locate(candidate) } ensurePage runs before every click in the
+     task tab and brings the tab back to the task page if it left it. locate (when given, it replaces ensurePage) also puts the page
+     into the state the candidate was seen in and answers { ok: true, path } with the element's path NOW, or { ok: false, why }. */
+  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false, ensurePage = null, locate = null } = {}) {
     this.cdp = cdp;
     this.stageDir = stageDir;
     this.destDir = destDir;
@@ -78,12 +88,14 @@ class DownloadManager {
     this.isAllowed = isAllowed;
     this.newWindow = newWindow;
     this.ensurePage = ensurePage;
+    this.locate = locate;
     this.clickJob = null;        /* the click job in progress: a window it opens is adopted, not closed */
     this.popups = new Set();
     this.jobs = new Map();       /* guid -> job */
     this.byFrame = new Map();    /* frameId -> job waiting for its download to begin */
     this.stray = 0;              /* downloads nobody asked for, cancelled */
     this.taken = new Set();
+    this.lastEndedAt = 0;
     this.totalBytes = 0;
     this.nextId = 1;
     this.off = [];
@@ -169,7 +181,7 @@ class DownloadManager {
       return { action: 'fail' };
     }
     if (!attachment && (INLINE_TYPE(job.contentType) || job.contentType === 'text/html')) {
-      return { action: 'attachment', filename: sanitizeFileName(job.candidate.nameHint || 'file').name };
+      return { action: 'attachment', filename: sanitizeFileName(bestName(job.candidate) || 'file').name };
     }
     return { action: 'continue' };
   }
@@ -177,6 +189,8 @@ class DownloadManager {
   /* One file. candidate: { mode: 'navigate'|'click', href, path, text, nameHint, ext, pageTab? }.
      signal: AbortSignal. Resolves with a result object (never rejects for a per-file failure). */
   async fetchOne(candidate, { signal } = {}) {
+    const gap = this.limits.gapMs - (Date.now() - this.lastEndedAt);
+    if (gap > 0) await sleep(gap);
     const started = Date.now();
     const job = {
       id: this.nextId++, candidate, guid: null, suggested: null, received: 0, totalBytes: 0, lastGrowthAt: started, startedAt: started,
@@ -202,11 +216,17 @@ class DownloadManager {
       } else {
         tab = candidate.pageTab;
         job.tab = tab;
-        if (this.ensurePage) await this.ensurePage();
-        this.byFrame.set(tab.frameId, job);
-        this.clickJob = job;
-        const clicked = await pageOp(tab, 'activate', { path: candidate.path, label: candidate.text });
-        if (!clicked.ok) job.terminal = { state: 'failed', detail: clicked.why };
+        let where = { ok: true, path: candidate.path };
+        if (this.locate) where = await this.locate(candidate);
+        else if (this.ensurePage) await this.ensurePage();
+        if (!where.ok) job.terminal = { state: 'failed', detail: safeText(where.why || 'the element could not be found again', 160) };
+        else {
+          this.byFrame.set(tab.frameId, job);
+          this.clickJob = job;
+          /* the element must still be the one that was listed: its own text, and for a bare "Download" the text of its row */
+          const clicked = await pageOp(tab, 'activate', { path: where.path, label: candidate.text, row: candidate.label, name: candidate.nameHint, ...(candidate.kind === 'link' ? { never: '' } : {}) });
+          if (!clicked.ok) job.terminal = { state: 'failed', detail: clicked.why };
+        }
       }
       await this.waitTerminal(job, signal);
       await this.finalize(job, result);
@@ -224,10 +244,17 @@ class DownloadManager {
     if (result.state === 'failed' && job.terminal) { result.state = job.terminal.state; result.detail = job.terminal.detail || null; }
     result.httpStatus = job.httpStatus;
     result.ms = Date.now() - started;
-    /* A file link that answers 401 or 403 to a bare navigation may want what a click carries (the page's referrer, its scripts): try the
-       click once. */
-    if (result.state === 'http-denied' && candidate.mode === 'navigate' && candidate.path && candidate.pageTab && !candidate.retried) {
+    this.lastEndedAt = Date.now();
+    /* A file link with a download attribute that answers 401 or 403 to a bare navigation may want what a click carries (the page's
+       referrer, its scripts): try the click once. A plain link is never clicked: a refused address would navigate the task tab itself
+       to the error page. */
+    if (result.state === 'http-denied' && candidate.mode === 'navigate' && candidate.download && candidate.path && candidate.pageTab && !candidate.retried) {
       return this.fetchOne({ ...candidate, mode: 'click', retried: true }, { signal });
+    }
+    /* A click that started nothing (Chrome sometimes drops a download that starts too soon after others): once more, a little later. */
+    if (result.state === 'no-download' && candidate.mode === 'click' && !candidate.reclicked && !(signal && signal.aborted)) {
+      await sleep(this.limits.reclickMs);
+      return this.fetchOne({ ...candidate, reclicked: true }, { signal });
     }
     return result;
   }
@@ -315,4 +342,4 @@ function currentSize(dir, guid) {
   return 0;
 }
 
-module.exports = { DownloadManager, DEFAULT_LIMITS, pickName, sha256File };
+module.exports = { DownloadManager, DEFAULT_LIMITS, pickName, bestName, sha256File };

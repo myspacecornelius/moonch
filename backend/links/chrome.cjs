@@ -24,6 +24,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Cdp, CdpError, sleep } = require('./cdp.cjs');
+const { safeText } = require('./tab.cjs');
 
 /* Where a Chrome or Chromium might be, after FINANCE_STUDIO_CHROME and CHROME_BIN (in that order). A path that ends in .app is a macOS
    application folder: the program is Contents/MacOS/<CFBundleExecutable>. */
@@ -164,6 +165,7 @@ function prepareProfile(profileDir) {
   prefs.signin = { ...(prefs.signin || {}), allowed: false };
   prefs.safebrowsing = { ...(prefs.safebrowsing || {}), enabled: false, enhanced: false };
   prefs.download_restrictions = 3;
+  prefs.profile.default_content_setting_values = { ...(prefs.profile.default_content_setting_values || {}), automatic_downloads: 1 };   /* Chrome's limit on the downloads a page starts by itself (it drops some) */
   prefs.download = { ...(prefs.download || {}), default_directory: quarantine, prompt_for_download: false };
   fs.writeFileSync(file, JSON.stringify(prefs), { mode: 0o600 });
   fs.chmodSync(file, 0o600);
@@ -209,6 +211,7 @@ async function killTree({ pid, profileDir, graceMs = 5000 }) {
 }
 
 const PROFILE_IN_USE_MESSAGE = 'Quit the loader\'s Chrome (Cmd+Q) and try again.';
+const SINGLETON_RE = /process_singleton|SingletonLock|profile.*in use/i;
 
 /* Signal a browser's whole process group (it was spawned detached, so the group is its own). A test double without a real pid is
    signalled through its own kill(). Never signals pid 0 or 1. */
@@ -271,10 +274,20 @@ async function launchBrowser({ binary, profileDir, headless = true, spawnFn = sp
   try {
     handle.version = await cdp.send('Browser.getVersion', {}, { timeout: 15000 });
   } catch (error) {
-    await handle.kill();
-    /* A second Chrome on a profile that another Chrome owns hands its job to the first and exits at once. */
-    if (/process_singleton|SingletonLock|profile.*in use/i.test(stderr)) throw new CdpError(PROFILE_IN_USE_MESSAGE, { code: 'PROFILE_IN_USE' });
-    error.message += ` Browser output: ${stderr.slice(-300)}`;
+    /* A second Chrome on a profile that another Chrome owns hands its job to the first and exits at once. The holder is somebody else's
+       (a Chrome the owner started, or the sign-in window of a run that crashed): only THIS child is ended, never the holder, and the
+       lock it keeps is left alone. */
+    if (SINGLETON_RE.test(stderr)) {
+      await killTree({ pid: child.pid, graceMs: 2000 });
+      await Promise.race([exited, sleep(2000)]);
+      throw new CdpError(PROFILE_IN_USE_MESSAGE, { code: 'PROFILE_IN_USE' });
+    }
+    const left = await handle.kill();
+    if (!left.length && !holdsProfile(profileDir)) scrubProfile(profileDir);
+    const tail = safeText(stderr.slice(-300), 200);
+    /* a pipe that closed before the browser answered: it never started (no display, a missing library, a refused sandbox ...) */
+    if (error.code === 'PIPE_CLOSED' || exitInfo !== null) throw new CdpError(`Chrome did not start. ${tail}`.trim(), { code: 'LAUNCH' });
+    error.message += ` Browser output: ${tail}`;
     throw error;
   }
   /* Chrome's default, when nobody has said otherwise, is to SAVE a download that a page starts into the person's own Downloads folder,
@@ -311,10 +324,12 @@ function launchWindow({ binary, profileDir, headless = false, spawnFn = spawn, e
     hasExited: () => exitInfo !== null,
     error: () => spawnError,
     async stop({ graceMs = 8000 } = {}) {
-      const singleton = singletonFolder(profileDir);
+      /* a window that gave up because ANOTHER Chrome owns the profile: that Chrome is not ours to sweep */
+      const handedOff = exitInfo !== null && SINGLETON_RE.test(stderr);
+      const singleton = handedOff ? null : singletonFolder(profileDir);
       if (exitInfo === null) { signalTree(child, 'SIGINT'); await Promise.race([exited, sleep(graceMs)]); }
       if (exitInfo === null) { signalTree(child, 'SIGTERM'); await Promise.race([exited, sleep(3000)]); }
-      const left = await killTree({ pid: child.pid, profileDir });
+      const left = await killTree({ pid: child.pid, profileDir: handedOff ? undefined : profileDir });
       if (singleton) fs.rmSync(singleton, { recursive: true, force: true });
       return left;
     },

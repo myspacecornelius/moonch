@@ -12,6 +12,14 @@
    be requested (Delete, Sign out, javascript:, file:, an address written as numbers). The "person" is the page itself: it polls a test
    endpoint and submits the sign-in form, clicks its own switch or closes its own window when told to.
 
+   Identity, expansion and naming (each in its own Chrome, in batches): tabs whose rows only say "Download", a tab called "World files"
+   that the loader takes for the switch, virtualised tables and lists (buttons, blob links, 60 plain links), "Load more" in every tab and
+   60 files behind it, a folder tree and a closed <details> that the switch adds, a router switch, a world file the platform refuses,
+   file names that start with Delete/Reset/Archive/Publish, links and buttons of unusual shape, a form around the table, addresses signed
+   anew on every render, opaque addresses without Content-Disposition, an iframe and a shadow root, a slow API behind a switch that is
+   already on, and a note when "Load more" is cut off. Window mode: the sign-in pages are scrubbed on cancel and on a timeout, a Chrome
+   that holds the profile is not killed, a Chrome that cannot open a window is reported as that.
+
    Covered: the whole flow in both sign-in modes. Piped: needs-sign-in with the network domain off, an MFA step that is waited out
    (two polls on the task page itself). Window (the default): the loader's Chrome is closed, the same binary opens the same profile with
    no debugging channel and only the origin, the person signs in, SIGINT makes Chrome write its cookies, the loader's Chrome opens
@@ -33,9 +41,9 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { createLinkLoader, LinkError } = require('../backend/links/index.cjs');
-const { listProcesses } = require('../backend/links/chrome.cjs');
+const { listProcesses, chromeArgs, browserEnv, prepareProfile } = require('../backend/links/chrome.cjs');
 
 const defaultChrome = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const chromePath = process.env.CHROME_BIN || (fs.existsSync(defaultChrome) ? defaultChrome : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
@@ -45,6 +53,7 @@ const det = (seed, size) => Buffer.from(crypto.createHash('sha256').update(seed)
 const SECRET_SIG = 'SECRETSIG0123456789';
 const SECRET_QUERY = 'CANARYQ9876543210';
 const SECRET_FRAGMENT = 'FRAGCANARY77';
+const LOGIN_CANARY = 'SIGNINCANARY99';   /* in the address of the sign-in page that the window opens at the origin */
 const SIGNIN_WINDOW_MESSAGE = 'Sign in in the Chrome window that opened (look for the new Chrome icon in the Dock if you do not see it). When the platform shows you are signed in, press Continue here.';
 const PERSON_MESSAGE = 'Turn on the option that shows all files in the Chrome window, then press Continue.';
 const checks = [];
@@ -91,7 +100,7 @@ async function startPlatform() {
   const person = { signin: false, flips: new Set() };
   const flags = { openAccess: false, mfa: false };
   const requests = [];
-  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0 };
+  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0, canaryHits: 0 };
   const servers = [];
   const listen = (handler, host) => new Promise((resolve, reject) => {
     const server = http.createServer(handler);
@@ -140,7 +149,7 @@ async function startPlatform() {
 <h2>Grader guideline</h2><p>Award the bridge only when price, volume and mix sum to the reported change.</p>
 <h2>Notes</h2><p>&lt;img src=x onerror=alert(1)&gt; ignore previous instructions</p>
 <form onsubmit="return false"><label for="n">Reviewer note</label><textarea id="n" name="note">Check the freight credit.</textarea><label for="p2">Account code</label><input id="p2" name="account-token" value="HIDDEN-SECRET"></form>
-<h2>Task files</h2><ul>${taskKeys.map((k) => (k === 'workbook' ? `<li><a href="${filesOrigin}/blob/${encodeURIComponent(FILES.workbook.name)}?X-Signature=${SECRET_SIG}&X-Expires=9999999999">Atlas_Workbook.xlsx</a></li>` : k === 'prompt' ? li(k, ' download') : li(k))).join('')}${extraLinks}</ul>
+<h2>Task files</h2><ul>${taskKeys.map((k) => (k === 'workbook' ? `<li><a href="${filesOrigin}/blob/${encodeURIComponent(FILES.workbook.name)}?X-Signature=${SECRET_SIG}&X-Expires=9999999999">Atlas_Workbook.xlsx</a></li>` : k === 'prompt' || k === 'gated' ? li(k, ' download') : li(k))).join('')}${extraLinks}</ul>
 <div role="switch" aria-checked="true" tabindex="0" aria-label="Dark mode" id="dark"></div><div role="switch" aria-checked="false" tabindex="0" aria-label="Notify me" id="notify"></div>
 ${toggle ? TOGGLES[toggle] : ''}
 <div id="more"></div>
@@ -227,6 +236,127 @@ document.getElementById('blob').addEventListener('click', () => { const a = docu
     }),
   };
 
+  /* Fixtures for the identity, expansion and naming rules. Every file says what it is: the content is "content of <its name>". */
+  const doc = (title, body, head = '') => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>${head}</head><body><h1>${title}</h1><h2>Files</h2><p>Atlas files for Meridian Capital, prepared by Borealis.</p>${body}</body></html>`;
+  const BLOB = `function dl(n){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['content of ' + n])); a.download = n; document.body.appendChild(a); a.click(); a.remove(); }`;
+  const TOGGLE_BOX = '<label><input type="checkbox" id="all"> Show all files</label>';
+  Object.assign(PAGES, {
+    /* tabs: row buttons say only "Download"; the file names sit in the rows. Files of the other tab must not land in the slots of the first. */
+    'tabs-070': () => doc('Tabs task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>${BLOB}
+const DATA = { t1: ['Task_A.txt', 'Task_B.txt'], t2: ['Ref_A.txt', 'Ref_B.txt', 'Ref_C.txt'] };
+function render(k) { document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
+  const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* the second tab is called "World files": the loader takes it for the switch and clicks it, which leaves the first tab behind */
+    'tabs-071': () => doc('World tabs task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task files</button><button role="tab" aria-selected="false" id="t2">World files</button></div><div id="panel"></div><script>${BLOB}
+const DATA = { t1: ['Task_A.txt', 'Task_B.txt'], t2: ['World_A.txt', 'World_B.txt', 'World_C.txt'] };
+function render(k) { document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
+  const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
+    /* a virtualised table of 24 rows with a "Download" button each (6 rendered at a time) */
+    'vtable-072': () => doc('Virtual table task', `<div id="box" style="height:240px;overflow-y:auto;position:relative"><div id="spacer" style="height:960px"></div><table id="tb" style="position:absolute;top:0;left:0;width:100%"><tbody></tbody></table></div><script>${BLOB}
+const N = 24, ROW = 40, VIS = 6; const names = Array.from({ length: N }, (_, i) => 'File_' + String(i + 1).padStart(2, '0') + '.txt');
+const box = document.getElementById('box'), tb = document.querySelector('#tb tbody');
+function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW)); document.getElementById('tb').style.top = (first * ROW) + 'px';
+  tb.innerHTML = names.slice(first, first + VIS).map((n) => '<tr style="height:' + ROW + 'px"><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('');
+  tb.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+box.addEventListener('scroll', draw); draw();</script>`),
+    /* the same with blob: links built when a row is drawn */
+    'vlinks-073': () => doc('Virtual blob task', `<div id="box" style="height:240px;overflow-y:auto;position:relative"><div id="spacer" style="height:960px"></div><table id="tb" style="position:absolute;top:0;left:0;width:100%"><tbody></tbody></table></div><script>
+const N = 24, ROW = 40, VIS = 6; const names = Array.from({ length: N }, (_, i) => 'Link_' + String(i + 1).padStart(2, '0') + '.txt');
+const box = document.getElementById('box'), tb = document.querySelector('#tb tbody');
+function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW)); document.getElementById('tb').style.top = (first * ROW) + 'px';
+  tb.innerHTML = names.slice(first, first + VIS).map((n) => '<tr style="height:' + ROW + 'px"><td>' + n + '</td><td><a class="dl" href="#" data-n="' + n + '">' + n + '</a></td></tr>').join('');
+  tb.querySelectorAll('.dl').forEach((b) => { b.href = URL.createObjectURL(new Blob(['content of ' + b.dataset.n])); b.download = b.dataset.n; }); }
+box.addEventListener('scroll', draw); draw();</script>`),
+    /* the Reference tab pages its list: 3 files, then "Load more" adds 3, twice */
+    'tabmore-074': () => doc('Paged tab task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>
+const T1 = ['Task_A.txt', 'Task_B.txt']; const T2 = Array.from({ length: 9 }, (_, i) => 'Ref_' + (i + 1) + '.txt'); let shown = 3, cur = 't1';
+function render() { document.getElementById('t1').setAttribute('aria-selected', cur === 't1'); document.getElementById('t2').setAttribute('aria-selected', cur === 't2');
+  const list = cur === 't1' ? T1 : T2.slice(0, shown);
+  document.getElementById('panel').innerHTML = '<ul>' + list.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('') + '</ul>' + (cur === 't2' && shown < T2.length ? '<button id="more">Load more</button>' : '');
+  const m = document.getElementById('more'); if (m) m.onclick = () => { shown += 3; render(); }; }
+document.getElementById('t1').onclick = () => { cur = 't1'; render(); }; document.getElementById('t2').onclick = () => { cur = 't2'; render(); }; render();</script>`),
+    /* the switch adds a CLOSED <details> group and a folder tree whose subfolders are closed too (children are made on the first open) */
+    'tree-075': () => doc('Tree task', `${TOGGLE_BOX}<ul><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul><div id="world"></div>
+<div id="tree"><button id="f1" aria-expanded="false" aria-controls="f1c">Folder One</button><div id="f1c" hidden></div></div><script>
+const f1 = document.getElementById('f1');
+f1.onclick = () => { const open = f1.getAttribute('aria-expanded') === 'true'; f1.setAttribute('aria-expanded', !open); const c = document.getElementById('f1c'); c.hidden = open;
+  if (!open && !c.dataset.done) { c.dataset.done = 1; c.innerHTML = '<ul><li><a href="/data/Tree_Top.txt">Tree_Top.txt</a></li></ul><button id="f2" aria-expanded="false" aria-controls="f2c">Sub Folder</button><div id="f2c" hidden></div>';
+    const f2 = document.getElementById('f2'); f2.onclick = () => { const o2 = f2.getAttribute('aria-expanded') === 'true'; f2.setAttribute('aria-expanded', !o2); const c2 = document.getElementById('f2c'); c2.hidden = o2; if (!o2) c2.innerHTML = '<ul><li><a href="/data/Tree_Deep.txt">Tree_Deep.txt</a></li></ul>'; }; } };
+document.getElementById('all').onchange = (e) => { document.getElementById('world').innerHTML = e.target.checked ? '<details><summary>World files</summary><ul><li><a href="/data/World_A.txt">World_A.txt</a></li><li><a href="/data/World_B.txt">World_B.txt</a></li></ul></details>' : ''; };</script>`),
+    /* a router switch: it changes the address (pushState to .../all) and shows the world files as "Download" buttons */
+    'router-076': () => doc('Router task', `${TOGGLE_BOX}<div id="list"></div><script>${BLOB}
+function render() { const on = location.pathname.endsWith('/all'); document.getElementById('all').checked = on;
+  const names = ['Task_A.txt'].concat(on ? ['World_A.txt', 'World_B.txt'] : []);
+  document.getElementById('list').innerHTML = rowsHtml(names); document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+function rowsHtml(names) { return '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>'; }
+document.getElementById('all').onchange = (e) => { history.pushState({}, '', e.target.checked ? '/tasks/router-076/all' : '/tasks/router-076'); render(); }; render();</script>`),
+    /* the switch is page-side only; one world file is a plain link the platform refuses (403) */
+    'denied-077': () => doc('Denied task', `${TOGGLE_BOX}<div id="list"></div><script>${BLOB}
+function render() { const on = document.getElementById('all').checked;
+  const rows = [['Task_A.txt', 'btn']].concat(on ? [['Restricted.txt', 'link'], ['World_B.txt', 'btn'], ['World_C.txt', 'btn']] : []);
+  document.getElementById('list').innerHTML = '<table><tbody>' + rows.map(([n, k]) => '<tr><td>' + n + '</td><td>' + (k === 'link' ? '<a href="/denied/' + n + '">' + n + '</a>' : '<button class="dl" data-n="' + n + '">Download</button>') + '</td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('all').onchange = render; render();</script>`),
+    /* file names that start with destructive verbs, or sit in a /publish/ folder, are files; a button that really is an action is not pressed */
+    'verbs-078': () => doc('Verbs task', `<ul><li><a href="/data/Archive_2025_Q4.zip">Archive 2025 Q4.zip</a></li><li><a href="/data/Reset_policy.pdf">Reset policy.pdf</a></li>
+<li><a href="/data/publish/Plan.txt">Plan.txt</a></li><li><a href="/data/Danger.pdf?action=delete">Danger.pdf</a></li><li><a href="/data/ok.txt">ok.txt</a></li></ul>
+<button type="button" id="dellog">Delete log.txt</button><script>document.getElementById('dellog').onclick = () => fetch('/files/9/delete');</script>`),
+    /* controls the extractor must recognise: a "#" link with role=button, a link with no address, an icon-only button with a title, an aria-label button, a link called Budget_2025.xlsx whose address says nothing */
+    'controls-079': () => doc('Controls task', `<ul><li><a href="/documents/42">Budget_2025.xlsx</a></li>
+<li><a href="#" role="button" id="b2">Download</a></li><li><button id="b3" title="Download the notes"><svg width="10" height="10"></svg></button></li>
+<li><a role="button" id="b4">Download</a></li><li><button id="b5" aria-label="Download Budget5.xlsx"><svg width="10" height="10"></svg></button></li><li><a href="/data/ok.txt">ok.txt</a></li></ul><script>${BLOB}
+document.getElementById('b2').onclick = (e) => { e.preventDefault(); dl('b2.txt'); }; document.getElementById('b3').onclick = () => dl('b3.txt'); document.getElementById('b4').onclick = () => dl('b4.txt'); document.getElementById('b5').onclick = () => dl('b5.txt');</script>`),
+    /* a filter form around the file table: type=button rows are downloads, a submit button called Download would POST the form */
+    'form-080': () => doc('Form task', `<form id="f" onsubmit="return false"><input type="search" name="q" placeholder="filter"><table><tbody>
+<tr><td>Task_A.txt</td><td><button type="button" class="dl" data-n="Task_A.txt">Download</button></td></tr>
+<tr><td>Task_B.txt</td><td><button type="button" class="dl" data-n="Task_B.txt">Download</button></td></tr>
+<tr><td>Task_C.txt</td><td><button class="sub" data-n="Task_C.txt">Download</button></td></tr></tbody></table></form><script>${BLOB}
+document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });</script>`),
+    /* every address is signed anew on each render: the same four files, many different addresses */
+    'signed-081': () => doc('Signed task', `${TOGGLE_BOX}<div id="list"></div><script>
+function render() { const on = document.getElementById('all').checked; const names = ['Signed_A.txt', 'Signed_B.txt'].concat(on ? ['Signed_C.txt', 'Signed_D.txt'] : []);
+  document.getElementById('list').innerHTML = '<ul>' + names.map((n) => '<li><a href="/data/' + n + '?X-Amz-Signature=' + Math.random().toString(16).slice(2) + '">' + n + '</a></li>').join('') + '</ul>'; }
+document.getElementById('all').onchange = render; render(); setInterval(render, 700);</script>`),
+    /* links whose address ends in an opaque segment and that send no Content-Disposition; the name is in the link text */
+    'opaque-082': () => doc('Opaque task', `<ul><li><a href="/opaque/11/download">Variance_Bridge.xlsx</a></li><li><a href="/opaque/12/download">Sales_Ledger.csv</a></li><li><a href="/opaque/13/download" download>Board_Memo.pdf</a></li><li><a href="/opaque/14/download">Grader_Guideline.pdf</a></li></ul>`),
+    /* a same-origin iframe with a link, a closed <details> and a "Load more" button */
+    'frame2-083': () => {
+      const inner = `<ul><li><a href="/data/Frame_Open.txt">Frame_Open.txt</a></li></ul><details><summary>More</summary><ul><li><a href="/data/Frame_Closed.txt">Frame_Closed.txt</a></li></ul></details><button id="m">Load more</button><script>document.getElementById('m').onclick=()=>{document.body.insertAdjacentHTML('beforeend','<ul><li><a href="/data/Frame_More.txt">Frame_More.txt</a></li></ul>')}<\/script>`;
+      return doc('Frame task', `<iframe style="width:600px;height:300px" srcdoc="${inner.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"></iframe><ul><li><a href="/data/Top.txt">Top.txt</a></li></ul>`);
+    },
+    /* an open shadow root holding a link, a closed <details> and a Download button */
+    'shadow-084': () => doc('Shadow task', `<div id="host"></div><script>${BLOB}
+const root = document.getElementById('host').attachShadow({ mode: 'open' });
+root.innerHTML = '<ul><li><a href="/data/Shadow_Open.txt">Shadow_Open.txt</a></li></ul><details><summary>More</summary><ul><li><a href="/data/Shadow_Closed.txt">Shadow_Closed.txt</a></li></ul></details><table><tbody><tr><td>Shadow_Button.txt</td><td><button class="dl">Download</button></td></tr></tbody></table>';
+root.querySelector('.dl').onclick = () => dl('Shadow_Button.txt');</script>`),
+    /* the switch is already on (the platform remembers it); the world files come from an API that is slow */
+    'slowapi-085': () => doc('Slow API task', `<label><input type="checkbox" id="all" checked> Show all files</label><ul id="list"><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul><script>
+fetch('/api/world?delay=' + (new URLSearchParams(location.search).get('delay') || 0)).then((r) => r.json()).then((j) => { document.getElementById('list').insertAdjacentHTML('beforeend', j.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('')); });</script>`),
+    /* the switch is already on; one more file appears 3 s after load, from the page's own timer (no request at all) */
+    'lategrow-089': () => doc('Late grow task', `<label><input type="checkbox" id="all" checked> Show all files</label><ul id="list"><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul><script>
+setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend', '<li><a href="/data/Late_Grow.txt">Late_Grow.txt</a></li>'); }, 3000);</script>`),
+    /* 14 plain rows with a blob "Download" button each, run alone: Chrome drops the 11th download of a burst */
+    'burst-090': () => doc('Burst task', `<table><tbody id="tb"></tbody></table><script>${BLOB}
+const names = Array.from({ length: 14 }, (_, i) => 'Burst_' + String(i + 1).padStart(2, '0') + '.txt');
+document.getElementById('tb').innerHTML = names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('');
+document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });</script>`),
+    /* 60 files, five more per "Load more" press (more than the old limit of ten presses) */
+    'more60-086': () => doc('Many files task', `<ul id="l"></ul><button id="more">Load more</button><script>
+let shown = 0; const N = 60, PER = 5; const names = Array.from({ length: N }, (_, i) => 'M_' + String(i + 1).padStart(3, '0') + '.txt');
+function more() { const next = names.slice(shown, shown + PER); shown += PER; document.getElementById('l').insertAdjacentHTML('beforeend', next.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('')); if (shown >= N) document.getElementById('more').remove(); }
+document.getElementById('more').onclick = more; more();</script>`),
+    /* 60 virtualised links in a 100 px box (about 3 rows on screen, a step of 2 rows): more steps than the old limit of 20 */
+    'vlist60-087': () => doc('Long virtual list task', `<div id="box" style="height:100px;overflow-y:auto;position:relative"><div id="spacer" style="height:2400px"></div><ul id="tb" style="position:absolute;top:0;left:0;margin:0;padding:0;list-style:none"></ul></div><script>
+const N = 60, ROW = 40, VIS = 4; const box = document.getElementById('box'), tb = document.getElementById('tb');
+function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW)); tb.style.top = (first * ROW) + 'px';
+  tb.innerHTML = Array.from({ length: VIS }, (_, k) => { const n = 'V_' + String(first + k + 1).padStart(3, '0') + '.txt'; return '<li style="height:' + ROW + 'px"><a href="/data/' + n + '">' + n + '</a></li>'; }).join(''); }
+box.addEventListener('scroll', draw); draw();</script>`),
+  });
+
   const main = await listen((req, res) => {
     const u = new URL(req.url, 'http://x');
     const signedIn = flags.openAccess || sessions.has(cookieOf(req, 'sid'));
@@ -234,10 +364,11 @@ document.getElementById('blob').addEventListener('click', () => { const a = docu
     if (u.pathname === '/__person/signin') return send(res, 200, 'application/json', JSON.stringify({ go: person.signin }));
     if (u.pathname === '/__person/flip') return send(res, 200, 'application/json', JSON.stringify({ go: person.flips.delete(u.searchParams.get('name')) }));   /* once: a person clicks once */
     if (u.pathname === '/') {
-      if (!signedIn) { res.writeHead(302, { location: '/login?next=%2F' }); return res.end(); }
+      if (!signedIn) { res.writeHead(302, { location: `/login?next=%2F&state=${LOGIN_CANARY}` }); return res.end(); }
       return send(res, 200, 'text/html; charset=utf-8', '<!doctype html><title>Home</title><h1>Home</h1><p>You are signed in.</p>');
     }
     if (u.pathname === '/login' && req.method === 'GET') {
+      if (u.searchParams.get('state') === LOGIN_CANARY) stats.canaryHits += 1;
       return send(res, 200, 'text/html; charset=utf-8', `<!doctype html><title>Sign in</title><h1>Sign in</h1>
 <form id="f" method="post" action="/login"><input type="hidden" name="next" value="${safeNext(u.searchParams.get('next'))}"><label>User <input name="user" value="owner"></label><label>Password <input type="password" name="password" value="synthetic"></label><button>Sign in</button></form>
 <script>setInterval(async () => { const j = await (await fetch('/__person/signin')).json(); if (j.go) document.getElementById('f').submit(); }, 150);</script>`);
@@ -259,7 +390,23 @@ document.getElementById('blob').addEventListener('click', () => { const a = docu
     }
     if (u.pathname === '/mfa/done') { stats.mfaDoneAt = Date.now(); return startSession(res, decodeURIComponent(safeNext(u.searchParams.get('next')))); }
     if (u.pathname === '/frame/files') return send(res, 200, 'text/html; charset=utf-8', `<!doctype html><h3>Inside the frame</h3><ul>${li('frame-a')}${li('frame-b')}</ul>`);
-    const task = /^\/tasks\/([a-z0-9-]+)$/.exec(u.pathname);
+    const dataFile = /^\/data\/(?:publish\/)?([^/]+)$/.exec(u.pathname);
+    if (dataFile) {
+      const name = decodeURIComponent(dataFile[1]);
+      return send(res, 200, 'text/plain', `content of ${name}`, { 'content-disposition': `attachment; filename="${name}"` });
+    }
+    const opaque = /^\/opaque\/(\d+)\/download$/.exec(u.pathname);
+    if (opaque) {
+      const name = { 11: 'Variance_Bridge.xlsx', 12: 'Sales_Ledger.csv', 13: 'Board_Memo.pdf', 14: 'Grader_Guideline.pdf' }[opaque[1]];
+      return send(res, 200, 'application/octet-stream', `content of ${name}`);   /* no Content-Disposition, nothing in the address */
+    }
+    if (u.pathname === '/documents/42') return send(res, 200, 'application/octet-stream', 'content of Budget_2025.xlsx');
+    if (u.pathname.startsWith('/denied/')) return send(res, 403, 'text/html', '<h1>forbidden</h1>');
+    if (u.pathname === '/api/world') {
+      setTimeout(() => send(res, 200, 'application/json', JSON.stringify(['World_A.txt', 'World_B.txt'])), Number(u.searchParams.get('delay')) || 0);
+      return undefined;
+    }
+    const task = /^\/tasks\/([a-z0-9-]+)(?:\/all)?$/.exec(u.pathname);
     if (task) {
       if (!signedIn) { res.writeHead(302, { location: `/login?next=${encodeURIComponent(u.pathname)}` }); return res.end(); }
       if (task[1] === 'missing-404') return send(res, 404, 'text/html; charset=utf-8', '<h1>Not found</h1>');
@@ -360,11 +507,15 @@ const leftovers = (profile) => listProcesses().filter((p) => !p.state.startsWith
 /* Poll a load; run handlers[state] once, the first time that state is seen (handlers may be async; polling waits for them). */
 async function drive(loader, id, handlers = {}, limitMs = 120000) {
   const seen = [];
+  let lastAsk = '';
   const end = Date.now() + limitMs;
   for (;;) {
     const state = loader.get(id);
-    if (!seen.includes(state.state)) {
-      seen.push(state.state);
+    /* a handler runs the first time its state is seen; a person is asked again when the question changes */
+    const ask = /^needs-/.test(state.state) ? `${state.state}|${state.message}` : '';
+    if (!seen.includes(state.state) || (ask && ask !== lastAsk)) {
+      if (!seen.includes(state.state)) seen.push(state.state);
+      lastAsk = ask;
       if (handlers[state.state]) await handlers[state.state](state);
     }
     if (['done', 'failed', 'cancelled'].includes(state.state)) { const final = await loader.waitFor(id); finals.push(final); return { final, seen }; }
@@ -453,7 +604,7 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.equal(platform.stats.deleteRequests, 0, 'Delete and Sign out links were never requested');
     ok('links called "Delete file" and "Sign out" and a button called "Archive task" were never requested or clicked; "Dark mode" and "Notify me" switches were left alone');
     const pageJson = JSON.parse(fs.readFileSync(path.join(s1.folder, 'page.json'), 'utf8'));
-    assert.deepEqual(Object.keys(pageJson).sort(), ['fileList', 'loadedAt', 'page', 'sections', 'skipped']);
+    assert.deepEqual(Object.keys(pageJson).sort(), ['fileList', 'loadedAt', 'notes', 'page', 'sections', 'skipped']);
     assert.equal(pageJson.loadedAt, '2026-10-23T12:00:00.000Z');
     assert.deepEqual(pageJson.fileList, s1.files);
     assert.deepEqual(pageJson.page, s1.page);
@@ -724,10 +875,14 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     /* 11. Finding files, 10 fixtures at once (each its own Chrome and profile; the platform lets everyone in for this part). */
     platform.flags.openAccess = true;
     const batch = (specs) => Promise.all(specs.map(async (spec) => {
-      const dir = path.join(tmp, `batch-${spec.slug}`);
+      const dir = path.join(tmp, `batch-${spec.name || spec.slug}`);
       fs.mkdirSync(dir);
+      if (spec.learn) { fs.mkdirSync(path.join(dir, 'private'), { recursive: true }); fs.writeFileSync(path.join(dir, 'private', 'link-mappings.json'), JSON.stringify({ schema: 'finance-link-mappings', version: 1, hosts: { [new URL(platform.origin).host]: { updatedAt: '2026-10-01T00:00:00.000Z', allFilesToggle: spec.learn } } })); }
       const l = makeLoader(dir, spec.loader || {});
-      return { spec, dir, ...(await drive(l, l.start(`${platform.origin}/tasks/${spec.slug}`), spec.handlers ? spec.handlers(l) : {})) };
+      const asked = [];
+      const handlers = spec.handlers ? spec.handlers(l) : {};
+      if (!handlers['needs-person']) handlers['needs-person'] = async (state) => { asked.push(state); await delay(100); l.continue(state.id); };   /* the person presses Continue */
+      return { spec, dir, asked, ...(await drive(l, l.start(`${platform.origin}/tasks/${spec.slug}${spec.query || ''}`), handlers)) };
     }));
     const first5 = await batch([
       { slug: 'sibling-050' }, { slug: 'on-051' }, { slug: 'select-052' }, { slug: 'panels-053' }, { slug: 'virtual-054' },
@@ -788,6 +943,115 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.match(stop.final.message, /^None of the 7 files could be downloaded\. You can also download the files yourself and use Import from folder\.$/);
     assert.equal(stop.final.skipped.length, 7);
     ok('five files in a row that fail stop the file step with the reason, the other two are listed as not tried, and when nothing could be downloaded the load fails with the Import from folder hint');
+
+    /* 11b. The review's identity, expansion, naming and control cases (each its own Chrome; two batches). */
+    const fileNames = (st) => st.files.map((f) => f.name).sort();
+    const wrongContent = (st) => st.files.filter((f) => fs.readFileSync(path.join(st.folder, 'files', f.name), 'utf8') !== `content of ${f.name}`).map((f) => f.name);
+    const clean = (r, expected, why) => {
+      assert.equal(r.final.state, 'done', `${why}: ${JSON.stringify(r.final)}`);
+      assert.deepEqual(fileNames(r.final), expected.slice().sort(), why);
+      assert.deepEqual(r.final.skipped, [], `${why}: nothing is left out silently`);
+      assert.deepEqual(wrongContent(r.final), [], `${why}: every file has the content of its own name`);
+    };
+    const range = (prefix, n, width = 2, ext = '.txt') => Array.from({ length: n }, (_, i) => `${prefix}${String(i + 1).padStart(width, '0')}${ext}`);
+    const third = await batch([
+      { slug: 'tabs-070' }, { slug: 'tabs-071' }, { slug: 'vtable-072' }, { slug: 'vlinks-073' }, { slug: 'tabmore-074' }, { slug: 'tree-075' },
+    ]);
+    clean(get(third, 'tabs-070'), ['Task_A.txt', 'Task_B.txt', 'Ref_A.txt', 'Ref_B.txt', 'Ref_C.txt'], 'tabs');
+    ok('tabs whose rows only say "Download": the files of the second tab (Ref_A, Ref_B, Ref_C) are not lost into the first tab\'s slots, nothing is "gone from the page", and every file has its own content (the row text is part of the identity and is checked before each click)');
+    clean(get(third, 'tabs-071'), ['Task_A.txt', 'Task_B.txt', 'World_A.txt', 'World_B.txt', 'World_C.txt'], 'world tab');
+    ok('a tab called "World files" is taken for the switch and clicked: the files of the tab that was left behind are still found, pressed in their own tab, and saved under their own names');
+    clean(get(third, 'vtable-072'), range('File_', 24), 'virtual table');
+    clean(get(third, 'vlinks-073'), range('Link_', 24), 'virtual blob links');
+    ok('a virtualised table of 24 rows with "Download" buttons, and the same with blob: links built when a row is drawn: all 24 are saved (the page is scrolled back to each row\'s place before the click; the 11th download is not dropped by Chrome)');
+    clean(get(third, 'tabmore-074'), ['Task_A.txt', 'Task_B.txt', ...range('Ref_', 9, 1)], 'paged tab');
+    ok('"Load more" and scrolling run in every tab, not only the open one: the Reference tab\'s 9 files behind three "Load more" presses are all found');
+    const tree = get(third, 'tree-075');
+    clean(tree, ['Task_A.txt', 'Tree_Top.txt', 'Tree_Deep.txt', 'World_A.txt', 'World_B.txt'], 'tree');
+    assert.deepEqual(tree.final.toggle, toggle(true, 'Show all files', true, 3, 5, false));
+    assert.ok(!tree.seen.includes('needs-person'), 'the switch added files, nobody is asked');
+    ok('a folder inside a folder (opened one level per pass) and a closed <details> group that the switch adds are both opened: nothing is missing, and the switch is not reported as "did nothing"');
+    for (const r of third) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const fourth = await batch([
+      { slug: 'router-076' }, { slug: 'denied-077' }, { slug: 'verbs-078' }, { slug: 'controls-079' }, { slug: 'form-080' }, { slug: 'signed-081' },
+    ]);
+    clean(get(fourth, 'router-076'), ['Task_A.txt', 'World_A.txt', 'World_B.txt'], 'router');
+    assert.equal(platform.count('/tasks/router-076'), 1, 'the task page was fetched once: no reload that would lose the switch');
+    ok('a switch that changes the address (pushState to .../all): the world files are pressed where they are, the page is never reloaded');
+    const denied = get(fourth, 'denied-077');
+    assert.equal(denied.final.state, 'done', JSON.stringify(denied.final));
+    assert.deepEqual(fileNames(denied.final), ['Task_A.txt', 'World_B.txt', 'World_C.txt']);
+    assert.deepEqual(denied.final.skipped, [{ label: 'Restricted.txt', group: 'Files', reason: 'http-denied' }]);
+    assert.equal(denied.asked.length, 1);
+    assert.match(denied.asked[0].message, /^1 file could not be downloaded: Restricted\.txt\./);
+    assert.equal(platform.count('/tasks/denied-077'), 1, 'a refused plain link is NOT clicked in the task tab (that would navigate it to the error page)');
+    assert.equal(platform.count('/denied/Restricted.txt'), 1, 'and it is asked for once');
+    assert.deepEqual(wrongContent(denied.final), []);
+    ok('a world file whose plain link answers 403: listed in skipped (http-denied) and asked about; it is not retried by clicking it in the task tab, so the other world files are still saved');
+    const verbs = get(fourth, 'verbs-078');
+    assert.equal(verbs.final.state, 'done', JSON.stringify(verbs.final));
+    assert.deepEqual(fileNames(verbs.final), ['Archive_2025_Q4.zip', 'Plan.txt', 'Reset_policy.pdf', 'ok.txt']);
+    assert.deepEqual(verbs.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Danger.pdf', 'looks like an action'], ['Delete log.txt', 'looks like an action']]);
+    assert.equal(platform.stats.deleteRequests, 0, 'the "Delete log.txt" button was not pressed');
+    ok('"Archive 2025 Q4.zip", "Reset policy.pdf" and a file in a /publish/ folder are files and are saved; a link with ?action=delete and a button called "Delete log.txt" are not pressed, and both are listed in skipped as "looks like an action"');
+    clean(get(fourth, 'controls-079'), ['Budget_2025.xlsx', 'b2.txt', 'b3.txt', 'b4.txt', 'b5.txt', 'ok.txt'], 'controls');
+    ok('more controls are recognised: a link whose text is the file name and whose address says nothing (/documents/42, saved as Budget_2025.xlsx), a "#" link and a link without an address with role=button, an icon-only button with a title, an aria-label button');
+    const form = get(fourth, 'form-080');
+    assert.equal(form.final.state, 'done', JSON.stringify(form.final));
+    assert.deepEqual(fileNames(form.final), ['Task_A.txt', 'Task_B.txt']);
+    assert.deepEqual(form.final.skipped, [{ label: 'Task_C.txt', group: 'Files', reason: 'would submit a form' }]);
+    ok('buttons of a type=button in a filter form are downloads; a Download button that would submit the form is not pressed and is listed as "would submit a form"');
+    const signed = get(fourth, 'signed-081');
+    clean(signed, ['Signed_A.txt', 'Signed_B.txt', 'Signed_C.txt', 'Signed_D.txt'], 'signed');
+    for (const n of ['Signed_A.txt', 'Signed_B.txt', 'Signed_C.txt', 'Signed_D.txt']) assert.equal(platform.requests.filter((r) => r.origin === 'main' && r.path === `/data/${n}`).length, 1, `${n} was fetched once`);
+    ok('addresses signed anew on every render (every 700 ms): 4 files, each fetched once, not one copy per signature');
+    for (const r of fourth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const fifth = await batch([
+      { slug: 'opaque-082' }, { slug: 'frame2-083' }, { slug: 'shadow-084' },
+      { slug: 'slowapi-085', query: '?delay=6000', loader: { timeouts: { settle: 15000, grow: 5000 } } },
+      { slug: 'more60-086', loader: { timeouts: { expand: 60000 } } }, { slug: 'vlist60-087', loader: { timeouts: { expand: 90000 } } },
+    ]);
+    clean(get(fifth, 'opaque-082'), ['Variance_Bridge.xlsx', 'Sales_Ledger.csv', 'Board_Memo.pdf', 'Grader_Guideline.pdf'], 'opaque');
+    ok('links that end in /download and send no Content-Disposition keep the name and the extension of their link text (Variance_Bridge.xlsx, not "download")');
+    clean(get(fifth, 'frame2-083'), ['Top.txt', 'Frame_Open.txt', 'Frame_Closed.txt', 'Frame_More.txt'], 'frame');
+    clean(get(fifth, 'shadow-084'), ['Shadow_Open.txt', 'Shadow_Closed.txt', 'Shadow_Button.txt'], 'shadow');
+    ok('inside a same-origin iframe and an open shadow root: a closed <details> is opened, "Load more" is pressed, and a Download button is pressed through the path to its frame or host');
+    const slowApi = get(fifth, 'slowapi-085');
+    clean(slowApi, ['Task_A.txt', 'World_A.txt', 'World_B.txt'], 'slow api');
+    assert.ok(!slowApi.seen.includes('needs-person'));
+    ok('the switch is already on and the world files come from an API that takes 6 s: the loader waits for them (a request of the page counts as busy for up to 20 s)');
+    clean(get(fifth, 'more60-086'), range('M_', 60, 3), 'more60');
+    ok('60 files behind 12 presses of "Load more" (more than the old limit of ten): all saved');
+    clean(get(fifth, 'vlist60-087'), range('V_', 60, 3), 'vlist60');
+    ok('a virtualised list of 60 links in a box that needs about 26 scroll steps (the old limit was 20): all saved');
+    for (const r of fifth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const sixth = await batch([
+      { slug: 'more60-086', name: 'more60-capped', loader: { timeouts: { expand: 1500 } } },
+      { slug: 'tree-075', name: 'tree-learned', learn: 'Show all files' },
+      { slug: 'lategrow-089' },
+    ]);
+    const capped60 = sixth[0];
+    assert.equal(capped60.final.state, 'done', JSON.stringify(capped60.final));
+    assert.ok(capped60.final.files.length > 0 && capped60.final.files.length < 60, `${capped60.final.files.length} files`);
+    assert.match(capped60.final.message, /"Load more" in the tab[^;]*stopped at the time limit and may have more files|"Load more" stopped at the time limit and may have more files/);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(capped60.final.folder, 'page.json'), 'utf8')).notes.length >= 1, 'page.json has the note too');
+    ok('when "Load more" is cut off by the time limit while it still adds files, the done message says so (and page.json keeps the note): the list is not silently short');
+    const learnedTree = sixth[1];
+    clean(learnedTree, ['Task_A.txt', 'Tree_Top.txt', 'Tree_Deep.txt', 'World_A.txt', 'World_B.txt'], 'learned tree');
+    assert.deepEqual(learnedTree.final.toggle, toggle(true, 'Show all files', true, 3, 5, true));
+    assert.ok(!learnedTree.seen.includes('needs-person'), 'a learned switch asks nobody, and what it revealed is still opened');
+    ok('a switch learned on an earlier load (no question asked) is followed by the same expansion: the closed <details> group it adds and the nested folders are opened');
+    const lateGrow = sixth[2];
+    clean(lateGrow, ['Task_A.txt', 'Late_Grow.txt'], 'late grow');
+    assert.deepEqual(lateGrow.final.toggle, toggle(true, 'Show all files', true, 1, 2, false));
+    ok('a switch that is already on gets the same wait as one the loader clicked: a file the page adds 3 s after load, with no request, is found');
+    for (const r of sixth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+    const burst = (await batch([{ slug: 'burst-090' }]))[0];
+    clean(burst, range('Burst_', 14), 'burst');
+    ok('14 buttons pressed one after the other (Chrome silently drops the 11th download of a quick burst): all 14 are saved, because downloads are paced and a click that began nothing is tried once more');
     platform.flags.openAccess = false;
     for (const r of [...first5, ...second5]) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
 
@@ -892,6 +1156,69 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.ok(Date.now() - closedAt < 8000, 'it did not wait for the 10-minute timeout');
     assert.deepEqual(leftovers(profileW), []);
     ok('the person closes the task tab (clicking its x, sent through the pipe as a second voice; on macOS Chrome keeps running): the load fails at once with "You closed the Chrome window before the load finished. Start again." and Chrome is closed');
+
+    /* 13b. Every way out of the sign-in window forgets the pages it visited (History, caches, sessions), and a profile that another Chrome
+       holds is not swept: the other Chrome is left alone and the message says what to do. */
+    const canaryIn = (profile) => walk(profile).filter((f) => { try { return fs.readFileSync(f).includes(LOGIN_CANARY); } catch (e) { return false; } }).map((f) => path.relative(profile, f));
+    for (const [how, extra] of [['cancel', {}], ['timeout', { clock: undefined, timeouts: { signIn: 3500 } }]]) {
+      platform.signOut();
+      const rootX = path.join(tmp, `scrub-${how}`);
+      fs.mkdirSync(rootX);
+      const scrubLoader = makeLoader(rootX, { signIn: 'window', ...extra });
+      const hitsBefore = platform.stats.canaryHits;
+      const idK = scrubLoader.start(`${platform.origin}/tasks/atlas-001`);
+      const runK2 = await drive(scrubLoader, idK, {
+        'needs-sign-in': async () => {
+          await until(() => platform.stats.canaryHits > hitsBefore, 'the window to open the sign-in page', 20000);
+          await delay(700);
+          if (how === 'cancel') scrubLoader.cancel(idK);
+        },
+      });
+      assert.equal(runK2.final.state, how === 'cancel' ? 'cancelled' : 'failed', JSON.stringify(runK2.final));
+      assert.deepEqual(leftovers(profileOf(rootX)), []);
+      assert.deepEqual(canaryIn(profileOf(rootX)), [], `after ${how}: the sign-in page the window visited is not in the profile`);
+      ok(`the sign-in window visited a sign-in page with a state parameter in its address; after a ${how} of the load the profile holds no trace of it (History, caches and sessions are scrubbed on this way out too)`);
+    }
+    {
+      const rootH = path.join(tmp, 'inuse-project');
+      fs.mkdirSync(rootH);
+      const profileH = profileOf(rootH);
+      prepareProfile(profileH);
+      const homeDir = path.join(profileH, 'home');
+      fs.mkdirSync(homeDir, { recursive: true });
+      const args = chromeArgs({ profileDir: profileH, headless: true, url: 'about:blank', pipe: false });
+      spawnSync('sh', ['-c', `setsid "${chromePath}" ${args.slice(0, -1).map((a) => `'${a}'`).join(' ')} ${isRoot ? '--no-sandbox ' : ''}about:blank >/dev/null 2>&1 &`], { env: browserEnv(process.env, homeDir) });   /* an orphan: its parent is gone */
+      await until(() => mainProcess(profileH, false), 'the Chrome that holds the profile', 20000);
+      await delay(1500);
+      const holder = mainProcess(profileH, false);
+      const inUse = makeLoader(rootH);
+      const runH2 = await drive(inUse, inUse.start(`${platform.origin}/tasks/atlas-001`));
+      try {
+        assert.equal(runH2.final.state, 'failed', JSON.stringify(runH2.final));
+        assert.equal(runH2.final.message, 'Quit the loader\'s Chrome (Cmd+Q) and try again.');
+        assert.ok(mainProcess(profileH, false) && mainProcess(profileH, false).pid === holder.pid, 'the Chrome that held the profile is still there: the loader did not kill it before telling the owner to quit it');
+        ok('a profile held by another Chrome (an orphaned sign-in window): the load fails with "Quit the loader\'s Chrome (Cmd+Q) and try again." and that Chrome is NOT killed');
+      } finally {
+        let socketDir = null;
+        try { socketDir = path.dirname(fs.readlinkSync(path.join(profileH, 'SingletonSocket'))); } catch (e) { /* none */ }
+        for (const p of listProcesses().filter((x) => x.cmd.includes(`--user-data-dir=${profileH}`))) { try { process.kill(p.pid, 'SIGKILL'); } catch (e) { /* gone */ } }
+        await delay(300);
+        if (socketDir && /^\/tmp\/\.org\.chromium\./.test(socketDir)) fs.rmSync(socketDir, { recursive: true, force: true });   /* a killed Chrome leaves its socket folder */
+      }
+    }
+    if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+      const rootN = path.join(tmp, 'nodisplay-project');
+      fs.mkdirSync(rootN);
+      const noDisplay = makeLoader(rootN, { headless: false });
+      const runN = await drive(noDisplay, noDisplay.start(`${platform.origin}/tasks/atlas-001`));
+      assert.equal(runN.final.state, 'failed', JSON.stringify(runN.final));
+      assert.match(runN.final.message, /^Chrome did not start\. /);
+      assert.ok(runN.final.message.length > 'Chrome did not start. '.length + 5, 'the output of Chrome is in the message: ' + runN.final.message);
+      assert.doesNotMatch(runN.final.message, /closed before the load finished/);
+      assert.equal(runN.final.error, runN.final.message);
+      assert.deepEqual(leftovers(profileOf(rootN)), []);
+      ok('a Chrome that cannot open a window (no display) is reported as "Chrome did not start." with its own output, not as a window the owner closed');
+    }
 
     /* 14. Headed (a real window under Xvfb), when Xvfb is there: the headed switches, the window brought forward, the sign-in window headed. */
     const xvfbPath = ['/usr/bin/Xvfb', '/usr/local/bin/Xvfb'].find((p) => fs.existsSync(p));

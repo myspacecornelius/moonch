@@ -136,13 +136,14 @@ class Tab {
     return this.s.waitFor('Page.lifecycleEvent', { filter: (p) => p.name === 'load' && p.frameId === this.frameId, timeout }).then(() => undefined);
   }
 
-  /* Run code in the loader's own JS world. `expression` is source text; the value must be JSON-able. */
-  async evalIsolated(expression, { timeout = 15000, retries = 1 } = {}) {
+  /* Run code in the loader's own JS world. `expression` is source text; the value must be JSON-able. userGesture: the page treats the
+     code as the result of a click by the person (Chrome limits the downloads a page starts by itself, and a click is not one of them). */
+  async evalIsolated(expression, { timeout = 15000, retries = 1, userGesture = false } = {}) {
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const { executionContextId } = await this.s.send('Page.createIsolatedWorld', { frameId: this.frameId, worldName: WORLD });
       let r;
       try {
-        r = await this.s.send('Runtime.evaluate', { expression, contextId: executionContextId, returnByValue: true, timeout }, { timeout: timeout + 3000 });
+        r = await this.s.send('Runtime.evaluate', { expression, contextId: executionContextId, returnByValue: true, timeout, ...(userGesture ? { userGesture: true } : {}) }, { timeout: timeout + 3000 });
       } catch (error) {
         if (attempt < retries && /context/i.test(error.message)) { await sleep(30); continue; }   /* the document was replaced under us */
         throw error;
@@ -172,21 +173,22 @@ class Tab {
 
 /* "Is the page finished?" There is no event for that. A single-page app fetches its data AFTER the HTML has loaded, renders, and then
    often fetches more. So wait for TWO quiet signals at once and give up after a hard deadline:
-     network idle   no request in flight (long-running ones are ignored after `stalledMs`: a long poll never ends) and nothing
+     network idle   no request in flight (long-running ones are ignored after `stalledMs`, or `stalledApiMs` for XHR and fetch: the data
+                    of a single-page app can be slow, a long poll never ends and costs at most maxMs) and nothing
                     finished for `idleMs`, from the tab's own request log;
      DOM stable     the MutationObserver installed at document start has seen nothing for `quietMs`, and readyState is "complete".
    A page that never settles (a ticker, a poll) is not an error: the result says settled:false and the loader goes on with what is there. */
 const IGNORED_TYPES = new Set(['WebSocket', 'EventSource', 'Ping', 'Prefetch', 'CSPViolationReport']);
 const SETTLE_DOM = '({ readyState: document.readyState, quiet: performance.now() - (globalThis.__fstLast || 0), count: globalThis.__fstCount || 0 })';
 
-async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000, pollMs = 80, stalledMs = 2500, signal } = {}) {
+async function waitForSettled(tab, { idleMs = 500, quietMs = 400, maxMs = 15000, pollMs = 80, stalledMs = 2500, stalledApiMs = 20000, signal } = {}) {
   const started = Date.now();
   let lastDom = { readyState: '?', quiet: 0, count: 0 };
   for (;;) {
     if (signal && signal.aborted) throw new CdpError('Cancelled.', { code: 'CANCELLED' });
     const now = Date.now();
     let busy = 0;
-    for (const entry of tab.net.inflight.values()) if (!IGNORED_TYPES.has(entry.type) && now - entry.startedAt <= stalledMs) busy += 1;
+    for (const entry of tab.net.inflight.values()) if (!IGNORED_TYPES.has(entry.type) && now - entry.startedAt <= (entry.type === 'XHR' || entry.type === 'Fetch' ? stalledApiMs : stalledMs)) busy += 1;   /* the data of a single-page app can take a while; a long poll costs at most maxMs */
     try { lastDom = await tab.evalIsolated(SETTLE_DOM, { timeout: 1500, retries: 0 }); }
     catch (e) { lastDom = { readyState: 'loading', quiet: 0, count: lastDom.count }; }   /* the document is being replaced: not stable yet */
     const networkIdle = busy === 0 && now - tab.net.lastActivityAt >= idleMs;
