@@ -48,6 +48,23 @@ function createAgentService(options = {}) {
     shutdown: async () => store.shutdown(),
     /* Synchronous, for the companion's process 'exit' hook: SIGKILL the process group of every pilot still running. */
     killPilots: () => store.killPilotsNow(),
+    /* Not part of the HTTP API. What the pipeline orchestrator (backend/pipeline) needs to start its own classifier and trap designer
+       under the same pre-flight, environment, limits and sign-in as a round: existing store members, bound. `runners` is the store's
+       own set of tool-less runners, so a run added to it is stopped by shutdown() and killPilots() like a simulated grader. */
+    runtime: () => ({
+      root: store.root,
+      tmpRoot: store.tmpRoot,
+      spawnFn: store.spawnFn,
+      limits: { ...store.limits },
+      now: () => store.now(),
+      detect: fresh => store._detect(fresh),
+      preflight: (runtime, argLists) => store._preflight(runtime, argLists),
+      preparedEnv: (scratch, token) => store._preparedEnv(scratch, token),
+      childEnv: (scratch, token) => store._childEnv(scratch, token),
+      originalConfigDir: () => store._originalConfigDir(),
+      companionPort: () => store.companionPort,
+      runners: store.graderRunners,
+    }),
   };
 }
 

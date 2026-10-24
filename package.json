@@ -16,6 +16,8 @@
     "test:candidates": "node tests/candidates-browser.cjs",
     "test:agents": "node tests/agents-browser.cjs",
     "test:ideas": "node tests/ideas-browser.cjs",
+    "test:links": "node tests/links-browser.cjs",
+    "test:pipeline": "node tests/pipeline-browser.cjs",
     "smoke": "node scripts/live-smoke.cjs",
     "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs",
     "package": "python3 scripts/package-filebase.py"
