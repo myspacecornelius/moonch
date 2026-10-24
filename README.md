@@ -133,8 +133,10 @@ The **Pipeline** page (top of the sidebar, Local agents edition only) runs a who
    - The new and edited files are scanned for passages of the guideline and the golden answer.
 
    A design that fails gets one repair turn, then counts as a redesign.
-4. **Screen.** Two blind pilots run on the design. The screen passes only if both score below 0.45 with the simulated grader. A score from 0.40 to 0.50 is graded twice and averaged.
-5. **Test.** Five blind pilots. The test passes if at least four of the five score below 0.45.
+4. **Screen.** Two blind pilots run on the design, and each is graded as soon as its run ends. The screen passes only if both score below **0.40** with the simulated grader. As soon as one pilot has a usable score of 0.40 or more, the other pilot is cancelled, the screen fails and the designer is sent back to harden the task.
+5. **Test.** Five blind pilots, which run **only when both screen pilots scored below 0.40**. The test passes if at least four of the five score below 0.45. It ends as soon as the result is decided: when four pilots are below 0.45 (passed), or when two are at or above it (four of five can no longer be reached). Pilots that have not ended are cancelled and not graded, are marked *stopped early* and get no replacement, and what they spent so far is still counted.
+
+   A score close to a bar is graded twice and averaged before it counts toward a decision: from 0.35 to 0.45 in the screen, from 0.40 to 0.50 in the test. A pilot with no usable score gets one replacement round, unless the result is already decided.
 6. **Redesign.** A failed screen, a failed test or a rejected design sends the designer back with the results, up to three redesigns.
 
 The run ends when a design passes the test, after the third redesign, when the next step would pass the total cap, or when you press *Stop*. Before each step it reserves that step's worst case plus 15% headroom. The total cap defaults to USD 50 and may be up to USD 200. The page shows what one full attempt (design, screen and test) can cost at most with the caps you chose. A lower total cap is allowed; the run then may stop at the cap before the test. While a pipeline runs, the Agents page cannot launch a round or use the simulated grader or the author review.

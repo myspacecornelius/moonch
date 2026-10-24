@@ -20,7 +20,7 @@ const { createServer, buildPipeline, ASSETS } = require('../backend/server.cjs')
 const { createAgentService, AgentError } = require('../backend/agents/index.cjs');
 const { createPipelineService, parseLink, redactPipelineData, constants: P } = require('../backend/pipeline/index.cjs');
 const { buildClassifierPrompt, parseClassifierOutput, heuristicClassification, classify, PREAMBLE } = require('../backend/pipeline/classify.cjs');
-const { readDesign, parseTrapsFile, feedbackText, designerPrompt, catalogText } = require('../backend/pipeline/design.cjs');
+const { readDesign, parseTrapsFile, feedbackText, designerPrompt, repairPrompt, catalogText } = require('../backend/pipeline/design.cjs');
 const { verifyPacket, verifyRoundPacket, leakWindows, containsLeak, SafetyError } = require('../backend/pipeline/safety.cjs');
 const { parsePage } = require('../backend/pipeline/intake.cjs');
 const { buildExport, safeLabel } = require('../backend/pipeline/export.cjs');
@@ -125,6 +125,10 @@ function designerScenario(n, opts = {}) {
   };
 }
 
+/* The simulated grader of a pilot's answer is a tool-less run of the pipeline's own (prompt on stdin) in <private>/pipelines/<id>/runs/grade-<run>-<call>; the
+   golden answer of a design is graded by the agent service's grader in its pilots folder (gsim-). */
+const GRADE_CWD = '/runs/grade-';
+
 function attemptRules(n, scores, opts = {}) {
   const pilotScenarios = scores.map((score, index) => ({
     resultText: `ANS-${n}-${index + 1} ${score < 0.45 ? 'Cash is 3,050 because the available facility counted as cash. Proceed.' : 'Usable cash is 1,250. Hold the borrowing.'}`,
@@ -141,7 +145,7 @@ function attemptRules(n, scores, opts = {}) {
     { cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held, attempt ${n}`, scenario: { resultText: opts.goldenGrade === undefined ? gradeJson(opts.goldenScore === undefined ? 0.95 : opts.goldenScore) : opts.goldenGrade, costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } },
   ];
   scores.forEach((score, index) => {
-    rules.push({ cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nANS-${n}-${index + 1}\\b`, scenario: { resultText: gradeJson(score), costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } });
+    rules.push({ cwd: GRADE_CWD, prompt: `<<<ANSWER\\nANS-${n}-${index + 1}\\b`, scenario: { resultText: gradeJson(score), costUsd: opts.graderCost === undefined ? 0.02 : opts.graderCost } });
   });
   return rules;
 }
@@ -194,7 +198,7 @@ async function makeWorld(t, options = {}) {
   const agents = options.wrapAgents ? options.wrapAgents(realAgents) : realAgents;
   const stages = [];
   const pipeline = createPipelineService({
-    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs, minCapCheck: options.minCapCheck, linkCloseMs: options.linkCloseMs, confirmFiles: options.confirmFiles,
+    root, agents, links: options.loader || null, claudeBin: STUB, env, tmpRoot, pollMs: 5, importTimeoutMs: options.importTimeoutMs, minCapCheck: options.minCapCheck, linkCloseMs: options.linkCloseMs, confirmFiles: options.confirmFiles, regradeBands: options.regradeBands,
     onStage: (stage, info) => { stages.push(stage); if (options.onStage) options.onStage(stage, info, world); },
   });
   const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines'), priv: id => path.join(root, 'private', 'pipelines', id) };
@@ -318,9 +322,13 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
   assert.deepEqual(attempt.screen.pilots.map(pilot => [pilot.n, pilot.score, pilot.valid, pilot.belowBar, pilot.audit.status]), [[1, 0.2, true, true, 'CLEAN'], [2, 0.3, true, true, 'CLEAN']]);
   assert.equal(attempt.test.passed, true);
   assert.equal(attempt.test.pilots.length, 5);
-  assert.equal(attempt.test.belowBar, 5);
+  /* the test is decided when the 4th pilot has a score below the bar: the 5th is not graded (it was stopped, or it had ended and was left) */
+  assert.equal(attempt.test.belowBar, 4);
+  assert.equal(attempt.test.pilots.filter(pilot => pilot.stoppedEarly).length, 1);
+  assert.equal(attempt.test.stoppedEarly.afterPilot >= 1 && attempt.test.stoppedEarly.afterPilot <= 5, true);
+  assert.equal(attempt.screen.stoppedEarly, null, 'a screen in which both pilots were below the bar ran to its end');
   assert.equal(attempt.screen.replacementRound, false);
-  assert.match(view.message, /The test passed: 5 of 5 pilots scored below 0.45/);
+  assert.match(view.message, /The test passed: 4 of 5 pilots scored below 0\.45; 1 pilot was stopped early because the result was decided after pilot \d scored 0\.\d\d/);
 
   /* the packet the pilots got: the edited file, the new file and the unchanged files, and nothing withheld */
   const given = pilotFiles(w);
@@ -344,9 +352,10 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
     assert.ok(run.prompt.endsWith('PV1\n') || run.prompt.endsWith('PV1'), 'the pilot prompt is the designer prompt');
     for (const secret of SECRETS.filter(item => item !== 'PV1')) assert.ok(!run.prompt.includes(secret), `a pilot prompt holds ${secret}`);
   }
-  /* the classifier, the designer and the fairness review got their prompt on stdin, not on a command line */
+  /* the classifier, the designer, the fairness review and the grading of each pilot got their prompt on stdin, not on a command line */
   const viaStdin = promptRuns(w).filter(run => run.via === 'stdin');
-  assert.equal(viaStdin.length, 3);
+  assert.equal(viaStdin.length, 3 + 6, 'three, and a grader call for each of the 2 screen pilots and the 4 test pilots that were graded');
+  assert.ok(viaStdin.slice(3).every(run => run.prompt.includes('You are a simulated grader')));
   assert.ok(viaStdin[0].prompt.startsWith(PREAMBLE));
   assert.ok(viaStdin[1].prompt.includes('You are the trap designer'));
   assert.ok(viaStdin[2].prompt.startsWith('You are reviewing a revised grader guideline for fairness.'));
@@ -364,10 +373,14 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
 
   /* the grader: one call per answer, with the designer's guideline and the scoring scale, never the original guideline */
   const graders = promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader'));
-  assert.equal(graders.length, 8, 'the golden answer of the design, and the 7 pilots');
+  assert.equal(graders.length, 7, 'the golden answer of the design, the 2 screen pilots and the 4 test pilots that were graded');
   assert.ok(graders[0].prompt.includes('Usable cash is 1,250 and the borrowing is held, attempt 1'), 'the first call grades the golden answer against the design\'s own guideline');
-  const graderArgv = readJsonLines(w.argvLog).filter(args => args[0] === '-p' && args[1].includes('You are a simulated grader'));
+  const graderArgv = readJsonLines(w.argvLog).filter(args => args[0] === '-p' && args[1] && args[1].includes('You are a simulated grader'));
+  assert.equal(graderArgv.length, 1, 'only the golden answer\'s check goes through the agent service\'s grader, which puts its prompt on the command line');
   assert.ok(graderArgv.every(args => args[args.indexOf('--effort') + 1] === 'medium'), 'the grader runs at least at medium effort, whatever the pilots use');
+  const pilotGraderArgs = readJsonLines(w.argvLog).filter(args => args[0] === '-p' && args.includes('--input-format') && args[args.indexOf('--tools') + 1] === '');
+  assert.ok(pilotGraderArgs.length >= 6 + 2, 'the classifier, the fairness review and the 6 pilot grader calls: no prompt on their command line');
+  assert.ok(pilotGraderArgs.every(args => args[1] === '--model' || args[1].startsWith('--')), 'the prompt is not an argument');
   for (const run of graders) {
     assert.ok(run.prompt.includes('DESIGNER-GUIDELINE-MARK'));
     assert.ok(run.prompt.includes('Scoring scale for this rehearsal'));
@@ -375,13 +388,15 @@ test('screen passes and the test succeeds: the stages, the packet, the pilots, t
     assert.equal((run.prompt.match(/<<<ANSWER/g) || []).length, 1, 'one answer per call');
   }
 
-  /* the budget: classify .01 + design .05 + golden answer check .02 + fairness .01 + 7 pilots at .10 + 7 graders at .02 */
+  /* the budget: classify .01 + design .05 + golden answer check .02 + fairness .01 + 7 pilots + 6 graders at .02. The pilot that was stopped may be
+     counted at its cap (estimated) when it had not ended, so the sum is bounded rather than exact. */
   const kinds = view.ledger.reduce((sum, entry) => ({ ...sum, [entry.kind]: (sum[entry.kind] || 0) + 1 }), {});
-  assert.deepEqual(kinds, { classify: 1, design: 1, calibration: 1, fairness: 1, pilot: 7, grader: 7 });
-  assert.ok(Math.abs(view.spentUsd - (0.01 + 0.05 + 0.02 + 0.01 + 0.7 + 0.14)) < 1e-9, String(view.spentUsd));
+  assert.deepEqual(kinds, { classify: 1, design: 1, calibration: 1, fairness: 1, pilot: 7, grader: 6 });
+  const fixedSpend = 0.01 + 0.05 + 0.02 + 0.01 + 6 * 0.02;
+  assert.ok(view.spentUsd >= fixedSpend + 0.7 - 1e-9 && view.spentUsd <= fixedSpend + 0.6 + 1.0 + 1e-9, String(view.spentUsd));
   assert.equal(view.ledger.reduce((sum, entry) => sum + entry.costUsd, 0).toFixed(6), view.spentUsd.toFixed(6));
   assert.equal(view.remainingUsd, +(30 - view.spentUsd).toFixed(6));
-  assert.ok(view.ledger.every(entry => entry.estimated === false));
+  assert.ok(view.ledger.filter(entry => entry.estimated).every(entry => entry.kind === 'pilot' && entry.costUsd === 1), 'only the cancelled pilot can be an estimate, at its cap');
 
   /* the rounds are the agent service's, with the gold and fingerprints of the design frozen, gaf hidden, one cap per pilot */
   const rounds = await w.agents.listRounds();
@@ -433,7 +448,8 @@ test('the constants are the rules of the spec', () => {
 test('a failed screen sends the designer back with feedback, and the second design passes', async t => {
   const rules = [
     classifierRule(),
-    ...attemptRules(1, [0.8, 0.2, 0.1, 0.2, 0.3]), /* pilot 1 gets through: the screen fails */
+    /* pilot 1 gets through: the screen fails. It ends after pilot 2, so both are graded and the feedback has both scores */
+    ...attemptRules(1, [0.8, 0.2, 0.1, 0.2, 0.3], { pilotExtra: [{ delayMs: 900 }, {}] }),
     ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
   ];
   const w = await makeWorld(t, { rules });
@@ -476,7 +492,8 @@ test('a failed screen sends the designer back with feedback, and the second desi
 test('a failed 5-pilot test sends the designer back, and the screen runs again', async t => {
   const rules = [
     classifierRule(),
-    ...attemptRules(1, [0.2, 0.3, 0.9, 0.8, 0.7]), /* the screen passes (pilots 1 and 2), the test has 2 of 5 below the bar */
+    /* the screen passes (pilots 1 and 2), the test has 2 of 5 below the bar: it ends when the second pilot at or above the bar has its score */
+    ...attemptRules(1, [0.2, 0.3, 0.9, 0.8, 0.7], { pilotExtra: [{}, {}, { delayMs: 900 }, { delayMs: 1500 }, { delayMs: 60000 }] }),
     ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.9]), /* 4 of 5 */
   ];
   const w = await makeWorld(t, { rules });
@@ -486,6 +503,8 @@ test('a failed 5-pilot test sends the designer back, and the screen runs again',
   assert.equal(view.attempts[0].outcome, 'test-failed');
   assert.equal(view.attempts[0].test.belowBar, 2);
   assert.equal(view.attempts[0].test.need, 4);
+  assert.deepEqual(view.attempts[0].test.stoppedEarly, { afterPilot: 4, score: 0.8 });
+  assert.equal(view.attempts[0].test.pilots[4].stoppedEarly, true, 'pilot 5 was still running and was cancelled');
   assert.equal(view.attempts[1].test.belowBar, 4);
   assert.equal(view.attempts[1].test.passed, true);
   assert.match(view.message, /4 of 5 pilots scored below 0.45/);
@@ -500,7 +519,7 @@ test('three redesigns are the most: then the pipeline stops, fails with a summar
   assert.equal(view.redesigns, 3);
   assert.equal(view.attempts.length, 4, 'the first design and three redesigns');
   assert.ok(view.attempts.every(attempt => attempt.outcome === 'screen-failed' && attempt.test === null));
-  assert.match(view.message, /Stopped after 3 redesigns: the screen of attempt 4 did not pass \(0 of 2 pilots scored below 0\.45; the rule needs 2\)/);
+  assert.match(view.message, /Stopped after 3 redesigns: the screen of attempt 4 did not pass \(0 of 2 pilots scored below 0\.40; the rule needs 2(; 1 pilot was stopped early because the result was decided after pilot \d scored 0\.90)?\)/);
   assert.equal(pilotPrompts(w).length, 8, 'two screen pilots for each of the four designs');
   assert.equal(w.stages.filter(stage => stage === 'redesign').length, 3);
   assert.equal(w.stages.filter(stage => stage === 'test').length, 0);
@@ -563,7 +582,8 @@ test('a run that started and reported no cost is counted at its cap, and says so
 test('a DISCARDED pilot is replaced once, and the replacement counts', async t => {
   const rules = [
     classifierRule(),
-    ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { pilotExtra: [{}, { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] }] }),
+    /* the others end after the discarded pilot, so it is taken first and the stage is decided by the last of the graded ones */
+    ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { pilotExtra: [{ delayMs: 400 }, { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] }, { delayMs: 400 }, { delayMs: 400 }, { delayMs: 400 }] }),
   ];
   /* pilot 2 reads outside its folder: DISCARDED. In the replacement round the one pilot is run 1, which is clean. */
   const w = await makeWorld(t, { rules });
@@ -594,11 +614,12 @@ test('a DISCARDED pilot is replaced once, and the replacement counts', async t =
 test('a replacement round that cannot change the decision is not run', async t => {
   const discard = { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] };
   /* attempt 1: pilot 1 gets through (0.9) and pilot 2 is discarded: even a perfect replacement gives 1 of 2, so the screen cannot pass */
-  const rules = [classifierRule(), ...attemptRules(1, [0.9, 0.2], { pilotExtra: [{}, discard] }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const rules = [classifierRule(), ...attemptRules(1, [0.9, 0.2], { pilotExtra: [{ delayMs: 900 }, discard] }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
   const w = await makeWorld(t, { rules });
   const { view } = await w.run();
   const screen = view.attempts[0].screen;
   assert.equal(screen.passed, false);
+  assert.equal(screen.stoppedEarly, null, 'the discarded pilot had ended and pilot 1 was the last: nothing was stopped');
   assert.equal(screen.replacementRound, false);
   assert.equal(screen.replacementSkipped, true);
   assert.equal(screen.roundIds.length, 1);
@@ -627,7 +648,7 @@ test('when the replacement is lost too the decision is made on what exists: a mi
 test('a pilot with no usable score does not count, and the replacement fills the place', async t => {
   /* the grader answers pilot 1 with text that is not JSON: no score. Pilot 1 of the replacement round has the same answer text. */
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3])];
-  const broken = rules.find(rule => rule.cwd === 'finance-studio-pilots/gsim-' && rule.prompt.includes('ANS-1-1'));
+  const broken = rules.find(rule => rule.cwd === GRADE_CWD && rule.prompt.includes('ANS-1-1'));
   broken.scenario = { resultText: 'I cannot grade this.', costUsd: 0.02 };
   const w = await makeWorld(t, { rules });
   const { view } = await w.run();
@@ -1305,7 +1326,10 @@ test('the designer prompt, the feedback and the catalog', () => {
     assert.match(text, /out\/guideline\.md/);
     assert.match(text, /out\/golden-answer\.md/);
     assert.match(text, /out\/traps\.json/);
-    assert.match(text, /below 0\.45/);
+    /* the designer aims at the screen first, and the screen's bar is the stricter one */
+    assert.match(text, /scores that answer below 0\.40 against the guideline/);
+    assert.ok(!/0\.45/.test(text), 'the test\'s bar is not the one the design is aimed at');
+    assert.match(text, new RegExp(`below ${P.SCREEN_BAR.toFixed(2).replace('.', '\\.')} against`));
     assert.match(text, /Do not read or write outside this folder/);
     assert.ok(!text.startsWith('-'));
   }
@@ -1323,6 +1347,22 @@ test('the designer prompt, the feedback and the catalog', () => {
     traps: [{ id: 't1', title: 'A trap' }],
   });
   assert.match(feedback, /# Feedback on design attempt 2/);
+  assert.ok(!/was stopped as soon as the result was decided/.test(feedback), 'nothing was stopped early');
+  const early = feedbackText({
+    attempt: 1,
+    stage: { name: 'screen', rule: 'both of the 2 pilots score below 0.40', bar: 0.40, belowBar: 0, pilotsWanted: 2, stoppedEarly: { afterPilot: 1, score: 0.52 }, pilots: [
+      { id: 'p1', replacement: false, state: 'completed', audit: { status: 'CLEAN' }, score: 0.52, verdict: 'meets-guidance', reason: 'Used the executed terms.', answer: 'The answer text.' },
+      { id: 'p2', replacement: false, state: 'cancelled', stoppedEarly: true, audit: null, score: null, verdict: null, reason: '', answer: '' },
+    ] },
+    history: [],
+    traps: [{ id: 't1', title: 'A trap' }],
+  });
+  assert.match(early, /The bar is a score below 0\.40; 0 of 2 counted pilots were below it\./);
+  assert.match(early, /The screen was stopped as soon as the result was decided: after pilot 1 scored 0\.52, the pilots that had not finished were cancelled and have no score\./);
+  assert.match(early, /score: 0\.52 \(at or above the bar, the pilot got through\)/);
+  assert.match(early, /### p2\n- state: cancelled \(stopped early: the result was already decided\); audit: none/);
+  /* a repair turn gives the same goal */
+  assert.match(repairPrompt({ attempt: 1, attempts: 4, problem: 'x' }), /scores that answer below 0\.40 against the guideline/);
   assert.match(feedback, /The test did not pass\. Rule: at least 4 of the 5 pilots score below 0\.45\. The bar is a score below 0\.45; 3 of 5 counted pilots were below it\./);
   assert.match(feedback, /### p2 \(replacement\)/);
   assert.match(feedback, /audit: DISCARDED/);
@@ -1568,9 +1608,11 @@ test('the export is a private zip of the final design, with the score table, and
   assert.match(await text('edited/Facility_Terms.txt'), /Clause 4 was amended/);
   assert.equal(JSON.parse(await text('traps.json')).traps.length, 2);
   const rows = (await text('scores.csv')).trim().split('\n');
-  assert.equal(rows[0], 'attempt,stage,pilot,round,run,score,below_bar,counted,audit');
+  assert.equal(rows[0], 'attempt,stage,pilot,round,run,score,below_bar,counted,audit,stopped_early');
   assert.equal(rows.length, 1 + 2 + 5);
-  assert.match(rows[1], /^1,screen,p1,rnd-[0-9a-f]{12},1,0\.20,yes,yes,CLEAN$/);
+  assert.match(rows[1], /^1,screen,p1,rnd-[0-9a-f]{12},1,0\.20,yes,yes,CLEAN,no$/);
+  assert.equal(rows.filter(row => /,yes$/.test(row)).length, 1, 'the test pilot that was stopped once the result was decided');
+  assert.match(await text('README_PRIVATE.txt'), /Screen: both of 2 below 0\.40\. Test: at least 4 of 5 below 0\.45\. A stage stops as soon as its result is decided\./);
   assert.equal(JSON.parse(await text('scores.json'))[0].test.passed, true);
   assert.equal(safeLabel('  ../My Task: 4821!  '), 'My_Task_4821');
   assert.equal(safeLabel(''), 'pipeline');
@@ -1941,7 +1983,7 @@ test('the working folder is outside the project, private, and not a link', async
 test('Stop while the simulated grader is running cancels that call and starts no other', async t => {
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3])];
   /* the grader of a pilot's answer hangs; the check of the golden answer, before any pilot, does not */
-  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-' && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
+  for (const rule of rules) if (rule.cwd === GRADE_CWD && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
   const w = await makeWorld(t, { rules });
   const { id } = await w.pipeline.start(w.body());
   await waitFor(() => promptRuns(w).some(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('<<<ANSWER\nANS-1-')), { label: 'the grader of a pilot answer to start' });
@@ -1955,16 +1997,32 @@ test('Stop while the simulated grader is running cancels that call and starts no
 
 /* ====================================================================== the bar, and the round the agent service made */
 
-test('the bar is "below 0.45": a score of exactly 0.45 does not beat the design', async t => {
-  const rules = [classifierRule(), ...attemptRules(1, [0.45, 0.44]), ...attemptRules(2, [0.449, 0.1, 0.1, 0.1, 0.1])];
+test('the bars are "below 0.40" for the screen and "below 0.45" for the test: a score exactly at the bar does not beat the design', async t => {
+  /* attempt 1: pilot 2 (0.39) is below the screen's bar, pilot 1 (0.40) is not: it ends after pilot 2 so both are graded.
+     attempt 2: the screen passes with 0.399 and 0.10; in the test 0.45 is not below the bar and 0.449 is: 4 of 5 pass */
+  const rules = [
+    classifierRule(),
+    ...attemptRules(1, [0.4, 0.39], { pilotExtra: [{ delayMs: 900 }, {}] }),
+    ...attemptRules(2, [0.399, 0.1, 0.45, 0.449, 0.1], { pilotExtra: [{}, {}, {}, { delayMs: 900 }, { delayMs: 900 }] }),
+  ];
   const w = await makeWorld(t, { rules });
   const { view } = await w.run();
-  assert.equal(view.attempts[0].screen.pilots[0].belowBar, false);
-  assert.equal(view.attempts[0].screen.pilots[1].belowBar, true);
-  assert.equal(view.attempts[0].screen.passed, false, 'one pilot at the bar got through');
-  assert.equal(view.attempts[1].screen.pilots[0].belowBar, true, '0.449 is below');
+  const [first, second] = view.attempts;
+  assert.equal(first.screen.bar, 0.4);
+  assert.equal(first.screen.pilots[0].belowBar, false, '0.40 is not below 0.40');
+  assert.equal(first.screen.pilots[1].belowBar, true);
+  assert.equal(first.screen.passed, false, 'one pilot at the bar got through');
+  assert.equal(second.screen.pilots[0].belowBar, true, '0.399 is below');
+  assert.equal(second.screen.passed, true);
+  assert.equal(second.test.bar, 0.45);
+  assert.equal(second.test.pilots[2].belowBar, false, '0.45 is not below 0.45');
+  assert.equal(second.test.pilots[3].belowBar, true, '0.449 is below');
+  assert.equal(second.test.passed, true);
   assert.equal(view.stage, 'done', view.message);
   assert.equal(view.redesigns, 1);
+  assert.equal(view.config.screenBar, 0.4);
+  assert.equal(view.config.testBar, 0.45);
+  assert.equal(view.config.passBar, 0.45, 'the first version\'s name for the test\'s bar');
 });
 
 test('SAFETY: the round the agent service made must hold exactly the packet that was checked, or it is cancelled and nothing runs', async t => {
@@ -2039,7 +2097,7 @@ test('Stop pressed while the loader is still starting cancels the load as soon a
 
 test('Stop pressed as the simulated grader is about to start is honoured within a moment, not at the grader\'s time limit', async t => {
   const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.3])];
-  for (const rule of rules) if (rule.cwd === 'finance-studio-pilots/gsim-' && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
+  for (const rule of rules) if (rule.cwd === GRADE_CWD && rule.prompt.includes('ANS-1-')) rule.scenario = { ...rule.scenario, delayMs: 60000 };
   const w = await makeWorld(t, { rules, onStage: (name, info, world) => { if (name === 'grade-screen') setImmediate(() => world.pipeline.stop(info.id).catch(() => {})); } });
   const { id } = await w.pipeline.start(w.body());
   const started = Date.now();
@@ -2478,53 +2536,275 @@ test('a prompt that states a figure of the golden answer is sent back for one re
 
 /* ====================================================================== grading: the regrade band, a refused call, the files a pilot wrote */
 
-/* graderSim answered from a script for the answers of attempt 1 (the golden answer and attempt 2 go to the stub): per pilot, the score of
-   each call in turn (a number, or 'refuse:<status>'). */
-function scriptedGrader(scripts, calls = {}) {
-  return real => ({
-    ...real,
-    graderSim: async body => {
-      const match = /ANS-1-(\d)/.exec(body.answerTexts[0]);
-      if (!match) return real.graderSim(body);
-      const list = scripts[match[1]] || [0.2];
-      const index = calls[match[1]] = (calls[match[1]] || 0) + 1;
-      const step = list[Math.min(index, list.length) - 1];
-      if (typeof step === 'string') throw new AgentError(Number(step.split(':')[1]), `scripted refusal ${step}`);
-      return { simulated: true, verdict: step < 0.45 ? 'does-not-meet-guidance' : 'meets-guidance', reason: `scripted ${step}`, score: step, items: [], results: [{ state: 'completed', costUsd: 0.02 }] };
-    },
-  });
-}
+/* The simulated grader's answers for the pilots of attempt n, call by call: { [pilot number]: [the first call, the second call] }, a number being
+   the score. The folder of a call ends in -<call>, which picks the entry. These rules go in front of attemptRules(n, ...). */
+const callRules = (n, scripts) => Object.entries(scripts).map(([pilot, steps]) => ({
+  cwd: GRADE_CWD,
+  prompt: `<<<ANSWER\\nANS-${n}-${pilot}\\b`,
+  scenario: steps.map(step => ({ resultText: gradeJson(step), costUsd: 0.02 })),
+}));
+/* how many grader calls the ledger holds for run `run` of a round */
+const graderCalls = (view, roundId, run) => view.ledger.filter(entry => entry.kind === 'grader' && entry.ref === `${roundId}#${run}`).length;
 
-test('a score from 0.40 to 0.50 is graded once more and the two are averaged; both are recorded', async t => {
-  const calls = {};
-  /* pilot 1: 0.40 -> 0.30 in the screen (average 0.35), 0.42 -> 0.50 in the test (0.46); pilot 2: 0.39, no second call; pilot 3: 0.50 -> 0.38 (0.44);
-     pilot 4: 0.51, no second call; pilot 5: 0.20 */
-  const scripts = { 1: [0.4, 0.3, 0.42, 0.5], 2: [0.39, 0.39], 3: [0.5, 0.38], 4: [0.51], 5: [0.2] };
-  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2]), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
-  const w = await makeWorld(t, { rules, wrapAgents: scriptedGrader(scripts, calls) });
+test('a score within 0.35 to 0.45 in the screen is graded once more and the two are averaged, before it counts toward a stop', async t => {
+  /* attempt 1: pilot 1 scores 0.42 (at or above the screen's bar) and then 0.30: the average 0.36 is below it, so the screen is not stopped and
+     pilot 2 is graded; pilot 2 scores 0.46, which is outside the band, so one call decides: the screen fails.
+     attempt 2: 0.35 (the low end of the band) is graded again, 0.34 (below the band) is not. */
+  const rules = [
+    classifierRule(),
+    ...callRules(1, { 1: [0.42, 0.30], 2: [0.46] }),
+    ...attemptRules(1, [0.1, 0.1], { pilotExtra: [{}, { delayMs: 700 }] }),
+    ...callRules(2, { 1: [0.35, 0.20], 2: [0.34] }),
+    ...attemptRules(2, [0.2, 0.2, 0.2, 0.2, 0.2]),
+  ];
+  const w = await makeWorld(t, { rules });
   const { view } = await w.run();
   assert.equal(view.stage, 'done', view.message);
-  const [screen, test] = [view.attempts[0].screen, view.attempts[0].test];
-  const round = pilot => ({ score: pilot.score, regrade: pilot.regrade, belowBar: pilot.belowBar });
-  assert.deepEqual(round(screen.pilots[0]), { score: 0.35, regrade: { first: 0.4, second: 0.3, average: 0.35 }, belowBar: true });
-  assert.deepEqual(round(screen.pilots[1]), { score: 0.39, regrade: null, belowBar: true });
-  assert.equal(screen.passed, true);
-  assert.deepEqual(test.pilots.map(pilot => pilot.score), [0.46, 0.39, 0.44, 0.51, 0.2]);
-  assert.deepEqual(test.pilots.map(pilot => pilot.regrade && [pilot.regrade.first, pilot.regrade.second]), [[0.42, 0.5], null, [0.5, 0.38], null, null]);
-  assert.deepEqual(test.pilots.map(pilot => pilot.belowBar), [false, true, true, false, true], '0.46 is not below the bar; the average decides');
-  assert.equal(test.belowBar, 3);
-  assert.equal(test.passed, false, '3 of 5');
-  assert.equal(view.attempts[0].outcome, 'test-failed');
-  assert.equal(calls[1], 4);
-  assert.equal(calls[2], 2);
-  assert.equal(calls[3], 2);
-  assert.equal(view.ledger.filter(entry => entry.kind === 'grader' && /#1$/.test(entry.ref) && entry.stage === 'grade-test').length >= 2, true, 'both calls are in the ledger');
+  const first = view.attempts[0].screen;
+  assert.deepEqual(first.pilots.map(pilot => [pilot.score, pilot.belowBar, pilot.valid]), [[0.36, true, true], [0.46, false, true]]);
+  assert.deepEqual(first.pilots[0].regrade, { first: 0.42, second: 0.3, average: 0.36 });
+  assert.equal(first.pilots[1].regrade, null, '0.46 is outside the band');
+  assert.equal(first.passed, false);
+  assert.equal(first.stoppedEarly, null, 'pilot 1 was regraded below the bar, so it did not stop the screen, and pilot 2 was the last');
+  assert.deepEqual([1, 2].map(run => graderCalls(view, first.roundIds[0], run)), [2, 1], 'two calls for the regraded pilot, one for the other');
+  const second = view.attempts[1].screen;
+  assert.deepEqual(second.pilots.map(pilot => [pilot.score, pilot.belowBar]), [[0.275, true], [0.34, true]]);
+  assert.deepEqual(second.pilots[0].regrade, { first: 0.35, second: 0.2, average: 0.275 });
+  assert.equal(second.pilots[1].regrade, null, '0.34 is below the band');
+  assert.equal(second.passed, true);
 });
 
-test('a grader call the service refuses gives that pilot no score and does not fail the pipeline; when every call is refused the stage fails', async t => {
-  /* one refusal (413) for pilot 2 of the screen: its place is taken by a replacement */
-  const once = scriptedGrader({ 1: [0.2], 2: ['refuse:413', 0.2], 3: [0.2], 4: [0.2], 5: [0.2] });
-  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2])], wrapAgents: once });
+test('a score within 0.40 to 0.50 in the test is graded once more and the two are averaged; both are recorded', async t => {
+  /* the screen passes with 0.20 and 0.30. In the test: pilot 3: 0.40 (the low end of the band) then 0.52 -> 0.46, not below 0.45; pilot 4: 0.50 (the
+     high end) then 0.38 -> 0.44, below; pilot 5: 0.51 is outside the band, one call, not below. 3 of 5: the test fails when pilot 5 has its score. */
+  const rules = [
+    classifierRule(),
+    ...callRules(1, { 1: [0.2], 2: [0.3], 3: [0.4, 0.52], 4: [0.5, 0.38], 5: [0.51] }),
+    ...attemptRules(1, [0.1, 0.1, 0.1, 0.1, 0.1], { pilotExtra: [{}, {}, { delayMs: 500 }, { delayMs: 1200 }, { delayMs: 2000 }] }),
+    ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const test = view.attempts[0].test;
+  assert.deepEqual(test.pilots.map(pilot => pilot.score), [0.2, 0.3, 0.46, 0.44, 0.51]);
+  assert.deepEqual(test.pilots.map(pilot => pilot.regrade && [pilot.regrade.first, pilot.regrade.second, pilot.regrade.average]), [null, null, [0.4, 0.52, 0.46], [0.5, 0.38, 0.44], null]);
+  assert.deepEqual(test.pilots.map(pilot => pilot.belowBar), [true, true, false, true, false], '0.46 is not below the bar; the average decides');
+  assert.equal(test.belowBar, 3);
+  assert.equal(test.passed, false, '3 of 5');
+  assert.equal(test.stoppedEarly, null, 'pilot 5 was the last to end');
+  assert.equal(view.attempts[0].outcome, 'test-failed');
+  assert.deepEqual([3, 4, 5].map(run => graderCalls(view, test.roundIds[0], run)), [2, 2, 1], 'both calls are in the ledger');
+});
+
+test('the screen stops as soon as one pilot has a usable score at or above 0.40: the other is cancelled and not graded, and its spend is counted', async t => {
+  /* pilot 1 ends at once with 0.52; pilot 2 would go on for a minute */
+  const rules = [
+    classifierRule(),
+    ...attemptRules(1, [0.52, 0.2], { pilotExtra: [{}, { delayMs: 60000 }] }),
+    ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await makeWorld(t, { rules });
+  const started = Date.now();
+  const { view } = await w.run();
+  assert.ok(Date.now() - started < 40000, `the minute-long pilot was not waited for (${Date.now() - started} ms)`);
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.redesigns, 1, 'the screen failed: task hardening starts');
+  const screen = view.attempts[0].screen;
+  assert.equal(screen.passed, false);
+  assert.deepEqual(screen.stoppedEarly, { afterPilot: 1, score: 0.52 });
+  assert.deepEqual(screen.pilots.map(pilot => [pilot.n, pilot.valid, pilot.stoppedEarly]), [[1, true, false], [2, false, true]]);
+  assert.equal(screen.pilots[1].state, 'cancelled');
+  assert.match(screen.pilots[1].stoppedReason, /^Stopped before it finished: the screen was already decided after pilot 1\./);
+  assert.equal(screen.pilots[1].score, null);
+  assert.equal(screen.counted, 1);
+  assert.equal(screen.replacementRound, false, 'a stopped pilot is not missing');
+  assert.equal(screen.replacementSkipped, false);
+  assert.equal(screen.roundIds.length, 1);
+  assert.equal(view.attempts[0].outcome, 'screen-failed');
+  assert.equal(view.attempts[0].test, null);
+  /* no grader call for the cancelled pilot, and the round is the agent service's, cancelled */
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-2')).length, 0);
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-1')).length, 1, 'pilot 0.52 is outside the band: one call');
+  const [firstRound] = (await w.agents.listRounds()).slice().reverse();
+  assert.equal(firstRound.status, 'cancelled');
+  /* the cancelled pilot had started and reported no cost: its cap is counted, and it says so */
+  const pilotEntries = view.ledger.filter(entry => entry.kind === 'pilot' && entry.stage === 'screen');
+  const stopped = pilotEntries.find(entry => entry.ref.endsWith('#2') && entry.ref.startsWith(screen.roundIds[0]));
+  assert.deepEqual([stopped.estimated, stopped.costUsd], [true, 1]);
+  assert.equal(screen.pilots[1].estimated, true);
+  assert.equal(screen.pilots[1].costUsd, 1);
+  assert.equal(view.ledger.reduce((sum, entry) => sum + entry.costUsd, 0).toFixed(6), view.spentUsd.toFixed(6));
+  /* the feedback for the redesign says what happened */
+  const feedback = fs.readFileSync(path.join(w.priv(view.id), 'attempts', '1', 'feedback.md'), 'utf8');
+  assert.match(feedback, /The screen was stopped as soon as the result was decided: after pilot 1 scored 0\.52/);
+  assert.match(feedback, /### p2\n- state: cancelled \(stopped early: the result was already decided\)/);
+  assert.match(view.ledger.find(entry => entry.kind === 'pilot').stage, /^screen$/);
+});
+
+test('a pilot that ended while another was being graded is not graded once the result is decided: it keeps its real cost and is not missing', async t => {
+  /* pilot 1 ends at once with 0.52 and its grading is slow; pilot 2 ends meanwhile (with 0.20, which would pass if it were graded) */
+  const rules = [
+    classifierRule(),
+    { cwd: GRADE_CWD, prompt: '<<<ANSWER\\nANS-1-1\\b', scenario: { resultText: gradeJson(0.52), costUsd: 0.02, delayMs: 1500 } },
+    ...attemptRules(1, [0.52, 0.2], { pilotExtra: [{}, { delayMs: 250 }] }),
+    ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const screen = view.attempts[0].screen;
+  assert.deepEqual(screen.stoppedEarly, { afterPilot: 1, score: 0.52 });
+  const second = screen.pilots[1];
+  assert.deepEqual([second.state, second.valid, second.score, second.stoppedEarly], ['completed', false, null, true]);
+  assert.match(second.stoppedReason, /^Not graded: the screen was already decided after pilot 1\./);
+  assert.deepEqual([second.costUsd, second.estimated], [0.1, false], 'it ended, so its own cost is counted, not its cap');
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-2')).length, 0, 'never graded');
+  assert.equal(screen.replacementRound, false);
+  assert.equal(screen.replacementSkipped, false, 'a pilot that was left ungraded is not missing');
+  assert.equal(screen.counted, 1);
+  const entry = view.ledger.find(item => item.kind === 'pilot' && item.ref === `${screen.roundIds[0]}#2`);
+  assert.deepEqual([entry.costUsd, entry.estimated], [0.1, false]);
+  assert.equal(view.attempts[0].outcome, 'screen-failed');
+});
+
+test('a screen with both pilots below 0.40 passes, and nothing is stopped', async t => {
+  /* 0.39 is within the band (graded again, still below); 0.10 is not */
+  const rules = [classifierRule(), ...callRules(1, { 1: [0.39, 0.38] }), ...attemptRules(1, [0.1, 0.1, 0.1, 0.1, 0.1])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const screen = view.attempts[0].screen;
+  assert.equal(screen.passed, true);
+  assert.equal(screen.stoppedEarly, null);
+  assert.deepEqual(screen.pilots.map(pilot => [pilot.valid, pilot.belowBar, pilot.stoppedEarly]), [[true, true, false], [true, true, false]]);
+  assert.equal(screen.belowBar, 2);
+  assert.equal(screen.bar, 0.4);
+  assert.equal(screen.rule, 'both of the 2 pilots score below 0.40');
+});
+
+test('the test stops as soon as 2 usable scores are at or above 0.45: 4 of 5 can no longer be reached, and the rest are cancelled', async t => {
+  const rules = [
+    classifierRule(),
+    /* the screen: pilots 1 and 2 pass. The test: pilots 1 and 2 are below the bar, 3 and 4 are not, 5 would go on for a minute */
+    ...attemptRules(1, [0.2, 0.3, 0.9, 0.8, 0.1], { pilotExtra: [{}, {}, { delayMs: 500 }, { delayMs: 1100 }, { delayMs: 60000 }] }),
+    ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await makeWorld(t, { rules });
+  const started = Date.now();
+  const { view } = await w.run();
+  assert.ok(Date.now() - started < 40000, `the minute-long pilot was not waited for (${Date.now() - started} ms)`);
+  assert.equal(view.stage, 'done', view.message);
+  const test = view.attempts[0].test;
+  assert.equal(test.passed, false);
+  assert.deepEqual(test.stoppedEarly, { afterPilot: 4, score: 0.8 });
+  assert.equal(test.belowBar, 2);
+  assert.equal(test.counted, 4);
+  assert.deepEqual(test.pilots.map(pilot => pilot.stoppedEarly), [false, false, false, false, true]);
+  assert.equal(test.pilots[4].state, 'cancelled');
+  assert.equal(test.replacementRound, false);
+  assert.equal(view.attempts[0].outcome, 'test-failed');
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-5')).length, 0, 'no grader call for the cancelled pilot');
+  assert.match(view.attempts[1].outcome, /passed/);
+  const cancelled = view.ledger.find(entry => entry.kind === 'pilot' && entry.stage === 'test' && entry.ref === `${test.roundIds[0]}#5`);
+  assert.deepEqual([cancelled.estimated, cancelled.costUsd], [true, 1], 'the cancelled pilot is counted at its cap');
+});
+
+test('the test stops as soon as 4 usable scores are below 0.45: the result is passed and the last pilot is cancelled', async t => {
+  const rules = [
+    classifierRule(),
+    ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.9], { pilotExtra: [{}, {}, { delayMs: 400 }, { delayMs: 800 }, { delayMs: 60000 }] }),
+  ];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const test = view.attempts[0].test;
+  assert.equal(test.passed, true);
+  assert.equal(test.belowBar, 4);
+  assert.deepEqual(test.stoppedEarly, { afterPilot: 4, score: 0.2 });
+  assert.equal(test.pilots[4].stoppedEarly, true);
+  assert.equal(test.pilots[4].valid, false);
+  assert.equal(view.attempts[0].outcome, 'passed');
+  assert.match(view.message, /^The test passed: 4 of 5 pilots scored below 0\.45; 1 pilot was stopped early because the result was decided after pilot 4 scored 0\.20 \(design attempt 1\)/);
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-5')).length, 0);
+  assert.equal(view.redesigns, 0);
+  const exported = await w.pipeline.export(view.id);
+  const zip = await packageEngine.readZip(new Uint8Array(Buffer.from(exported.zipBase64, 'base64')));
+  const csv = await zip.text([...zip.entries.keys()].find(name => name.endsWith('/scores.csv')));
+  assert.match(csv, /^1,test,p5,rnd-[0-9a-f]{12},5,,,no,[A-Z]*,yes$/m, 'the table says which pilot was stopped');
+});
+
+test('a replacement round stops early too: its pilots are graded as they end and are counted with the first round\'s', async t => {
+  /* the test: pilots 3 and 4 are discarded (the first round has 3 usable scores, all below the bar); the replacement round has 2 pilots, the first
+     ends at once with a score below the bar (the 4th: decided, passed) and the second would go on for a while and is cancelled */
+  const discard = { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] };
+  const rules = [
+    classifierRule(),
+    ...attemptRules(1, [0.2, 0.3, 0.2, 0.2, 0.2], { pilotExtra: [{}, { delayMs: 1000 }, discard, discard, { delayMs: 400 }] }),
+  ];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  assert.equal(view.stage, 'done', view.message);
+  const test = view.attempts[0].test;
+  assert.equal(test.replacementRound, true);
+  assert.equal(test.roundIds.length, 2);
+  assert.equal(test.passed, true);
+  assert.equal(test.belowBar, 4);
+  assert.deepEqual(test.pilots.map(pilot => [pilot.n, pilot.replacement]), [[1, false], [2, false], [3, false], [4, false], [5, false], [6, true], [7, true]]);
+  assert.deepEqual(test.pilots.map(pilot => pilot.stoppedEarly), [false, false, false, false, false, false, true]);
+  assert.deepEqual(test.stoppedEarly, { afterPilot: 6, score: 0.2 });
+  assert.equal(test.pilots[6].state, 'cancelled');
+  assert.equal(test.counted, 4);
+  assert.equal(test.pilots[2].audit.status, 'DISCARDED');
+  assert.equal(promptRuns(w).filter(run => run.prompt.includes('You are a simulated grader') && run.prompt.includes('ANS-1-3')).length, 0, 'a discarded answer is never graded');
+});
+
+test('a pilot stage is never stopped by a score that is not usable, and a pilot that ended before the decision but was not graded is not "missing"', async t => {
+  /* screen: pilot 1 is discarded (ends first, no score), pilot 2 scores 0.9: decided failed; pilot 1 is the one missing, but the stage cannot change */
+  const discard = { toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }] };
+  const rules = [classifierRule(), ...attemptRules(1, [0.2, 0.9], { pilotExtra: [discard, { delayMs: 500 }] }), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { rules });
+  const { view } = await w.run();
+  const screen = view.attempts[0].screen;
+  assert.equal(screen.passed, false);
+  assert.equal(screen.stoppedEarly, null, 'nothing was left to stop');
+  assert.equal(screen.replacementRound, false);
+  assert.equal(screen.replacementSkipped, true, 'a perfect replacement could not pass the screen');
+  assert.equal(screen.pilots[0].valid, false);
+  assert.equal(screen.pilots[0].stoppedEarly, false);
+  assert.equal(view.stage, 'done', view.message);
+});
+
+test('the bars and the regrade bands are in the configuration', async t => {
+  const w = await makeWorld(t, { server: true });
+  const listed = await w.pipeline.list();
+  assert.equal(listed.config.screenBar, 0.4);
+  assert.equal(listed.config.testBar, 0.45);
+  assert.equal(listed.config.passBar, 0.45);
+  assert.deepEqual(listed.config.screenRegradeBand, [0.35, 0.45]);
+  assert.deepEqual(listed.config.testRegradeBand, [0.4, 0.5]);
+  assert.deepEqual(listed.config.regradeBand, [0.4, 0.5]);
+  const response = await w.get('/api/pipeline');
+  assert.deepEqual([response.json.config.screenBar, response.json.config.testBar], [0.4, 0.45]);
+  assert.equal(P.SCREEN_BAR, 0.4);
+  assert.equal(P.TEST_BAR, 0.45);
+  assert.equal(P.PASS_BAR, P.TEST_BAR);
+  assert.throws(() => { P.SCREEN_BAR = 1; }, TypeError);
+});
+
+test('a grader call that could not be made gives that pilot no score and does not fail the pipeline; when no call could be made the stage fails', async t => {
+  /* the grader of a pilot goes through the pipeline's own runtime (the prompt on stdin): the pre-flight of that runtime refuses */
+  const refusing = (state, make) => real => ({
+    ...real,
+    runtime: () => {
+      const rt = real.runtime();
+      return { ...rt, preflight: async (...args) => { const refusal = state.on ? make(state) : null; if (refusal) throw refusal; return rt.preflight(...args); } };
+    },
+  });
+  const arm = state => (stage => { if (stage === 'grade-screen') state.on = true; });
+  /* one refusal, for the second call: that pilot's place is taken by a replacement */
+  const once = { on: false, calls: 0 };
+  const w = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2], { pilotExtra: [{}, { delayMs: 600 }] })], wrapAgents: refusing(once, state => (++state.calls === 2 ? new AgentError(409, 'scripted refusal') : null)), onStage: arm(once) });
   const { view } = await w.run();
   assert.equal(view.stage, 'done', view.message);
   const screen = view.attempts[0].screen;
@@ -2533,16 +2813,18 @@ test('a grader call the service refuses gives that pilot no score and does not f
   assert.equal(screen.pilots[1].reason, 'The simulated grader could not take this answer.');
   assert.equal(screen.replacementRound, true);
   assert.equal(screen.counted, 2);
-  /* 409 and 400 are the same; every call refused is the grader being unusable */
-  const all = scriptedGrader({ 1: ['refuse:409'], 2: ['refuse:400'], 3: ['refuse:409'], 4: ['refuse:409'], 5: ['refuse:409'] });
-  const dead = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2])], wrapAgents: all });
+  /* every call refused is the grader being unusable */
+  const all = { on: false };
+  const dead = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2])], wrapAgents: refusing(all, () => new AgentError(409, 'scripted refusal')), onStage: arm(all) });
   const failed = (await dead.run()).view;
   assert.equal(failed.stage, 'failed');
-  assert.match(failed.message, /^The simulated grader could not be used: scripted refusal refuse:409/);
+  assert.match(failed.message, /^The simulated grader could not be used: scripted refusal/);
+  assert.equal(failed.attempts[0].screen.passed, null, 'the stage never ended');
   /* an error of another kind is not a refusal of one answer */
-  const broken = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2])], wrapAgents: real => ({ ...real, graderSim: async body => { if (/ANS-1-/.test(body.answerTexts[0])) throw new AgentError(500, 'internal'); return real.graderSim(body); } }) });
+  const odd = { on: false };
+  const broken = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.2])], wrapAgents: refusing(odd, () => new AgentError(500, 'internal')), onStage: arm(odd) });
   assert.equal((await broken.run()).view.stage, 'failed');
-  /* the check of the golden answer: refused twice, the design is rejected */
+  /* the check of the golden answer is the agent service's grader: refused twice, the design is rejected */
   const refusedGolden = real => ({ ...real, graderSim: async body => { if (/attempt 1\b/.test(body.answerTexts[0]) && /Usable cash is 1,250 and the borrowing is held/.test(body.answerTexts[0])) throw new AgentError(413, 'too large'); return real.graderSim(body); } });
   const g = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2]), ...attemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])], wrapAgents: refusedGolden });
   const gv = (await g.run()).view;
@@ -3184,8 +3466,9 @@ test('a pipeline with the default caps, every run spending its whole cap, reache
   assert.equal(view.config.pilotCapUsd, C.BUDGET_USD.pilotDefault);
   assert.equal(view.stage, 'done', view.message);
   assert.equal(view.attempts[0].test.pilots.length, 5);
-  /* 0.5 + 5 + 2 x 0.5 (calibration is one call) ... : classify 0.5, design 5, calibration 0.5, fairness 0.25, 7 pilots at 3 + 0.5 */
-  assert.ok(Math.abs(view.spentUsd - (0.5 + 5 + 0.5 + 0.25 + 7 * 3.5)) < 1e-6, String(view.spentUsd));
+  /* classify 0.5, design 5, calibration 0.5, fairness 0.25, 7 pilots at 3 (the 5th of the test is stopped, and counted at its cap or its cost: 3 either way)
+     and 6 grader calls at 0.5 (the 2 screen pilots and the 4 test pilots that were graded) */
+  assert.ok(Math.abs(view.spentUsd - (0.5 + 5 + 0.5 + 0.25 + 7 * 3 + 6 * 0.5)) < 1e-6, String(view.spentUsd));
   assert.ok(view.spentUsd < P.DEFAULT_CAP_USD);
 });
 
@@ -3571,4 +3854,77 @@ test('POST /api/pipeline/:id/continue ends the confirm-files wait', async t => {
   const finished = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.running === false ? r : null; }, { label: 'the end' });
   assert.equal(finished.json.stage, 'done', finished.json.message);
   assert.equal((w.logs || []).length, 0, (w.logs || []).join('\n'));
+});
+
+/* ====================================================================== the regrade band of each stage is validated */
+
+test('regradeBand: the screen\'s band, the test\'s band, the fallback, and every shape that is not a band', () => {
+  const { regradeBand, isBand } = require('../backend/pipeline/gates.cjs');
+  /* the bands of the constants: one around each bar, and the single band the first version had */
+  assert.deepEqual(regradeBand('screen'), [0.35, 0.45]);
+  assert.deepEqual(regradeBand('test'), [0.4, 0.5]);
+  assert.deepEqual(P.REGRADE_BAND, [0.4, 0.5]);
+  assert.notEqual(regradeBand('screen'), P.SCREEN_REGRADE_BAND, 'a copy: the caller cannot change the constant');
+  /* an override of one stage is used for that stage only */
+  assert.deepEqual(regradeBand('screen', { overrides: { screen: [0.3, 0.5], test: [0.42, 0.48] } }), [0.3, 0.5]);
+  assert.deepEqual(regradeBand('test', { overrides: { screen: [0.3, 0.5], test: [0.42, 0.48] } }), [0.42, 0.48]);
+  /* the ends are part of the band, for the bar too: a band may start or end at the bar */
+  assert.deepEqual(regradeBand('screen', { overrides: { screen: [0.4, 0.5] } }), [0.4, 0.5]);
+  assert.deepEqual(regradeBand('screen', { overrides: { screen: [0.3, 0.4] } }), [0.3, 0.4]);
+  /* a stage with no override of its own takes the fallback */
+  assert.deepEqual(regradeBand('screen', { overrides: {} }), [0.4, 0.5]);
+  assert.deepEqual(regradeBand('test', { overrides: null }), [0.4, 0.5]);
+  assert.deepEqual(regradeBand('screen', { overrides: {}, fallback: [0.3, 0.6] }), [0.3, 0.6]);
+  /* every shape of an invalid override falls back to the single band */
+  const invalid = [
+    ['NaN low', [NaN, 0.5]], ['NaN high', [0.3, NaN]], ['Infinity', [0.3, Infinity]], ['reversed', [0.5, 0.35]], ['empty', [0.4, 0.4]],
+    ['below 0', [-0.1, 0.5]], ['above 1', [0.3, 1.1]], ['missing', undefined], ['null', null], ['not a list', '0.35,0.45'], ['an object', { lo: 0.35, hi: 0.45 }],
+    ['one number', [0.4]], ['three numbers', [0.35, 0.45, 0.5]], ['text', ['0.35', '0.45']], ['an empty list', []],
+    ['above the bar', [0.5, 0.6]], ['below the bar', [0.1, 0.3]], ['just above the bar', [0.4000001, 0.5]],
+  ];
+  for (const [label, band] of invalid) {
+    assert.equal(isBand(band) && band[0] <= 0.4 && 0.4 <= band[1], false, label);
+    assert.deepEqual(regradeBand('screen', { overrides: { screen: band } }), [0.4, 0.5], `screen, ${label}`);
+    assert.deepEqual(regradeBand('screen', { overrides: { screen: band }, fallback: [0.3, 0.6] }), [0.3, 0.6], `screen with another fallback, ${label}`);
+  }
+  assert.deepEqual(regradeBand('test', { overrides: { test: [0.1, 0.3] } }), [0.4, 0.5], 'a band that does not hold the test\'s bar 0.45');
+  assert.deepEqual(regradeBand('test', { overrides: { test: [0.46, 0.5] } }), [0.4, 0.5]);
+  assert.deepEqual(regradeBand('test', { overrides: { test: [0.35, 0.45] } }), [0.35, 0.45], 'the screen\'s band holds the test\'s bar at its end, so it is valid there');
+  /* a fallback that is not valid for the stage throws, even when the stage has a good override */
+  for (const [label, fallback] of [['NaN', [NaN, 0.5]], ['reversed', [0.5, 0.4]], ['out of range', [0.4, 1.5]], ['missing', undefined], ['not a list', 0.45], ['holds neither bar', [0.5, 0.6]]]) {
+    assert.throws(() => regradeBand('screen', { overrides: { screen: [0.3, 0.5] }, fallback }), error => error instanceof TypeError && /is not valid for the screen/.test(error.message), label);
+    assert.throws(() => regradeBand('test', { fallback }), error => error instanceof TypeError && /is not valid for the test/.test(error.message), label);
+  }
+  assert.throws(() => regradeBand('screen', { fallback: [0.42, 0.5] }), /is not valid for the screen/, 'holds the test\'s bar, not the screen\'s');
+  assert.deepEqual(regradeBand('test', { fallback: [0.42, 0.5] }), [0.4, 0.5], 'valid for the test, and its own band is used');
+  assert.deepEqual(regradeBand('test', { overrides: {}, fallback: [0.42, 0.5] }), [0.42, 0.5], 'and used as the fallback');
+  assert.throws(() => regradeBand('grade'), error => error instanceof TypeError && /no regrade band for the stage grade/.test(error.message));
+});
+
+test('the service asks for the bands when it starts: a valid override is used, an invalid one falls back, an invalid fallback throws at once, and a stage regrades by its own band', async t => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const w = await makeWorld(t);
+  const make = regradeBands => new PipelineService({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, regradeBands });
+  assert.deepEqual(make(undefined).bands, { screen: [0.35, 0.45], test: [0.4, 0.5] });
+  assert.deepEqual(make({ screen: [0.3, 0.5] }).bands, { screen: [0.3, 0.5], test: [0.4, 0.5] });
+  assert.deepEqual(make({ test: [0.42, 0.48] }).bands, { screen: [0.35, 0.45], test: [0.42, 0.48] });
+  assert.deepEqual(make({ screen: [NaN, 0.5], test: [0.5, 0.4] }).bands, { screen: [0.4, 0.5], test: [0.4, 0.5] }, 'both invalid: the single band');
+  assert.deepEqual(make({ screen: [0.9, 0.95], fallback: [0.3, 0.6] }).bands, { screen: [0.3, 0.6], test: [0.4, 0.5] }, 'a screen band that does not hold the bar takes the fallback');
+  assert.throws(() => make({ fallback: [0.5, 0.6] }), error => error instanceof TypeError && /not valid for the screen/.test(error.message));
+  assert.throws(() => make({ fallback: [NaN, 0.5] }), TypeError);
+  assert.throws(() => make({ fallback: [0.42, 0.5] }), /not valid for the screen/);
+  assert.deepEqual((await make({ screen: [0.3, 0.5], test: [0.42, 0.48] }).list()).config, { ...(await make().list()).config, screenRegradeBand: [0.3, 0.5], testRegradeBand: [0.42, 0.48] });
+  assert.deepEqual((await make({ fallback: [0.3, 0.6] }).list()).config.regradeBand, [0.3, 0.6]);
+
+  /* a screen band of [0.25, 0.45]: a score of 0.30 is graded again (the default band would leave it); the test keeps its own band */
+  const rules = [classifierRule(), ...callRules(1, { 1: [0.30, 0.20], 2: [0.1], 3: [0.44, 0.44], 4: [0.1], 5: [0.1] }), ...attemptRules(1, [0.1, 0.1, 0.1, 0.1, 0.1], { pilotExtra: [{}, {}, {}, { delayMs: 500 }, { delayMs: 1000 }] })];
+  const custom = await makeWorld(t, { rules, regradeBands: { screen: [0.25, 0.45] } });
+  const { view } = await custom.run();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.attempts[0].screen.pilots[0].regrade, { first: 0.3, second: 0.2, average: 0.25 });
+  assert.equal(view.attempts[0].screen.pilots[1].regrade, null);
+  assert.deepEqual((await custom.pipeline.list()).config.screenRegradeBand, [0.25, 0.45], 'the list sends the band that is in force');
+  /* the test keeps its own band: 0.44 is inside [0.40, 0.50], so it is graded twice */
+  const third = view.attempts[0].test.pilots[2].regrade;
+  assert.deepEqual(third && [third.first, third.second], [0.44, 0.44]);
 });

@@ -381,33 +381,33 @@ test('the total cap starts at USD 50, or at the default the companion reports, a
 test('config.minCap: the least total cap of one full attempt is shown by the cap field and moves with the pilot cap', async t => {
   /* 1.15 x (6.25 + 7 x (3 + 1.5)) = 43.4125, up to the cent */
   const { page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
-  assert.equal(capMinInForm(page), 'A full attempt with these caps can cost up to USD 43.42.');
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
   assert.match(page.region('start-form'), /id="pl-cap"[^>]*aria-describedby="pl-cap-hint pl-cap-min"/, 'the cap field is described by the figure');
   await page.type('pilotCap', { value: '5' });   // 1.15 x (6.25 + 7 x 6.5) = 59.5125
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 59.52. With this total cap the run may stop at the cap before the 5-pilot test.', 'the default total cap of 50 is below it, so it warns');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.52. With this total cap the run may stop at the cap before the 5-pilot test.', 'the default total cap of 50 is below it, so it warns');
   await page.type('pilotCap', { value: '0.05' });   // 1.15 x (6.25 + 7 x 1.55) = 19.665
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 19.67.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 19.67.');
   await page.type('pilotCap', { value: 'x' });
   assert.equal(page.element('pl-cap-min').textContent, '', 'no figure while the pilot cap is not an amount');
   await page.type('pilotCap', { value: '3' });
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
   /* a sum that is exactly on a cent is not rounded up by floating point error: 1.1 x 5 x (0.30 + 0.5) = 4.40 */
   const { page: exact } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 0, perPilotUsd: 0.5, pilots: 5, headroom: 1.1 } } });
   await exact.type('pilotCap', { value: '0.30' });
-  assert.equal(exact.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 4.40.');
+  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40.');
 });
 
 test('config.minCap: below the least cap Start stays enabled and the cap hint warns that the run may stop before the test', async t => {
   const { companion, page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
   await ready(page);
   assert.equal(page.enabled('start'), true, 'the default of 50 covers 43.42');
-  assert.equal(capMinInForm(page), 'A full attempt with these caps can cost up to USD 43.42.');
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
   await page.type('cap', { value: '43.41' });
   assert.equal(page.enabled('start'), true, 'a cap below one full attempt is the owner\'s choice');
   assert.equal(whyOf(page), '');
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
   await page.type('cap', { value: '43.42' });
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42.', 'exactly the least cap: no warning');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.', 'exactly the least cap: no warning');
   /* a larger pilot cap raises the least cap, and the warning follows it */
   await page.type('pilotCap', { value: '4' });   // 1.15 x (6.25 + 7 x 5.5) = 51.4625
   assert.match(page.element('pl-cap-min').textContent, /USD 51\.47\. With this total cap the run may stop/);
@@ -422,9 +422,9 @@ test('config.minCap: below the least cap Start stays enabled and the cap hint wa
   await ready(exact);
   await exact.type('pilotCap', { value: '0.30' });
   await exact.type('cap', { value: '4.39' });
-  assert.match(exact.element('pl-cap-min').textContent, /^A full attempt with these caps can cost up to USD 4\.40\. With this total cap/);
+  assert.match(exact.element('pl-cap-min').textContent, /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 4\.40\. With this total cap/);
   await exact.type('cap', { value: '4.4' });
-  assert.equal(exact.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 4.40.');
+  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40.');
 });
 
 test('config.minCap: the range checks still block, and a least cap above the largest total cap only warns', async t => {
@@ -462,7 +462,7 @@ test('config.minCap missing or unusable: the page says nothing about it and does
   for (const minCap of odd) {
     const { page } = await bootWith(t, [], { config: { ...CFG, minCap } });
     assert.equal(capMinInForm(page), '', 'no figure for ' + JSON.stringify(minCap));
-    assert.doesNotMatch(page.region('start-form'), /A full attempt with these caps/);
+    assert.doesNotMatch(page.region('start-form'), /one full attempt \(screen and test\)/);
     await ready(page);
     await page.type('cap', { value: '1' });
     await page.type('pilotCap', { value: '0.05' });
@@ -1299,13 +1299,13 @@ test('the diffs as the companion sends them, { available, kind, added, removed, 
 
 test('a regraded pilot shows its average as the score and "Graded twice: a, b"; the score that counts is the one the companion sets', async t => {
   const regraded = (first, second, score) => ({ score, regrade: { first, second, average: score } });
-  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.45, 0.2], true, { 0: regraded(0.43, 0.47, 0.45), 1: { regrade: null } }) })]);
+  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.4, 0.2], true, { 0: regraded(0.38, 0.42, 0.4), 1: { regrade: null } }) })]);
   const s = page.region('screen');
-  assert.match(s, /<td data-label="Score">0\.45<small class="pl-regraded">Graded twice: 0\.43, 0\.47<\/small><\/td>/);
+  assert.match(s, /<td data-label="Score">0\.40<small class="pl-regraded">Graded twice: 0\.38, 0\.42<\/small><\/td>/);
   assert.match(s, /<td data-label="Score">0\.20<\/td>/, 'a single grading says nothing extra');
-  assert.deepEqual([...s.matchAll(/data-label="Below 0\.45">(.*?)<\/td>/g)].map(m => m[1].replace(/<[^>]*>/g, '')), ['✕ No', '✓ Yes'], 'the average, 0.45, is not below the bar');
-  const { page: edge } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.4496, 0.1], true, { 0: regraded(0.4492, 0.45, 0.4496) }) })]);
-  assert.match(edge.region('screen'), /0\.45 \(0\.4496\)<small class="pl-regraded">Graded twice: 0\.45 \(0\.4492\), 0\.45<\/small>/, 'near-bar digits keep the yes or no honest');
+  assert.deepEqual([...s.matchAll(/data-label="Below 0\.40">(.*?)<\/td>/g)].map(m => m[1].replace(/<[^>]*>/g, '')), ['✕ No', '✓ Yes'], 'the average, 0.40, is not below the screen bar');
+  const { page: edge } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3996, 0.1], true, { 0: regraded(0.3992, 0.4, 0.3996) }) })]);
+  assert.match(edge.region('screen'), /0\.40 \(0\.3996\)<small class="pl-regraded">Graded twice: 0\.40 \(0\.3992\), 0\.40<\/small>/, 'near-bar digits keep the yes or no honest');
   const { page: noScore } = await bootWith(t, [baseState({ id: 'pl-atlas-0003', stage: 'test', design: designFacts(), screen: stageOf('screen', [null, 0.2], true, { 0: { regrade: { first: 0.4, second: 0.5, average: 0.46 }, valid: true, score: null } }) })]);
   assert.match(noScore.region('screen'), /<td data-label="Score">0\.46<small class="pl-regraded">Graded twice: 0\.40, 0\.50<\/small>/, 'if only the average came, it is the score');
   const { page: junk } = await bootWith(t, [baseState({ id: 'pl-atlas-0004', stage: 'test', design: designFacts(), screen: stageOf('screen', [0.3, 0.2], true, { 0: { regrade: 'x' }, 1: { regrade: { first: 0.4 } } }) })]);
@@ -1332,13 +1332,13 @@ test('a stage says when a replacement round ran, when none was run because it co
   assert.match(s, /<p class="muted pl-stage-note">No replacement round was run because it could not change the result\.<\/p>/);
   assert.doesNotMatch(s, /A replacement round ran/);
   assert.doesNotMatch(s, /graded a second time/, 'the band is only explained where a score was graded twice');
-  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [0.3, 0.2, 0.45], true, { 2: { replacement: true, regrade: { first: 0.44, second: 0.46, average: 0.45 } } }), replacementRound: true } });
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [0.3, 0.2, 0.4], true, { 2: { replacement: true, regrade: { first: 0.39, second: 0.41, average: 0.4 } } }), replacementRound: true } });
   await page.tick();
   s = page.region('screen');
   assert.match(s, /A replacement round ran for the pilots without a usable score\./);
   assert.doesNotMatch(s, /No replacement round was run/);
   assert.match(s, /A score from 0\.40 to 0\.50 is graded a second time and the two scores are averaged\./, 'the band comes from the companion');
-  const { page: noConfig } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.45, 0.2], true, { 0: { regrade: { first: 0.44, second: 0.46, average: 0.45 } } }) })], { config: {} });
+  const { page: noConfig } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: stageOf('screen', [0.4, 0.2], true, { 0: { regrade: { first: 0.39, second: 0.41, average: 0.4 } } }) })], { config: {} });
   assert.doesNotMatch(noConfig.region('screen'), /graded a second time/, 'without the companion\'s band the page does not guess one');
 });
 
@@ -1462,14 +1462,14 @@ test('when the pipeline stopped because files would be withheld, the result says
 test('the cost line uses the companion\'s caps and says reservations include the headroom; without its rules it says only what the page knows', async t => {
   const { page } = await bootWith(t);
   const limits = () => page.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 50.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
+  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 50.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
   const { page: custom } = await bootWith(t, [], { config: { classifyCapUsd: 0.75, designCapUsd: 8, repairCapUsd: 2, fairnessCapUsd: 0.4, graderCapUsd: 0.6, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.25 } });
   const text = custom.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(text, /the classifier USD 0\.75, the designer USD 8\.00 and one repair turn USD 2\.00, the fairness review USD 0\.40, each grader call USD 0\.60/);
   assert.match(text, /with 25% headroom on top/, 'the headroom is the companion\'s');
   const { page: bare } = await bootWith(t, [], { config: {} });
   const old = bare.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00, before the classifier, designer and grader runs. The total cap of USD 50.00 covers everything.');
+  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The classifier, designer and grader runs cost extra. The total cap of USD 50.00 covers everything.');
   const { page: partial } = await bootWith(t, [], { config: { fairnessCapUsd: 0.25, headroom: 1 } });
   const some = partial.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(some, /The other calls are capped too: the fairness review USD 0\.25\./);
@@ -1477,6 +1477,10 @@ test('the cost line uses the companion\'s caps and says reservations include the
   await page.type('cap', { value: '12' });
   await page.type('pilotCap', { value: '1' });
   assert.match(limits(), /^Each pilot is capped at USD 1\.00, so a 2-pilot screen can cost up to USD 2\.00 and a 5-pilot test up to USD 5\.00\..*The total cap of USD 12\.00 covers everything\./);
+  assert.match(limits(), /The 5 test pilots run only when both screen pilots score below 0\.40, and a round stops as soon as its result is decided\./, 'the test pilots only run when the screen passes');
+  /* the screen bar is the companion's when it reports one */
+  const { page: barred } = await bootWith(t, [], { config: { screenBar: 0.35, testBar: 0.5 } });
+  assert.match(barred.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1], /run only when both screen pilots score below 0\.35,/);
 });
 
 test('the calibration minimum is the companion\'s goldenMin, and the page knows 0.90 when it says none', async t => {
@@ -1513,27 +1517,222 @@ test('the copy has no percentage: the spend, the stages and the result say it in
 
 /* ====================================================================== score tables */
 
-const rowsOf = html => [...html.matchAll(/<tr><th scope="row">Pilot (\d+)<\/th><td data-label="Score">([^<]*)<\/td><td data-label="Below 0\.45">(.*?)<\/td><td data-label="Audit">(.*?)<\/td><\/tr>/g)].map(m => ({ pilot: Number(m[1]), score: m[2], below: m[3].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(), audit: m[4].replace(/<[^>]*>/g, '').trim() }));
+const rowsOf = html => [...html.matchAll(/<tr><th scope="row">Pilot (\d+)<\/th><td data-label="Score">(.*?)<\/td><td data-label="Below 0\.\d\d">(.*?)<\/td><td data-label="Audit">(.*?)<\/td><\/tr>/g)].map(m => ({ pilot: Number(m[1]), score: m[2].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(), below: m[3].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(), audit: m[4].replace(/<[^>]*>/g, '').trim() }));
 
-test('the screen table: pilot, score to two decimals, below 0.45 yes or no in words, the audit badge, the bar and the rule', async t => {
+test('the screen table: pilot, score to two decimals, below 0.40 yes or no in words, the audit badge, the bar and the rule', async t => {
   const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: { passed: true, pilots: pilots([0.3, 0.1]) } })]);
   const s = page.region('screen');
   assert.match(s, /2-pilot screen/);
-  assert.match(s, /The screen passes when both pilots score below 0\.45\./);
+  assert.match(s, /The screen passes when both pilots score below 0\.40\. If the first pilot to finish scores 0\.40 or more, the other is stopped and the designer starts again\./);
   assert.match(s, /<span class="pill green">Screen passed<\/span>/);
-  assert.match(s, /<caption class="sr-only">2-pilot screen: score of each pilot against the bar of 0\.45<\/caption>/);
-  assert.match(s, /<th scope="col">Below 0\.45<\/th>/);
+  assert.match(s, /<caption class="sr-only">2-pilot screen: score of each pilot against the bar of 0\.40<\/caption>/);
+  assert.match(s, /<th scope="col">Below 0\.40<\/th>/);
+  assert.doesNotMatch(s, /0\.45/, 'the screen says nothing of the test bar');
   assert.deepEqual(rowsOf(s), [{ pilot: 1, score: '0.30', below: '✓ Yes', audit: 'CLEAN' }, { pilot: 2, score: '0.10', below: '✓ Yes', audit: 'CLEAN' }]);
-  assert.match(s, /2 of 2 below 0\.45; both needed\./);
+  assert.match(s, /2 of 2 below 0\.40; both needed\./);
   assert.match(s, /<span class="pill green">CLEAN<\/span>/);
 });
 
 test('a failed screen: a score at or above the bar is No, the pill says Screen failed, and the tally counts honestly', async t => {
-  const { page } = await bootWith(t, [baseState({ stage: 'redesign', redesigns: 0, design: designFacts(), screen: { passed: false, pilots: pilots([0.45, 0.2]) } })]);
+  const { page } = await bootWith(t, [baseState({ stage: 'redesign', redesigns: 0, design: designFacts(), screen: { passed: false, pilots: pilots([0.4, 0.2]) } })]);
   const s = page.region('screen');
-  assert.deepEqual(rowsOf(s).map(r => [r.score, r.below]), [['0.45', '✕ No'], ['0.20', '✓ Yes']]);
+  assert.deepEqual(rowsOf(s).map(r => [r.score, r.below]), [['0.40', '✕ No'], ['0.20', '✓ Yes']]);
   assert.match(s, /<span class="pill red">Screen failed<\/span>/);
-  assert.match(s, /1 of 2 below 0\.45; both needed\./);
+  assert.match(s, /1 of 2 below 0\.40; both needed\./);
+});
+
+/* ---- the owner's rules for the pilot stages: the screen bar 0.40 and the test bar 0.45, and rounds that stop as soon as their result is decided ---- */
+
+/* the pilot record of a pilot the round no longer needed, as the orchestrator keeps it (stoppedEarly: true and the reason in stoppedReason) */
+const notNeeded = (kind, after) => ({ state: 'cancelled', score: null, valid: false, belowBar: null, audit: null, stoppedEarly: true, stoppedReason: `Not graded: the ${kind} was already decided after pilot ${after}.` });
+const cell = (html, label) => [...html.matchAll(new RegExp(`<td data-label="${label}">(.*?)</td>`, 'g'))].map(m => m[1]);
+const strip = x => x.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+/* The rows of the redesign table, one object per attempt with the text of each cell under its own column (traps, screen, test, outcome, design_checks):
+   a result that sits in the wrong column fails the test that reads it. */
+const redesignRowsOf = html => [...html.matchAll(/<tr><th scope="row">([^<]*)<\/th>(.*?)<\/tr>/g)].map(m => ({ attempt: m[1], ...Object.fromEntries([...m[2].matchAll(/<td data-label="([^"]+)">(.*?)<\/td>/g)].map(c => [c[1].toLowerCase().replace(/ /g, '_'), strip(c[2])])) }));
+
+test('the two bars: the screen is below 0.40 and the test below 0.45, in the rules, the column heads, the tallies, the stage line and the start card', async t => {
+  const { page } = await bootWith(t, [baseState({ stage: 'grade-test', design: designFacts(), screen: { passed: true, pilots: pilots([0.3, 0.1]) }, test: { passed: null, pilots: pilots([0.1, 0.2, 0.3, 0.9, 0.44]) } })]);
+  const sc = page.region('screen'), te = page.region('test');
+  assert.match(sc, /The screen passes when both pilots score below 0\.40\./);
+  assert.match(sc, /<th scope="col">Below 0\.40<\/th>/);
+  assert.match(sc, /against the bar of 0\.40<\/caption>/);
+  assert.match(sc, /2 of 2 below 0\.40; both needed\./);
+  assert.doesNotMatch(sc, /0\.45/);
+  assert.match(te, /The test succeeds when at least 4 of 5 pilots score below 0\.45\. It runs only when the screen has passed, and it stops as soon as 2 pilots score 0\.45 or more \(it cannot pass\) or 4 are below \(it has passed\)\./);
+  assert.match(te, /<th scope="col">Below 0\.45<\/th>/);
+  assert.match(te, /against the bar of 0\.45<\/caption>/);
+  assert.match(te, /4 of 5 below 0\.45; 4 needed\./);
+  assert.doesNotMatch(te, /0\.40/);
+  assert.equal(page.stage(), 'Test: grading the five answers (4 of 5 must score below 0.45).');
+  const { page: sp, companion } = await bootWith(t, [baseState({ stage: 'screen' })]);
+  assert.equal(sp.stage(), 'Screen: two blind pilots are working (both must score below 0.40).');
+  companion.update('pl-atlas-0001', { stage: 'grade-screen' });
+  await sp.tick();
+  assert.equal(sp.stage(), 'Screen: grading the two answers (both must score below 0.40).');
+  companion.update('pl-atlas-0001', { stage: 'test' });
+  await sp.tick();
+  assert.equal(sp.stage(), 'Test: five blind pilots are working (4 of 5 must score below 0.45).');
+  /* the start card says it all before anything runs, and that the test pilots run only when the screen passes */
+  const happens = sp.region('start-foot').match(/<p class="pl-happens">([^<]*)<\/p>/);
+  assert.equal(happens, null, 'a pipeline is running, so no start card is open');
+  const { page: start } = await bootWith(t);
+  const text = start.region('start-foot').match(/<p class="pl-happens">([^<]*)<\/p>/)[1];
+  assert.match(text, /two blind pilots run a screen that both must score below 0\.40, then, only if the screen passes, five pilots run a test in which at least 4 of 5 must score below 0\.45\./);
+  assert.match(text, /Each round stops as soon as its result is decided/);
+  assert.match(start.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1], /The 5 test pilots run only when both screen pilots score below 0\.40, and a round stops as soon as its result is decided\./);
+});
+
+test('the bars come from the pipeline\'s own config, else the companion\'s, else 0.40 and 0.45; a bar that is not a usable number is not used', async t => {
+  /* the companion's list config */
+  const { page: listed } = await bootWith(t, [baseState({ stage: 'grade-test', design: designFacts(), screen: { passed: true, pilots: pilots([0.3, 0.1]) }, test: { passed: null, pilots: pilots([0.1, 0.2, 0.3, 0.9, 0.44]) } })], { config: { screenBar: 0.35, testBar: 0.5 } });
+  assert.match(listed.region('screen'), /<th scope="col">Below 0\.35<\/th>/);
+  assert.match(listed.region('test'), /<th scope="col">Below 0\.50<\/th>/);
+  assert.match(listed.region('test'), /4 of 5 below 0\.50; 4 needed\./, 'the count follows the bar');
+  assert.equal(listed.stage(), 'Test: grading the five answers (4 of 5 must score below 0.50).');
+  /* the pipeline's own config wins: a run keeps the bars it was started with */
+  const own = baseState({ stage: 'grade-test', design: designFacts(), config: { screenBar: 0.3, testBar: 0.55 }, screen: { passed: true, pilots: pilots([0.3, 0.1]) }, test: { passed: null, pilots: pilots([0.1, 0.2, 0.3, 0.9, 0.5]) } });
+  const { page: mine } = await bootWith(t, [own], { config: { screenBar: 0.35, testBar: 0.5 } });
+  assert.match(mine.region('screen'), /<th scope="col">Below 0\.30<\/th>/);
+  assert.deepEqual(rowsOf(mine.region('screen')).map(r => r.below), ['✕ No', '✓ Yes'], '0.30 is not below the screen bar 0.30');
+  assert.match(mine.region('test'), /<th scope="col">Below 0\.55<\/th>/);
+  assert.match(mine.region('test'), /4 of 5 below 0\.55; 4 needed\./);
+  /* none, or not usable: the spec's bars */
+  for (const bad of [0, -1, 2, 'x', null, [], { withheld: true }, NaN]) {
+    const { page: odd } = await bootWith(t, [{ ...own, config: { screenBar: bad, testBar: bad } }], { config: { screenBar: bad, testBar: bad } });
+    assert.match(odd.region('screen'), /<th scope="col">Below 0\.40<\/th>/, JSON.stringify(bad));
+    assert.match(odd.region('test'), /<th scope="col">Below 0\.45<\/th>/, JSON.stringify(bad));
+  }
+  const { page: none } = await bootWith(t, [{ ...own, config: undefined }], { config: {} });
+  assert.match(none.region('screen'), /Below 0\.40/);
+  assert.match(none.region('test'), /Below 0\.45/);
+  /* the result card says what the test needed */
+  const { page: done } = await bootWith(t, [doneState({ summary: '', config: { screenBar: 0.4, testBar: 0.5 } })]);
+  assert.match(done.region('verdict'), /4 of 5 test pilots scored below 0\.50\./);
+  const { page: spec } = await bootWith(t, [doneState({ summary: '' })]);
+  assert.match(spec.region('verdict'), /4 of 5 test pilots scored below 0\.45\./);
+});
+
+test('a screen stopped after pilot 1: the other pilot is "Stopped: not needed" with its reason (not a failure), and the stage says why it stopped', async t => {
+  const stopped = { ...stageOf('screen', [0.62, null], false, { 1: notNeeded('screen', 1) }), stoppedEarly: { afterPilot: 1, score: 0.62 } };
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'redesign', redesigns: 1, design: designFacts(), attempts: [attemptOf({ n: 1, outcome: 'screen-failed', screen: stopped })] })]);
+  const s = page.region('screen');
+  assert.match(s, /<span class="pill red">Screen failed<\/span>/);
+  assert.match(s, /<p class="pl-early-stop">Stopped after pilot 1 scored 0\.62: the screen cannot pass\.<\/p>/);
+  const rows = rowsOf(s);
+  assert.equal(rows[0].score, '0.62');
+  assert.equal(rows[0].below, '✕ No');
+  assert.equal(rows[1].score, 'Stopped: not needed Not graded: the screen was already decided after pilot 1.', 'the state and the reason');
+  assert.equal(rows[1].below, 'Not needed');
+  assert.equal(rows[1].audit, 'Not needed');
+  assert.match(s, /<td data-label="Score">Stopped: not needed<small class="pl-stopped-reason">Not graded: the screen was already decided after pilot 1\.<\/small><\/td>/);
+  assert.match(s, /<span class="pill ?">Not needed<\/span>/, 'a plain pill, not the amber "Not audited"');
+  assert.doesNotMatch(s, /No score \(cancelled\)|Replacement pending|counts against the design|Not audited|pill amber/);
+  assert.match(s, /0 of 2 below 0\.40; both needed\./);
+  assert.match(s, /If the first pilot to finish scores 0\.40 or more, the other is stopped and the designer starts again\./);
+  /* the redesign table */
+  const [row] = redesignRowsOf(page.region('redesigns'));
+  assert.equal(row.attempt, 'Attempt 1 (latest)');
+  assert.equal(row.screen, 'Failed (0.62, not needed)', 'the screen column holds the screen result');
+  assert.equal(row.test, 'Not run', 'the test column holds none');
+  assert.equal(row.outcome, 'Screen failed', 'the outcome column holds the outcome');
+  assert.doesNotMatch(row.test + ' | ' + row.outcome, /not needed|0\.62/, 'the screen result is in no other column');
+  /* before the companion has decided (passed is null), the pilot is still not a failure and the line says only what happened */
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stopped, passed: null } });
+  companion.update('pl-atlas-0001', { stage: 'grade-screen' });
+  await page.tick();
+  const open = page.region('screen');
+  assert.match(open, /<p class="pl-early-stop">Stopped after pilot 1 scored 0\.62\.<\/p>/);
+  assert.match(open, /<span class="pill violet">Screen in progress<\/span>/);
+  assert.equal(rowsOf(open)[1].below, 'Not needed');
+  assert.doesNotMatch(open, /Replacement pending/, 'a stopped pilot is not waiting for a replacement');
+  /* a pilot that failed on its own is still a failure */
+  companion.attemptPatch('pl-atlas-0001', { screen: stageOf('screen', [0.62, null], false, { 1: { state: 'cancelled', score: null, valid: false, audit: null } }) });
+  await page.tick();
+  assert.equal(rowsOf(page.region('screen'))[1].score, 'No score (cancelled)');
+  assert.doesNotMatch(page.region('screen'), /Stopped after|Stopped: not needed/);
+});
+
+test('a test stopped after 2 pilots at or above the bar, and a test stopped once 4 were below: who stopped it, with what score, and what that meant', async t => {
+  /* pilots 1 and 3 scored 0.45 or more: the test cannot reach 4 of 5, so pilots 4 and 5 are stopped */
+  const failed = { ...stageOf('test', [0.2, 0.71, 0.45, null, null], false, { 3: notNeeded('test', 3), 4: notNeeded('test', 3) }), stoppedEarly: { afterPilot: 3, score: 0.45 } };
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'redesign', redesigns: 1, design: designFacts(), attempts: [attemptOf({ n: 1, outcome: 'test-failed', screen: stageOf('screen', [0.2, 0.3], true), test: failed })] })]);
+  let s = page.region('test');
+  assert.match(s, /<span class="pill red">Test failed<\/span>/);
+  assert.match(s, /<p class="pl-early-stop">Stopped after pilot 3 scored 0\.45: the test cannot pass\.<\/p>/);
+  assert.deepEqual(rowsOf(s).map(r => (r.score.startsWith('Stopped: not needed') ? 'stopped' : r.score)), ['0.20', '0.71', '0.45', 'stopped', 'stopped']);
+  assert.deepEqual(rowsOf(s).map(r => r.below), ['✓ Yes', '✕ No', '✕ No', 'Not needed', 'Not needed']);
+  assert.match(s, /1 of 5 below 0\.45; 4 needed\./);
+  assert.equal((s.match(/Stopped: not needed/g) || []).length, 2);
+  assert.doesNotMatch(s, /No score|Replacement pending|counts against the design/);
+  const [trow] = redesignRowsOf(page.region('redesigns'));
+  assert.equal(trow.screen, 'Passed (0.20, 0.30)', 'the screen column holds the screen result');
+  assert.equal(trow.test, 'Failed (0.20, 0.71, 0.45, not needed, not needed)', 'the test column holds the test result');
+  assert.equal(trow.outcome, 'Test failed', 'the outcome column holds the outcome');
+  assert.doesNotMatch(trow.screen + ' | ' + trow.outcome, /not needed|0\.71|0\.45/, 'the test result is in no other column');
+  assert.doesNotMatch(trow.test + ' | ' + trow.outcome, /Passed|0\.30/, 'the screen result is in no other column');
+  /* four below the bar: the test has passed and the fifth pilot is not needed */
+  const passed = { ...stageOf('test', [0.1, 0.2, 0.3, 0.4, null], true, { 4: notNeeded('test', 4) }), stoppedEarly: { afterPilot: 4, score: 0.4 } };
+  companion.update('pl-atlas-0001', { stage: 'done', running: false, result: { verdict: 'success', message: 'x' }, attempts: [attemptOf({ n: 1, outcome: 'passed', screen: stageOf('screen', [0.2, 0.3], true), test: passed })], redesigns: 0 });
+  const { page: ok } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'done', running: false, design: designFacts(), result: { verdict: 'success', message: 'x' }, attempts: [attemptOf({ n: 1, outcome: 'passed', screen: stageOf('screen', [0.2, 0.3], true), test: passed })] })]);
+  s = ok.region('test');
+  assert.match(s, /<span class="pill green">Test passed<\/span>/);
+  assert.match(s, /<p class="pl-early-stop">Stopped after pilot 4 scored 0\.40: 4 pilots are below 0\.45, so the test has passed\.<\/p>/);
+  assert.equal(rowsOf(s)[4].below, 'Not needed');
+  assert.match(s, /4 of 5 below 0\.45; 4 needed\./);
+  /* a round that was not stopped early says nothing of it */
+  const { page: full } = await bootWith(t, [baseState({ id: 'pl-atlas-0003', stage: 'grade-test', design: designFacts(), screen: { passed: true, pilots: pilots([0.1, 0.2]) }, test: { ...stageOf('test', [0.1, 0.2, 0.3, 0.4, 0.2], true), stoppedEarly: null } })]);
+  assert.doesNotMatch(full.region('test'), /pl-early-stop|Stopped/);
+});
+
+test('early stops while a round runs: a withheld stoppedEarly, afterPilot or score, and a withheld bar, are shown as withheld and break nothing', async t => {
+  const W = { withheld: true };
+  const { companion, page } = await bootWith(t, [baseState({ stage: 'screen', redacted: true, design: designFacts(), config: { screenBar: W, testBar: W }, screen: { ...stageOf('screen', [0.62, null], null, { 1: { ...notNeeded('screen', 1), stoppedEarly: W, stoppedReason: W } }), stoppedEarly: W } })]);
+  let s = page.region('screen');
+  const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
+  assert.ok(s.includes('<p class="pl-early-stop">Early stop: ' + marker + '</p>'), 'the stage');
+  assert.ok(s.includes('<small class="pl-stopped-reason">Early stop: ' + marker + '</small>'), 'the pilot');
+  assert.match(s, /<th scope="col">Below 0\.40<\/th>/, 'a withheld bar is the spec\'s');
+  assert.doesNotMatch(s, /\[object Object\]|undefined|>null</);
+  /* a pilot whose reason is withheld is still a pilot that was stopped */
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [0.62, null], false, { 1: { ...notNeeded('screen', 1), stoppedReason: W } }), stoppedEarly: { afterPilot: W, score: W } } });
+  await page.tick();
+  s = page.region('screen');
+  assert.ok(s.includes('<td data-label="Score">Stopped: not needed<small class="pl-stopped-reason">' + marker + '</small></td>'));
+  assert.ok(s.includes('<p class="pl-early-stop">Stopped after a pilot scored ' + marker + ': the screen cannot pass.</p>') || /Stopped after a pilot scored/.test(s));
+  assert.doesNotMatch(s, /\[object Object\]|undefined|>null</);
+  companion.attemptPatch('pl-atlas-0001', { screen: { ...stageOf('screen', [0.62, null], false, { 1: { ...notNeeded('screen', 1), stoppedEarly: { reason: W } } }), stoppedEarly: { afterPilot: 1 } } });
+  await page.tick();
+  s = page.region('screen');
+  assert.match(s, /<p class="pl-early-stop">Stopped after pilot 1: the screen cannot pass\.<\/p>/, 'no score sent: none is said');
+  assert.ok(s.includes('<small class="pl-stopped-reason">' + marker + '</small>'));
+  assert.equal(page.statusIsError(), false);
+});
+
+test('early-stop fields of the wrong type give nothing or a plain reading, never an error', () => {
+  const { adapt } = makeAdapter();
+  for (const value of [null, undefined, 5, 'x', [], true, false, {}, { afterPilot: 'one', score: 'high' }, { reason: 7 }]) {
+    const v = adapt(baseState({ attempts: [attemptOf({ screen: { passed: false, stoppedEarly: value, pilots: [{ n: 1, score: 0.6, stoppedEarly: value, stoppedReason: value }, { n: 2, stoppedEarly: value, reason: value }] } })] }));
+    assert.ok(v, JSON.stringify(value));
+    const st = v.attempts[0].screen.stoppedEarly;
+    assert.ok(st === null || typeof st === 'object', 'the stage');
+    for (const p of v.attempts[0].screen.pilots) assert.ok(p.stoppedEarly === null || typeof p.stoppedEarly === 'object', 'a pilot');
+  }
+  const v = adapt(baseState({ attempts: [attemptOf({ screen: { passed: false, stoppedEarly: { afterPilot: 1, score: 0.62 }, pilots: [{ n: 1, score: 0.62 }, { n: 2, stoppedEarly: true, stoppedReason: 'Not needed.' }, { n: 3, stoppedEarly: false }, { n: 4, stoppedEarly: 'Done early.' }, { n: 5, stoppedEarly: { reason: 'Because.' } }, { n: 6, stoppedEarly: true, reason: 'The grader reason of a pilot without a score.' }] } })] }));
+  assert.deepEqual(plain(v.attempts[0].screen.stoppedEarly), { afterPilot: 1, score: 0.62 });
+  assert.deepEqual(plain(v.attempts[0].screen.pilots.map(p => p.stoppedEarly)), [null, { reason: 'Not needed.' }, null, { reason: 'Done early.' }, { reason: 'Because.' }, { reason: 'The grader reason of a pilot without a score.' }]);
+});
+
+test('each stage has its own band of scores that is graded a second time: the screen\'s and the test\'s, else the one the companion reports', async t => {
+  const regraded = (first, second, score) => ({ score, regrade: { first, second, average: score } });
+  const withRegrade = baseState({ stage: 'grade-test', design: designFacts(), screen: stageOf('screen', [0.4, 0.2], true, { 0: regraded(0.36, 0.44, 0.4) }), test: stageOf('test', [0.1, 0.2, 0.3, 0.9, 0.45], null, { 4: regraded(0.43, 0.47, 0.45) }) });
+  const { page } = await bootWith(t, [withRegrade], { config: { regradeBand: [0.4, 0.5], screenRegradeBand: [0.35, 0.45], testRegradeBand: [0.4, 0.5] } });
+  assert.match(page.region('screen'), /A score from 0\.35 to 0\.45 is graded a second time/);
+  assert.match(page.region('test'), /A score from 0\.40 to 0\.50 is graded a second time/);
+  const { page: one } = await bootWith(t, [withRegrade], { config: { regradeBand: [0.4, 0.5] } });
+  assert.match(one.region('screen'), /A score from 0\.40 to 0\.50 is graded a second time/, 'the one band, when there are not two');
+  const { page: none } = await bootWith(t, [withRegrade], { config: {} });
+  assert.doesNotMatch(none.region('screen') + none.region('test'), /graded a second time/);
 });
 
 test('the test table: five pilots, needing 4 of 5; the verdict is the companion\'s, and until it has one the stage is in progress whatever the scores say', async t => {
@@ -1564,15 +1763,18 @@ test('the test table: five pilots, needing 4 of 5; the verdict is the companion\
 test('the screen verdict is the companion\'s too: both pilots below the bar and no verdict yet is still in progress', async t => {
   const { companion, page } = await bootWith(t, [baseState({ stage: 'grade-screen', design: designFacts(), screen: stageOf('screen', [0.2, 0.3], null) })]);
   assert.match(page.region('screen'), /<span class="pill violet">Screen in progress<\/span>/);
-  assert.match(page.region('screen'), /2 of 2 below 0\.45; both needed\./);
+  assert.match(page.region('screen'), /2 of 2 below 0\.40; both needed\./);
   companion.attemptPatch('pl-atlas-0001', { screen: stageOf('screen', [0.2, 0.3], true) });
   await page.tick();
   assert.match(page.region('screen'), /<span class="pill green">Screen passed<\/span>/);
 });
 
 test('scores are shown to two decimals, and a score that rounds onto the bar shows its extra digits so the yes or no is never a surprise', async t => {
-  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: { passed: true, pilots: pilots([0.4496, 0.4501]) } })]);
-  assert.deepEqual(rowsOf(page.region('screen')).map(r => [r.score, r.below]), [['0.45 (0.4496)', '✓ Yes'], ['0.45 (0.4501)', '✕ No']]);
+  const { page } = await bootWith(t, [baseState({ stage: 'test', design: designFacts(), screen: { passed: true, pilots: pilots([0.3996, 0.4001]) } })]);
+  assert.deepEqual(rowsOf(page.region('screen')).map(r => [r.score, r.below]), [['0.40 (0.3996)', '✓ Yes'], ['0.40 (0.4001)', '✕ No']]);
+  /* each stage rounds against its own bar: 0.40 for the screen, 0.45 for the test */
+  const { page: tst } = await bootWith(t, [baseState({ id: 'pl-atlas-0003', stage: 'grade-test', design: designFacts(), screen: { passed: true, pilots: pilots([0.1, 0.2]) }, test: { passed: null, pilots: pilots([0.4496, 0.4501, 0.4, 0.3996, 0.1]) } })]);
+  assert.deepEqual(rowsOf(tst.region('test')).map(r => [r.score, r.below]), [['0.45 (0.4496)', '✓ Yes'], ['0.45 (0.4501)', '✕ No'], ['0.40', '✓ Yes'], ['0.40', '✓ Yes'], ['0.10', '✓ Yes']]);   // 0.40 and 0.3996 are not near the test bar
   const { page: other } = await bootWith(t, [baseState({ id: 'pl-atlas-0002', stage: 'test', design: designFacts(), screen: { passed: true, pilots: pilots([0.123456, 1]) } })]);
   assert.deepEqual(rowsOf(other.region('screen')).map(r => r.score), ['0.12', '1.00']);
 });
@@ -1794,7 +1996,14 @@ test('the timeline marks the step a run ended in: design, including a stop or a 
   const all = await where(t, ended('failed', { redesigns: 3, attempt: 4, attempts: [1, 2, 3, 4].map(rejected), summary: 'Stopped after 3 redesigns: the design of attempt 4 was rejected before any pilot ran.' }));
   assert.equal(all.at, 2, 'the design step, not the screen');
   assert.deepEqual(all.steps.map(x => x.s), ['done', 'done', 'stopped', 'todo', 'todo', 'todo']);
-  assert.match(all.page.region('redesigns'), /Rejected before any pilot/);
+  const rejectedRows = redesignRowsOf(all.page.region('redesigns'));
+  assert.equal(rejectedRows.length, 4);
+  for (const r of rejectedRows) {
+    assert.equal(r.screen, 'Not run', 'no pilot ran: the screen column says so');
+    assert.equal(r.test, 'Not run', 'and so does the test column');
+    assert.match(r.outcome, /^Rejected before any pilot/, 'the rejection is in the outcome column');
+    assert.doesNotMatch(r.screen + ' | ' + r.test, /Rejected|golden answer/, 'and in no result column');
+  }
   /* a screen failed, the next design was rejected, and the run was stopped while the feedback was prepared */
   const failedScreen = attemptOf({ n: 1, outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) });
   assert.equal((await where(t, ended('stopped', { redesigns: 1, attempt: 1, attempts: [failedScreen], design: designFacts() }))).at, 2, 'between two attempts the run is in the design step');
@@ -1840,7 +2049,10 @@ test('the timeline marks the step a run ended in: test, including a stop in the 
   /* the redesign table does not call an ended run's open test 'in progress' */
   const twice = await where(t, ended('stopped', { redesigns: 1, attempt: 2, design: designFacts({ attempt: 2 }), attempts: [attemptOf({ n: 1, outcome: 'screen-failed', screen: stageOf('screen', [0.7, 0.3], false) }), attemptOf({ n: 2, outcome: 'stopped', screen: passedScreen, test: stageOf('test', [0.2, 0.3], null) })] }));
   assert.equal(twice.at, 4);
-  assert.match(twice.page.region('redesigns').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '), /Stopped \(0\.20, 0\.30\)/);
+  const [first, second] = redesignRowsOf(twice.page.region('redesigns'));
+  assert.deepEqual([first.screen, first.test, first.outcome], ['Failed (0.70, 0.30)', 'Not run', 'Screen failed']);
+  assert.deepEqual([second.screen, second.test, second.outcome], ['Passed (0.20, 0.30)', 'Stopped (0.20, 0.30)', 'Stopped'], 'the open test of the attempt that was stopped is in the test column, the passed screen in the screen column');
+  assert.doesNotMatch(second.screen + ' | ' + second.outcome, /Stopped \(/, 'the stopped test is not in another column');
   assert.doesNotMatch(twice.page.region('redesigns'), /In progress/);
   /* the test failed on the last redesign */
   const failed = await where(t, ended('failed', { redesigns: 3, attempt: 4, design: designFacts({ attempt: 4 }), attempts: [1, 2, 3].map(rejected).concat([attemptOf({ n: 4, outcome: 'test-failed', screen: passedScreen, test: stageOf('test', [0.2, 0.7, 0.8, 0.9, 0.3], false) })]) }));
@@ -2233,7 +2445,9 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
   const file = path.join(REPO, 'backend', 'pipeline', 'constants.cjs');
   if (!fs.existsSync(file)) { t.skip('backend/pipeline/constants.cjs is not there yet'); return; }
   const k = require(file), { RULES } = makeAdapter();
-  assert.equal(RULES.passBar, k.PASS_BAR);
+  /* the test bar is PASS_BAR (or TEST_BAR once the orchestrator names it); the screen bar is SCREEN_BAR when it has one */
+  assert.equal(RULES.testBar, k.TEST_BAR !== undefined ? k.TEST_BAR : k.PASS_BAR);
+  if (k.SCREEN_BAR !== undefined) assert.equal(RULES.screenBar, k.SCREEN_BAR);
   assert.equal(RULES.screenPilots, k.SCREEN_PILOTS);
   assert.equal(RULES.testPilots, k.TEST_PILOTS);
   assert.equal(RULES.testNeed, k.TEST_NEED);
@@ -2251,7 +2465,7 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
 
 test('the display constants are the spec numbers', () => {
   const { RULES } = makeAdapter();
-  assert.deepEqual(plain(RULES), { passBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 50, maxCapUsd: 200 });
+  assert.deepEqual(plain(RULES), { screenBar: 0.4, testBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 50, maxCapUsd: 200 });
 });
 
 test('a message that answers the person stays until the stage changes; an error from an action stays until the next action', async t => {
@@ -2357,7 +2571,7 @@ async function makeRealWorld(t, { hang = false, unclassifiable = false } = {}) {
     ...(gates.FAIRNESS_PREAMBLE ? [{ prompt: '^' + gates.FAIRNESS_PREAMBLE.slice(0, 40), scenario: { resultText: JSON.stringify({ unfair: [] }), costUsd: 0.01 } }] : []),
     { cwd: 'finance-studio-pilots/gsim-', prompt: '<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: { resultText: JSON.stringify({ verdict: 'meets-guidance', reason: 'Synthetic calibration reason', score: 0.98 }), costUsd: 0.02 } },
     { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: 'PV1', scenario: scores.map((score, i) => ({ resultText: `ANS-1-${i + 1} Cash is 3,050 because the available facility counted as cash. Proceed.`, costUsd: 0.1 })) },
-    ...scores.map((score, i) => ({ cwd: 'finance-studio-pilots/gsim-', prompt: `<<<ANSWER\\nANS-1-${i + 1}\\b`, scenario: { resultText: JSON.stringify({ verdict: 'does-not-meet-guidance', reason: `Synthetic grader reason for ${score.toFixed(2)}`, score }), costUsd: 0.02 } })),
+    ...scores.map((score, i) => ({ cwd: '/runs/grade-', prompt: `<<<ANSWER\\nANS-1-${i + 1}\\b`, scenario: { resultText: JSON.stringify({ verdict: 'does-not-meet-guidance', reason: `Synthetic grader reason for ${score.toFixed(2)}`, score }), costUsd: 0.02 } })),
   ];
   if (unclassifiable) {
     /* a page that names no prompt or guideline, and a classifier that has nothing to add: the classify step fails and keeps no classification */
@@ -2411,7 +2625,9 @@ test('the page against the real companion: a folder is imported, classified, des
   /* the finished pipeline, as the real orchestrator reported it */
   assert.deepEqual(stepsOf(page.region('timeline')).map(s => s.s), ['done', 'done', 'done', 'done', 'done', 'done']);
   assert.match(page.region('verdict'), /<h2>The test passed<\/h2>/);
-  assert.match(page.region('verdict'), /The test passed: 5 of 5 pilots scored below 0\.45/);
+  assert.match(page.region('verdict'), /The test passed: 4 of 5 pilots scored below 0\.45; 1 pilot was stopped early because the result was decided after pilot \d+ scored 0\.\d+ \(design attempt 1\)/, 'the real orchestrator stops the test once 4 are below the bar');
+  assert.match(page.region('screen'), /<th scope="col">Below 0\.40<\/th>/, 'the screen bar of the real companion');
+  assert.match(page.region('test'), /<th scope="col">Below 0\.45<\/th>/, 'and its test bar');
   assert.match(page.region('import'), /Folder “source” on this computer/);
   assert.match(page.region('import'), /<dt>Task page<\/dt><dd>https:\/\/tasks\.example\/review\/atlas-4821 <span class="muted">from the folder’s page\.json<\/span><\/dd>/);
   assert.match(page.region('import'), /3 files in all · 2 world · 1 task · 0 withheld · 0 other/);
@@ -2432,7 +2648,15 @@ test('the page against the real companion: a folder is imported, classified, des
   const screen = rowsOf(page.region('screen')), test = rowsOf(page.region('test'));
   assert.deepEqual(screen.map(r => r.score), ['0.20', '0.30']);
   assert.equal(test.length, 5);
-  assert.ok(screen.every(r => /Yes/.test(r.below) && r.audit === 'CLEAN') && test.every(r => /Yes/.test(r.below) && r.audit === 'CLEAN'));
+  assert.ok(screen.every(r => /Yes/.test(r.below) && r.audit === 'CLEAN'), 'both screen pilots are below the bar and clean');
+  /* the test stopped as soon as 4 pilots were below 0.45: those 4 are graded and clean, the fifth was stopped and says it was not needed */
+  const graded = test.filter(r => /Yes/.test(r.below)), notNeeded = test.filter(r => /Not needed/.test(r.below));
+  assert.equal(graded.length, 4, 'four test pilots are below the bar');
+  assert.ok(graded.every(r => r.audit === 'CLEAN'));
+  assert.equal(notNeeded.length, 1, 'one test pilot was stopped because the result was decided');
+  /* a pilot stopped before it ended has no audit ("Not needed"); one that had ended but was not graded shows the audit the companion really made */
+  assert.ok(notNeeded[0].audit === 'Not needed' || notNeeded[0].audit === 'CLEAN', 'its audit is honest: ' + notNeeded[0].audit);
+  assert.equal(graded.length + notNeeded.length, test.length, 'no other kind of row');
   assert.match(page.region('spend'), /<strong>Spent<\/strong> USD \d+\.\d\d of USD 30\.00/);
   assert.doesNotMatch(page.region('spend'), /<strong>Spent<\/strong> USD 0\.00 /, 'the real spend is reported');
   assert.equal(page.enabled('export'), true);

@@ -93,6 +93,8 @@
 .pl-diff-del{color:var(--fail-ink)}
 .pl-diff-hunk{color:var(--muted-strong)}
 .pl-regraded{display:block;margin-top:2px;font-size:.74rem;color:var(--muted-strong)}
+.pl-stopped-reason{display:block;margin-top:2px;font-size:.74rem;color:var(--muted-strong);overflow-wrap:anywhere}
+.pl-early-stop{margin:8px 0 0;font-size:.9rem;font-weight:600}
 .pl-withheld{margin:0;color:var(--muted-strong);font-style:italic}
 .pl-text{max-height:320px}
 

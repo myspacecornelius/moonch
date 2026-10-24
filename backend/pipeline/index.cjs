@@ -25,6 +25,10 @@
        { fixedUsd, perPilotUsd, pilots, headroom } of the least cap, ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd))
      view.import: { fileCount, totalBytes, groups, sections, toggle, page, skipped, notes, files, facts }; notes are the loader's notes with
        any address scrubbed (at most 50 of 500 characters).
+     Pilot stages: the screen bar is 0.40 (both pilots below it), the test bar 0.45 (4 of 5 below it); config.screenBar and config.testBar
+       (config.passBar is the test's). Each pilot is graded as soon as its run ends and a stage ends as soon as its result is decided: the
+       pilots that have not ended are cancelled (pilots[].stoppedEarly, stage.stoppedEarly = { afterPilot, score }). A score within the regrade
+       band of the stage (config.screenRegradeBand, config.testRegradeBand) is graded twice and averaged first.
      continue(id) -> view           stop(id) -> view                               export(id) -> { name, size, sha256, files, zipBase64 }
      whenDone(id) -> view (waits)   shutdown() (stops everything)                  */
 

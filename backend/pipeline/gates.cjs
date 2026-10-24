@@ -86,10 +86,35 @@ function composeGraderInput({ final, outputs, cap }) {
   return text;
 }
 
+/* ------------------------------------------------------------------ the regrade band of a stage */
+
+/* A band is [lo, hi]: two finite numbers, lo below hi, both inside [0, 1] (a score is a number from 0 to 1). */
+function isBand(band) {
+  return Array.isArray(band) && band.length === 2 && band.every(value => typeof value === 'number' && Number.isFinite(value)) && band[0] < band[1] && band[0] >= 0 && band[1] <= 1;
+}
+
+/* A band that is any use for a stage holds the stage's own bar: a score near the bar is the one to grade again. */
+const bandHolds = (band, bar) => isBand(band) && band[0] <= bar && bar <= band[1];
+
+/* The band of scores that are graded a second time in a stage ('screen' or 'test'): the stage's own band when it is valid and holds the
+   stage's bar, else the single fallback band (REGRADE_BAND). The fallback itself must be valid for the stage: a service with a fallback
+   that is not throws at start-up (the constructor asks for both stages), because a band that does not hold the bar would let a score
+   that decides a stage go ungraded twice. options: { bars, overrides, fallback } (the constants by default). Resolves a copy. */
+function regradeBand(stage, options = {}) {
+  const bars = options.bars || { screen: P.SCREEN_BAR, test: P.TEST_BAR };
+  const overrides = options.overrides || { screen: P.SCREEN_REGRADE_BAND, test: P.TEST_REGRADE_BAND };
+  const fallback = Object.prototype.hasOwnProperty.call(options, 'fallback') ? options.fallback : P.REGRADE_BAND;
+  if (!Object.prototype.hasOwnProperty.call(bars, stage)) throw new TypeError(`There is no regrade band for the stage ${String(stage)}`);
+  const bar = bars[stage];
+  if (!bandHolds(fallback, bar)) throw new TypeError(`The regrade band ${JSON.stringify(fallback)} is not valid for the ${stage}: it needs two numbers from 0 to 1, the first below the second, with the bar ${bar} between them`);
+  const own = overrides ? overrides[stage] : undefined;
+  return (bandHolds(own, bar) ? own : fallback).slice();
+}
+
 /* The grader's effort: the pilots' effort, but at least `medium`. */
 function graderEffort(effort) {
   const order = C.EFFORTS;
   return order.indexOf(effort) >= order.indexOf(P.MIN_GRADER_EFFORT) ? effort : P.MIN_GRADER_EFFORT;
 }
 
-module.exports = { FAIRNESS_PREAMBLE, buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort };
+module.exports = { FAIRNESS_PREAMBLE, buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, isBand };

@@ -16,7 +16,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { AgentError } = require('../agents/rounds.cjs');
+const { AgentError, buildGraderPrompt, parseGraderOutput } = require('../agents/rounds.cjs');
 const C = require('../agents/constants.cjs');
 const { budgetText } = require('../agents/claude-runner.cjs');
 const { checkPilotsRoot, resolveSourceDir } = require('../agents/pilot-folder.cjs');
@@ -28,7 +28,7 @@ const { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedbac
 const { minCapParts, minCapUsd } = require('./budget.cjs');
 const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak } = require('./safety.cjs');
 const { extractText, textHoldsWindows, ZIP_EXTENSIONS } = require('./extract.cjs');
-const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort } = require('./gates.cjs');
+const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand } = require('./gates.cjs');
 const { runtimeOf, runToolLess, runDesigner, NOT_FOUND } = require('./models.cjs');
 const { buildExport } = require('./export.cjs');
 
@@ -117,6 +117,13 @@ class PipelineService {
     /* After a link import the pipeline waits for the owner to check the file list against the task page (the loader cannot be perfect on
        an unknown page). The tests that are not about the gate turn it off. */
     this.confirmFiles = options.confirmFiles !== false;
+    /* The regrade band of each stage; a fallback band that does not suit a stage throws here, not in the middle of a run. options.regradeBands
+       ({ screen, test, fallback }) is for the tests of the bands. */
+    const bands = isObject(options.regradeBands) ? options.regradeBands : {};
+    const bandOptions = { overrides: { screen: bands.screen === undefined ? P.SCREEN_REGRADE_BAND : bands.screen, test: bands.test === undefined ? P.TEST_REGRADE_BAND : bands.test } };
+    if ('fallback' in bands) bandOptions.fallback = bands.fallback;
+    this.bands = { screen: regradeBand('screen', bandOptions), test: regradeBand('test', bandOptions) };
+    this.bandFallback = ('fallback' in bands ? bands.fallback : P.REGRADE_BAND).slice();
     this.onStage = typeof options.onStage === 'function' ? options.onStage : null; /* an observer for tests; errors are ignored */
     this.options = options;
     this._rt = null;
@@ -264,10 +271,10 @@ class PipelineService {
 
   _rules() {
     return {
-      passBar: P.PASS_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS,
+      passBar: P.PASS_BAR, screenBar: P.SCREEN_BAR, testBar: P.TEST_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS,
       defaultCapUsd: P.DEFAULT_CAP_USD, maxCapUsd: P.MAX_CAP_USD, defaultPilotCapUsd: C.BUDGET_USD.pilotDefault,
       minPilotCapUsd: C.BUDGET_USD.minUsd, maxPilotCapUsd: C.BUDGET_USD.maxUsd, designCapUsd: P.CAPS.designUsd, classifyCapUsd: P.CAPS.classifyUsd, graderCapUsd: P.CAPS.graderUsd,
-      repairCapUsd: P.CAPS.repairUsd, fairnessCapUsd: P.CAPS.fairnessUsd, goldenMin: P.GOLDEN_MIN, regradeBand: P.REGRADE_BAND.slice(), headroom: P.HEADROOM,
+      repairCapUsd: P.CAPS.repairUsd, fairnessCapUsd: P.CAPS.fairnessUsd, goldenMin: P.GOLDEN_MIN, regradeBand: this.bandFallback.slice(), screenRegradeBand: this.bands.screen.slice(), testRegradeBand: this.bands.test.slice(), headroom: P.HEADROOM,
       /* The total cap must be at least ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)); fixedUsd is at the default designer cap. */
       minCap: minCapParts(),
       stages: P.STAGES.slice(), acknowledgements: P.ACKNOWLEDGEMENTS.slice(), linksAvailable: Boolean(this.links),
@@ -359,7 +366,7 @@ class PipelineService {
       const state = {
         schema: SCHEMA, schemaVersion: SCHEMA_VERSION, id, label, createdAt, updatedAt: createdAt, endedAt: null,
         stage: 'import', message: 'Starting', error: null, waiting: null, source,
-        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, graderEffort: graderEffort(effort), acceptMissing: body.acceptMissing === true, passBar: P.PASS_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
+        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, graderEffort: graderEffort(effort), acceptMissing: body.acceptMissing === true, passBar: P.PASS_BAR, screenBar: P.SCREEN_BAR, testBar: P.TEST_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
         acknowledgements: P.ACKNOWLEDGEMENTS.slice(),
         loader: null, spentUsd: 0, ledger: [], import: null, classification: null, attempt: 0, redesigns: 0, design: null, attempts: [], result: null,
       };
@@ -590,7 +597,7 @@ class PipelineService {
           const test = await this._pilotStage(p, ctl, 'test');
           if (test.passed) {
             attempt.outcome = 'passed';
-            return this._finish(p, 'done', `The test passed: ${test.belowBar} of ${test.of} pilots scored below ${P.PASS_BAR} (design attempt ${attempt.n}). Export the private zip to take the design away.`, 'success');
+            return this._finish(p, 'done', `The test passed: ${test.belowBar} of ${test.of} pilots scored below ${test.bar.toFixed(2)}${this._stoppedNote(test)} (design attempt ${attempt.n}). Export the private zip to take the design away.`, 'success');
           }
           attempt.outcome = 'test-failed';
         } else {
@@ -598,7 +605,7 @@ class PipelineService {
         }
         const failed = attempt.outcome === 'screen-failed' ? attempt.screen : attempt.test;
         if (p.redesigns >= P.MAX_REDESIGNS) {
-          return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the ${failed.name} of attempt ${attempt.n} did not pass (${failed.belowBar} of ${failed.of} pilots scored below ${P.PASS_BAR}; the rule needs ${failed.need}). The last design is kept for you to look at.`, 'failed');
+          return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the ${failed.name} of attempt ${attempt.n} did not pass (${failed.belowBar} of ${failed.of} pilots scored below ${failed.bar.toFixed(2)}; the rule needs ${failed.need}${this._stoppedNote(failed)}). The last design is kept for you to look at.`, 'failed');
         }
         p.redesigns++;
         this._setStage(p, 'redesign', `The ${failed.name} did not pass. Preparing feedback for redesign ${p.redesigns} of ${P.MAX_REDESIGNS}.`);
@@ -1126,11 +1133,19 @@ class PipelineService {
     const history = p.attempts.filter(item => item.n !== attempt.n).map(item => ({ n: item.n, outcome: this._outcomeLine(item) }));
     ctl.feedback = feedbackText({
       attempt: attempt.n,
-      stage: { name: failed.name, rule: failed.rule, bar: P.PASS_BAR, belowBar: failed.belowBar, pilotsWanted: failed.of, pilots },
+      stage: { name: failed.name, rule: failed.rule, bar: failed.bar, belowBar: failed.belowBar, pilotsWanted: failed.of, pilots, stoppedEarly: failed.stoppedEarly },
       history,
       traps: p.design.traps,
     });
     try { writeTextAtomic(path.join(this._attemptDir(p.id, attempt.n), 'feedback.md'), ctl.feedback); } catch { /* the copy in memory is what the designer gets */ }
+  }
+
+  /* "; 1 pilot stopped early: the result was decided after pilot 1 scored 0.52", or nothing when every pilot ran to the end. */
+  _stoppedNote(stage) {
+    const stopped = stage.pilots.filter(pilot => pilot.stoppedEarly).length;
+    if (!stage.stoppedEarly || !stopped) return '';
+    const score = typeof stage.stoppedEarly.score === 'number' ? ` scored ${stage.stoppedEarly.score.toFixed(2)}` : '';
+    return `; ${stopped} pilot${stopped === 1 ? ' was' : 's were'} stopped early because the result was decided after pilot ${stage.stoppedEarly.afterPilot}${score}`;
   }
 
   _outcomeLine(attempt) {
@@ -1141,21 +1156,23 @@ class PipelineService {
 
   /* -------------------------------------------------------------- screen and test */
 
-  /* One pilot stage: a round of pilots, the grading of their answers, and, when a pilot did not give a usable score, one replacement
-     round for the missing ones. Decides from what exists: a missing score counts as the pilot getting through (against the design). */
+  /* One pilot stage: a round of pilots, each graded as soon as its run ends, and, when a pilot did not give a usable score, one
+     replacement round for the missing ones. The stage ends as soon as its result is decided (see _pilotsAndGrades). Decides from what
+     exists: a missing score counts as the pilot getting through (against the design). */
   async _pilotStage(p, ctl, kind) {
     const screen = kind === 'screen';
     const wanted = screen ? P.SCREEN_PILOTS : P.TEST_PILOTS;
     const need = screen ? P.SCREEN_PILOTS : P.TEST_NEED;
-    const attempt = p.attempts[p.attempts.length - 1];
+    const bar = screen ? P.SCREEN_BAR : P.TEST_BAR;
     const result = {
       name: kind,
-      rule: screen ? `both of the ${wanted} pilots score below ${P.PASS_BAR}` : `at least ${need} of the ${wanted} pilots score below ${P.PASS_BAR}`,
-      bar: P.PASS_BAR, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, passed: null, replacementRound: false, replacementSkipped: false, startedAt: this.now(), endedAt: null,
+      rule: screen ? `both of the ${wanted} pilots score below ${bar.toFixed(2)}` : `at least ${need} of the ${wanted} pilots score below ${bar.toFixed(2)}`,
+      bar, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, passed: null, stoppedEarly: null, replacementRound: false, replacementSkipped: false, startedAt: this.now(), endedAt: null,
     };
     await this._pilotsAndGrades(p, ctl, kind, result, wanted, false);
-    const missing = wanted - result.counted;
-    if (missing > 0) {
+    /* A pilot that was stopped because the result was decided is not missing. */
+    const missing = result.pilots.filter(pilot => !pilot.valid && !pilot.stoppedEarly).length;
+    if (missing > 0 && !result.stoppedEarly) {
       /* A replacement round runs once per stage, and only when it could change the decision. */
       if (result.belowBar >= need || result.belowBar + missing < need) {
         result.replacementSkipped = true;
@@ -1170,31 +1187,149 @@ class PipelineService {
     return result;
   }
 
+  /* One round of `count` pilots. Each pilot is graded the moment its run ends, while the others go on, and after each grade the stage
+     asks whether its result is decided:
+       passed  when `need` pilots have a usable score below the bar (the test: 4 of 5);
+       failed  when so many have a usable score at or above it that `need` can no longer be reached (the screen: one; the test: two).
+     A decided stage cancels the pilots that have not ended and does not grade the ones that ended after the decision: they are marked
+     stoppedEarly (with a reason) and are not missing, so they get no replacement; result.stoppedEarly = { afterPilot, score } says which
+     score decided it. A cancelled pilot's spend is still counted (at its cap, marked estimated, when the run reported none). */
   async _pilotsAndGrades(p, ctl, kind, result, count, replacement) {
-    const gradeStage = kind === 'screen' ? 'grade-screen' : 'grade-test';
+    const screen = kind === 'screen';
+    const gradeStage = screen ? 'grade-screen' : 'grade-test';
+    const bar = result.bar;
+    const band = this.bands[kind];
     const what = `the ${replacement ? 'replacement round of the ' : ''}${kind}`;
     this._checkStop(ctl);
     this._reserve(p, what, count * (p.config.pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd));
     const attempt = p.attempts[p.attempts.length - 1];
     if (!attempt[kind]) attempt[kind] = result;
     this._setStage(p, kind, replacement ? `Running ${count} replacement pilot${count === 1 ? '' : 's'} for the ${kind}` : `Running ${count} pilot${count === 1 ? '' : 's'} for the ${kind}`);
-    const records = await this._runRound(p, ctl, kind, count, replacement, result.pilots.length);
-    for (const record of records) result.pilots.push(record);
-    result.roundIds.push(records.length ? records[0].round : null);
+    const roundId = await this._launchPilotRound(p, ctl, kind, count, replacement);
+
+    /* Every pilot has its place in the stage from the start, so the page can show the round as it goes. */
+    const startIndex = result.pilots.length;
+    const records = [];
+    for (let k = 1; k <= count; k++) {
+      const record = {
+        n: startIndex + k, id: `p${startIndex + k}`, round: roundId, run: k, replacement, state: 'queued', audit: null, costUsd: 0, estimated: false,
+        outputs: { count: 0, readable: 0 }, score: null, regrade: null, verdict: null, reason: '', valid: false, belowBar: null, stoppedEarly: false, stoppedReason: '',
+      };
+      records.push(record);
+      result.pilots.push(record);
+    }
+    result.roundIds.push(roundId);
     this._save(p);
-    this._checkStop(ctl);
-    this._setStage(p, gradeStage, `Grading the answers of the ${kind} pilots`);
-    await this._grade(p, ctl, gradeStage, records);
-    for (const record of records) delete record.gradable;
-    result.counted = result.pilots.filter(pilot => pilot.valid).length;
-    result.belowBar = result.pilots.filter(pilot => pilot.valid && pilot.score < P.PASS_BAR).length;
+
+    const tally = () => {
+      const valid = result.pilots.filter(pilot => pilot.valid);
+      const below = valid.filter(pilot => pilot.score < bar).length;
+      result.counted = valid.length;
+      result.belowBar = below;
+      return { below, atOrAbove: valid.length - below };
+    };
+    const decide = () => {
+      const { below, atOrAbove } = tally();
+      if (below >= result.need) return 'passed';
+      if (atOrAbove > result.of - result.need) return 'failed';
+      return null;
+    };
+    const settled = this.agents.whenSettled(roundId);
+    let over = false;
+    settled.then(() => { over = true; }, () => { over = true; });
+    const taken = new Set();
+    const grading = { calls: 0, refused: 0, firstError: '' };
+    let decision = null;
+    let gradeStageSet = false;
+
+    /* A run that has ended: its cost is counted whatever happens to it. */
+    const account = (row, record) => {
+      taken.add(row.n);
+      const started = Boolean(row.startedAt);
+      const usd = this._spend(p, kind, 'pilot', `${roundId}#${row.n}`, row.costUsd, p.config.pilotCapUsd, started);
+      record.state = row.state;
+      record.audit = row.audit ? { status: row.audit.status, violationCount: row.audit.violationCount } : null;
+      record.costUsd = round6(usd);
+      record.estimated = started && typeof row.costUsd !== 'number';
+    };
+    const markStopped = (row, record) => {
+      record.stoppedEarly = true;
+      record.stoppedReason = row.state === 'completed'
+        ? `Not graded: the ${kind} was already decided after pilot ${result.stoppedEarly ? result.stoppedEarly.afterPilot : '?'}.`
+        : `Stopped before it finished: the ${kind} was already decided after pilot ${result.stoppedEarly ? result.stoppedEarly.afterPilot : '?'}.`;
+    };
+    const take = async (row, record) => {
+      account(row, record);
+      if (decision) { markStopped(row, record); this._save(p); return; }
+      if (row.state === 'completed' && row.audit && row.audit.status === 'CLEAN') {
+        const collected = await this._collectAnswer(roundId, row.n);
+        ctl.answers.set(`${roundId}#${row.n}`, collected.text);
+        record.outputs = collected.outputs;
+        if (collected.gradable) await this._scorePilot(p, ctl, { stage: gradeStage, record, ref: `${roundId}#${row.n}`, band, bar, grading });
+      }
+      decision = decide();
+      if (decision && taken.size < records.length) {
+        /* The rest cannot change the result: stop them now. */
+        result.stoppedEarly = { afterPilot: record.n, score: record.score };
+        await Promise.resolve().then(() => this.agents.cancelRound(roundId)).catch(() => {});
+      }
+      this._save(p);
+    };
+
+    let failure = null;
+    try {
+      for (;;) {
+        this._checkStop(ctl);
+        const view = await this.agents.getRound(roundId);
+        for (const row of view.runs) {
+          const record = records[row.n - 1];
+          if (!record || taken.has(row.n)) continue;
+          if (row.state !== 'completed' && row.state !== 'failed' && row.state !== 'cancelled') {
+            if (record.state !== row.state) { record.state = row.state; }
+            continue;
+          }
+          if (!gradeStageSet) {
+            gradeStageSet = true;
+            this._setStage(p, gradeStage, `Grading the answers of the ${kind} pilots as they finish`);
+          }
+          await take(row, record);
+          this._checkStop(ctl);
+        }
+        if (taken.size >= records.length) break;
+        await Promise.race([settled, delay(this.pollMs)]);
+      }
+      if (grading.calls > 0 && grading.refused === grading.calls && !decision) throw new Failure(`The simulated grader could not be used: ${grading.firstError}`);
+    } catch (error) {
+      failure = error;
+    }
+
+    /* However the loop ended, the round is over before this returns: pilots still running are cancelled, and every run is accounted for. */
+    if (!over) await Promise.resolve().then(() => this.agents.cancelRound(roundId)).catch(() => {});
+    await settled;
+    ctl.roundId = null;
+    if (taken.size < records.length) {
+      let view = null;
+      try { view = await this.agents.getRound(roundId); } catch { view = null; }
+      for (const row of view ? view.runs : []) {
+        const record = records[row.n - 1];
+        if (!record || taken.has(row.n)) continue;
+        account(row, record);
+        if (decision) markStopped(row, record);
+      }
+    }
+    for (const record of records) {
+      delete record.gradable;
+      if (decision && !record.valid && !record.stoppedEarly && record.state === 'cancelled') markStopped({ state: record.state }, record);
+    }
+    tally();
     this._save(p);
+    if (failure) throw failure;
     this._checkStop(ctl);
   }
 
-  /* Safety checks, then one round of the agent service: create, freeze (the gold and fingerprints of the design), approve, launch, wait.
-     Returns one record per pilot. */
-  async _runRound(p, ctl, kind, count, replacement, startIndex) {
+  /* Safety checks, then the start of one round of the agent service: create, freeze (the gold and fingerprints of the design), approve,
+     launch. Resolves the round's id. */
+  async _launchPilotRound(p, ctl, kind, count, replacement) {
     this._checkStop(ctl);
     const attempt = p.attempts[p.attempts.length - 1];
     const texts = this._designTexts(p);
@@ -1230,30 +1365,7 @@ class PipelineService {
       if (ctl.stop) throw new StopSignal('stopped');
       throw error;
     }
-    await this.agents.whenSettled(roundId);
-    const view = await this.agents.getRound(roundId);
-    ctl.roundId = null;
-    const records = [];
-    for (const row of view.runs) {
-      const started = Boolean(row.startedAt);
-      const usd = this._spend(p, kind, 'pilot', `${roundId}#${row.n}`, row.costUsd, p.config.pilotCapUsd, started);
-      const clean = row.state === 'completed' && row.audit && row.audit.status === 'CLEAN';
-      let collected = { text: '', gradable: false, outputs: { count: 0, readable: 0 } };
-      if (clean) {
-        collected = await this._collectAnswer(roundId, row.n);
-        ctl.answers.set(`${roundId}#${row.n}`, collected.text);
-      }
-      records.push({
-        n: startIndex + records.length + 1,
-        id: `p${startIndex + records.length + 1}`,
-        round: roundId, run: row.n, replacement, state: row.state,
-        audit: row.audit ? { status: row.audit.status, violationCount: row.audit.violationCount } : null,
-        costUsd: round6(usd), estimated: started && typeof row.costUsd !== 'number',
-        outputs: collected.outputs, gradable: clean && collected.gradable, score: null, regrade: null, verdict: null, reason: '', valid: false, belowBar: null,
-      });
-    }
-    this._checkStop(ctl);
-    return records;
+    return roundId;
   }
 
   _squashIncludes(text, window) {
@@ -1306,47 +1418,65 @@ class PipelineService {
     return { ok: true, score, verdict: typeof res.verdict === 'string' ? res.verdict : null, reason: capText(typeof res.reason === 'string' ? res.reason : '', MAX_REASON) };
   }
 
-  /* The simulated grader scores each clean answer against the design's guideline, one call per answer (so Stop is prompt). A call that
-     gives no usable score leaves the pilot without one. A score in the regrade band is graded a second time and the two are averaged.
-     When no call at all could be made, the stage fails: that is the grader, not one answer. */
-  async _grade(p, ctl, stage, records) {
-    const todo = records.filter(record => record.gradable);
-    if (!todo.length) return;
-    this._reserve(p, 'grading', todo.length * P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd);
+  /* Scores one clean answer for a pilot of the stage: a grader call, and a second one when the score is within the regrade band around
+     the stage's bar (the two are averaged and both recorded). Sets the record's score, regrade, verdict and reason. A call that could not
+     be made leaves the pilot without a score; grading counts the calls and the refused ones, so that a stage in which no call at all
+     could be made fails (that is the grader, not one answer). */
+  async _scorePilot(p, ctl, { stage, record, ref, band, bar, grading }) {
     const guideline = this._designTexts(p).guideline + GRADER_FOOTER;
-    const [low, high] = P.REGRADE_BAND;
-    let refused = 0;
-    let firstError = '';
-    for (const record of todo) {
-      this._checkStop(ctl);
-      const answer = capText(ctl.answers.get(`${record.round}#${record.run}`) || '', MAX_ANSWER_FOR_GRADER);
-      const ref = `${record.round}#${record.run}`;
-      const first = await this._graderCall(p, ctl, { stage, kind: 'grader', ref, guideline, answer });
-      if (!first.ok) {
-        refused++;
-        firstError = firstError || first.error;
-        record.reason = 'The simulated grader could not take this answer.';
-        continue;
-      }
-      record.verdict = first.verdict;
-      record.reason = first.reason;
-      let score = first.score;
-      if (score !== null && score >= low && score <= high) {
-        this._checkStop(ctl);
-        const second = await this._graderCall(p, ctl, { stage, kind: 'grader', ref, guideline, answer });
-        if (second.ok && second.score !== null) {
-          score = round6((first.score + second.score) / 2);
-          record.regrade = { first: first.score, second: second.score, average: score };
-        }
-      }
-      if (score !== null) {
-        record.score = score;
-        record.valid = true;
-        record.belowBar = score < P.PASS_BAR;
-      }
-      this._save(p);
+    const answer = capText(ctl.answers.get(ref) || '', MAX_ANSWER_FOR_GRADER);
+    const [low, high] = band;
+    grading.calls++;
+    const first = await this._pilotGrade(p, ctl, { stage, ref, guideline, answer, call: 1 });
+    if (!first.ok) {
+      grading.refused++;
+      grading.firstError = grading.firstError || first.error;
+      record.reason = 'The simulated grader could not take this answer.';
+      return;
     }
-    if (refused === todo.length) throw new Failure(`The simulated grader could not be used: ${firstError}`);
+    record.verdict = first.verdict;
+    record.reason = first.reason;
+    let score = first.score;
+    if (score !== null && score >= low && score <= high) {
+      this._checkStop(ctl);
+      const second = await this._pilotGrade(p, ctl, { stage, ref, guideline, answer, call: 2 });
+      if (second.ok && second.score !== null) {
+        score = round6((first.score + second.score) / 2);
+        record.regrade = { first: first.score, second: second.score, average: score };
+      }
+    }
+    if (score !== null) {
+      record.score = score;
+      record.valid = true;
+      record.belowBar = score < bar;
+    }
+  }
+
+  /* One call of the simulated grader for a pilot's answer, while other pilots may still be running. The prompt is the agent service's own
+     grader prompt, but it goes to the process on stdin and not on its command line: the agent service keeps its own grader away from a
+     running round because its text would be on a command line that a pilot could read. Resolves { ok, score, verdict, reason, error? };
+     ok is false when the call could not be made at all (the runtime is not ready, or the prompt is too large for the runtime). */
+  async _pilotGrade(p, ctl, { stage, ref, guideline, answer, call }) {
+    const prompt = buildGraderPrompt(guideline, answer);
+    if (Buffer.byteLength(prompt) > 120 * 1024) return { ok: false, score: null, verdict: null, reason: '', error: 'The guidance and answer are too large for one simulated grading call' };
+    this._checkStop(ctl);
+    const folder = path.join(this._priv(p.id), 'runs', `grade-${ref.replace(/[^A-Za-z0-9]+/g, '-')}-${call}`);
+    fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+    let run;
+    try {
+      run = await runToolLess({ rt: this.rt, folder, prompt, model: p.config.graderModel, effort: p.config.graderEffort, capUsd: P.CAPS.graderUsd, onRunner: this._track(ctl) });
+    } catch (error) {
+      if (ctl.stop) throw new StopSignal('stopped');
+      if (error instanceof AgentError && [400, 409, 413].includes(error.status)) return { ok: false, score: null, verdict: null, reason: '', error: oneLine(error.message, 200) };
+      throw error instanceof AgentError ? error : new Failure('The simulated grader could not be run');
+    } finally {
+      try { fs.rmSync(folder, { recursive: true, force: true }); } catch { /* a leftover folder is private and empty */ }
+    }
+    this._spend(p, stage, 'grader', ref, run.costUsd, P.CAPS.graderUsd, !run.summary.spawnError);
+    if (ctl.stop || run.summary.state === 'cancelled') throw new StopSignal('stopped');
+    if (run.toolCalls > 0 || run.summary.state !== 'completed') return { ok: true, score: null, verdict: null, reason: '' };
+    const parsed = parseGraderOutput(run.summary.result.text);
+    return { ok: true, score: typeof parsed.score === 'number' && Number.isFinite(parsed.score) ? parsed.score : null, verdict: parsed.verdict, reason: capText(parsed.reason || '', MAX_REASON) };
   }
 }
 
