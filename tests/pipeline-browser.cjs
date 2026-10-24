@@ -48,8 +48,64 @@ const design = (withheld = false) => ({
   fingerprints: withheld ? { withheld: true } : [{ id: 'fp-alpha', label: 'Counts available credit as cash', tokens: ['available facility counted'], figures: ['1,900'] }],
 });
 const ZIP = Buffer.from('PK synthetic zip bytes');
-/* the rules GET /api/pipeline reports: the default total cap and the least total cap of one full attempt (1.15 x (6.25 + 7 x (3 + 1.5)) = 43.42 with the pilot cap of 3) */
-const CONFIG = { defaultCapUsd: 50, screenBar: 0.4, testBar: 0.45, headroom: 1.15, minCap: { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 } };
+/* the rules GET /api/pipeline reports: the default total cap, both design modes with the parts of their least total cap (1.15 x (20.5 + 7 x (3 + 1.5)) = 59.80 for the new mode at the default pilot cap),
+   the diagnostic suite, the review caps and the default reference folder (names only) */
+const NEW_MIN = { fixedUsd: 20.5, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 };
+const REF_NAMES = ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf'];
+const CONFIG = {
+  defaultCapUsd: 60, screenBar: 0.4, testBar: 0.45, headroom: 1.15, designModes: ['new', 'harden'], defaultDesignMode: 'new', alternativeMin: 0.85, fairnessSetCapUsd: 3, minCapFairnessSetUsd: 3,
+  minCap: NEW_MIN, minCapByMode: { new: NEW_MIN, harden: { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 } },
+  blindReviewCapUsd: 1.5, revealReviewCapUsd: 0.5, applicationCapUsd: 0.5, adjudicationCapUsd: 0.5,
+  references: { maxFiles: 20, maxBytes: 8388608, extensions: ['.md', '.txt', '.pdf'], default: { exists: true, found: 2, names: REF_NAMES, bytes: 48211, problems: 0 } },
+};
+/* ---- a full attempt of the new mode, in the shape of backend/pipeline (invented: Atlas and Meridian) ---- */
+const COUNTING = new Set(['intended', 'other_valid_error']);
+const LOW_KEY = { intended: 'intended', other_valid_error: 'otherValid', permitted_alternative: 'permittedAlternative', grader_defect: 'graderDefect', ambiguous: 'ambiguous', tool_failure: 'toolFailure', unsupported: 'unsupported' };
+const adj = klass => ({ class: klass, claimed: klass, counts: COUNTING.has(klass), note: '', application: null });
+function explainedStage(name, spec, passed, over = {}) {
+  const bar = name === 'test' ? 0.45 : 0.4, extra = {};
+  const lows = { lowScorers: 0, intended: 0, otherValid: 0, permittedAlternative: 0, graderDefect: 0, ambiguous: 0, toolFailure: 0, unsupported: 0, counted: 0 }, unexplained = [];
+  spec.forEach(([score, klass], i) => {
+    const low = typeof score === 'number' && score < bar;
+    extra[i] = low && klass ? { adjudication: adj(klass), countsTowardPass: COUNTING.has(klass) } : { adjudication: null, countsTowardPass: low ? null : false };
+    if (!low) return;
+    lows.lowScorers++;
+    if (klass) lows[LOW_KEY[klass]]++;
+    if (COUNTING.has(klass)) lows.counted++; else unexplained.push({ pilot: 'p' + (i + 1), class: klass || 'unsupported', score });
+  });
+  return { ...stageOf(name, spec.map(x => x[0]), passed, extra), explained: lows.counted, lows, unexplained, recount: null, ...over };
+}
+const TRAP_RULE = 'Leverage is measured on funded debt net of cash held in the blocked account.';
+const BRIEF = {
+  taskType: { workflow: 'Quarterly covenant review', why: 'The world files hold a facility agreement, a ledger and an amendment that a covenant review can use.', referenceEntries: ['Covenant walkthrough'] },
+  decision: { ask: 'Does the Atlas borrower meet its leverage covenant at quarter end?', mandate: 'Advise the credit committee whether a waiver is needed.', authorityFile: 'Atlas_Facility_Agreement.txt', effectiveDate: '2025-01-01', decisionDate: '2025-03-31' },
+  files: [{ name: 'Atlas_Facility_Agreement.txt', role: 'authority' }, { name: 'Atlas_Ledger.csv', role: 'evidence' }, { name: 'Meridian_Old_Schedule.csv', role: 'decoy' }],
+  traps: [{ id: 't1', primary: true, rule: { file: 'Atlas_Facility_Agreement.txt', clause: TRAP_RULE },
+    correctPath: { reasoning: 'Net the blocked cash against funded debt before the ratio.', action: 'Report the covenant as met', figures: [{ label: 'Net leverage', value: 3.4, tolerance: 0.05 }] },
+    wrongPath: { reasoning: 'Use gross funded debt, as the ledger line shows it.', action: 'Report the covenant as breached', figures: [{ label: 'Net leverage', value: 4.1, tolerance: 0.05 }] },
+    changesDecision: 'required_conclusion', whyTempting: { kind: 'effort', source: 'The ledger has one gross debt line that is quick to use.' }, consequence: { source: 'A breach report triggers the default notice of the amendment.' },
+    strongestAlternative: { answer: 'Report the covenant as met and ask for a waiver', whyRejected: 'No waiver is needed while the ratio is inside the limit.' } }],
+  permittedAlternatives: [{ answer: 'Report the covenant as met and add a monitoring step', support: 'The agreement lets the committee add monitoring.', file: 'answers/alt-1.md' }], permittedAlternativesReason: '', controls: [], primary: 't1',
+};
+const CHECK = { pass: true, failed: [], checks: { governs: true, inForce: true, notSuperseded: true, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' }, hits: 0 };
+const FAIRNESS = { status: 'passed', repairs: 0, stage1: { state: 'ok', tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0 }, stage2: { disposition: 'excluded_by_clause', objectionClass: 'permitted_discretion', evaluations: 1, application: CHECK, briefApplication: null } };
+const ANSWER_SET = { goldenMin: 0.9, alternativeMin: 0.85, passed: true, answers: [
+  { name: 'golden', kind: 'golden', file: 'golden-answer.md', threshold: 0.9, sha256: 'b'.repeat(64), score: 0.95, grades: [0.96, 0.94], passed: true, unstable: false, runs: [{ why: 'first grading', grades: [0.96, 0.94], score: 0.95, passed: true, unstable: false }] },
+  { name: 'alt-1', kind: 'alternative', file: 'answers/alt-1.md', threshold: 0.85, sha256: 'c'.repeat(64), score: 0.8767, grades: [0.9, 0.8, 0.88], passed: true, unstable: true, runs: [{ why: 'first grading', grades: [0.9, 0.8, 0.88], score: 0.8767, passed: true, unstable: true }] }] };
+const FREEZE = { n: 1, at: '2026-10-23T10:20:00.000Z', reason: 'before the pilots', packetSha256: 'd1'.repeat(32), packetFiles: 9, promptSha256: 'e2'.repeat(32), guidelineSha256: 'f3'.repeat(32), goldenSha256: 'a4'.repeat(32), answerSetSha256: 'b5'.repeat(32), answers: [{ name: 'golden', sha256: 'c6'.repeat(32) }], pilot: { model: 'claude-opus-5-5', effort: 'medium', capUsd: 3 }, grader: { model: 'claude-sonnet-5-5', effort: 'medium' }, budget: { totalCapUsd: 60, designCapUsd: 5, pilotCapUsd: 3 } };
+const newAttempt = (over = {}) => ({ ...attempt({ n: 1 }), mode: 'new', validation: 'complete', traps: ['Gross debt used for the ratio'], fairness: FAIRNESS, answerSet: ANSWER_SET, calibration: { score: 0.95, verdict: 'meets-guidance', reason: 'Matches every rubric line.' }, freeze: [FREEZE], guidelineRepair: null, diagnostic: null, taskType: BRIEF.taskType,
+  difficulty: { status: 'pending', screen: null, test: null }, screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true),
+  test: explainedStage('test', [[0.1, 'intended'], [0.2, 'ambiguous'], [0.3, 'other_valid_error'], [0.8, null], [null, null]], null, {}), ...over });
+const newDesign = () => ({ ...design(), traps: [{ id: 't1', title: 'Gross debt used for the ratio', files: ['Atlas_Ledger.csv'], mechanism: 'm', decoy: 'Meridian_Old_Schedule.csv', correctValue: '3.4', wrongValue: '4.1' }], editedFiles: [], unscanned: [], fairness: FAIRNESS, taskType: BRIEF.taskType, brief: BRIEF, alternatives: [{ name: 'alt-1', file: 'answers/alt-1.md', answer: 'Report the covenant as met and add a monitoring step' }], answerSet: ANSWER_SET, freeze: [FREEZE] });
+const NEW_REFS = { source: 'default', found: 2, names: REF_NAMES, bytes: 48211, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: [], scannedChars: 5000, truncated: false };
+/* the second review of a design that the checks rejected: a clause that did not apply, files that could not be read, and files the reviewers saw only in part */
+const FAILED_STAGE2 = {
+  disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, cut: ['Atlas_Facility_Agreement.txt', 'Meridian_Long_Ledger.csv'],
+  application: { pass: false, failed: ['notSuperseded'], checks: { governs: true, inForce: true, notSuperseded: false, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' },
+    hits: [{ id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt', snippet: 'This amendment replaces the schedule.' }, { id: 'more', kind: 'more', document: '', snippet: '3 more passages of supersession wording were found near the clause and are not listed here' }, { id: 'u1', kind: 'unreadable', document: 'Meridian_Policy_Scan.pdf', snippet: 'x' }],
+    unscanned: ['Meridian_Policy_Scan.pdf', 'Atlas_Appendix.xlsx'] },
+  briefApplication: { pass: false, count: 4, failures: [{ trap: 1, part: 'rule', failed: ['governs', 'inForce'] }, { trap: 2, part: 'whyRejected', failed: ['notSuperseded'] }], unscanned: ['Meridian_Policy_Scan.pdf'] },
+};
 function handleApi(req, res, url, body) {
   const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
   if (req.method === 'POST') {
@@ -60,7 +116,7 @@ function handleApi(req, res, url, body) {
   if (req.method === 'GET' && url === '/api/pipeline') return send(200, { pipelines: [...pipelines.values()].map(p => ({ id: p.id, label: p.label, createdAt: p.createdAt, stage: p.stage, running: !ENDED.includes(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.capUsd, attempt: p.attempts.length, redesigns: p.redesigns })), running: null, config: CONFIG });
   if (req.method === 'POST' && url === '/api/pipeline/start') {
     if ([...pipelines.values()].some(p => !ENDED.includes(p.stage))) return send(409, { error: 'A pipeline is already running.' });
-    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, config: { acceptMissing: false, screenBar: 0.4, testBar: 0.45 }, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
+    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, config: { acceptMissing: false, screenBar: 0.4, testBar: 0.45, designMode: body.designMode, fairnessSet: body.fairnessSet === true, keepAsWorld: body.keepAsWorld || [] }, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
     pipelines.set(state.id, state);
     return send(200, { id: state.id });
   }
@@ -165,6 +221,14 @@ async function noHorizontalOverflow(label) {
   }
   await viewport(1440, 1000);
 }
+async function noOverflowAtPhone(label) {
+  for (const [w, h] of [[390, 844], [320, 640]]) {
+    await viewport(w, h);
+    const o = await overflow();
+    assert.ok(o.scroll <= o.inner, `${label}: horizontal overflow at ${w}x${h}: scrollWidth ${o.scroll} > ${o.inner}`);
+  }
+  await viewport(1440, 1000);
+}
 /* The page repaints from a poll every 2 seconds; wait for the next one that shows what the fake companion now holds. */
 const POLL_WAIT = 6000;
 const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage")||{}).textContent||"")`;
@@ -214,10 +278,24 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await text('[data-pl=start]'), 'Approve and start');
     assert.match(await text('#pl-why'), /Enter the task link/);
     assert.equal(await count('#pl-root button.primary'), 1, 'one yellow primary');
-    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '50', 'the companion\'s default total cap');
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '60', 'the companion\'s default total cap');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80. The reviews and the adjudication of low scores are part of every attempt.', 'the default total cap pays for it: no warning');
     assert.equal(await count('#pl-start-form input[data-pl-in=ack]'), 4);
-    assert.equal(await count('#pl-start-form input[type=checkbox]'), 5, 'the four acknowledgements and the withheld-files choice');
+    assert.equal(await count('#pl-start-form input[type=checkbox]'), 6, 'the four acknowledgements, the withheld-files choice and the diagnostic answers');
+    /* the design mode and the fields of the new mode */
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-start-form select[data-pl-in=designMode] option")].map(o=>o.textContent+(o.selected?"*":"")).join("|")'), 'New task from the world files*|Harden the existing task');
+    assert.equal(await text('#pl-refs'), 'Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). The designer and the reviewers read them and their text is sent to Anthropic. Pilots never see them.');
+    assert.match(await text('#pl-keep-hint'), /^Warning: the pilots get these files, and so does the designer, even if the names look like answers or grading material\./);
+    assert.match(await text('.pl-fairness-set'), /^Also run the diagnostic answers \(adds up to USD 3\.00 per attempt\)/);
+    await evaluate('(()=>{const s=document.querySelector("#pl-start-form select[data-pl-in=designMode]");s.value="harden";s.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await waitFor('!document.querySelector("#pl-keep")', 'the harden mode to hide the fields of the new mode');
+    assert.equal(await exists('#pl-refs'), false);
+    assert.equal(await exists('.pl-fairness-set'), false);
+    assert.equal(await count('#pl-start-form input[type=checkbox]'), 5);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 41.40. The fairness review is part of every attempt.', 'the harden mode has its own figure');
+    assert.equal(await focused(), 'design-mode', 'the keyboard stays on the choice');
+    await evaluate('(()=>{const s=document.querySelector("#pl-start-form select[data-pl-in=designMode]");s.value="new";s.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await waitFor('!!document.querySelector("#pl-keep")', 'the fields of the new mode to come back');
     assert.equal(await evaluate('document.querySelectorAll("#pl-root [role=status][aria-live=polite]").length >= 3'), true, 'live regions for the message, the stage and the wait');
     await noHorizontalOverflow('start card');
     pass('the view opens in the shell with its own header, one yellow primary (disabled with its reason), four acknowledgements and no horizontal overflow at three sizes');
@@ -233,30 +311,43 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await call('Input.insertText', { text: TASK_LINK });
     await delay(80);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/);
-    /* the least total cap, typed live: the figure follows the pilot cap, and Start waits for a cap that covers it */
+    /* the least total cap, typed live: the figure follows the pilot cap and the diagnostic switch, and a total cap below it warns and does not block */
+    const SENT = ' The reviews and the adjudication of low scores are part of every attempt.';
     await evaluate('document.querySelector("#pl-cap").focus();document.querySelector("#pl-cap").select()');
     await call('Input.insertText', { text: '40' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT + ' With this total cap the run may stop at the cap before the 5-pilot test.');
     assert.doesNotMatch(await text('#pl-why'), /at least USD/, 'a low total cap warns and does not block');
     await evaluate('document.querySelector("#pl-cap").select()');
-    await call('Input.insertText', { text: '50' });
+    await call('Input.insertText', { text: '60' });
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT);
+    await click('#pl-start-form input[data-pl-in=fairnessSet]');
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 63.25.' + SENT + ' With this total cap the run may stop at the cap before the 5-pilot test.', 'the diagnostic answers go over the default total cap of 60');
+    await click('#pl-start-form input[data-pl-in=fairnessSet]');
     await evaluate('document.querySelector("#pl-pilot-cap").focus();document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '5' });
     await delay(80);
-    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\./, 'the figure follows the pilot cap as it is typed');
-    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\. With this total cap the run may stop/, 'and warns while the total cap is below it');
+    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 75\.90\./, 'the figure follows the pilot cap as it is typed');
+    assert.match(await text('#pl-cap-min'), /USD 75\.90\. The reviews and the adjudication of low scores are part of every attempt\. With this total cap the run may stop/, 'and warns while the total cap is below it');
     assert.equal(await evaluate('document.querySelector("#pl-cap").getAttribute("aria-describedby")'), 'pl-cap-hint pl-cap-min');
     await evaluate('document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '3' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/, 'a cap that covers it: the next reason is the acknowledgements');
+    /* the files to keep as world files, typed into the field */
+    await evaluate('document.querySelector("#pl-keep").focus()');
+    await call('Input.insertText', { text: 'Atlas_Parent_Answer.xlsx, Meridian_Notes.txt' });
+    await delay(80);
     await shot('01b-min-cap-1440', 1440, 1000);
+    await shot('01c-new-mode-390', 390, 844);
+    await viewport(1440, 1000);
     await evaluate('document.querySelector("#pl-url").focus()');
     const order = [];
-    for (let i = 0; i < 6; i++) { await press('Tab'); order.push(await focused()); }
-    assert.deepEqual(order, ['cap', 'model', 'effort', 'pilot-cap', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
+    for (let i = 0; i < 9; i++) { await press('Tab'); order.push(await focused()); }
+    assert.deepEqual(order, ['design-mode', 'cap', 'model', 'effort', 'pilot-cap', 'keep-as-world', 'fairness-set', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
     assert.equal(await evaluate('document.querySelector("[data-pl-key=accept-missing]").checked'), false, 'the withheld-files choice is off unless the person turns it on');
     for (let i = 0; i < 4; i++) {
       await press('Space');
@@ -276,14 +367,14 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const start = posts.find(p => p.url === '/api/pipeline/start');
     assert.ok(start, 'the page posted a start');
     assert.equal(start.nonce, NONCE);
-    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 50, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
+    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 60, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, designMode: 'new', keepAsWorld: ['Atlas_Parent_Answer.xlsx', 'Meridian_Notes.txt'], acknowledgements: ACK_IDS });
     assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 1);
     assert.equal(await focused(), 'pl-stage', 'the keyboard moves to the stage line');
     assert.equal(await evaluate('document.body.innerHTML.includes("SECRET-TOKEN-123")'), false, 'the link is nowhere in the page');
     assert.equal(await exists('[data-pl=start]'), false);
     assert.match(await text('#pl-start-form'), /A pipeline is running/);
     assert.equal(await exists('[data-pl=stop]'), true, 'Stop is visible while it runs');
-    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 50\.00/);
+    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 60\.00/);
     pass('Enter on the button posts once with the nonce and the exact body; the link leaves the page; the keyboard lands on the stage line; Stop and the spend line show');
     await noHorizontalOverflow('running');
 
@@ -321,7 +412,8 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const continuesBefore = posts.filter(p => p.url.endsWith('/continue')).length;
     set({
       import: { fileCount: 40, page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle: { found: true, label: 'Show all files', flipped: true, filesBefore: 4, filesAfter: 40, learned: false },
-        skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES },
+        skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES,
+        keepAsWorld: [{ name: 'Atlas_Parent_Answer.xlsx', present: true, warning: 'its name looks like an answer or grading material (a file named like an answer), and it goes to the designer and the pilots as a world file' }, { name: 'Meridian_Notes.txt', present: false, warning: 'the task has no file by this name' }] },
       waiting: { kind: 'confirm-files', message: '40 files were fetched. Compare them with the files listed on the task page, then press Continue.', since: new Date().toISOString() },
     });
     await waitFor(stageIs('^Waiting for you: check the files$'), 'the confirm-files wait', POLL_WAIT);
@@ -334,6 +426,14 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await count('#pl-wait .pl-notes li'), 3, 'the three notes');
     assert.match(await text('#pl-wait .pl-notes'), /The loader could not fully cover these places/);
     assert.equal(await evaluate('document.querySelector("#pl-wait .pl-notes").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the notes come before the files');
+    /* the files the owner asked to keep as world files, with the companion's warning */
+    assert.equal(await text('#pl-wait .pl-kept strong'), 'You asked to keep 2 files as world files');
+    assert.match(await text('#pl-wait .pl-kept'), /The designer and the pilots get these files, even if the name looks like an answer or grading material\./);
+    assert.match(await text('#pl-wait .pl-kept li:nth-child(1)'), /^Atlas_Parent_Answer\.xlsx\s+its name looks like an answer or grading material[\s\S]*goes to the designer and the pilots as a world file$/);
+    assert.match(await text('#pl-wait .pl-kept li:nth-child(2)'), /^Meridian_Notes\.txt\s+the task has no file by this name\s+Not among the files that were fetched\.$/);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-kept").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the warning comes before the list of files');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-wait .pl-kept")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-wait .pl-files-box")).borderLeftColor'), true, 'and it is marked as a warning');
+    assert.match(await text('#pl-import .pl-kept'), /You asked to keep 2 files as world files/, 'the import card shows it too');
     assert.match(await text('#pl-wait'), /Skipped \(2\)[\s\S]*Atlas_Thumbs\.db\s+a system file[\s\S]*Atlas_Archive_2019\.zip\s+larger than the size cap/);
     assert.match(await text('#pl-wait'), /Show all files[\s\S]*Found and turned on \(\u201CShow all files\u201D\)\. 4 files offered before, 40 after\./);
     assert.equal(await evaluate('[...document.querySelectorAll("#pl-wait .pl-confirm-actions button")].map(b=>b.textContent.trim()).join("|")'), 'Every file is there: continue|Stop');
@@ -371,7 +471,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await waitFor(stageIs('^Classify:'), 'classify', POLL_WAIT);
     assert.match(await text('#pl-import'), /9 files in all · 5 world · 3 task · 2 withheld · 1 other/);
     assert.match(await text('#pl-import'), /Found and turned on \(“Show all files”\)\. 4 files offered before, 9 after\./);
-    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 50\.00/);
+    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 60\.00/);
     assert.equal(await evaluate('document.querySelector("#pl-timeline [aria-current=step] strong").textContent'), 'Classify');
     assert.match(await text('#pl-spend'), /Classifying what was captured/, 'the companion\'s progress message shows under the stage');
     set({ stage: 'design', classification: { prompt: { kind: 'section', section: 'Business request', number: 2 }, guideline: { kind: 'file', file: 'Atlas_Grader_Guide.docx' }, goldenAnswer: { kind: 'file', file: 'Atlas_Reference_Answer.docx' }, worldFiles: ['Atlas_Facility_Schedule.csv', 'Meridian_Ledger.xlsx'], taskFiles: ['Atlas_Brief.txt'], other: [], withheld: [{ name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }, { name: 'Atlas_Reference_Answer.docx', why: 'it is the golden answer' }], notes: [], warnings: [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline or the golden answer' }] }, design: design(), attempt: 1, attempts: [attempt()] });
@@ -427,6 +527,29 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('03-screen-withheld-1440', 1440, 1000);
     pass('while a round runs the withheld fields read "Withheld while a round runs", the notice explains, and the golden answer is nowhere in the page');
 
+    /* ---------- the new mode while a round runs: what the companion's own redaction leaves of a full attempt ---------- */
+    {
+      const { redactPipelineData } = require(path.join(root, 'backend', 'pipeline', 'redact.cjs'));
+      const [id, state] = [...pipelines][0];
+      const running = { ...state, redacted: false, stage: 'screen', design: newDesign(), references: NEW_REFS, config: { ...state.config, designMode: 'new' }, attempts: [newAttempt({ outcome: 'in-progress', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [null, null]], null) })] };
+      pipelines.set(id, redactPipelineData(JSON.parse(JSON.stringify(running))));
+      await waitFor('/Withheld while a round runs/.test((document.querySelector("#pl-brief")||{}).innerText||"")', 'the new mode while a round runs', POLL_WAIT);
+      const gone = await evaluate('(()=>{const t=document.body.innerText;return ["Quarterly covenant review","Atlas_Facility_Agreement","Report the covenant","Net the blocked cash","breached","Usable cash is 1,250"].filter(x=>t.includes(x))})()');
+      assert.deepEqual(gone, [], 'nothing of the brief, the golden answer or the paths is on the page while a round runs');
+      assert.equal(await text('#pl-brief .pl-withheld'), 'Withheld while a round runs');
+      assert.match(await text('#pl-design .pl-task-type'), /^Task type: Withheld while a round runs$/);
+      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Not checked for leaked passages: Withheld while a round runs/);
+      assert.deepEqual(await evaluate('[...document.querySelectorAll("#pl-checks h3")].map(h=>h.textContent)'), ['Fairness: could another answer be better supported?', 'Difficulty: do the pilots fail for the intended reason?', 'Answer set: can the guideline grade the fixed answers?', 'Guideline repair', 'Diagnostic answers', 'Freeze records'], 'a repair or a diagnostic that may exist is withheld, not left out');
+      assert.equal(await evaluate('[...document.querySelectorAll("#pl-checks .pl-withheld")].length >= 3'), true, 'the fairness, the answer set and the counts are withheld');
+      assert.match(await text('#pl-checks .card-title'), /Checks complete/, 'that the checks finished is not private');
+      assert.match(await text('#pl-screen .pl-lows'), /^Counts by class: Withheld while a round runs$/);
+      assert.match(await text('#pl-screen tbody tr:first-child td:nth-child(4)'), /Counts\s+Withheld while a round runs/, 'whether a pilot counts shows, the diagnosis does not');
+      await noHorizontalOverflow('the new mode withheld');
+      await noOverflowAtPhone('the new mode withheld');
+      await shot('03c-new-withheld-1440', 1440, 1000);
+      pipelines.set(id, { ...pipelines.get(id), attempts: [], references: null, redacted: false });
+    }
+
     /* ---------- the screen and the test ---------- */
     set({ redacted: false, design: design() });
     setAttempt({ screen: stageOf('screen', [0.31, 0.12], true), test: stageOf('test', [0.1, 0.2, 0.9, 0.3], null, { 3: { state: 'running', score: null, valid: false, belowBar: null, audit: null } }) });
@@ -467,7 +590,9 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-screen .card-title'), /Screen failed/);
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(2)'), 'Stopped: not needed\nNot graded: the screen was already decided after pilot 1.');
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(3)'), 'Not needed');
-    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Not needed');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Not needed', 'the column of the count toward the pass');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(5)'), 'Not needed', 'and the audit column');
+    assert.equal(await evaluate('document.querySelector("#pl-screen thead th:nth-child(4)").textContent'), 'Counts toward the pass');
     assert.match(await text('#pl-screen tbody tr:nth-child(1) td:nth-child(3)'), /No/);
     assert.equal(await evaluate('document.querySelector("#pl-screen tbody tr:nth-child(2) .pill").className'), 'pill ', 'the audit badge is plain: neither amber nor red');
     assert.equal(await evaluate('document.querySelectorAll("#pl-screen .pill.amber, #pl-screen .pill.red").length'), 1, 'only the Screen failed pill is red, and it comes with its words');
@@ -508,6 +633,87 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('04d-test-stopped-390', 390, 844);
     await viewport(1440, 1000);
     pass('the two bars show in their own stage (below 0.40 for the screen, below 0.45 for the test); a screen stopped after pilot 1 and a test stopped after 2 pilots at or above the bar show the pilots that were not needed as "Stopped: not needed" with their reason, and the stage says why it stopped');
+
+    /* ---------- a full attempt of the new mode: the brief, fairness and difficulty apart, the answer set, the freeze, and which low scores count ---------- */
+    set({ stage: 'test', running: true, redacted: false, redesigns: 0, summary: '', result: null, design: newDesign(), references: { ...NEW_REFS, partial: ['Atlas_Review_Handbook.md'], truncated: true },
+      attempts: [newAttempt({ difficulty: { status: 'pending', screen: { passed: true, explained: 2, belowBar: 2, of: 2, need: 2, lows: explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true).lows }, test: null } })] });
+    await waitFor(stageIs('^Test: five blind'), 'the new mode attempt', POLL_WAIT);
+    await waitFor('!!document.querySelector("#pl-brief .pl-brief-table")', 'the brief');
+    assert.match(await text('#pl-design .pl-task-type'), /^Task type: Quarterly covenant review\. Why: The world files hold/);
+    assert.equal(await text('#pl-design .pl-refs-summary'), 'Reference documents used: 2 files (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). Pilots never see them. Checked for leaked passages only in part: Atlas_Review_Handbook.md. Not checked for leaked passages (their text could not be read, or the scan cap left them out): Meridian_Workflow_Catalog.pdf.');
+    assert.equal(await text('#pl-brief .pl-brief-decision dt:last-of-type'), 'Decision date');
+    assert.equal(await text('#pl-brief .pl-brief-decision dd:last-of-type'), '2025-03-31');
+    assert.equal(await text('#pl-brief h2'), 'What the traps rest on');
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-brief thead th")].map(h=>h.textContent).join("|")'), 'Trap|Rule|Correct path|Wrong path|Why it is tempting|Strongest alternative');
+    const brief = JSON.parse(await evaluate('JSON.stringify(Object.fromEntries([...document.querySelectorAll("#pl-brief tbody tr:first-child td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])))'));
+    assert.ok(brief.Rule.includes('Atlas_Facility_Agreement.txt') && brief.Rule.includes(TRAP_RULE), 'the rule and its clause are in the rule column');
+    assert.ok(brief['Correct path'].includes('Report the covenant as met') && brief['Correct path'].includes('3.4') && !/breached|4\.1/.test(brief['Correct path']), 'the correct path is in its own column');
+    assert.ok(brief['Wrong path'].includes('Report the covenant as breached') && brief['Wrong path'].includes('4.1') && !brief['Wrong path'].includes('Report the covenant as met'), 'and the wrong path in its own');
+    assert.ok(brief['Why it is tempting'].startsWith('effort') && brief['Why it is tempting'].includes('What it costs'), 'why it is tempting');
+    assert.ok(brief['Strongest alternative'].includes('ask for a waiver') && brief['Strongest alternative'].includes('Ruled out by: No waiver is needed'), 'the strongest alternative and the clause that rules it out');
+    assert.equal(await text('#pl-brief .pl-alt-score'), 'Its answer scored 0.88 against the guideline (it needs 0.85), and the grades were unstable.');
+    /* fairness and difficulty: two headings, two lists, each with its own words */
+    assert.deepEqual(await evaluate('[...document.querySelectorAll("#pl-checks h3")].map(h=>h.textContent)'), ['Fairness: could another answer be better supported?', 'Difficulty: do the pilots fail for the intended reason?', 'Answer set: can the guideline grade the fixed answers?', 'Freeze records']);
+    const fairText = await text('#pl-checks .pl-review'), diffText = await text('#pl-checks .pl-difficulty');
+    assert.match(fairText, /Blind review: a reader with only the prompt and the files gave an answer \(1 try\)\./);
+    assert.match(fairText, /Second review: the other answer is ruled out by a clause of the files \(objection: permitted discretion\)\./);
+    assert.match(fairText, /Application check of the clause that rules the other answer out: passed\./);
+    assert.ok(!/Screen|Test|pilot/.test(fairText), 'no pilot result in the fairness list');
+    assert.match(diffText, /^Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\./);
+    assert.match(diffText, /Test: not run\.$/);
+    assert.ok(!/review|clause/i.test(diffText), 'no review in the difficulty list');
+    assert.equal(await evaluate('document.querySelector("#pl-checks .pl-unstable").checkVisibility()'), true, 'the unstable grade is marked where it can be seen');
+    assert.match(await text('#pl-checks .pl-unstable'), /^Unstable: the grades fell on both sides of the line, so a third grade decided\. All grades: 0\.90, 0\.80, 0\.88\.$/);
+    const answers = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-answers tbody tr")].map(r=>Object.fromEntries([["row",r.querySelector("th").innerText.replace(/\\s+/g," ").trim()],...[...r.querySelectorAll("td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])])))'));
+    assert.deepEqual(answers.map(a => [a.row, a.Needs, a.Grades, a.Score]), [['Golden answer', '0.90', '0.96, 0.94', '0.95'], ['Permitted alternative alt-1', '0.85', '0.90, 0.80, 0.88', '0.88']]);
+    assert.ok(!answers[0].Result.includes('Unstable') && answers[1].Result.includes('Unstable'), 'only the unstable answer is marked');
+    assert.match(await text('#pl-checks .pl-freeze li:first-child'), /^Freeze 1 \(before the pilots\)[\s\S]*Packet d1d1d1d1d1d1 \(9 files\); prompt e2e2e2e2e2e2; guideline f3f3f3f3f3f3; golden answer a4a4a4a4a4a4; answer set b5b5b5b5b5b5\./);
+    /* a design the checks rejected: the checks of the brief's clauses by trap, a file that could not be read, and the files the reviewers saw in part */
+    setAttempt({ fairness: { ...FAIRNESS, status: 'rejected', stage2: FAILED_STAGE2 } });
+    await waitFor('/Trap 2, why the alternative is rejected/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the failed checks', POLL_WAIT);
+    const items = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-review > li")].map(li=>li.innerText.replace(/\\s+/g," ").trim()))'));
+    assert.equal(items.length, 4, 'the blind review, the second review and one line for each check');
+    const app = items.find(x => x.startsWith('Application check of the clause that rules the other answer out')), brf = items.find(x => x.startsWith('Application check of the clauses the brief rests on'));
+    assert.match(app, /^Application check of the clause that rules the other answer out: failed\. it may be superseded\. In force from 2025-01-01; decision on 2025-03-31\. 1 place in the files mentions a change of a document\./);
+    assert.ok(app.includes('Meridian_Policy_Scan.pdf: This file could not be read as text, so it could not be checked for a later document that replaces it.'));
+    assert.ok(app.includes('More passages were found than are shown here (3 more).'));
+    assert.ok(app.includes('These files could not be read as text, so they could not be checked for a later document that replaces the clause: Atlas_Appendix.xlsx.'));
+    assert.ok(brf.startsWith('Application check of the clauses the brief rests on: failed. 4 checks made.'), brf);
+    assert.ok(brf.includes('Trap 1, the rule clause: it does not govern this decision; it is not shown to be in force.') && brf.includes('Trap 2, why the alternative is rejected: it may be superseded.'));
+    assert.ok(!app.includes('Trap 1') && !brf.includes('More passages'), 'each failure is under its own check');
+    assert.equal(await text('#pl-checks .pl-cut'), 'The reviewers saw these files only in part: Atlas_Facility_Agreement.txt, Meridian_Long_Ledger.csv.');
+    assert.equal(await evaluate('document.querySelectorAll("#pl-checks .pl-hit-unreadable").length'), 1);
+    await noOverflowAtPhone('the failed checks');
+    await shot('03g-new-failed-checks-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03g-new-failed-checks-390', 390, 844);
+    await viewport(1440, 1000);
+    setAttempt({ fairness: FAIRNESS });
+    await waitFor('!/Trap 2, why the alternative is rejected/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the passing checks again', POLL_WAIT);
+    /* the pilots of the test: which low scores count, and the ones that do not are marked with their diagnosis */
+    const counts = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-test tbody tr")].map(r=>r.querySelector("td[data-label=\\"Counts toward the pass\\"]").innerText.replace(/\\s+/g," ").trim()))'));
+    assert.deepEqual(counts, ['\u2713 Counts Diagnosis: the intended error', '! Low score that does not count Diagnosis: ambiguous', '\u2713 Counts Diagnosis: another valid error', 'Does not count: the score is not below 0.45', 'Waiting for a score']);
+    assert.equal(await count('#pl-test .pl-nocount'), 1);
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-test .pl-nocount")).color!==getComputedStyle(document.querySelector("#pl-test .pl-counts")).color'), true, 'a counting pilot and one that does not look different, and each has its words');
+    assert.equal(await text('#pl-test .pl-unexplained li'), 'Pilot 2 scored 0.20: ambiguous');
+    assert.match(await text('#pl-test .pl-lows'), /^Low scores: 3\. By diagnosis: 1 intended, 1 another valid error, 0 permitted alternative, 0 grader defect, 1 ambiguous, 0 tool failure, 0 not supported\. Counted toward the pass: 2\.$/);
+    assert.equal(await text('#pl-test .pl-tally'), '3 of 5 below 0.45; 2 count toward the pass; 4 needed.');
+    await noHorizontalOverflow('the new mode cards');
+    await noOverflowAtPhone('the new mode cards');
+    await shot('03d-new-brief-1440', 1440, 1000);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('03e-new-checks-1440', 1440, 1000);
+    await viewport(390, 844);
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-brief thead")).position'), 'absolute', 'at phone width the brief table folds into labels per cell');
+    await evaluate('document.querySelector("#pl-brief").scrollIntoView()');
+    await shot('03d-new-brief-390', 390, 844);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('03e-new-checks-390', 390, 844);
+    await evaluate('document.querySelector("#pl-test").scrollIntoView()');
+    await shot('03f-new-test-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('a full attempt of the new mode: the task type, the brief with each trap in its own columns, fairness and difficulty as two separate results, the answer set with an unstable grade marked, the freeze record, and each pilot saying whether its low score counts');
 
     /* ---------- done: result and export ---------- */
     set({ stage: 'done', running: false, spentUsd: 17.4, redesigns: 2, summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 3). Export the private zip to take the design away.', attempts: [
@@ -582,6 +788,37 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('04b-budget-390', 390, 844);
     await viewport(1440, 1000);
     pass('a stop at the cap before the test marks Test as where it stopped, the Test card says it was not started, and the result says why in plain words');
+
+    /* ---------- the checks did not finish: a third pipeline that the cap stopped before the blind review ---------- */
+    await click('[data-pl=new]');
+    await waitFor('!!document.querySelector("#pl-url")', 'the form to open for the third pipeline');
+    await evaluate('document.querySelector("#pl-url").focus()');
+    await call('Input.insertText', { text: TASK_LINK });
+    for (const id of ACK_IDS) await click('#pl-start-form input[data-id="' + id + '"]');
+    await click('[data-pl=start]');
+    await waitFor(stageIs('^Import:'), 'the third pipeline', 5000);
+    assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 3, 'a third start was posted');
+    set({ stage: 'budget', running: false, capUsd: 30, spentUsd: 24.5, references: NEW_REFS, design: null, summary: 'Stopped before the blind review: USD 24.50 spent, and the step could cost up to USD 2.30.', result: { verdict: 'incomplete', message: 'x', validation: 'incomplete' },
+      attempts: [newAttempt({ validation: 'incomplete', outcome: 'budget', fairness: { ...FAIRNESS, status: 'incomplete', stage2: null }, difficulty: { status: 'pending', screen: null, test: null }, screen: null, test: null, freeze: [], calibration: null })] });
+    await waitFor(stageIs('^Stopped at the cap'), 'the incomplete result', POLL_WAIT);
+    assert.equal(await text('#pl-stage'), 'Stopped at the cap, in the Design step: the next call would pass the total cap, so it was not started.');
+    assert.equal(await text('#pl-verdict h2'), 'The checks did not finish');
+    assert.match(await text('#pl-verdict .card-title'), /Incomplete/);
+    assert.equal(await text('#pl-verdict .pl-incomplete'), 'The checks did not finish. Nothing here counts as a pass: a design passes only after every check of it has finished.');
+    assert.equal(await text('#pl-checks .pl-incomplete'), 'The checks did not finish. Nothing here counts as a pass: a design passes only after every check of it has finished.');
+    assert.match(await text('#pl-checks .card-title'), /Checks did not finish/);
+    assert.match(await text('#pl-checks .pl-review'), /Second review: not run\./);
+    assert.match(await text('#pl-checks .pl-difficulty'), /Screen: not run\.\s+Test: not run\./);
+    assert.equal(await evaluate('/passed|Passed/.test(document.querySelector("#pl-verdict").innerText.replace("Nothing here counts as a pass","")+document.querySelector("#pl-checks .pl-difficulty").innerText)'), false, 'nothing reads as a pass');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-checks .pl-incomplete")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-checks")).borderLeftColor'), true, 'the notice is marked');
+    await noHorizontalOverflow('the checks did not finish');
+    await noOverflowAtPhone('the checks did not finish');
+    await shot('04e-incomplete-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('04e-incomplete-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('a run stopped before its checks finished says so plainly in the checks card and the result, and nothing reads as a pass');
 
     /* ---------- leaving and coming back ---------- */
     await click('[data-dash-tab="overview"]');

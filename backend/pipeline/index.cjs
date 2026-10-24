@@ -20,9 +20,16 @@
        onStage  an observer called with (stage, { id, attempt }) at every stage change; for tests, errors ignored
 
      start(body) -> { id }          list() -> { pipelines, running, config }       get(id) -> view      busy() -> true while one runs
-       body: { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, designCapUsd?, graderModel?, label?, acceptMissing? }
+       body: { url | sourceDir, capUsd, model, effort, pilotCapUsd, acknowledgements, designCapUsd?, graderModel?, label?, acceptMissing?,
+               designMode? ('new' default | 'harden'), keepAsWorld? [file names], referencesDir? (path | false), fairnessSet? }
        capUsd must pay for one full attempt (design, the 2-pilot screen and the 5-pilot test): list().config.minCap holds the parts
-       { fixedUsd, perPilotUsd, pilots, headroom } of the least cap, ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd))
+       { fixedUsd, perPilotUsd, pilots, headroom } of the least cap, ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd));
+       config.minCapByMode has them for both modes.
+     Designer v2 (designMode 'new'; docs/local-agents.md section 20, items 11 to 19): the designer builds a new task from the world files and the reference
+       documents (new-design.cjs); each attempt faces the answer set, the blind review, the reveal and the application check before any pilot, and a
+       low pilot score counts toward a pass only when it is explained (an adjudication per low score). Fairness (attempt.fairness) and difficulty
+       (attempt.difficulty) are separate results; attempt.validation is 'complete' before a pass can count; a cap that cannot pay for the checks ends
+       the run with result.verdict 'incomplete'.
      view.import: { fileCount, totalBytes, groups, sections, toggle, page, skipped, notes, files, facts }; notes are the loader's notes with
        any address scrubbed (at most 50 of 500 characters).
      Pilot stages: the screen bar is 0.40 (both pilots below it), the test bar 0.45 (4 of 5 below it); config.screenBar and config.testBar

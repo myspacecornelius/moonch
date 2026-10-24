@@ -14,22 +14,17 @@ const path = require('node:path');
 const { GAF_PATTERN } = require('../../package-engine.js');
 const C = require('../agents/constants.cjs');
 const { parseFigure } = require('../agents/classify.cjs');
-const { DESIGN, INTAKE, SCREEN_BAR } = require('./constants.cjs');
+const { DESIGN, INTAKE, SCREEN_BAR, GOLDEN_MIN, ALTERNATIVE_MIN } = require('./constants.cjs');
 const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS, Stopped } = require('./util.cjs');
 const { extractText, scanFile, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { lineDiff } = require('./diff.cjs');
 const { withheldReason } = require('./classify.cjs');
 const { containsLeak, leakWindows, EMPTY_SHA } = require('./safety.cjs');
+const { parseBrief, briefEvaluatorText, verifyBriefSources } = require('./brief.cjs');
+const { extractText: extractFileText } = require('./extract.cjs');
 const { sha256Hex } = require('./util.cjs');
 
-/* A design that cannot be used. `message` names no figure, phrase or text of the withheld material (it is shown to the owner and kept in
-   the state); `detail`, when there is one, says exactly what is wrong and goes only to the designer's repair turn and its feedback. */
-class DesignError extends Error {
-  constructor(message, detail) {
-    super(message);
-    this.detail = detail || message;
-  }
-}
+const { DesignError } = require('./errors.cjs');
 
 /* A fault in one file the designer wrote. The public message does not name the file: a new file's name can state the gold, and the name
    of an edited file shows which world file holds the trap. The name goes into the detail, for the designer only. */
@@ -96,6 +91,111 @@ const DESIGNER_TASK = [
   '- Finish with a short plain-text summary of the traps. Do not end the run before the four files in out/ exist.',
 ];
 
+/* ------------------------------------------------------------------ designer v2: a new task from the world files */
+
+const NEW_RULES = [
+  'You are the trap designer for one new finance task. Your working folder is the current folder. Work only inside it.',
+  '',
+  'What is here:',
+  '- task/             the world files and task files the pilots will receive. Read them. Do not change them.',
+  '- ideas.txt         the catalog of trap mechanisms: id, name, kind, mechanism, and one line each.',
+];
+
+const NEW_TASK = [
+  '',
+  `Goal: build a new task from the world files. Its hardest trap should make a careful blind pilot give a wrong final answer that a simulated grader scores below ${SCREEN_BAR.toFixed(2)} against the guideline, while the files settle which answer is right. A trap has one correct reading and one tempting wrong reading.`,
+  '',
+  'How to build it:',
+  '1. Pick the task type (workflow) that the world files can best support; when reference documents are present, pick it from them, and borrow a mechanism from another workflow when it fits.',
+  '2. Build around a documented decision, a tempting wrong path and evidence that tells them apart. Compute both paths before you write any file.',
+  '3. Prefer NEW files. Write each under out/new/ (sub folders allowed, at most three levels in all). A new file is an ordinary source document of the task and must read like one. Edit an existing world or task file only when the trap cannot work without it: copy it to out/edited/<same name>, change the copy, and list it in editedFiles with a reason.',
+  `4. Write out/prompt.txt: the business prompt the pilots receive, at most ${DESIGN.promptChars} characters. It must not mention traps, mechanisms or the guideline.`,
+  `5. Write out/guideline.md: the grader guideline, at most ${DESIGN.guidelineChars} characters. Say what a correct answer states, name the correct values, and say which wrong readings fail. If only the reasoning is required, accept every permitted action in an "Acceptable variation" section; if one action is required, the packet must hold the decision rule that makes every other action wrong.`,
+  '6. Write out/golden-answer.md: the golden answer that matches your design.',
+  '7. For each permitted alternative (a different action or method that the packet allows), write out/answers/alt-N.md (N from 1): a strong answer that takes that action with correct reasoning. Keep out/answers/ out of out/new and out/edited.',
+  '8. Write out/traps.json, valid JSON in exactly this shape:',
+  '{"traps": [{"id": "t1", "title": "short title", "mechanism": "how the trap works", "files": ["file names the trap uses"], "decoy": "the tempting wrong source or reading", "correctValue": "...", "wrongValue": "..."}],',
+  ' "gold": {"decision": "phrases a correct answer states, separated by semicolons", "figures": [{"label": "...", "value": 1250, "tolerance": 1}]},',
+  ' "fingerprints": [{"id": "fp-1", "label": "the wrong reading in a few words", "tokens": ["words a wrong answer uses"], "figures": [{"label": "...", "value": 3050, "tolerance": 1}]}],',
+  ' "newFiles": ["names of the files under out/new"],',
+  ' "editedFiles": [{"name": "name of a file under out/edited", "reason": "why the trap cannot work without this edit"}],',
+  ' "rubricChanges": []}',
+  '9. Write out/brief.json, valid JSON in exactly this shape (one primary trap, at most three in all):',
+  '{"taskType": {"workflow": "...", "why": "...", "referenceEntries": ["..."]},',
+  ' "decision": {"ask": "...", "mandate": "...", "authorityFile": "name of the authority file", "effectiveDate": "...", "decisionDate": "YYYY-MM-DD, the day the decision of the task is taken"},',
+  ' "files": [{"name": "file name", "role": "authority" or "evidence" or "decoy" or "baseline"}],',
+  ' "traps": [{"id": "t1 (the id of traps.json)", "primary": true, "rule": {"file": "name", "clause": "the exact words of the governing rule"},',
+  '   "correctPath": {"reasoning": "...", "action": "...", "figures": [{"label": "...", "value": 0, "tolerance": 0}]},',
+  '   "wrongPath": {"reasoning": "...", "action": "...", "figures": [{"label": "...", "value": 0, "tolerance": 0}]},',
+  '   "changesDecision": "required_conclusion" or "required_calculation" or "neither",',
+  '   "whyTempting": {"kind": "money" or "time" or "effort" or "accountability", "source": "the ordinary record that creates the impression"},',
+  '   "consequence": {"source": "the record that makes the wrong accommodation really cost something"},',
+  '   "strongestAlternative": {"answer": "...", "whyRejected": "the exact words of the clause that rules it out"}}],',
+  ' "permittedAlternatives": [{"answer": "...", "support": "the clause or record that permits it", "file": "answers/alt-1.md"}],',
+  ' "permittedAlternativesReason": "why there is none, when the list is empty",',
+  ' "controls": [{"scenario": "baseline" or "primary_wrong" or "secondary_wrong" or "combined_wrong", "trap": "id, for secondary_wrong", "action": "...", "figures": [], "changesDecision": true}]}',
+  '   controls is needed when there is more than one trap: the baseline, each single wrong path and the combination, each different from the baseline, so that one mechanism cannot mask another.',
+  '',
+  'Hard rules:',
+  '- The wrong path must change a required conclusion (a different action) or a materially required calculation. Arithmetic movement alone does not count.',
+  '- One primary trap. Any other mechanism needs its own control and a combined control that show none masks another.',
+  '- The packet MUST hold a source that states the governing rule, its scope, its effective date and which document governs. Never take a rule statement out to make the task harder; if a clarification is what makes the task fair, keep it and look for difficulty elsewhere (joins across holders, date ordering, legal against cash availability, gross against net).',
+  '- Do not write into any file the pilots get an explanation that applies the rule to the facts.',
+  '- Name the strongest defensible alternative answer and the exact words of the clause that rule it out. If no clause rules it out, list it in permittedAlternatives (with its answer file) or change the trap.',
+  '- rule.clause and strongestAlternative.whyRejected must be word for word in a file the pilots get (or in prompt.txt), each a whole sentence or at least 40 characters. Every one of them is later checked to show that it governs the decision, is in force on the decision date, has not been superseded by any file in the packet (a file the checks cannot read as text counts against you) and rules the wrong path or the alternative out. Keep the rule statements near the top of a long file.',
+  '- Every figure in gold.figures must appear in out/golden-answer.md and in out/guideline.md, written as digits (1,250 or 1250). Your golden answer and each alternative answer will be graded against your guideline: the golden answer must score at least ' + GOLDEN_MIN.toFixed(2) + ' and each alternative at least ' + ALTERNATIVE_MIN.toFixed(2) + '.',
+  '- Do not state any figure of the golden answer, and do not state the decision, in out/prompt.txt or in the name of a new file.',
+  '- Evaluator material (guideline, golden answer, brief, answers) is never placed in out/new or out/edited, and no text of it is copied into a file the pilots get.',
+  '- An edited file must not be much smaller than the original (at most 20 percent).',
+  '- The names of new and edited files must read like ordinary documents. Do not use words such as guideline, rubric, answer, golden, reference, solution, key, memo, grader, evaluation, review, audit or gaf in a name.',
+  '- Reference documents are for you alone: no passage of them goes into any file the pilots get.',
+  '- Do not read or write outside this folder. Do not start any program that calls a model. Do not use the network.',
+  '- Finish with a short plain-text summary of the traps. Do not end the run before the files in out/ exist.',
+];
+
+function designerPromptNew({ attempt, attempts, redesign, hasReferences = false, fairnessSet = false }) {
+  const lines = [...NEW_RULES];
+  if (hasReferences) lines.push('- reference/       the owner\'s reference documents: what good tasks of a kind look like. For you alone. Read them with the Read tool (PDFs included).');
+  if (redesign) {
+    lines.push('- feedback.md       how the last design fared: what each check found, and each pilot\'s score and the reason it counted or not. Read it first.');
+    lines.push('- previous/         your last design (its out/ folder), for you to strengthen or replace.');
+  }
+  lines.push(...NEW_TASK);
+  if (fairnessSet) lines.push('', 'Also write out/answers.json and the answer files it names: for each of the six diagnostic answers (expected action with correct reasoning, high; a comparison that commits to the correct path, high; the expected action through the intended wrong reasoning, low; a dual recommendation that leaves execution unresolved, low; a wrong action with correct arithmetic, low; a genuine qualification grounded in a real source ambiguity, high) give {"name", "file": "answers/diag-N.md", "band": "high" or "low"}.');
+  lines.push('', `This is design attempt ${attempt} of ${attempts}.${redesign ? ' Strengthen the traps that worked and replace the ones that did not.' : ''}`);
+  return lines.join('\n') + '\n';
+}
+
+/* One repair turn for what the reviews found (designer v2): the same folder, told what to fix. what: 'alternative' (a permitted alternative:
+   add it to the acceptable variation, write its answer file, update the brief), 'missing' (a requirement the packet lacks, or a guideline
+   that asks for something the packet does not hold) or 'general' (the first design did not pass a check). */
+function reviewRepairPrompt({ attempt, attempts, what, finding }) {
+  const lines = [...NEW_RULES, '- out/              what your last run left. Change it as little as you can.'];
+  lines.push('', 'WHAT THE REVIEW FOUND, exactly:', capText(String(finding), 2500), '');
+  if (what === 'alternative') lines.push('This alternative is allowed by the packet. Add it to the "Acceptable variation" section of out/guideline.md, write out/answers/alt-N.md (a strong answer that takes that action with correct reasoning), and list it in permittedAlternatives of out/brief.json with its file. Change nothing else.');
+  else if (what === 'equivalent') lines.push('This is a different presentation or method with the same required conclusion. Add a line to the "Acceptable variation" section of out/guideline.md so that it is accepted. Change nothing else.');
+  else lines.push('Supply what is missing in the files the pilots get (a source that states the rule, its scope, its effective date and which document governs), or fix the guideline so that it asks for nothing the files do not hold. Keep every rule below.');
+  lines.push(...NEW_TASK, '', `This is a repair turn for design attempt ${attempt} of ${attempts}. You have one short run: do not start the design again.`);
+  return lines.join('\n') + '\n';
+}
+
+/* The one repair turn after a stage failed because the evaluator material was at fault (designer v2): only guideline.md and golden-answer.md. */
+function evaluatorRepairPrompt({ attempt, attempts, finding }) {
+  return [
+    'You are the trap designer for one new finance task. Your working folder is the current folder. Work only inside it.',
+    '',
+    'The pilots have run on your design. Some answers scored low although they are acceptable, or the grading was wrong for them. The files the pilots get and the prompt are fixed and cannot change.',
+    '',
+    'WHAT WAS FOUND, exactly:',
+    capText(String(finding), 3500),
+    '',
+    'Change ONLY out/guideline.md and out/golden-answer.md so that the guideline accepts what the packet allows and grades it fairly. Do not touch anything else in out/ (no new file, no edited file, no prompt, no brief, no alternative answer). Your golden answer must still score at least ' + GOLDEN_MIN.toFixed(2) + ' against the guideline.',
+    '- Do not read or write outside this folder. Do not start any program that calls a model. Do not use the network.',
+    '',
+    `This is a guideline repair for design attempt ${attempt} of ${attempts}. You have one short run.`,
+  ].join('\n') + '\n';
+}
+
 function designerPrompt({ attempt, attempts, redesign }) {
   const lines = [...DESIGNER_RULES];
   if (redesign) {
@@ -107,10 +207,10 @@ function designerPrompt({ attempt, attempts, redesign }) {
 }
 
 /* The one repair turn: a second run in the same folder, told the exact problem with the first one's work in out/. */
-function repairPrompt({ attempt, attempts, problem }) {
-  const lines = [...DESIGNER_RULES, '- out/              what a first run left. It cannot be used as it is.'];
+function repairPrompt({ attempt, attempts, problem, mode = 'harden' }) {
+  const lines = [...(mode === 'new' ? NEW_RULES : DESIGNER_RULES), '- out/              what a first run left. It cannot be used as it is.'];
   lines.push('', 'THE PROBLEM, exactly:', capText(String(problem), 1500), '', 'Fix that problem in out/ and change as little else as you can. Keep every rule below.');
-  lines.push(...DESIGNER_TASK, '', `This is a repair turn for design attempt ${attempt} of ${attempts}. You have one short run: do not start the design again.`);
+  lines.push(...(mode === 'new' ? NEW_TASK : DESIGNER_TASK), '', `This is a repair turn for design attempt ${attempt} of ${attempts}. You have one short run: do not start the design again.`);
   return lines.join('\n') + '\n';
 }
 
@@ -139,6 +239,9 @@ function feedbackText({ attempt, stage, history, traps }) {
     `# Feedback on design attempt ${attempt}`,
     '',
     `The ${stage.name} did not pass. Rule: ${stage.rule}. The bar is a score below ${stage.bar.toFixed(2)}; ${stage.belowBar} of ${stage.pilotsWanted} counted pilots were below it.`,
+    ...(Array.isArray(stage.unexplained) && stage.unexplained.length ? [
+      `${stage.unexplained.length} pilot${stage.unexplained.length === 1 ? '' : 's'} scored below the bar but the low score could not be explained as the error you built the trap for (or as another error the files rule out), so ${stage.unexplained.length === 1 ? 'it' : 'they'} did not count. The traps may not be what is making these pilots fail: read their answers below, and rebuild the trap so that the intended error is what fails.`,
+    ] : []),
     ...(stage.stoppedEarly ? [`The ${stage.name} was stopped as soon as the result was decided: after pilot ${stage.stoppedEarly.afterPilot} scored ${typeof stage.stoppedEarly.score === 'number' ? stage.stoppedEarly.score.toFixed(2) : 'no score'}, the pilots that had not finished were cancelled and have no score.`] : []),
     '',
     '## The traps of this attempt',
@@ -150,6 +253,7 @@ function feedbackText({ attempt, stage, history, traps }) {
     lines.push('', `### ${pilot.id}${pilot.replacement ? ' (replacement)' : ''}`);
     lines.push(`- state: ${pilot.state}${pilot.stoppedEarly ? ' (stopped early: the result was already decided)' : ''}; audit: ${pilot.audit ? pilot.audit.status : 'none'}`);
     lines.push(`- score: ${typeof pilot.score === 'number' ? pilot.score.toFixed(2) : 'none'}${pilot.score !== null && pilot.score !== undefined ? (pilot.score < stage.bar ? ' (below the bar, the design worked)' : ' (at or above the bar, the pilot got through)') : ''}`);
+    if (pilot.adjudication) lines.push(`- the low score ${pilot.countsTowardPass ? 'was explained' : 'was not explained'} (${pilot.adjudication.class}${pilot.adjudication.note ? `: ${pilot.adjudication.note}` : ''})`);
     if (pilot.verdict) lines.push(`- grader verdict: ${pilot.verdict}`);
     if (pilot.reason) lines.push(`- grader reason: ${pilot.reason}`);
     if (pilot.answer) lines.push('', 'Final answer:', '', capText(pilot.answer, 6000));
@@ -313,7 +417,7 @@ function atomsStated(text, atoms, original) {
 /* Everything out/ holds, validated against the disk and the withheld material. packet: Map(name -> { sha256 }) of the base packet (the
    world and task files that are not withheld). withheldHashes: Set. windows: leak windows of every withheld text (safety.leakWindows).
    Returns the design, with the lists of new and edited files as they are on disk. */
-function readDesign({ outDir, packet, withheldHashes, windows, original = null, originalDir = null }) {
+function readDesign({ outDir, packet, withheldHashes, windows, original = null, originalDir = null, mode = 'harden', referenceWindows = [] }) {
   const notes = [];
   const prompt = readCapped(path.join(outDir, 'prompt.txt'), DESIGN.promptChars, 'out/prompt.txt').replace(/\s+$/, '');
   if (!prompt.trim()) throw new DesignError('out/prompt.txt is empty');
@@ -386,6 +490,7 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
       let text = '';
       try { text = fs.readFileSync(file.abs, 'utf8'); } catch { text = ''; }
       if (containsLeak(text, windows)) throw fileFault(kind, file.rel, 'holds a long passage of the guideline or the golden answer');
+      if (referenceWindows.length && containsLeak(text, referenceWindows)) throw fileFault(kind, file.rel, 'holds a long passage of the reference documents');
     }
     return { name: file.rel, bytes: file.bytes, sha256 };
   };
@@ -420,6 +525,33 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   for (const file of editedFiles) {
     file.reason = reasons.get(file.name);
     if (file.sha256 === packet.get(file.name).sha256) notes.push(`${file.name} is listed as edited but is identical to the original.`);
+  }
+
+  /* Designer v2: the brief, and the answers of the permitted alternatives. They are evaluator material: no word of them may be in a file the
+     pilots get, so their texts join the windows of the leak scan. */
+  let brief = null;
+  const alternatives = [];
+  if (mode === 'new') {
+    const briefText = readCapped(path.join(outDir, 'brief.json'), 60000, 'out/brief.json');
+    brief = parseBrief(briefText, { traps: parsed.traps, files: available });
+    withheldHashes = new Set([...withheldHashes, sha256Hex(briefText)]);
+    for (const name of ['brief.json', 'answers.json']) { try { withheldHashes.add(hashFile(path.join(outDir, name))); } catch { /* not written */ } }
+    const answersDir = path.join(outDir, 'answers');
+    let present = false;
+    try {
+      const stat = fs.lstatSync(answersDir);
+      present = true;
+      if (stat.isSymbolicLink() || !stat.isDirectory() || fs.realpathSync(answersDir) !== path.join(realOut, 'answers')) throw new Error('not plain');
+    } catch {
+      if (present) throw new DesignError('out/answers is not a plain folder (a link or a file stands in its place)', 'out/answers must be a real folder inside out/, with regular files in it. Do not make links.');
+    }
+    for (const item of brief.permittedAlternatives) {
+      const text = readCapped(path.join(outDir, ...item.file.split('/')), 20000, `out/${item.file}`).replace(/\s+$/, '');
+      if (!text.trim()) throw new DesignError('The answer of a permitted alternative is empty', `out/${item.file} is empty.`);
+      alternatives.push({ name: item.file.replace(/^answers\//, '').replace(/\.md$/, ''), file: item.file, text, sha256: sha256Hex(text), answer: item.answer });
+    }
+    windows = [...windows, ...leakWindows(briefEvaluatorText(brief)), ...alternatives.flatMap(item => leakWindows(item.text))];
+    for (const item of alternatives) withheldHashes = new Set([...withheldHashes, item.sha256, sha256Hex(item.text + '\n')]);
   }
 
   /* The gold must be in the texts a grader reads: every figure in the golden answer and in the guideline. */
@@ -474,10 +606,11 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   if (bytes > C.LIMITS.bytes) throw new DesignError('The pilot packet would be larger than the packet limit');
 
   if (containsLeak(prompt, windows)) throw new DesignError('out/prompt.txt holds a long passage of the guideline or the golden answer');
+  if (referenceWindows.length && containsLeak(prompt, referenceWindows)) throw new DesignError('out/prompt.txt holds a long passage of the reference documents');
   const guidelineDiff = original && typeof original.guidelineText === 'string' && original.guidelineText
     ? { available: true, ...lineDiff(original.guidelineText, guideline, { maxLines: DESIGN.diffLines }) }
     : { available: false, added: 0, removed: 0, lines: [], truncated: false };
-  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, rubricChanges: parsed.rubricChanges, guidelineDiff, notes, windows, unscanned: [] };
+  return { prompt, guideline, goldenAnswer, traps: parsed.traps, gold: parsed.gold, fingerprints: parsed.fingerprints, newFiles, editedFiles, rubricChanges: parsed.rubricChanges, guidelineDiff, notes, windows, referenceWindows, brief, alternatives, unscanned: [] };
 }
 
 /* Extensions read as text by the scan below, whatever they are called: the plain text kinds and the usual source, markup and log forms.
@@ -494,6 +627,8 @@ const ZIP_TEXT_CHARS = 4 * 1024 * 1024;
 async function scanDesignFiles({ outDir, design, shouldStop }) {
   const unscanned = [];
   const stopped = () => { if (shouldStop && shouldStop()) throw new Stopped('stopped'); };
+  /* The windows of the reference documents are a WindowSet (a very large set) or an array; both have a length, and containsLeak and scanFile take either. */
+  const reference = design.referenceWindows && design.referenceWindows.length ? design.referenceWindows : [];
   for (const [kind, sub, list] of [['new', 'new', design.newFiles], ['edited', 'edited', design.editedFiles]]) {
     for (const file of list) {
       stopped();
@@ -504,11 +639,17 @@ async function scanDesignFiles({ outDir, design, shouldStop }) {
         stopped();
         if (text === null) { unscanned.push({ name: file.name, kind }); continue; }
         if (containsLeak(text, design.windows)) throw fileFault(kind, file.name, 'holds a long passage of the guideline or the golden answer');
+        if (reference.length && containsLeak(text, reference)) throw fileFault(kind, file.name, 'holds a long passage of the reference documents');
         continue;
       }
       const scan = await scanFile(abs, design.windows, shouldStop);
       stopped();
       if (scan.leak === true) throw fileFault(kind, file.name, 'holds a long passage of the guideline or the golden answer');
+      if (reference.length) {
+        const again = await scanFile(abs, reference, shouldStop);
+        stopped();
+        if (again.leak === true) throw fileFault(kind, file.name, 'holds a long passage of the reference documents');
+      }
       if (scan.leak === null || scan.binary || !SCANNED_AS_TEXT.has(ext)) unscanned.push({ name: file.name, kind });
     }
   }
@@ -556,4 +697,24 @@ async function buildWork({ originalDir, outDir, workDir, packet, design, shouldS
   return manifest.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-module.exports = { DesignError, scanDesignFiles, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, parseTrapsFile, numbersIn, canonNumber, leakAtoms, atomsStated };
+/* The text of each file the pilots will get, as it will be in the packet (an edited copy in place of its original): [{ name, text }]. Text that
+   cannot be read gives null. dirs: { originalDir, outDir }. */
+async function packetDocuments({ packet, design, originalDir, outDir, maxChars = 1024 * 1024 }) {
+  const edited = new Set(design.editedFiles.map(file => file.name));
+  const out = [];
+  for (const name of packet.keys()) {
+    const abs = edited.has(name) ? path.join(outDir, 'edited', ...name.split('/')) : path.join(originalDir, ...name.split('/'));
+    out.push({ name, text: await extractFileText(abs, { maxChars }) });
+  }
+  for (const file of design.newFiles) out.push({ name: file.name, text: await extractFileText(path.join(outDir, 'new', ...file.name.split('/')), { maxChars }) });
+  return out;
+}
+
+/* The brief's quotes against the packet as it will be (see brief.cjs verifyBriefSources). Resolves { warnings, documents }. */
+async function verifyDesignBrief({ packet, design, originalDir, outDir, referenceTexts = [] }) {
+  const documents = await packetDocuments({ packet, design, originalDir, outDir });
+  const checked = verifyBriefSources(design.brief, documents, design.prompt, referenceTexts);
+  return { warnings: checked.warnings, documents };
+}
+
+module.exports = { DesignError, designerPromptNew, reviewRepairPrompt, evaluatorRepairPrompt, packetDocuments, verifyDesignBrief, scanDesignFiles, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, buildWork, parseTrapsFile, numbersIn, canonNumber, leakAtoms, atomsStated };

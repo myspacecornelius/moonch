@@ -15,6 +15,7 @@ const { buildArgs, ClaudeRun, summarizeEvents, detectClaude, pilotEnv, preparePi
 const { auditToolCalls } = require('../agents/path-audit.cjs');
 const { redactFilesUnder } = require('../agents/pilot-token.cjs');
 const C = require('../agents/constants.cjs');
+const { isolationProblems } = require('./isolation.cjs');
 
 const TOOL_LESS_TIMEOUT_MS = 10 * 60 * 1000;
 const NOT_FOUND = 'Claude Code was not found. Install it, or run it once in your own terminal to sign in. Nothing was started';
@@ -43,6 +44,18 @@ function runtimeOf(agents, options) {
   };
 }
 
+/* An isolated run (designer v2: a reviewer, an adjudicator, the blind reader) is checked, before its process exists, against the exclusions of
+   isolation.cjs: the options and environment it would get and its working folder. A run that fails one is not started. `isolated` is true or
+   { forbiddenText: [strings that no environment value may hold] }. */
+function requireIsolation(rt, isolated, { args, env, folder }) {
+  if (!isolated) return;
+  const problems = isolationProblems({
+    args, env, cwd: folder, tmpRoot: rt.tmpRoot, projectRoot: rt.root, homeDir: require('node:os').homedir(),
+    forbiddenText: isolated && Array.isArray(isolated.forbiddenText) ? isolated.forbiddenText : [],
+  });
+  if (problems.length) throw new AgentError(409, `A review run was not started because it would not be isolated (${problems.slice(0, 3).join('; ')}). Nothing was started`);
+}
+
 /* detect + pre-flight for one argument list. Returns { runtime, token }. Throws AgentError 409 when the runtime is missing or not ready. */
 async function prepare(rt, args) {
   const runtime = await rt.detect(true);
@@ -64,18 +77,20 @@ async function runProcess(rt, runner, onRunner) {
 }
 
 /* One tool-less run in an empty folder. Resolves { summary, facts, costUsd, toolCalls }; the caller decides what the answer is worth. */
-async function runToolLess({ rt, folder, prompt, model, effort, capUsd, onRunner }) {
+async function runToolLess({ rt, folder, prompt, model, effort, capUsd, onRunner, isolated = false }) {
   const args = buildArgs({ prompt, model, effort, tools: [], maxBudgetUsd: capUsd, promptVia: 'stdin' });
   const { runtime, token } = await prepare(rt, args);
   const scratch = path.join(folder, '.tmp');
   fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  const env = rt.preparedEnv(scratch, token);
+  requireIsolation(rt, isolated, { args, env, folder });
   const runner = new ClaudeRun({
     bin: runtime.path,
     args,
     promptVia: 'stdin',
     prompt,
     cwd: folder,
-    env: rt.preparedEnv(scratch, token),
+    env,
     spawnFn: rt.spawnFn,
     timeoutMs: Math.min(rt.limits.timeoutMs, TOOL_LESS_TIMEOUT_MS),
     killGraceMs: rt.limits.killGraceMs,
@@ -87,20 +102,22 @@ async function runToolLess({ rt, folder, prompt, model, effort, capUsd, onRunner
   return { summary, facts, costUsd: summary.result.total_cost_usd, toolCalls: facts.toolCalls.total };
 }
 
-/* The designer: a run with the six tools in `folder` (its working folder, which must exist). Resolves
-   { summary, costUsd, audit: { status, violations, notes }, answer }. The audit covers every tool call; the token, when there is one, is
-   looked for in everything the run left in the folder, and a run that left it is DISCARDED like a pilot. */
-async function runDesigner({ rt, folder, prompt, model, effort, capUsd, transcriptPath, projectRoot, onRunner }) {
-  const args = buildArgs({ prompt, model, effort, tools: C.TOOLS.slice(), maxBudgetUsd: capUsd, promptVia: 'stdin' });
+/* A run with tools in `folder` (its working folder, which must exist), audited like a pilot: every tool call against the folder, the token, when
+   there is one, looked for in everything the run left in it. Resolves { summary, costUsd, audit: { status, violations, notes }, answer }. A
+   run that left the token, or a tool call outside the folder, is DISCARDED. tools: the tools of the run, from the allowlist. */
+async function runAudited({ rt, folder, prompt, model, effort, capUsd, tools, transcriptPath, projectRoot, onRunner, isolated = false }) {
+  const args = buildArgs({ prompt, model, effort, tools, maxBudgetUsd: capUsd, promptVia: 'stdin' });
   const { runtime, token } = await prepare(rt, args);
   const scratch = path.join(folder, '.tmp');
+  const env = rt.preparedEnv(scratch, token);
+  requireIsolation(rt, isolated, { args, env, folder });
   const runner = new ClaudeRun({
     bin: runtime.path,
     args,
     promptVia: 'stdin',
     prompt,
     cwd: folder,
-    env: rt.preparedEnv(scratch, token),
+    env,
     spawnFn: rt.spawnFn,
     timeoutMs: rt.limits.timeoutMs,
     killGraceMs: rt.limits.killGraceMs,
@@ -136,4 +153,11 @@ async function runDesigner({ rt, folder, prompt, model, effort, capUsd, transcri
   };
 }
 
-module.exports = { runtimeOf, runToolLess, runDesigner, NOT_FOUND };
+/* The designer: a run with the six tools in its own folder. */
+const runDesigner = options => runAudited({ ...options, tools: C.TOOLS.slice() });
+
+/* The blind reviewer (designer v2, stage 1): a run that can only read, in a copy of the pilot packet. */
+const REVIEWER_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
+const runReviewer = options => runAudited({ ...options, tools: REVIEWER_TOOLS.slice() });
+
+module.exports = { runtimeOf, runToolLess, runDesigner, runReviewer, runAudited, REVIEWER_TOOLS, NOT_FOUND };

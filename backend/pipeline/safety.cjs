@@ -44,9 +44,9 @@ function treeManifest(dir) {
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/* manifest: [{ name, bytes, sha256 }] as built. withheldHashes: Set of sha256. withheldNames: Set of lower case names.
+/* manifest: [{ name, bytes, sha256 }] as built. withheldHashes: Set of sha256. withheldNames: Set of lower case names. allowNames: Set of exact names the owner kept.
    Returns the manifest read from disk when everything holds. */
-function verifyPacket({ dir, manifest, withheldHashes, withheldNames }) {
+function verifyPacket({ dir, manifest, withheldHashes, withheldNames, allowNames = null }) {
   let actual;
   try {
     actual = treeManifest(dir);
@@ -64,7 +64,8 @@ function verifyPacket({ dir, manifest, withheldHashes, withheldNames }) {
     if (built.sha256 !== file.sha256 || built.bytes !== file.bytes) throw new SafetyError('A file of the pilot packet changed after it was built', `A file of the pilot packet changed after it was built (${file.name.slice(0, 120)})`);
     if (file.sha256 !== EMPTY_SHA && withheldHashes.has(file.sha256)) throw new SafetyError('A file of the pilot packet is byte for byte withheld material', `A file of the pilot packet is byte for byte withheld material (${file.name.slice(0, 120)})`);
     if (withheldNames.has(file.name.toLowerCase())) throw new SafetyError('A file of the pilot packet carries the name of withheld material', `A file of the pilot packet carries the name of withheld material (${file.name.slice(0, 120)})`);
-    if (WITHHELD_ROLES.includes(classifyPath(file.name).role)) throw new SafetyError('A file of the pilot packet looks like grading material by name', `A file of the pilot packet looks like grading material by name (${file.name.slice(0, 120)})`);
+    /* allowNames: the files the owner handed on by name (keepAsWorld). Their names look like grading material and they go on; their bytes are still checked above. */
+    if (!(allowNames && allowNames.has(file.name)) && WITHHELD_ROLES.includes(classifyPath(file.name).role)) throw new SafetyError('A file of the pilot packet looks like grading material by name', `A file of the pilot packet looks like grading material by name (${file.name.slice(0, 120)})`);
   }
   return actual;
 }
@@ -92,11 +93,53 @@ function leakWindows(text) {
   return out;
 }
 
+/* A very large set of windows (the reference documents of designer v2 can be megabytes of text) held as a Set, so that a text is checked by
+   sliding over it once and not by one search for every window. A short key (the first KEY characters of each window) is looked up at every position and
+   only a key that is known is compared in full. It has a length, like the array the other callers pass. */
+const KEY = 16;
+class WindowSet {
+  constructor(windows = []) {
+    this.set = new Set(windows);
+    this.keys = new Set(windows.map(window => window.slice(0, KEY)));
+    this.sizes = [...new Set(windows.map(window => window.length))].sort((a, b) => a - b);
+  }
+
+  get length() { return this.set.size; }
+
+  holds(squashed) {
+    if (!this.sizes.length) return false;
+    const last = squashed.length - this.sizes[0];
+    for (let at = 0; at <= last; at++) {
+      if (!this.keys.has(squashed.slice(at, at + KEY))) continue;
+      for (const size of this.sizes) if (at + size <= squashed.length && this.set.has(squashed.slice(at, at + size))) return true;
+    }
+    return false;
+  }
+}
+
+/* The windows of several texts as one WindowSet; at most maxChars characters of text in all. Resolves { set, scannedChars, truncated, cut }: cut lists
+   { index, scanned, of } for each text the cap cut short or left out, so that the caller can name them (a text the cap left out is not guarded). */
+function leakWindowSet(texts, maxChars = 12 * 1024 * 1024) {
+  const windows = [];
+  let used = 0;
+  const cut = [];
+  texts.forEach((text, index) => {
+    let chunk = String(text === undefined || text === null ? '' : text);
+    const of = chunk.length;
+    if (used + chunk.length > maxChars) { chunk = chunk.slice(0, Math.max(0, maxChars - used)); }
+    if (chunk.length < of) cut.push({ index, scanned: chunk.length, of });
+    used += chunk.length;
+    for (const window of leakWindows(chunk)) windows.push(window);
+  });
+  return { set: new WindowSet(windows), scannedChars: used, truncated: cut.length > 0, cut };
+}
+
 /* True when the text holds any of the windows. */
 function containsLeak(text, windows) {
   if (!windows.length) return false;
   const s = squash(text);
+  if (windows instanceof WindowSet) return windows.holds(s);
   return windows.some(window => s.includes(window));
 }
 
-module.exports = { SafetyError, EMPTY_SHA, treeManifest, verifyPacket, verifyRoundPacket, leakWindows, containsLeak };
+module.exports = { SafetyError, EMPTY_SHA, treeManifest, verifyPacket, verifyRoundPacket, leakWindows, leakWindowSet, WindowSet, containsLeak };
