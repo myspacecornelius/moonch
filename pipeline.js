@@ -122,8 +122,8 @@
   const REVIEW_STATUSES=['pending','passed','rejected','incomplete','not-reached'];
   /* The fairness record of the new mode ({ status, stage1, stage2, repairs }), told from the old fairness review ({ status: ok | unfair | unusable }) by its shape. */
   const isReview=f=>isObj(f)&&!isWithheld(f)&&(f.stage1!==undefined||f.stage2!==undefined||typeof f.repairs==='number'||REVIEW_STATUSES.includes(f.status));
-  const HIT_KINDS=['passage','unreadable','more'];
-  /* The supersession hits of an application check: how many (a count in an older companion), or the list { id, kind ('passage' | 'unreadable' | 'more'), document, snippet }.
+  const HIT_KINDS=['passage','notice','unreadable','more'];
+  /* The supersession hits of an application check: how many (a count in an older companion), or the list { id, kind ('passage' | 'notice' | 'unreadable' | 'more'), document, snippet }.
      The snippet is not kept; a 'more' entry carries how many more there were (its count, or the number its snippet opens with). */
   function adaptHits(h){
     if(Array.isArray(h)){
@@ -137,7 +137,7 @@
     if(isWithheld(c))return WITHHELD;
     if(!isObj(c))return null;
     const k=isObj(c.checks)?c.checks:{},d=isObj(c.dates)?c.dates:null;
-    return {pass:c.pass===true,failed:arr(c.failed).map(text).filter(Boolean),checks:{governs:k.governs===true,inForce:k.inForce===true,notSuperseded:k.notSuperseded===true,excludes:k.excludes===true},dates:d?{effective:cell(d.effective),decision:cell(d.decision)}:null,hits:adaptHits(c.hits),unscanned:nameList2(c.unscanned)};
+    return {pass:c.pass===true,failed:arr(c.failed).map(text).filter(Boolean),checks:{governs:k.governs===true,inForce:k.inForce===true,notSuperseded:k.notSuperseded===true,excludes:k.excludes===true},dates:d?{effective:cell(d.effective),decision:cell(d.decision)}:null,hits:adaptHits(c.hits),unscanned:nameList2(c.unscanned),cut:nameList2(c.cut)};
   }
   /* The checks of the brief's own clauses: { pass, count, failures: [{ trap (from 1), part ('rule' | 'whyRejected'), failed }], unscanned }. An older companion sent { pass, failed, checks, hits }. */
   function adaptBriefCheck(c){
@@ -145,23 +145,23 @@
     if(!isObj(c))return null;
     if(!Array.isArray(c.failures)){
       const failed=arr(c.failed).map(text).filter(Boolean);
-      return {pass:c.pass===true,count:null,failures:failed.length?[{trap:null,part:'',failed}]:[],unscanned:[]};
+      return {pass:c.pass===true,count:null,failures:failed.length?[{trap:null,part:'',failed}]:[],unscanned:[],cut:[]};
     }
-    return {pass:c.pass===true,count:num(c.count),failures:c.failures.filter(isObj).map(f=>({trap:num(f.trap),part:text(f.part),failed:arr(f.failed).map(text).filter(Boolean)})),unscanned:nameList2(c.unscanned)};
+    return {pass:c.pass===true,count:num(c.count),failures:c.failures.filter(isObj).map(f=>({trap:num(f.trap),part:text(f.part),failed:arr(f.failed).map(text).filter(Boolean)})),unscanned:nameList2(c.unscanned),cut:nameList2(c.cut)};
   }
   function adaptReview(f){
     if(isWithheld(f))return WITHHELD;
     if(!isReview(f))return null;
     const s1=f.stage1,s2=f.stage2;
     return {status:text(f.status),repairs:num(f.repairs)||0,
-      stage1:isWithheld(s1)?WITHHELD:isObj(s1)?{state:text(s1.state),tries:num(s1.tries)||0,runs:num(s1.runs)||0,discarded:num(s1.discarded)||0}:null,
+      stage1:isWithheld(s1)?WITHHELD:isObj(s1)?{state:text(s1.state),tries:num(s1.tries)||0,runs:num(s1.runs)||0,discarded:num(s1.discarded)||0,rendered:nameList2(s1.rendered),unreadable:nameList2(s1.unreadable)}:null,
       stage2:isWithheld(s2)?WITHHELD:isObj(s2)?{disposition:text(s2.disposition),objectionClass:text(s2.objectionClass),evaluations:num(s2.evaluations)||0,application:adaptCheck(s2.application),briefApplication:adaptBriefCheck(s2.briefApplication),cut:nameList2(s2.cut)}:null};
   }
   function adaptAnswerSet(s){
     if(isWithheld(s))return WITHHELD;
     if(!isObj(s))return null;
     return {goldenMin:num(s.goldenMin),alternativeMin:num(s.alternativeMin),passed:bool(s.passed),answers:arr(s.answers).filter(isObj).map(a=>({name:cell(a.name),kind:a.kind==='golden'?'golden':'alternative',file:text(a.file),threshold:num(a.threshold),score:num(a.score),grades:numList(a.grades),passed:bool(a.passed),unstable:a.unstable===true,
-      runs:arr(a.runs).filter(isObj).map(r=>({why:text(r.why),grades:numList(r.grades),score:num(r.score),passed:bool(r.passed),unstable:r.unstable===true}))}))};
+      runs:arr(a.runs).filter(isObj).map(r=>({why:text(r.why),grades:numList(r.grades),score:num(r.score),rule:r.rule==='both'||r.rule==='majority'?r.rule:'',passed:bool(r.passed),unstable:r.unstable===true}))}))};
   }
   /* The difficulty result, apart from the fairness result: { status, screen, test } with each stage { passed, explained, belowBar, of, need, lows } */
   function adaptDifficulty(d){
@@ -176,7 +176,7 @@
     return arr(list).filter(isObj).map((f,i)=>{
       const pilot=isObj(f.pilot)?f.pilot:{},grader=isObj(f.grader)?f.grader:{},budget=isObj(f.budget)?f.budget:{};
       return {n:num(f.n)||i+1,at:text(f.at),reason:cell(f.reason),packetSha256:sha12(f.packetSha256),packetFiles:num(f.packetFiles),promptSha256:sha12(f.promptSha256),guidelineSha256:sha12(f.guidelineSha256),goldenSha256:sha12(f.goldenSha256),answerSetSha256:sha12(f.answerSetSha256),
-        answers:arr(f.answers).filter(isObj).map(a=>({name:text(a.name),sha256:sha12(a.sha256)})),pilot:{model:text(pilot.model),effort:text(pilot.effort),capUsd:num(pilot.capUsd)},grader:{model:text(grader.model),effort:text(grader.effort)},budget:{totalCapUsd:num(budget.totalCapUsd),designCapUsd:num(budget.designCapUsd),pilotCapUsd:num(budget.pilotCapUsd)}};
+        answers:isWithheld(f.answers)?WITHHELD:arr(f.answers).filter(isObj).map(a=>({name:text(a.name),sha256:sha12(a.sha256)})),pilot:{model:text(pilot.model),effort:text(pilot.effort),capUsd:num(pilot.capUsd)},grader:{model:text(grader.model),effort:text(grader.effort)},budget:{totalCapUsd:num(budget.totalCapUsd),designCapUsd:num(budget.designCapUsd),pilotCapUsd:num(budget.pilotCapUsd)}};
     });
   }
   /* The guideline-only repair: { stage, outcome (pending | applied | failed), classes, changed, reason, regrade: { before, after, passed }, recounted: { passed, explained } } */
@@ -218,8 +218,8 @@
     if(!isObj(r))return null;
     /* problems is how many there are (an older companion sent the list itself); problemList says what they are, each a short plain sentence */
     const old=Array.isArray(r.problems)?r.problems.map(text).filter(Boolean):[],listed=Array.isArray(r.problemList)?r.problemList.map(text).filter(Boolean):[];
-    const list=listed.length?listed:old;
-    return {exists:r.exists===true,found:num(r.found)||0,names:arr(r.names).map(text).filter(Boolean),bytes:num(r.bytes)||0,problems:{count:Array.isArray(r.problems)?old.length:Math.max(num(r.problems)||0,0),list}};
+    const list=listed.length?listed:old,listWithheld=isWithheld(r.problemList);
+    return {exists:r.exists===true,found:num(r.found)||0,names:isWithheld(r.names)?WITHHELD:arr(r.names).map(text).filter(Boolean),bytes:num(r.bytes)||0,problems:{withheld:listWithheld,count:Array.isArray(r.problems)?old.length:Math.max(num(r.problems)||0,0),list}};
   }
   /* the view's references: { source, found, names, bytes, files, unscanned, scannedChars, truncated } */
   function adaptReferences(r){
@@ -241,7 +241,7 @@
       const regrade=isWithheld(rg)?WITHHELD:isObj(rg)&&num(rg.first)!==null&&num(rg.second)!==null?{first:num(rg.first),second:num(rg.second),average:num(rg.average)}:null;
       /* the score that counts is score, which the companion sets to the average of a regraded pilot's two */
       return {n:num(q.n)||i+1,replacement:q.replacement===true,state:text(q.state),score:q.valid===false?null:num(q.score)??(isObj(regrade)&&!isWithheld(regrade)?regrade.average:null),regrade,stoppedEarly:stopped,audit:audit.toUpperCase(),id:text(q.id),adjudication:adaptAdjudication(q.adjudication),countsTowardPass:typeof q.countsTowardPass==='boolean'?q.countsTowardPass:null,toolFailure:q.toolFailure===true,regraded:q.regraded===true,
-        previous:isWithheld(q.previous)?WITHHELD:isObj(q.previous)?{score:num(q.previous.score),belowBar:typeof q.previous.belowBar==='boolean'?q.previous.belowBar:null,countsTowardPass:typeof q.previous.countsTowardPass==='boolean'?q.previous.countsTowardPass:null,class:isObj(q.previous.adjudication)?text(q.previous.adjudication.class):''}:null,
+        previous:isWithheld(q.previous)?WITHHELD:isObj(q.previous)?{score:num(q.previous.score),belowBar:typeof q.previous.belowBar==='boolean'?q.previous.belowBar:null,countsTowardPass:typeof q.previous.countsTowardPass==='boolean'?q.previous.countsTowardPass:null,valid:typeof q.previous.valid==='boolean'?q.previous.valid:null,class:isObj(q.previous.adjudication)?text(q.previous.adjudication.class):typeof q.previous.adjudication==='string'?q.previous.adjudication:''}:null,
         outputs:isWithheld(o)?WITHHELD:isObj(o)&&num(o.count)!==null?{count:num(o.count),readable:num(o.readable)||0}:null};
     })};
   }
@@ -315,9 +315,9 @@
       keptFiles:isWithheld(imp.keepAsWorld)?WITHHELD:arr(imp.keepAsWorld).map(x=>isObj(x)?{name:text(x.name),present:x.present!==false,warning:cell(x.warning)}:{name:text(x),present:true,warning:''}).filter(x=>x.name!==''),
       importNotes:isWithheld(imp.notes)?WITHHELD:arr(imp.notes).map(cell).filter(x=>isWithheld(x)||x!==''),
       toggle:isWithheld(imp.toggle)?WITHHELD:tog?{found:tog.found===true,label:text(tog.label),flipped:tog.flipped===true,learned:tog.learned===true,before:num(tog.filesBefore),after:num(tog.filesAfter)}:null,
-      cls:{any:!!(cls.prompt||cls.guideline||cls.goldenAnswer||cls.worldFiles||cls.taskFiles||arr(cls.keptAsWorld).length||arr(cls.warnings).length||arr(cls.goldenSuspects).length||arr(cls.unscanned).length),prompt:ref(cls.prompt),guideline:ref(cls.guideline),golden:ref(cls.goldenAnswer),...lists,withheld,notes:arr(cls.notes).map(text).filter(Boolean),
+      cls:{any:!!(cls.prompt||cls.guideline||cls.goldenAnswer||cls.worldFiles||cls.taskFiles||arr(cls.keptAsWorld).length||arr(cls.warnings).length||arr(cls.goldenSuspects).length||arr(cls.unscanned).length||nameCells(cls.unreadable).length),prompt:ref(cls.prompt),guideline:ref(cls.guideline),golden:ref(cls.goldenAnswer),...lists,withheld,notes:arr(cls.notes).map(text).filter(Boolean),
         warnings:isWithheld(cls.warnings)?[{name:WITHHELD,why:''}]:arr(cls.warnings).map(x=>isObj(x)?{name:cell(x.name),why:cell(x.why)}:{name:typeof x==='string'?x:'',why:''}).filter(x=>isWithheld(x.name)||x.name),
-        goldenSuspects:nameCells(cls.goldenSuspects),unscanned:nameCells(cls.unscanned),kept:isWithheld(cls.keptAsWorld)?WITHHELD:arr(cls.keptAsWorld).map(x=>isObj(x)?{name:text(x.name),why:cell(x.why)}:{name:text(x),why:''}).filter(x=>x.name!=='')},
+        goldenSuspects:nameCells(cls.goldenSuspects),unscanned:nameCells(cls.unscanned),unreadable:nameCells(cls.unreadable),kept:isWithheld(cls.keptAsWorld)?WITHHELD:arr(cls.keptAsWorld).map(x=>isObj(x)?{name:text(x.name),why:cell(x.why)}:{name:text(x),why:''}).filter(x=>x.name!=='')},
       design,screen:last?last.screen:null,test:last?last.test:null,attempts};
   }
   /* The answer to POST /api/pipeline/:id/export: { name, zipBase64 } (it also has size, sha256 and files). */
@@ -581,10 +581,10 @@
     const r=refDefault();
     if(!r)return '';
     if(r.problems.count>0){
-      return html`<p class="pl-refs pl-refs-problem" id="pl-refs">Reference documents: the default folder has ${plural(r.problems.count,'problem')}, so a start is refused. Fix the folder, or start without it.</p>${r.problems.list.length?html`<ul class="pl-names pl-refs-list">${r.problems.list.map(x=>html`<li>${x}</li>`)}</ul>`:''}
+      return html`<p class="pl-refs pl-refs-problem" id="pl-refs">Reference documents: the default folder has ${plural(r.problems.count,'problem')}, so a start is refused. Fix the folder, or start without it.</p>${r.problems.withheld?html`<p class="pl-withheld pl-refs-details">Details withheld while a round runs.</p>`:''}${r.problems.list.length?html`<ul class="pl-names pl-refs-list">${r.problems.list.map(x=>html`<li>${x}</li>`)}</ul>`:''}
         <label class="check pl-no-refs"><input type="checkbox" data-pl-in="noReferences" data-pl-key="no-references" ${S.form.noReferences?'checked':''}><span><strong>Start without the reference folder</strong>The designer then works from the world files and its own list of ideas.</span></label>`;
     }
-    if(r.found>0)return html`<p class="pl-refs" id="pl-refs">Reference documents: ${plural(r.found,'file')} found in the default folder (${r.names.join(', ')}). The designer and the reviewers read them and their text is sent to Anthropic. Pilots never see them.</p>`;
+    if(r.found>0)return html`<p class="pl-refs" id="pl-refs">Reference documents: ${plural(r.found,'file')} found in the default folder (${isWithheld(r.names)?inline(r.names):r.names.join(', ')}). The designer and the reviewers read them and their text is sent to Anthropic. Pilots never see them.</p>`;
     return html`<p class="pl-refs" id="pl-refs">Reference documents: none found in the default folder. The designer works from the world files and its own list of ideas.</p>`;
   }
   function startWhy(){
@@ -644,7 +644,7 @@
         <label class="field">Cap per pilot (USD)<input type="text" inputmode="decimal" id="pl-pilot-cap" data-pl-in="pilotCap" data-pl-key="pilot-cap" value="${f.pilotCap}" maxlength="6" autocomplete="off" spellcheck="false" aria-describedby="pl-pilot-hint"><small id="pl-pilot-hint">Passed to each pilot as its own spending cap. ${usd(PILOT_CAP.minUsd)} to ${usd(PILOT_CAP.maxUsd)}.</small></label>
       </div>
       ${f.designMode==='new'?newModeFieldsHtml():''}
-      <label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ${f.acceptMissing?'checked':''}><span><strong>${ACCEPT_LABEL}</strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, and says which.</span></label>
+      <label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ${f.acceptMissing?'checked':''}><span><strong>${ACCEPT_LABEL}</strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, and says which. In the new mode it also lets a start go on when the reviewers cannot read a file of the task: that file then goes unchecked.</span></label>
       <fieldset class="pl-acks"><legend>Required before the run starts</legend>${ACKNOWLEDGEMENTS.map(a=>html`<label class="check"><input type="checkbox" data-pl-in="ack" data-id="${a.id}" data-pl-key="ack-${a.id}" ${f.acks[a.id]?'checked':''}><span><strong>${a.label}</strong>${a.text}</span></label>`)}</fieldset>`;
   }
   function startFootHtml(){
@@ -690,6 +690,7 @@
     return html`<div class="card-title"><div><div class="eyebrow">Waiting for you</div><h2>${waitTitle(w.kind)}</h2></div>${pill('Paused','amber')}</div>
       <p class="pl-wait-message">${isWithheld(w.message)?inline(w.message):w.message||'Compare the files below with the task page in the Chrome window. If a file is missing, press Stop, fix the page or download it yourself, and start again.'}</p>
       ${importNotesHtml(v)}
+      ${unreadableFilesHtml(v)}
       ${keptFilesHtml(v)}
       ${fetchedFilesHtml(v)}
       ${isWithheld(v.skipped)?html`<h3>Skipped</h3><p class="pl-withheld">${WITHHELD_TEXT}</p>`:v.skipped.length?html`<h3>Skipped (${v.skipped.length})</h3>${skippedList(v)}`:''}
@@ -740,6 +741,14 @@
     if(!k.length)return '';
     return html`<div class="notice pl-warning pl-kept" role="note"><strong>You asked to keep ${plural(k.length,'file')} as world files</strong><p class="pl-warning-lead">The designer and the pilots get ${k.length===1?'this file':'these files'}, even if the name looks like an answer or grading material.</p><ul class="pl-names">${k.map(x=>html`<li><strong>${x.name}</strong>${!isWithheld(x.warning)&&x.warning===''?'':html` <span class="muted">${inline(x.warning)}</span>`}${x.present?'':html` <span class="pl-missing">Not among the files that were fetched.</span>`}</li>`)}</ul></div>`;
   }
+  /* The files of the packet that nobody can read (classification.unreadable): the reviewers see nothing of them. A start is refused unless the owner accepts that. */
+  const ACCEPT_SHORT='Start even if a world or task file has to be withheld';
+  function unreadableFilesHtml(v){
+    const u=v.cls.unreadable;
+    if(!u.length)return '';
+    const one=u.length===1;
+    return html`<div class="notice pl-warning pl-unreadable" role="note"><strong>The reviewers cannot read ${one?'this file':'these files'}</strong><p class="pl-warning-lead">The reviewers cannot read ${one?'this file':'these files'}, so a start is refused unless you accept that ${one?'it goes':'they go'} unchecked.${v.acceptMissing?' You started with that accepted, so the run went on.':' To accept it, tick \u201C'+ACCEPT_SHORT+'\u201D in the start form.'}</p><ul class="pl-names">${u.map(x=>html`<li>${inline(x)}</li>`)}</ul></div>`;
+  }
   function importNotesHtml(v){
     if(isWithheld(v.importNotes))return html`<p class="pl-withheld">Places the loader could not fully cover: ${WITHHELD_TEXT}</p>`;
     if(!v.importNotes.length)return '';
@@ -776,6 +785,7 @@
     const c=v.cls;
     return html`<div class="card-title"><div><div class="eyebrow">Classify</div><h2>What each part of the task is</h2></div>${c.warnings.length?pill(plural(c.warnings.length,'warning'),'amber'):''}</div>
       ${c.warnings.length?html`<div class="notice pl-warning" role="note"><strong>Warning: check this before you trust the classification</strong><p class="pl-warning-lead">The classifier called each of these a world or task file, but the pilots will not get it.</p><ul class="pl-names">${c.warnings.map(w=>html`<li>${isWithheld(w.name)?inline(w.name):w.name}${w.why===''?'':html`: ${inline(w.why)}`}</li>`)}</ul></div>`:''}
+      ${unreadableFilesHtml(v)}
       <dl class="history-details"><dt>Business prompt</dt><dd>${refText(c.prompt,v.designMode)}</dd><dt>Grader guideline</dt><dd>${refText(c.guideline,v.designMode)}</dd><dt>Golden answer</dt><dd>${refText(c.golden,v.designMode)}</dd></dl>
       ${isWithheld(c.kept)?'':c.kept.length?html`<p class="pl-class-note pl-kept-note">Kept as world files because you asked, although the name looks like an answer or grading material: ${c.kept.map(x=>plain(x.name)+(x.why!==''?' ('+plain(x.why)+')':'')).join(', ')}.</p>`:''}
       ${c.goldenSuspects.length?html`<p class="pl-class-note">These files look like the golden answer: ${joined(c.goldenSuspects)}.${c.golden===null?' None was identified as the golden answer.':''}</p>`:''}
@@ -915,15 +925,20 @@
   const PART_WORDS={rule:'the rule clause',whyRejected:'why the alternative is rejected'};
   /* The lines under a check: the files that could not be read as text, so that no later document that replaces the clause could be looked for in them, and a note when
      more passages were found than are listed. */
+  /* The files one check was shown only in part (a long file is cut to what the reviewer can read). */
+  const cutLine=l=>isWithheld(l)?html`<li class="pl-hit-cut">The check saw these files only in part: ${inline(l)}</li>`:l.length?html`<li class="pl-hit-cut">The check saw these files only in part: ${l.join(', ')}.</li>`:'';
   function hitLinesHtml(c){
-    const out=[],h=c.hits||{count:0,list:[]},covered=new Set(h.list.filter(x=>x.kind==='unreadable').map(x=>plain(x.document)));
+    const out=[],h=c.hits||{count:0,list:[]},covered=new Set(h.list.filter(x=>x.kind==='unreadable'||x.kind==='notice').map(x=>plain(x.document)));
     h.list.forEach(x=>{
       if(x.kind==='unreadable')out.push(html`<li class="pl-hit-unreadable"><strong>${inline(x.document)}</strong>: This file could not be read as text, so it could not be checked for a later document that replaces it.</li>`);
+      else if(x.kind==='notice')out.push(html`<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>${inline(x.document)}</strong> (the quote itself is not shown here).</li>`);
       else if(x.kind==='more')out.push(html`<li class="pl-hit-more">More passages were found than are shown here${x.count!==null?' ('+x.count+' more)':''}.</li>`);
     });
     const left=isWithheld(c.unscanned)?null:c.unscanned.filter(n=>!covered.has(n));
     if(isWithheld(c.unscanned))out.push(html`<li class="pl-hit-unscanned">Files that could not be read as text: ${inline(c.unscanned)}</li>`);
     else if(left.length)out.push(html`<li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces the clause: ${left.join(', ')}.</li>`);
+    const cl=cutLine(c.cut);
+    if(cl!=='')out.push(cl);
     return out.length?html`<ul class="pl-hit-list">${out}</ul>`:'';
   }
   function checkLineHtml(c,label){
@@ -944,6 +959,8 @@
     b.failures.forEach(f=>lines.push(html`<li class="pl-brief-failure">${f.trap!==null?'Trap '+f.trap:'A trap'}, ${PART_WORDS[f.part]||(f.part!==''?f.part:'a clause')}: ${f.failed.length?f.failed.map(k=>CHECK_WORDS[k]||k).join('; '):'it did not pass'}.</li>`));
     if(isWithheld(b.unscanned))lines.push(html`<li class="pl-hit-unscanned">Files that could not be read as text: ${inline(b.unscanned)}</li>`);
     else if(b.unscanned.length)lines.push(html`<li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces a clause: ${b.unscanned.join(', ')}.</li>`);
+    const cl=cutLine(b.cut);
+    if(cl!=='')lines.push(cl);
     const list=lines.length?html`<ul class="pl-hit-list">${lines}</ul>`:'';
     return b.pass?html`<li class="pl-check-pass">${label}: passed.${made}${list}</li>`:html`<li class="pl-check-fail">${label}: failed.${made}${list}</li>`;
   }
@@ -953,6 +970,8 @@
     if(isWithheld(s2.cut))return html`<p class="pl-cut">The reviewers saw these files only in part: ${inline(s2.cut)}</p>`;
     return s2.cut.length?html`<p class="pl-cut">The reviewers saw these files only in part: ${s2.cut.join(', ')}.</p>`:'';
   }
+  /* A line of file names under the blind review; the list may be withheld while a round runs. */
+  const filesLine=(cls,lead,l)=>isWithheld(l)?html`<li class="${cls}">${lead} ${inline(l)}</li>`:l.length?html`<li class="${cls}">${lead} ${l.join(', ')}.</li>`:'';
   function reviewHtml(a){
     const r=a.review;
     if(r===null)return '';
@@ -960,11 +979,13 @@
     if(isWithheld(r))return html`${lead}<p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     const s1=r.stage1,s2=r.stage2;
     const one=isWithheld(s1)?html`<li>Blind review: ${inline(s1)}</li>`:s1===null?html`<li>Blind review: not run.</li>`
-      :html`<li>Blind review: ${s1.state==='ok'?'a reader with only the prompt and the files gave an answer':s1.state==='unusable'?'no usable answer':'running'}${s1.tries?' ('+plural(s1.tries,'try','tries')+(s1.discarded?', '+s1.discarded+' discarded':'')+')':''}.</li>`;
+      :html`<li>Blind review: ${s1.state==='ok'?'a reader with only the prompt and the files gave an answer':s1.state==='partial'?'a reader with only the prompt and the files gave an answer, but not every file could be read':s1.state==='unusable'?'no usable answer':'running'}${s1.tries?' ('+plural(s1.tries,'try','tries')+(s1.discarded?', '+s1.discarded+' discarded':'')+')':''}.</li>${filesLine('pl-rendered','These files were turned into text for the blind reviewer:',s1.rendered)}${filesLine('pl-unreadable-files','Nobody could read these files, so the blind review is partial for them:',s1.unreadable)}`;
     const two=isWithheld(s2)?html`<li>Second review: ${inline(s2)}</li>`:s2===null?html`<li>Second review: not run.</li>`
       :html`<li>Second review: ${DISPOSITION_WORDS[s2.disposition]||s2.disposition||'no decision'}${s2.objectionClass!==''?' (objection: '+(OBJECTION_WORDS[s2.objectionClass]||s2.objectionClass)+')':''}${s2.evaluations>1?'; it ran '+s2.evaluations+' times':''}.</li>`;
-    return html`${lead}<p>${pill(REVIEW_WORDS[r.status]||r.status||'No result',REVIEW_KIND[r.status]||'')} ${r.repairs>0?plural(r.repairs,'repair turn')+' used.':'No repair turn used.'}</p>
-      <ul class="pl-names pl-review">${one}${two}${isWithheld(s2)||s2===null?'':html`${checkLineHtml(s2.application,'Application check of the clause that rules the other answer out')}${briefCheckHtml(s2.briefApplication,'Application check of the clauses the brief rests on')}`}</ul>${cutHtml(s2)}`;
+    /* a design refused before the reviews ran: no review ran, so there is nothing to list */
+    const none=r.status==='not-reached',unrun=none&&s1===null&&s2===null;
+    const body=unrun?'':html`<ul class="pl-names pl-review">${one}${two}${isWithheld(s2)||s2===null?'':html`${checkLineHtml(s2.application,'Application check of the clause that rules the other answer out')}${briefCheckHtml(s2.briefApplication,'Application check of the clauses the brief rests on')}`}</ul>${cutHtml(s2)}`;
+    return html`${lead}<p>${pill(REVIEW_WORDS[r.status]||r.status||'No result',REVIEW_KIND[r.status]||'')} ${unrun?'':r.repairs>0?plural(r.repairs,'repair turn')+' used.':'No repair turn used.'}</p>${none?html`<p class="pl-review-none">No review ran: the design was refused before the reviews.</p>`:''}${body}`;
   }
   function difficultyHtml(a){
     const d=a.difficulty;
@@ -979,13 +1000,17 @@
     };
     return html`${lead}<p>${pill(d.status==='passed'?'Passed':d.status==='failed'?'Failed':'Not decided',d.status==='passed'?'green':d.status==='failed'?'red':'violet')}</p><ul class="pl-names pl-difficulty">${line('Screen',d.screen,'screen')}${line('Test',d.test,'test')}</ul>`;
   }
+  /* Which rule decided the grades of a fixed answer: both of two grades, or the majority of three. */
+  const RULE_WORDS={both:'both grades must pass',majority:'the majority of the grades'};
+  const ruleNote=x=>{const last=x.runs.length?x.runs[x.runs.length-1]:null;return last&&last.rule!==''?html`<small class="pl-rule">Decided by: ${RULE_WORDS[last.rule]}</small>`:'';};
+  const runNotes=r=>{const n=[];if(r.unstable)n.push('unstable');if(r.rule!=='')n.push('decided by: '+RULE_WORDS[r.rule]);return n.length?' ('+n.join('; ')+')':'';};
   function answerSetHtml(a){
     const s=a.answerSet;
     if(s===null)return '';
     const lead=html`<h3>Answer set: can the guideline grade the fixed answers?</h3><p class="muted">The golden answer needs ${(s&&!isWithheld(s)&&s.goldenMin!==null?s.goldenMin:calMin()).toFixed(2)} or more, and each permitted alternative ${(s&&!isWithheld(s)&&s.alternativeMin!==null?s.alternativeMin:(S.rules.alternativeMin!==null?S.rules.alternativeMin:0.85)).toFixed(2)} or more. Each is graded twice, and a third time when the two grades fall on both sides of the line.</p>`;
     if(isWithheld(s))return html`${lead}<p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     if(!s.answers.length)return html`${lead}<p class="muted">No answer has been graded yet.</p>`;
-    return html`${lead}<div class="table-wrap"><table class="pl-table pl-answers"><caption class="sr-only">The fixed answers graded against the guideline</caption><thead><tr><th scope="col">Answer</th><th scope="col">Needs</th><th scope="col">Grades</th><th scope="col">Score</th><th scope="col">Result</th></tr></thead><tbody>${s.answers.map(x=>html`<tr><th scope="row">${x.kind==='golden'?'Golden answer':'Permitted alternative'}${x.kind==='golden'?'':html` <small class="pl-answer-name">${inline(x.name)}</small>`}</th><td data-label="Needs">${x.threshold!==null?x.threshold.toFixed(2):''}</td><td data-label="Grades">${gradesText(x.grades)}</td><td data-label="Score">${x.score!==null?scoreFmt(x.score,x.threshold!==null?x.threshold:0.9):'No score'}</td><td data-label="Result">${x.passed===true?html`<span class="pl-yes"><span aria-hidden="true">\u2713</span> Passed</span>`:x.passed===false?html`<span class="pl-no"><span aria-hidden="true">\u2715</span> Failed</span>`:html`<span class="muted">Not graded</span>`}${x.unstable?html`<small class="pl-unstable"><strong>Unstable:</strong> the grades fell on both sides of the line, so a third grade decided. All grades: ${gradesText(x.grades)}.</small>`:''}${x.runs.length>1?html`<small class="pl-runs">${x.runs.map((r,i)=>'Grading '+(i+1)+(r.why!==''?' ('+r.why+')':'')+': '+(r.score!==null?r.score.toFixed(2):'no score')+(r.unstable?' (unstable)':'')).join('; ')}.</small>`:''}</td></tr>`)}</tbody></table></div>`;
+    return html`${lead}<div class="table-wrap"><table class="pl-table pl-answers"><caption class="sr-only">The fixed answers graded against the guideline</caption><thead><tr><th scope="col">Answer</th><th scope="col">Needs</th><th scope="col">Grades</th><th scope="col">Score</th><th scope="col">Result</th></tr></thead><tbody>${s.answers.map(x=>html`<tr><th scope="row">${x.kind==='golden'?'Golden answer':'Permitted alternative'}${x.kind==='golden'?'':html` <small class="pl-answer-name">${inline(x.name)}</small>`}</th><td data-label="Needs">${x.threshold!==null?x.threshold.toFixed(2):''}</td><td data-label="Grades">${gradesText(x.grades)}${ruleNote(x)}</td><td data-label="Score">${x.score!==null?scoreFmt(x.score,x.threshold!==null?x.threshold:0.9):'No score'}</td><td data-label="Result">${x.passed===true?html`<span class="pl-yes"><span aria-hidden="true">\u2713</span> Passed</span>`:x.passed===false?html`<span class="pl-no"><span aria-hidden="true">\u2715</span> Failed</span>`:html`<span class="muted">Not graded</span>`}${x.unstable?html`<small class="pl-unstable"><strong>Unstable:</strong> the grades fell on both sides of the line, so a third grade decided. All grades: ${gradesText(x.grades)}.</small>`:''}${x.runs.length>1?html`<small class="pl-runs">${x.runs.map((r,i)=>'Grading '+(i+1)+(r.why!==''?' ('+r.why+')':'')+': '+(r.score!==null?r.score.toFixed(2):'no score')+runNotes(r)).join('; ')}.</small>`:''}</td></tr>`)}</tbody></table></div>`;
   }
   function freezeHtml(a){
     const f=a.freeze;
@@ -1002,7 +1027,7 @@
     if(isWithheld(r))return html`<h3>Guideline repair</h3><p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     const what=r.outcome==='applied'?'applied':r.outcome==='failed'?'not used':'in progress';
     const side=l=>l.map(x=>x.name+' '+gradesText(x.grades)+(x.unstable?' (unstable)':'')).join('; ');
-    return html`<h3>Guideline repair</h3><p>The ${r.stage||'stage'} failed on low scores that were the guideline's fault, not the packet's${r.classes.length?' ('+r.classes.map(classLabel).join(', ')+')':''}. The designer repaired the guideline and the golden answer once: ${pill(what,r.outcome==='applied'?'green':r.outcome==='failed'?'amber':'violet')}${r.changed.length?html` Changed: ${r.changed.join(', ')}.`:''}${r.reason!==''?html` ${inline(r.reason)}`:''}</p>
+    return html`<h3>Guideline repair</h3><p>The ${r.stage||'stage'} failed on low scores that were the guideline's fault, not the packet's${r.classes.length?' ('+r.classes.map(classLabel).join(', ')+')':''}. The designer repaired the guideline and the golden answer once: ${pill(what,r.outcome==='applied'?'green':r.outcome==='failed'?'amber':'violet')}${r.changed.length?html` Changed: ${r.changed.join(', ')}.`:''}${r.reason===''?'':r.outcome==='failed'?html` Reason: ${inline(r.reason)}${isWithheld(r.reason)?'':'.'}`:html` ${inline(r.reason)}`}</p>
       ${r.regrade?html`<p class="muted pl-regrade">Fixed answers graded again with the revised guideline. Before: ${side(r.regrade.before)||'none'}. After: ${side(r.regrade.after)||'none'}.</p>`:''}
       ${r.recounted?html`<p class="muted pl-recounted">The ${r.stage||'stage'} was counted again: ${r.recounted.passed===true?'passed':r.recounted.passed===false?'failed':'not decided'}${r.recounted.explained!==null?', '+r.recounted.explained+' count toward the pass':''}.</p>`:''}`;
   }
@@ -1098,7 +1123,7 @@
     if(p.score===null)return html`<span class="muted">Waiting for a score</span>`;
     if(p.score>=bar)return html`<span class="muted">Does not count: the score is not below ${barText(bar)}</span>`;
     if(p.countsTowardPass===true)return html`<span class="pl-counts"><span aria-hidden="true">\u2713</span> Counts</span>${cls}`;
-    if(p.countsTowardPass===false)return html`<span class="pl-nocount"><span aria-hidden="true">!</span> Low score that does not count</span>${cls||html`<small class="pl-diagnosis">Diagnosis: not diagnosed</small>`}`;
+    if(p.countsTowardPass===false)return html`<span class="pl-nocount"><span aria-hidden="true">!</span> Low score that does not count${adj&&!isWithheld(adj)&&adj.class==='unsupported'&&adj.claimed==='tool_failure'?': the claim of a tool failure was not confirmed':''}</span>${cls||html`<small class="pl-diagnosis">Diagnosis: not diagnosed</small>`}`;
     return html`<span class="muted">Waiting for the diagnosis</span>${cls}`;
   }
   const LOW_WORDS=[['intended','intended'],['otherValid','another valid error'],['permittedAlternative','permitted alternative'],['graderDefect','grader defect'],['ambiguous','ambiguous'],['toolFailure','tool failure'],['unsupported','not supported']];
@@ -1162,7 +1187,7 @@
     const parts=[],min=calMin(),c=a.calibration,f=a.fairness;
     if(c!==null)parts.push(isWithheld(c)?html`Calibration: ${inline(c)}`:isWithheld(c.score)?html`Calibration: ${inline(c.score)}`:c.score===null?'Calibration: no usable score':'Calibration: '+scoreFmt(c.score,min)+(c.score>=min?', passed':', failed'));
     if(f!==null)parts.push(isWithheld(f)?html`Fairness review: ${inline(f)}`:f.status==='unusable'?'Fairness review: no usable answer':f.status==='ok'&&!f.count?'Fairness review: no unfair item':'Fairness review: '+plural(f.count,'unfair item'));
-    if(a.review!==null)parts.push(isWithheld(a.review)?html`Fairness: ${inline(a.review)}`:'Fairness: '+(REVIEW_WORDS[a.review.status]||a.review.status||'no result').toLowerCase()+(a.review.stage2&&!isWithheld(a.review.stage2)&&a.review.stage2.disposition!==''?' ('+(DISPOSITION_WORDS[a.review.stage2.disposition]||a.review.stage2.disposition)+')':''));
+    if(a.review!==null)parts.push(isWithheld(a.review)?html`Fairness: ${inline(a.review)}`:a.review.status==='not-reached'?'Fairness: no review ran':'Fairness: '+(REVIEW_WORDS[a.review.status]||a.review.status||'no result').toLowerCase()+(a.review.stage2&&!isWithheld(a.review.stage2)&&a.review.stage2.disposition!==''?' ('+(DISPOSITION_WORDS[a.review.stage2.disposition]||a.review.stage2.disposition)+')':''));
     if(a.answerSet!==null)parts.push(isWithheld(a.answerSet)?html`Answer set: ${inline(a.answerSet)}`:'Answer set: '+(a.answerSet.passed===true?'graded as required':a.answerSet.passed===false?'not graded as required':'not decided')+(a.answerSet.answers.some(x=>x.unstable)?', with an unstable grade':''));
     if(a.guidelineRepair!==null&&!isWithheld(a.guidelineRepair))parts.push('Guideline repair: '+(a.guidelineRepair.outcome==='applied'?'applied':a.guidelineRepair.outcome==='failed'?'not used':'in progress'));
     if(a.validation==='incomplete')parts.push('The checks did not finish');
@@ -1197,11 +1222,14 @@
     /* The companion names its start option in its message (acceptMissing); the page says it with the words of the box. */
     const friendly=t=>String(t).replace(/with acceptMissing/g,'with the box \u201CStart even if a world or task file has to be withheld\u201D ticked').replace(/\bacceptMissing\b/g,'the \u201CStart even if a world or task file has to be withheld\u201D box');
     const needsAccept=v.stage==='failed'&&/acceptMissing/.test(v.summary+' '+v.error);
+    /* the start stopped because the reviewers cannot read some files of the task, and the box that accepts that was not ticked */
+    const unreadFail=v.stage==='failed'&&!v.acceptMissing&&!needsAccept&&v.cls.unreadable.length>0;
     /* The step the cap stopped in, what was spent, and what to do: the companion's sentence says what the next call would have cost. */
     const capNote=v.stage==='budget'?html`<p class="pl-budget-note">Stopped in the ${STEPS[stepOf(v)][1]} step${v.capUsd?' with '+usd(v.spentUsd)+' of '+usd(v.capUsd)+' spent':''}. To go further, start a new pipeline with a higher total cap.</p>`:'';
     return html`<div class="card-title"><div><div class="eyebrow">Result</div><h2>${data[0]}</h2></div>${pill(data[1],data[2])}</div>
       <p>${friendly(v.summary||data[3])}</p>${capNote}${incomplete?incompleteHtml():''}${leaned}${v.error&&v.error!==v.summary?html`<p class="pl-error">Reason: ${friendly(v.error)}</p>`:''}
       ${needsAccept?html`<div class="notice pl-accept-note" role="note"><strong>Some files would be withheld from the pilots.</strong> To go on without them, tick \u201C${ACCEPT_LABEL}\u201D in the start form, then start again. <button type="button" class="small" data-pl="accept-form" data-pl-key="accept-form">Open the start form</button></div>`:''}
+      ${unreadFail?html`<div class="notice pl-accept-note pl-unreadable-note" role="note"><strong>The reviewers cannot read ${v.cls.unreadable.length===1?'a file':'some files'} of this task.</strong> To go on with ${v.cls.unreadable.length===1?'it':'them'} unchecked, tick \u201C${ACCEPT_SHORT}\u201D in the start form, then start again. <button type="button" class="small" data-pl="accept-form" data-pl-key="accept-form">Open the start form</button></div>`:''}
       <p class="muted">Spent ${usd(v.spentUsd)}${v.capUsd?' of '+usd(v.capUsd):''}. Redesigns used: ${v.redesigns} of ${RULES.maxRedesigns}.</p>`;
   }
 

@@ -415,6 +415,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
         skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES,
         keepAsWorld: [{ name: 'Atlas_Parent_Answer.xlsx', present: true, warning: 'its name looks like an answer or grading material (a file named like an answer), and it goes to the designer and the pilots as a world file' }, { name: 'Meridian_Notes.txt', present: false, warning: 'the task has no file by this name' }] },
       waiting: { kind: 'confirm-files', message: '40 files were fetched. Compare them with the files listed on the task page, then press Continue.', since: new Date().toISOString() },
+      classification: { unreadable: ['Borealis_Old_Report.xls', 'Atlas_Archive.bin'] },
     });
     await waitFor(stageIs('^Waiting for you: check the files$'), 'the confirm-files wait', POLL_WAIT);
     assert.equal(await text('#pl-wait h2'), 'Check the files');
@@ -434,6 +435,12 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await evaluate('document.querySelector("#pl-wait .pl-kept").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the warning comes before the list of files');
     assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-wait .pl-kept")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-wait .pl-files-box")).borderLeftColor'), true, 'and it is marked as a warning');
     assert.match(await text('#pl-import .pl-kept'), /You asked to keep 2 files as world files/, 'the import card shows it too');
+    /* the files the reviewers cannot read: named with the plain reason, above the list of files, and marked as a warning */
+    assert.equal(await text('#pl-wait .pl-unreadable strong'), 'The reviewers cannot read these files');
+    assert.match(await text('#pl-wait .pl-unreadable .pl-warning-lead'), /^The reviewers cannot read these files, so a start is refused unless you accept that they go unchecked\. To accept it, tick .Start even if a world or task file has to be withheld. in the start form\.$/);
+    assert.deepEqual(JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-wait .pl-unreadable li")].map(li=>li.textContent))')), ['Borealis_Old_Report.xls', 'Atlas_Archive.bin']);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-unreadable").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the warning comes before the list of files');
+    assert.equal(await count('#pl-wait .pl-unreadable'), 1);
     assert.match(await text('#pl-wait'), /Skipped \(2\)[\s\S]*Atlas_Thumbs\.db\s+a system file[\s\S]*Atlas_Archive_2019\.zip\s+larger than the size cap/);
     assert.match(await text('#pl-wait'), /Show all files[\s\S]*Found and turned on \(\u201CShow all files\u201D\)\. 4 files offered before, 40 after\./);
     assert.equal(await evaluate('[...document.querySelectorAll("#pl-wait .pl-confirm-actions button")].map(b=>b.textContent.trim()).join("|")'), 'Every file is there: continue|Stop');
@@ -464,6 +471,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await press('Enter');
     await waitFor('!document.querySelector("#pl-wait [data-pl=continue]")', 'the confirm wait to end', 5000);
     assert.equal(posts.filter(p => p.url.endsWith('/continue')).length, continuesBefore + 1, 'one more continue was posted');
+    set({ classification: undefined });
     pass('the confirm-files wait shows "Check the files": the message, three notes above the list, 40 files with groups in a scrolling box, the skipped files, the toggle result, and two buttons that fit a phone and work from the keyboard');
 
     /* ---------- classify, design ---------- */
@@ -531,14 +539,24 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     {
       const { redactPipelineData } = require(path.join(root, 'backend', 'pipeline', 'redact.cjs'));
       const [id, state] = [...pipelines][0];
-      const running = { ...state, redacted: false, stage: 'screen', design: newDesign(), references: NEW_REFS, config: { ...state.config, designMode: 'new' }, attempts: [newAttempt({ outcome: 'in-progress', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [null, null]], null) })] };
+      const ledgerEntry = (kind, ref) => ({ at: new Date().toISOString(), stage: 'design', kind, ref, costUsd: 0.3, estimated: false });
+      const running = { ...state, redacted: false, stage: 'screen', design: newDesign(), references: { ...NEW_REFS, partial: ['Atlas_Partial_Reference.md'] }, config: { ...state.config, designMode: 'new' },
+        classification: { worldFiles: ['Atlas_Ledger.csv'], taskFiles: [], other: [], withheld: [], unreadable: ['Borealis_Archive.bin'] },
+        ledger: [ledgerEntry('blind-review', 'attempt 1'), ledgerEntry('reveal', 'alt-1'), ledgerEntry('grader', 'as-golden'), ledgerEntry('grader', 'diag-1')],
+        attempts: [newAttempt({ outcome: 'in-progress', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [null, null]], null),
+          fairness: { ...FAIRNESS, stage1: { ...FAIRNESS.stage1, state: 'partial', rendered: ['Atlas_Rendered_Ledger.xlsx'], unreadable: ['Meridian_Hidden_Scan.bin'] } },
+          freeze: [{ ...FREEZE, answers: [{ name: 'alt-1', sha256: 'c6'.repeat(32) }] }] })] };
       pipelines.set(id, redactPipelineData(JSON.parse(JSON.stringify(running))));
       await waitFor('/Withheld while a round runs/.test((document.querySelector("#pl-brief")||{}).innerText||"")', 'the new mode while a round runs', POLL_WAIT);
       const gone = await evaluate('(()=>{const t=document.body.innerText;return ["Quarterly covenant review","Atlas_Facility_Agreement","Report the covenant","Net the blocked cash","breached","Usable cash is 1,250"].filter(x=>t.includes(x))})()');
       assert.deepEqual(gone, [], 'nothing of the brief, the golden answer or the paths is on the page while a round runs');
       assert.equal(await text('#pl-brief .pl-withheld'), 'Withheld while a round runs');
       assert.match(await text('#pl-design .pl-task-type'), /^Task type: Withheld while a round runs$/);
-      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Not checked for leaked passages: Withheld while a round runs/);
+      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Checked for leaked passages only in part: Withheld while a round runs Not checked for leaked passages: Withheld while a round runs/);
+      const leaked = await evaluate('(()=>{const t=document.body.innerText;return ["Atlas_Partial_Reference","Atlas_Rendered_Ledger","Meridian_Hidden_Scan","Meridian_Workflow_Catalog","as-golden","diag-1"].filter(x=>t.includes(x))})()');
+      assert.deepEqual(leaked, [], 'the files the leak scan read in part, the files turned into text and the files nobody could read are not on the page');
+      assert.match(await text('#pl-classify'), /Borealis_Archive\.bin/, 'the files the reviewers cannot read are not private');
+      assert.match(await text('#pl-checks .pl-freeze li:first-child'), /Packet d1d1d1d1d1d1 \(9 files\)/, 'the freeze hashes stay visible');
       assert.deepEqual(await evaluate('[...document.querySelectorAll("#pl-checks h3")].map(h=>h.textContent)'), ['Fairness: could another answer be better supported?', 'Difficulty: do the pilots fail for the intended reason?', 'Answer set: can the guideline grade the fixed answers?', 'Guideline repair', 'Diagnostic answers', 'Freeze records'], 'a repair or a diagnostic that may exist is withheld, not left out');
       assert.equal(await evaluate('[...document.querySelectorAll("#pl-checks .pl-withheld")].length >= 3'), true, 'the fairness, the answer set and the counts are withheld');
       assert.match(await text('#pl-checks .card-title'), /Checks complete/, 'that the checks finished is not private');
@@ -689,7 +707,42 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
     await shot('03g-new-failed-checks-390', 390, 844);
     await viewport(1440, 1000);
-    setAttempt({ fairness: FAIRNESS });
+    /* the blind review that could not read every file, a hit that is a notice, the files a check saw only in part, and the rule that decided each grade */
+    setAttempt({
+      fairness: { ...FAIRNESS, stage1: { ...FAIRNESS.stage1, state: 'partial', rendered: ['Atlas_Ledger.xlsx', 'Meridian_Schedule.docx'], unreadable: ['Borealis_Scan.bin'] },
+        stage2: { ...FAIRNESS.stage2, application: { ...CHECK, hits: [{ id: 'u1', kind: 'notice', document: 'Meridian_Notice.pdf', unreadable: true, snippet: 'quoted words that must not be shown' }], unscanned: ['Meridian_Notice.pdf'], cut: ['Atlas_Facility_Agreement.txt'] } } },
+      answerSet: { ...ANSWER_SET, answers: ANSWER_SET.answers.map(a => ({ ...a, runs: a.runs.map(r => ({ ...r, rule: a.grades.length > 2 ? 'majority' : 'both' })) })) },
+    });
+    await waitFor('/Nobody could read these files/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the partial blind review', POLL_WAIT);
+    const lines2 = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-review > li")].map(li=>li.innerText.replace(/\\s+/g," ").trim()))'));
+    assert.ok(lines2[0].startsWith('Blind review: a reader with only the prompt and the files gave an answer, but not every file could be read'), lines2[0]);
+    assert.equal(lines2[1], 'These files were turned into text for the blind reviewer: Atlas_Ledger.xlsx, Meridian_Schedule.docx.');
+    assert.equal(lines2[2], 'Nobody could read these files, so the blind review is partial for them: Borealis_Scan.bin.');
+    const app2 = lines2.find(x => x.startsWith('Application check of the clause that rules the other answer out'));
+    assert.ok(app2.includes('A reviewer quoted this from a file that only the blind reader could open: Meridian_Notice.pdf (the quote itself is not shown here).'), app2);
+    assert.ok(app2.includes('The check saw these files only in part: Atlas_Facility_Agreement.txt.'), app2);
+    assert.equal((app2.match(/Meridian_Notice\.pdf/g) || []).length, 1, 'a file is named once');
+    assert.ok(!(await text('#pl-checks')).includes('quoted words that must not be shown'), 'the quote is not shown');
+    const answers2 = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-answers tbody tr")].map(r=>Object.fromEntries([["row",r.querySelector("th").innerText.replace(/\\s+/g," ").trim()],...[...r.querySelectorAll("td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])])))'));
+    assert.deepEqual(answers2.map(a => a.Grades), ['0.96, 0.94 Decided by: both grades must pass', '0.90, 0.80, 0.88 Decided by: the majority of the grades']);
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-checks .pl-rule")].length===2&&[...document.querySelectorAll("#pl-checks .pl-rule")].every(e=>e.checkVisibility())'), true, 'each rule is on screen, under its grades');
+    await noOverflowAtPhone('the partial blind review');
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03h-new-partial-blind-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03h-new-partial-blind-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('the blind review that could not read every file names the files turned into text and the files nobody could read; a notice names its document without the quote; each grade says which rule decided it');
+    /* a design refused before any review: it says so, and lists nothing */
+    setAttempt({ fairness: { status: 'not-reached', repairs: 0, stage1: null, stage2: null } });
+    await waitFor('!!document.querySelector("#pl-checks .pl-review-none")', 'the design refused before the reviews', POLL_WAIT);
+    assert.equal(await text('#pl-checks .pl-review-none'), 'No review ran: the design was refused before the reviews.');
+    assert.equal(await count('#pl-checks .pl-review'), 0, 'no list of reviews');
+    assert.ok(!/Blind review|Second review/.test(await text('#pl-checks')), 'no review is listed');
+    await noOverflowAtPhone('the design refused before the reviews');
+    pass('a design refused before the reviews says "No review ran" and lists no review');
+    setAttempt({ fairness: FAIRNESS, answerSet: ANSWER_SET });
     await waitFor('!/Trap 2, why the alternative is rejected/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the passing checks again', POLL_WAIT);
     /* the pilots of the test: which low scores count, and the ones that do not are marked with their diagnosis */
     const counts = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-test tbody tr")].map(r=>r.querySelector("td[data-label=\\"Counts toward the pass\\"]").innerText.replace(/\\s+/g," ").trim()))'));

@@ -108,7 +108,7 @@
 .pl-counts{color:var(--pass-ink)}
 .pl-nocount{color:var(--warn-ink)}
 .pl-counts span[aria-hidden],.pl-nocount span[aria-hidden]{display:inline-block;margin-right:4px}
-.pl-diagnosis,.pl-diagnosis-note,.pl-brief-why,.pl-brief-figures,.pl-unstable,.pl-runs,.pl-freeze-hashes,.pl-freeze-run{display:block;margin-top:3px;font-size:.78rem;line-height:1.45;color:var(--muted-strong);font-weight:400;overflow-wrap:anywhere}
+.pl-diagnosis,.pl-diagnosis-note,.pl-brief-why,.pl-brief-figures,.pl-unstable,.pl-runs,.pl-rule,.pl-freeze-hashes,.pl-freeze-run{display:block;margin-top:3px;font-size:.78rem;line-height:1.45;color:var(--muted-strong);font-weight:400;overflow-wrap:anywhere}
 .pl-unstable{color:var(--warn-ink)}
 .pl-unexplained,.pl-leaned,.pl-incomplete{margin:12px 0 0}
 .pl-unexplained ul{margin:8px 0 0}
@@ -127,6 +127,9 @@
 .pl-hit-list li{margin:3px 0;overflow-wrap:anywhere}
 .pl-cut{margin:8px 0 0;font-size:.86rem;line-height:1.5;color:var(--warn-ink);overflow-wrap:anywhere}
 .pl-refs-list{margin:0 0 12px}
+.pl-refs-details{margin:0 0 12px;font-size:.86rem}
+.pl-review-none{margin:8px 0 0;font-size:.9rem;line-height:1.5}
+.pl-unreadable{margin:0 0 14px}
 .pl-freeze{margin:0 0 4px;padding-left:22px;font-size:.88rem;line-height:1.55}
 .pl-freeze li{margin:8px 0}
 .pl-regrade,.pl-recounted{margin:4px 0 0;font-size:.84rem}
