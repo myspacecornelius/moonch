@@ -10,8 +10,8 @@
      - Fetch.continueResponse can ADD "content-disposition: attachment", so that Chrome's download manager takes a file type it would
        otherwise show in the tab (text, pdf, png, json, html).
    The Fetch domain also hands over the body of a form that is posted, so it is switched on only on a tab opened for one file (gateTab) or,
-   for the length of ONE download click, on the task tab (guardWrites, which looks at the method and nothing else); never while the person
-   signs in. Exports: gateTab, guardWrites, attachmentHeader. */
+   for the length of one press, on the task tab (guardWrites, which looks at the method, and at the body of a POST only to tell a data query
+   from a change); never while the person signs in. Exports: gateTab, guardWrites, isReadQuery, attachmentHeader. */
 
 const REDIRECT = new Set([301, 302, 303, 307, 308]);
 
@@ -52,21 +52,70 @@ async function gateTab(tab, { isAllowed, onBlocked = () => {}, file }) {
   return { async stop() { off(); await s.send('Fetch.disable').catch(() => {}); } };
 }
 
-/* A guard for the task tab while ONE download control is pressed. Pressing it runs the page's own script, which can do anything; a request
-   that is not a read (POST, PUT, PATCH, DELETE ...) is failed before it leaves the browser, reads go on. Only the method is looked at: the
-   body of the request is never read or kept. onBlocked({ method }) says what was stopped. */
-async function guardWrites(tab, { onBlocked = () => {} } = {}) {
-  const s = tab.s;
-  const answer = (method, params) => s.send(method, params, { timeout: 10000 }).catch(() => { /* the tab closed or the request ended */ });
-  const handler = (p) => {
-    const method = String((p.request && p.request.method) || 'GET').toUpperCase();
-    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return answer('Fetch.continueRequest', { requestId: p.requestId });
-    try { onBlocked({ method }); } catch (e) { /* a callback must not leave the request paused */ }
-    return answer('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' });
-  };
-  const off = s.on('Fetch.requestPaused', handler);
-  await s.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
-  return { async stop() { off(); await s.send('Fetch.disable').catch(() => {}); } };
+/* Whether the body of a POST is a data QUERY and not a change: a GraphQL query (JSON {"query": "query ... { ... }"}, one or a batch, or the
+   raw text of one) with no "mutation" (or "subscription") anywhere in the body. Single-page apps load their lists with POST queries; a body
+   that is anything else (a JSON change, a form, nothing at all) is a write. This is the only place a request body is read: for this
+   decision, in memory, never kept or logged. */
+function isReadQuery(postData) {
+  if (typeof postData !== 'string' || !postData.trim() || postData.length > 200000) return false;
+  if (/\b(mutation|subscription)\b/i.test(postData)) return false;
+  const reads = (text) => /^\s*(query\b|\{|fragment\b)/.test(String(text).replace(/#[^\n]*/g, ''));
+  let parsed;
+  try { parsed = JSON.parse(postData); } catch (e) { return reads(postData) && !/^\s*[[{]\s*"/.test(postData); }   /* raw GraphQL text, not JSON */
+  const ops = Array.isArray(parsed) ? parsed : [parsed];
+  return ops.length > 0 && ops.length <= 50 && ops.every((op) => op && typeof op === 'object' && typeof op.query === 'string' && reads(op.query));
 }
 
-module.exports = { gateTab, guardWrites, attachmentHeader };
+/* The text of a request body, from postData or from its entries (Chrome gives the bytes of a small body as base64 entries); undefined when it
+   is not plain text in memory (a file, a stream, nothing). */
+function bodyOf(request) {
+  if (typeof request.postData === 'string') return request.postData;
+  const entries = request.postDataEntries;
+  if (Array.isArray(entries) && entries.length && entries.every((e) => e && typeof e.bytes === 'string')) return entries.map((e) => Buffer.from(e.bytes, 'base64').toString('utf8')).join('');
+  return undefined;
+}
+
+/* A guard for the task tab while the loader PRESSES something (a tab, an expander, "Load more", a pager, the "show all files" switch, a
+   download control). Pressing runs the page's own script, which can do anything; a request that is not a read (PUT, PATCH, DELETE, a POST
+   that is not a data query) is failed before it leaves the browser. GET, HEAD and OPTIONS go on, and so does a POST whose body is a GraphQL
+   query (isReadQuery). Guards nest: while one is on, another call joins it (the newest one is told what was stopped), and the browser's
+   Fetch domain is switched off when the last one stops. onBlocked({ method }) says what was stopped. */
+async function guardWrites(tab, { onBlocked = () => {} } = {}) {
+  const s = tab.s;
+  if (!s || typeof s.on !== 'function') return { async stop() {} };   /* a test double without a session */
+  let shared = tab.writeGuard;
+  if (!shared) {
+    shared = { listeners: [], users: 0, off: null };
+    const answer = (method, params) => s.send(method, params, { timeout: 10000 }).catch(() => { /* the tab closed or the request ended */ });
+    const handler = (p) => {
+      const request = p.request || {};
+      const method = String(request.method || 'GET').toUpperCase();
+      if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return answer('Fetch.continueRequest', { requestId: p.requestId });
+      if (method === 'POST' && isReadQuery(bodyOf(request))) return answer('Fetch.continueRequest', { requestId: p.requestId });
+      const top = shared.listeners[shared.listeners.length - 1];
+      try { if (top) top({ method }); } catch (e) { /* a callback must not leave the request paused */ }
+      return answer('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' });
+    };
+    shared.off = s.on('Fetch.requestPaused', handler);
+    tab.writeGuard = shared;
+    await s.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  }
+  shared.users += 1;
+  shared.listeners.push(onBlocked);
+  let stopped = false;
+  return {
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      const at = shared.listeners.lastIndexOf(onBlocked);
+      if (at >= 0) shared.listeners.splice(at, 1);
+      shared.users -= 1;
+      if (shared.users > 0) return;
+      tab.writeGuard = null;
+      shared.off();
+      await s.send('Fetch.disable').catch(() => {});
+    },
+  };
+}
+
+module.exports = { gateTab, guardWrites, isReadQuery, attachmentHeader };

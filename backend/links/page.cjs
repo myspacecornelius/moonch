@@ -14,7 +14,12 @@
          "show all files" switch (a switch, checkbox, radio, tab, pressed button or <select> option, or a plain button, whose label says
          show or view, all, and files; none of clear, delete, remove, reset, archive, move, apply, bulk, select all ...).
    Whatever names a file and is not allowed is listed in skipped ("not clearly a download: download it yourself"), never requested or
-   pressed. Every click goes through pageOps' activate, which needs a kind and checks the live element against the rule of that kind.
+   pressed. Every click goes through pageOps' activate, which needs a kind and checks the live element against the rule of that kind;
+   and every press runs with the write guard on (gate.cjs guardWrites, started by discover.cjs guarded): a request that is not a read is
+   failed before it leaves the browser, and the control that tried is not pressed again. A tab or pager that is a link must pass the same
+   address tests as a file (addressProblem, the never-rules, the same site). A pager needs a navigation around it (nav, role=navigation, a
+   box that says pagination) or links that change only a page parameter; a control that is in a form that is not GET, or whose
+   onchange/onclick submits, and a choice list that is not all views of the files, is never the "show all files" control.
 
    extractPage reads, nothing clicked, nothing submitted. It walks the document in order, open shadow roots and same-origin iframes
    included, and returns
@@ -78,7 +83,7 @@ const DOWNLOAD_NAME_SRC = `^[^a-z0-9]*(?:download(?:\\s+(?:the|this|a|your|my))?
 const DOWNLOAD_NAME_RE = new RegExp(DOWNLOAD_NAME_SRC, 'i');
 const ALL_BUTTON_RE = /^[^a-z0-9]*download\s+(all|everything|zip|archive|bundle)\b/i;
 /* A control that shows more of a list: "Load more", "Show 20 more", "View all (12)", "See all", "Show remaining 8", "More", "Next". */
-const MORE_SRC = '^[^a-z0-9]*(?:(?:load|show|view|see|display|get|fetch)\\s+(?:(?:\\d+|more|all|remaining|older|earlier|additional|the rest(?: of)?|next)\\s*)+(?:files?|attachments?|documents?|docs?|items?|results?|rows?|entries|comments|messages|activity|records?|versions?)?|more(?:\\s+(?:files?|attachments?|documents?|items?|results?))?|\\+\\s*\\d+(?:\\s+more)?|\\d+\\s+more|expand\\s+all|next(?:\\s+page)?|older)(?:\\s*[(\\[][^)\\]]{0,20}[)\\]])?[^a-z0-9]*$';
+const MORE_SRC = '^[^a-z0-9]*(?:(?:load|show|view|see|display)\\s+(?:(?:\\d+|more|all|remaining|older|earlier|additional|the rest(?: of)?|next)\\s*)+(?:files?|attachments?|documents?|docs?|items?|results?|rows?|entries|comments|messages|activity|records?|versions?)?|more(?:\\s+(?:files?|attachments?|documents?|items?|results?))?|\\+\\s*\\d+\\s+more|\\d+\\s+more|expand\\s+all|next(?:\\s+page)?|older)(?:\\s*[(\\[][^)\\]]{0,20}[)\\]])?[^a-z0-9]*$';
 /* The "next page" control of a pager: Next, Next page, Older, an arrow. */
 const NEXT_SRC = '^(?:go to\\s+)?(?:(?:next|older)(?:\\s+page)?[\\s\\u203a\\u00bb>\\u2192]*|[\\u203a\\u00bb>\\u2192]+)$';
 /* Script in an onclick attribute that submits a form or sends something. */
@@ -89,13 +94,18 @@ const SCRIPTED_SRC = '\\b(?:submit|form|forms|fetch|xhr|xmlhttprequest|ajax|post
    of the text: every one is a single linear scan. */
 const TOGGLE_LABEL_RE = /^(?=[\s\S]*\b(?:show|view)\b)(?=[\s\S]*\b(?:all|every|world)\b)(?=[\s\S]*\b(?:files?|attachments?|documents?|downloads?)\b)|^\s*all files\s*$/i;
 /* A label with one of these is never the "show all files" control, whatever else it says. */
-const TOGGLE_NEVER_RE = /\b(?:clear|delete|remove|reset|archiv\w*|move|apply|bulk|select all|discard|detach|unlink|trash|empty|wipe|purge|mark|notify|notification|notifications|email|digest|newsletter|subscribe|share|send|upload|import|lock|restore)\b/i;
+const TOGGLE_NEVER_RE = /\b(?:clear|delete|remove|reset|archiv\w*|move|apply|bulk|select all|discard|detach|unlink|trash|empty|wipe|purge|mark|notify|notification|notifications|email|digest|newsletter|subscribe|share|send|upload|import|lock|restore|access|permissions?|visible|visibility|client|guest|external|public|publicly|edit|can|role|default|always)\b/i;
+/* A choice list can be the "show all files" control only when EVERY option is a view of the files (Added files, All files, My files ...):
+   a list of permissions, statuses or actions is not. And a control that belongs to a form that is not GET, or whose onchange/onclick
+   mentions submit or form, saves something when it is flipped: never flipped. */
+const VIEW_WORD_SRC = '\\b(?:files?|attachments?|documents?|downloads?|everything|all|mine|my|added|task|world|recent|latest|current)\\b';
+const RISK_SCRIPT_SRC = '\\b(?:submit|form|forms)\\b';
 const TOGGLE_KINDS = new Set(['switch', 'checkbox', 'radio', 'tab', 'pressed', 'option', 'button']);
 
 /* What the page side needs, as plain strings (regex sources) so that nothing is spliced into code. */
 const RULES = {
   ext: EXT_SRC, download: DOWNLOAD_NAME_SRC, toggle: TOGGLE_LABEL_RE.source, toggleNever: TOGGLE_NEVER_RE.source, more: MORE_SRC, next: NEXT_SRC,
-  scripted: SCRIPTED_SRC, never: NEVER_TEXT_RE.source, actions: ACTION_WORDS,
+  scripted: SCRIPTED_SRC, never: NEVER_TEXT_RE.source, actions: ACTION_WORDS, viewWord: VIEW_WORD_SRC, riskScript: RISK_SCRIPT_SRC, pageParam: null,
 };
 const pageArgs = (extra = {}) => ({ limits: LIMITS, rules: RULES, ...extra });
 
@@ -108,6 +118,8 @@ function extractPage(opts) {
   const toggleNever = new RegExp(R.toggleNever || '(?!)', 'i');
   const downloadRe = new RegExp(R.download || '(?!)', 'i');
   const scriptedRe = new RegExp(R.scripted || '(?!)', 'i');
+  const riskRe = new RegExp(R.riskScript || '(?!)', 'i');
+  const viewWordRe = new RegExp(R.viewWord || '(?!)', 'i');
   const trunc = {};
   const HIDDEN = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]', 'g');
   const STRIP = new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]', 'g');
@@ -259,6 +271,12 @@ function extractPage(opts) {
   }
   const dispositionName = (u) => { const d = u.searchParams.get('response-content-disposition') || u.searchParams.get('filename') || ''; const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(d); if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } } return d && !/=/.test(d) ? d : ''; };
 
+  /* a control that saves something when it is flipped: it belongs to a form that is not GET, or its onchange/onclick attribute mentions submit or form */
+  const toggleRisk = (el) => {
+    const form = el.form || (el.closest ? el.closest('form') : null);
+    if (form && String((form.getAttribute && form.getAttribute('method')) || 'get').toLowerCase() !== 'get') return true;
+    return riskRe.test((el.getAttribute('onchange') || '') + ' ' + (el.getAttribute('onclick') || ''));
+  };
   out.headings = []; out.links = []; out.buttons = []; out.toggles = []; out.hidden = [];
   let controlCount = 0; let linkCount = 0; let group = '';
   const addToggle = (t) => { if (out.toggles.length < L.togglesMax) out.toggles.push({ disabled: false, key: '', group, ...t }); else trunc.toggles = true; };
@@ -272,21 +290,24 @@ function extractPage(opts) {
     }
     const role = (el.getAttribute('role') || '').toLowerCase();
     if ((tag === 'INPUT' && el.type === 'checkbox') || role === 'switch' || role === 'checkbox') {
-      addToggle({ label: clip(labelOf(el, true), 120), checked: tag === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true', kind: role || 'checkbox', disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'), path: cssPath(el), key: keyOf(el) });
+      addToggle({ label: clip(labelOf(el, true), 120), checked: tag === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true', kind: role || 'checkbox', disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'), path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
       continue;
     }
     if ((tag === 'INPUT' && el.type === 'radio') || role === 'radio') {
-      addToggle({ label: clip(labelOf(el, true), 120), checked: tag === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true', kind: 'radio', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el) });
+      addToggle({ label: clip(labelOf(el, true), 120), checked: tag === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true', kind: 'radio', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
       continue;
     }
     if (role === 'tab') {
-      addToggle({ label: clip(labelOf(el, false), 120), checked: el.getAttribute('aria-selected') === 'true', kind: 'tab', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el) });
+      addToggle({ label: clip(labelOf(el, false), 120), checked: el.getAttribute('aria-selected') === 'true', kind: 'tab', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
       continue;
     }
     if (tag === 'SELECT') {
       controlCount += 1;
       const path = cssPath(el); const key = keyOf(el);
-      Array.from(el.options || []).slice(0, L.selectOptions).forEach((o, i) => addToggle({ label: clip(norm(o.textContent), 120), checked: Boolean(o.selected), kind: 'option', disabled: Boolean(el.disabled || o.disabled), path, option: i, key }));
+      /* a list of anything but views of the files (permissions, statuses, actions) is not the "show all files" control */
+      const listed = Array.from(el.options || []);
+      const unsafe = toggleRisk(el) || !listed.every((o) => viewWordRe.test(norm(o.textContent)) && !toggleNever.test(norm(o.textContent)));
+      listed.slice(0, L.selectOptions).forEach((o, i) => addToggle({ label: clip(norm(o.textContent), 120), checked: Boolean(o.selected), kind: 'option', disabled: Boolean(el.disabled || o.disabled), path, option: i, key, unsafe }));
       continue;
     }
     const rawHref = tag === 'A' ? el.getAttribute('href') : null;
@@ -323,13 +344,13 @@ function extractPage(opts) {
     if (tag === 'BUTTON' || tag === 'A' || role === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type))) {
       const pressed = el.getAttribute('aria-pressed');
       if (pressed === 'true' || pressed === 'false') {   /* a toggle button */
-        addToggle({ label: clip(labelOf(el, true), 120), checked: pressed === 'true', kind: 'pressed', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el) });
+        addToggle({ label: clip(labelOf(el, true), 120), checked: pressed === 'true', kind: 'pressed', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
         continue;
       }
       const text = clip(norm(tag === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
       if (!text) continue;
       if (toggleRe.test(text) && !toggleNever.test(text) && !el.disabled && visible(el)) {   /* a plain "Show all files" button */
-        addToggle({ label: text, checked: false, kind: 'button', path: cssPath(el), key: keyOf(el) });
+        addToggle({ label: text, checked: false, kind: 'button', path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
         continue;
       }
       const dataUrl = el.getAttribute('data-url') || el.getAttribute('data-href') || el.getAttribute('data-download-url') || el.getAttribute('data-file') || null;
@@ -441,6 +462,9 @@ function pageOps(opts) {
   const toggleRe = new RegExp(R.toggle || '(?!)', 'i');
   const toggleNever = new RegExp(R.toggleNever || '(?!)', 'i');
   const scriptedRe = new RegExp(R.scripted || '(?!)', 'i');
+  const riskRe = new RegExp(R.riskScript || '(?!)', 'i');
+  const viewWordRe = new RegExp(R.viewWord || '(?!)', 'i');
+  const pageParamRe = new RegExp(R.pageParam || '(?!)', 'i');
   const actionSet = new Set(Array.isArray(R.actions) ? R.actions : []);
   const caps = opts.caps || {};
   const visible = (el) => { try { return typeof el.checkVisibility === 'function' ? el.checkVisibility() : true; } catch (e) { return true; } };
@@ -538,29 +562,48 @@ function pageOps(opts) {
     return names.length > 0 && downloadRe.test(names[0]) && !names.slice(1).some(hasAction);
   };
   const popupOf = (el) => { const p = el.getAttribute('aria-haspopup'); return Boolean(p && p !== 'false'); };
+  /* a control that saves something when it is flipped: it belongs to a form that is not GET, or its onchange/onclick mentions submit or form */
+  const toggleRisk = (el) => {
+    const form = el.form || (el.closest ? el.closest('form') : null);
+    if (form && String((form.getAttribute && form.getAttribute('method')) || 'get').toLowerCase() !== 'get') return true;
+    return riskRe.test((el.getAttribute('onchange') || '') + ' ' + (el.getAttribute('onclick') || ''));
+  };
+  /* a link of a pager: the same site and path as this page, and only a page parameter differs */
+  const listLink = (href) => {
+    try {
+      const a = new URL(href); const b = new URL(location.href);
+      if (a.origin !== b.origin || a.pathname !== b.pathname) return false;
+      const rest = (u) => Array.from(u.searchParams).filter(([k]) => !pageParamRe.test(k)).map(([k, v]) => k + '=' + v).sort().join('&');
+      return rest(a) === rest(b);
+    } catch (e) { return false; }
+  };
 
   if (opts.op === 'where') return { href: location.href };
 
   if (opts.op === 'expand') {
-    let opened = 0; let expanded = 0; let blocked = 0; let cut = false;
+    let opened = 0; let expanded = 0; let blocked = 0; let cut = false; let label = ''; let at = '';
     const popups = [];
+    const skip = new Set(Array.isArray(opts.skip) ? opts.skip : []);
     const rs = roots();
     for (const d of every('details:not([open])', rs)) { if (opened >= 200) { cut = true; break; } d.open = true; opened += 1; }
     const started = performance.now();
-    for (let guard = 0; ; guard += 1) {
+    const limit = opts.one ? 1 : 400;
+    for (let guard = 0; expanded < limit; guard += 1) {
       if (guard >= 400 || performance.now() - started > 2500) { cut = true; break; }
       let target = null;
-      /* looked up again after every click: a tree that draws itself anew has new nodes, and the old list holds dead ones */
+      /* looked up again after every press: a tree that draws itself anew has new nodes, and the old list holds dead ones */
       for (const el of every('[aria-expanded="false"]', rs)) {
         if (el.__fstTried) continue;
         const role = (el.getAttribute('role') || '').toLowerCase();
         if (el.disabled || /^(combobox|menuitem|menu|option|listbox)$/.test(role) || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || !pressable(el) || !visible(el)) continue;
         if (popupOf(el)) { el.__fstTried = true; const l = textOf(el); if (/file|attachment|document|download/i.test(l) && popups.length < 10) popups.push(l); continue; }
         if (submitsForm(el)) { el.__fstTried = true; blocked += 1; continue; }
+        if (skip.size && skip.has(cssPath(el))) { el.__fstTried = true; continue; }   /* pressed before, and the page tried to save something */
         target = el; break;
       }
       if (!target) break;
       target.__fstTried = true;
+      label = textOf(target); at = cssPath(target);
       /* a tree item: the handler sits on its row, which a click on the row reaches (and bubbles up to the item as well) */
       let spot = target;
       if ((target.getAttribute('role') || '').toLowerCase() === 'treeitem') {
@@ -572,7 +615,7 @@ function pageOps(opts) {
       }
       spot.click(); expanded += 1;
     }
-    return { opened, expanded, popups, blocked, cut };
+    return { opened, expanded, popups, blocked, cut, label, path: at };
   }
   if (opts.op === 'controls') {
     const tabsMax = caps.tabs || 50; const moreMax = caps.more || 50;
@@ -581,7 +624,7 @@ function pageOps(opts) {
     for (const el of every('[role=tab]', rs)) {
       if (el.disabled || el.getAttribute('aria-disabled') === 'true' || !visible(el)) continue;
       if (tabs.length >= tabsMax) { cut.tabs = (cut.tabs || 0) + 1; continue; }
-      tabs.push({ label: textOf(el), path: cssPath(el), selected: el.getAttribute('aria-selected') === 'true' });
+      tabs.push({ label: textOf(el), path: cssPath(el), selected: el.getAttribute('aria-selected') === 'true', href: el.tagName === 'A' && !pressable(el) ? el.href : null });
     }
     const ctrls = every('button,a,[role=button],[role=link],input[type=button]', rs).filter((el) => visible(el));
     /* the pager: Next / Previous / numbered controls that sit together (a nav, a list, a pagination box) */
@@ -593,10 +636,13 @@ function pageOps(opts) {
       const rel = String(el.getAttribute('rel') || '').toLowerCase().split(/\s+/);
       const kind = nextRe.test(aria) || nextRe.test(label) || rel.includes('next') ? 'next' : (PREV.test(aria) || PREV.test(label) ? 'prev' : (/^\d{1,4}$/.test(label) ? 'num' : ''));
       if (!kind) continue;
-      const box = (el.closest ? el.closest('nav,[role=navigation],ul,ol,[class*=pag]') : null) || el.parentElement;
+      /* a pager sits in a navigation: a nav, a role=navigation, or a box whose aria-label or class says pagination. A row of digits or arrows
+         anywhere else (a points picker, a stage mover) is not one. */
+      const nav = el.closest ? el.closest('nav,[role=navigation],[aria-label*="pagin" i],[class*="pagin" i],[class*="pager" i]') : null;
+      const box = nav || (el.closest ? el.closest('ul,ol') : null) || el.parentElement;
       if (!box) continue;
       if (!groups.has(box)) groups.set(box, []);
-      groups.get(box).push({ el, kind, label, aria });
+      groups.get(box).push({ el, kind, label, aria, nav: Boolean(nav) });
     }
     const isCurrent = (el) => {
       const li = el.parentElement;
@@ -614,7 +660,9 @@ function pageOps(opts) {
       const relNext = Boolean(next) && String(next.el.getAttribute('rel') || '').toLowerCase().split(/\s+/).includes('next');
       const ok = nums.length >= 2 || ((next || prev) && (nums.length >= 1 || labelled || (next && prev) || relNext));
       const wizard = Boolean(box.closest && box.closest('form')) && nums.length < 2 && !labelled;   /* "Next" in a form is a step of the form */
-      if (!ok || wizard || items.length <= bestSize) continue;
+      /* evidence: in a navigation, or made of links that stay on this list and change only a page parameter */
+      const evidence = items.some((i) => i.nav) || items.every((i) => i.el.tagName === 'A' && !pressable(i.el) && listLink(i.el.href));
+      if (!ok || wizard || !evidence || items.length <= bestSize) continue;
       bestSize = items.length; bestItems = items;
       const describe = (i) => ({ label: i.label || i.aria, path: cssPath(i.el), href: hrefOf(i.el), disabled: Boolean(i.el.disabled) || i.el.getAttribute('aria-disabled') === 'true' });
       const numbered = nums.map((i) => ({ n: Number(i.label), current: isCurrent(i.el), ...describe(i) })).sort((a, b) => a.n - b.n);
@@ -696,6 +744,8 @@ function pageOps(opts) {
     } else if (kind === 'tab') {
       if (role !== 'tab') return refuse('the element is no longer a tab');
       if (submitsForm(el)) return refuse('the control would submit a form');
+      /* a tab that is a link goes to an address: only the one the loader looked at and found harmless */
+      if (tag === 'A' && !pressable(el) && (typeof opts.href !== 'string' || opts.href === '' || el.href !== opts.href)) return refuse('the tab is a link to an address the loader has not looked at');
     } else if (kind === 'expander') {
       if (!el.hasAttribute('aria-expanded') && tag !== 'SUMMARY' && role !== 'treeitem') return refuse('the element is no longer an expander');
       if (!pressable(el) || submitsForm(el)) return refuse('the control would leave the page or submit a form');
@@ -705,6 +755,7 @@ function pageOps(opts) {
     } else if (kind === 'pager') {
       if (!(nextRe.test(text) || nextRe.test(norm(el.getAttribute('aria-label'))) || /^\d{1,4}$/.test(text) || String(el.getAttribute('rel') || '').toLowerCase().split(/\s+/).includes('next'))) return refuse('the element is no longer a page control');
       if (submitsForm(el)) return refuse('the control would submit a form');
+      if (!pressable(el)) return refuse('the control is a link that goes to another address');
     } else if (kind === 'toggle') {
       /* the "show all files" control: a switch, checkbox, radio, tab, pressed button, <select> option or plain button whose label says so */
       const tkind = String(opts.tkind || '');
@@ -714,10 +765,12 @@ function pageOps(opts) {
       if (wrap) labels.push(norm(wrap.textContent));
       const shown = labels.concat(typeof opts.label === 'string' ? [opts.label] : []);
       if (shown.some((l) => toggleNever.test(l))) return refuse('the label of the control names an action');
+      if (toggleRisk(el)) return refuse('the control belongs to a form that saves something, or runs a script that submits');
       if (tkind === 'option') {
         if (tag !== 'SELECT' || typeof opts.option !== 'number' || !el.options || !el.options[opts.option]) return refuse('the element is no longer a choice list');
         const o = norm(el.options[opts.option].textContent);
         if (toggleNever.test(o) || (!opts.learned && !toggleRe.test(o))) return refuse('the choice is not "show all files"');
+        if (!Array.from(el.options).every((x) => viewWordRe.test(norm(x.textContent)) && !toggleNever.test(norm(x.textContent)))) return refuse('the list holds choices that are not views of the files');
       } else if (tkind === 'switch' || tkind === 'checkbox' || tkind === 'radio') {
         if (!((tag === 'INPUT' && /^(checkbox|radio)$/.test(el.type)) || /^(switch|checkbox|radio)$/.test(role))) return refuse('the element is no longer a switch');
       } else if (tkind === 'tab') {
@@ -909,12 +962,23 @@ function pagerSteps(pager) {
 
 /* A pager link the loader may follow: the same site and path as the page, and no difference but a page-type parameter. */
 const PAGE_PARAM_RE = /^(page|p|pg|pagenum|page_num|page_number|pageindex|page_index|paged|offset|start|skip|from|cursor|after)$/i;
+RULES.pageParam = PAGE_PARAM_RE.source;
 function pageLinkOk(target, current) {
   let a; let b;
   try { a = new URL(target); b = new URL(current); } catch (e) { return false; }
   if (!/^https?:$/.test(a.protocol) || a.origin !== b.origin || a.pathname !== b.pathname) return false;
   const rest = (u) => { const m = new Map(); for (const [k, v] of u.searchParams) if (!PAGE_PARAM_RE.test(k)) m.set(k, v); return [...m].sort().map(([k, v]) => `${k}=${v}`).join('&'); };
-  return rest(a) === rest(b);
+  return rest(a) === rest(b) && !addressProblem(target) && !NEVER_HREF_RE.test(target);
+}
+
+/* Why a tab or pager that is a LINK may not be followed: an address on another site, or with an action word in it (the same tests as for a
+   file). '' when it may. */
+function tabLinkProblem(target, current) {
+  let a; let b;
+  try { a = new URL(target); b = new URL(current); } catch (e) { return 'an address that cannot be read'; }
+  if (!/^https?:$/.test(a.protocol)) return 'not a web address';
+  if (a.origin !== b.origin) return 'another site';
+  return addressProblem(target) || (NEVER_HREF_RE.test(target) ? 'an action word in the address' : '');
 }
 
 /* toggles: [{ label, checked, disabled, path, key, kind }] as extractPage lists them. learned: what was taught for this host: a label
@@ -922,7 +986,7 @@ function pageLinkOk(target, current) {
    is a switch, checkbox, radio, tab, pressed button, choice or plain button, and its label names none of clear, delete, remove, reset,
    archive, move, apply, bulk, select all and the like. Then: the learned key (an id or data-testid), the learned label, then the first
    label that matches TOGGLE_LABEL_RE. */
-const usableToggle = (t) => Boolean(t && typeof t.label === 'string' && !t.disabled && TOGGLE_KINDS.has(t.kind || 'switch') && !TOGGLE_NEVER_RE.test(t.label));
+const usableToggle = (t) => Boolean(t && typeof t.label === 'string' && !t.disabled && !t.unsafe && TOGGLE_KINDS.has(t.kind || 'switch') && !TOGGLE_NEVER_RE.test(t.label));
 function findAllFilesToggle(toggles, learned) {
   const usable = (Array.isArray(toggles) ? toggles : []).filter((t) => usableToggle(t) && !t.checked);
   const taught = typeof learned === 'string' ? { label: learned, key: '' } : (learned && typeof learned === 'object' ? learned : {});
@@ -949,7 +1013,7 @@ function findAllFilesState(toggles, learned) {
 }
 
 module.exports = {
-  extractPage, pageOps, pageOp, takePage, pageArgs, RULES, fileCandidates, droppedCandidates, classify, linkVerdict, addressProblem, nameIsDownload, pagerSteps, pageLinkOk,
+  extractPage, pageOps, pageOp, takePage, pageArgs, RULES, fileCandidates, droppedCandidates, classify, linkVerdict, addressProblem, nameIsDownload, pagerSteps, pageLinkOk, tabLinkProblem, tabLinkProblem,
   navigateKey, namePhrase, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE, TOGGLE_NEVER_RE, LIMITS, NOT_CLEAR, NEVER_TEXT_RE, NEVER_HREF_RE, NEVER_ACTION_PARAM_RE, ACTION_WORDS,
   ALL_BUTTON_RE, FILE_EXTENSIONS, EXT_SRC,
 };

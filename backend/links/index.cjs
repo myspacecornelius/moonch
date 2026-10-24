@@ -32,6 +32,9 @@
             sentence as message when failed. skipped: every file that was NOT kept, with the reason (also in page.json).
    Files land in <folder>/files/<sanitised unique name>; <folder>/page.json holds { sections: [{ heading, text }], fileList, skipped, notes,
    page, loadedAt } (text capped at 20,000 characters per section, 200 sections). Caps: 300 files, 200 MB per file, 2 GB in all.
+   EVERY PRESS (tab, expander, "Load more", pager, the "show all files" switch, a download) runs with the write guard on until the page
+   has settled: PUT, PATCH, DELETE and any POST that is not a GraphQL query are failed before they leave the browser; the control that
+   tried is not pressed again and a note says "The page tried to save a change when '<label>' was pressed; it was blocked".
    WHAT IS REQUESTED OR PRESSED is an allowlist (see page.cjs): a link whose address path ends in a file extension (or is exactly
    /download) with no action word in it, a link with a download attribute, a control named as a download that is not in a form, and
    controls that only show more (tabs, expanders, "Load more", pagers, the "show all files" switch). Nothing else is requested or pressed.
@@ -61,7 +64,7 @@ const { Tab, safeText, cleanLabel, waitForSettled } = require('./tab.cjs');
 const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, linkVerdict, nameIsDownload, navigateKey, TOGGLE_LABEL_RE, LIMITS: PAGE_LIMITS } = require('./page.cjs');
 const { classifyPage, LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('./auth-wall.cjs');
 const { DownloadManager } = require('./downloads.cjs');
-const { stabilize, expandAll, gather, replay, candidateKey, tabKey, LOST, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
+const { stabilize, expandAll, gather, replay, guarded, newCtx, keyOf, candidateKey, tabKey, LOST, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
 const { validateLink, fileUrlAllowed } = require('./url.cjs');
 const store = require('./store.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
@@ -166,6 +169,7 @@ function createLinkLoader(options = {}) {
     /* what the loader could not do completely, told in the state, in page.json and at the end of the done message */
     const capNotes = [];
     const note = (text) => { if (!capNotes.includes(text)) { capNotes.push(text); st.notes = capNotes.slice(); } };
+    const pressCtx = newCtx(note);   /* the controls the page tried to save something with when they were pressed: not pressed again */
     /* API requests of the page that had not answered when a settle ended: looked at again when the files are listed (told only if they
        never answered by then; an answer that came in the meantime has been seen by a later look) */
     const suspects = new Set();
@@ -342,7 +346,7 @@ function createLinkLoader(options = {}) {
         const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
         return { tab: open ? { label: open.label, path: open.path } : null, more: 0, scroll: 0 };
       };
-      const expandNow = async () => { const total = await expandAll(job.tab, snaps, { signal, view: BASE }); if (total.lost) note(LOST('after something was opened')); };
+      const expandNow = async () => { const total = await expandAll(job.tab, snaps, { signal, view: BASE, ctx: pressCtx }); if (total.lost) note(LOST('after something was opened')); };
       const stamp = (list, view) => { for (const x of list) x.view = { tab: view.tab ? { ...view.tab } : null, more: 0, scroll: 0 }; };
       const snaps = await stabilize(job.tab, page.snap, { signal, waits: timeouts.stable });
       let BASE = await viewNow();
@@ -374,10 +378,20 @@ function createLinkLoader(options = {}) {
       if (pick) recipe.toggle = { key: pick.key, label: pick.label, path: pick.path, option: pick.option, kind: pick.kind, learned: usedLearned };
       if (pick && !alreadyOn && pick.path) {
         const clickedAt = Date.now() - 50;
-        const clicked = await pageOp(job.tab, 'activate', { path: pick.path, kind: 'toggle', tkind: pick.kind || 'switch', label: pick.label, option: pick.option, learned: usedLearned });
-        if (clicked.ok) {
+        /* the press, the settle and the wait for the list to grow are one guarded step: a request that saves something is failed */
+        let grown = null;
+        const clicked = await guarded(job.tab, pressCtx, async (st) => {
+          st.last = { key: keyOf('toggle', pick.path, pick.label), label: pick.label, path: pick.path };
+          const r = await pageOp(job.tab, 'activate', { path: pick.path, kind: 'toggle', tkind: pick.kind || 'switch', label: pick.label, option: pick.option, learned: usedLearned });
+          if (!r.ok) return r;
+          await sleep(20);
+          if (st.count > st.seen) { st.seen = st.count; pressCtx.banned.add(st.last.key); pressCtx.skip.add(pick.path); note(`The page tried to save a change when '${pick.label}' was pressed; it was blocked`); }
           await settle(clickedAt);
-          snap = await growWait(before.length);
+          grown = await growWait(before.length);
+          return r;
+        });
+        if (clicked.ok) {
+          snap = grown;
           BASE = await viewNow();
           stamp([snap], BASE);
           snaps.push(snap);
@@ -415,12 +429,21 @@ function createLinkLoader(options = {}) {
           if (recipe.appliedAt === loads) return current;
           if (fileCandidates(current).length >= recipe.afterClick) { recipe.appliedAt = loads; return current; }
         } else if (t.checked) return current;
+        if (pressCtx.banned.has(keyOf('toggle', t.path, t.label))) return current;   /* the page tried to save something when it was pressed */
         const pressedAt = Date.now() - 50;
-        const r = await pageOp(job.tab, 'activate', { path: t.path, kind: 'toggle', tkind: t.kind || 'switch', label: t.label, option: t.option, learned: Boolean(want.learned) });
-        if (!r.ok) return current;
-        recipe.appliedAt = loads;
-        await settle(pressedAt);
-        return growWait(Math.max(0, recipe.afterClick - 1));
+        let grown = current;
+        const r = await guarded(job.tab, pressCtx, async (st) => {
+          st.last = { key: keyOf('toggle', t.path, t.label), label: t.label, path: t.path };
+          const out = await pageOp(job.tab, 'activate', { path: t.path, kind: 'toggle', tkind: t.kind || 'switch', label: t.label, option: t.option, learned: Boolean(want.learned) });
+          if (!out.ok) return out;
+          await sleep(20);
+          if (st.count > st.seen) { st.seen = st.count; pressCtx.banned.add(st.last.key); pressCtx.skip.add(t.path); note(`The page tried to save a change when '${t.label}' was pressed; it was blocked`); }
+          recipe.appliedAt = loads;
+          await settle(pressedAt);
+          grown = await growWait(Math.max(0, recipe.afterClick - 1));
+          return out;
+        });
+        return r.ok ? grown : current;
       };
       /* Load an address of the task (the link itself, or a page of a pager made of links), then put the switch and the open folders back. */
       const goto = async (target) => {
@@ -428,7 +451,7 @@ function createLinkLoader(options = {}) {
         if (again.cls.state === 'needs-sign-in' || again.cls.state === 'needs-person') throw new LinkError(`The platform asks you to sign in again. ${IMPORT_HINT}`, 502, 'sign-in-loop');
         if (again.cls.state !== 'ready') throw new LinkError(again.cls.reason, 502, again.cls.state);
         await ensureToggle(await takePage(job.tab));
-        await expandAll(job.tab, [], { signal, snapshots: false });
+        await expandAll(job.tab, [], { signal, snapshots: false, ctx: pressCtx });
       };
       /* Where the page is, after the person has used the window or a download left it: back on the task page (or below it), or the
          loader goes back once, looks again and puts the switch and the open folders back. After the person has used the window the page
@@ -461,14 +484,14 @@ function createLinkLoader(options = {}) {
         const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
         let hit = !wantTab || (open && tabKey(open.label) === tabKey(wantTab)) ? findOn(current, c) : null;
         if (!hit) {
-          const r = await replay(job.tab, c.view || BASE, recipe.home, { signal, pos, goto, homeUrl: href });
+          const r = await replay(job.tab, c.view || BASE, recipe.home, { signal, pos, goto, homeUrl: href, ctx: pressCtx });
           if (!r.ok) return { ok: false, why: r.why };
           current = await takePage(job.tab);
           hit = findOn(current, c);
           /* a candidate with no tab on record (the page has none, or the view was not exact): every tab, one after the other */
           if (!hit && !wantTab) {
             for (const t of (await pageOp(job.tab, 'controls')).tabs) {
-              const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal, pos, goto, homeUrl: href });
+              const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal, pos, goto, homeUrl: href, ctx: pressCtx });
               if (!r2.ok) continue;
               hit = findOn(await takePage(job.tab), c);
               if (hit) break;
@@ -505,7 +528,7 @@ function createLinkLoader(options = {}) {
 
       /* Tabs, "Load more", scrolling; then the files of every snapshot as one list. A limit that ended a step is told in a note. */
       set(job, 'loading', `Looking for every file.${KEEP_OPEN}`);
-      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand, pos, goto, homeUrl: href }); recipe.home = info.home; for (const text of info.capped) note(text); };
+      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand, pos, goto, homeUrl: href, ctx: pressCtx }); recipe.home = info.home; for (const text of info.capped) note(text); };
       /* a request that was still waiting at a settle: it answered since (take one more look, its files may be new) or it never did (say so) */
       const lateLook = async () => {
         let answered = 0; let pending = 0;

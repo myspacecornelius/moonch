@@ -473,7 +473,14 @@ Files: `backend/pipeline/` (`service.cjs` the stage machine, `intake.cjs`, `clas
    - a control named as a download ("Download", "Download all (12)", "Download Q3.pdf", an icon titled Download) that is not in a form and cannot submit;
    - for exposing content only: tabs, `<details>`, aria-expanded expanders and tree items, *Load more*, *Show more*, *View all*, pagers, and the show-all-files toggle. The toggle's label must say show or view all (or every, or world) files, attachments or documents, and must contain none of clear, delete, remove, reset, archive, move, apply, bulk, select all, share, send, upload and the like.
 
-   Every press re-checks the live element against its kind's rule. While a download control is pressed, any request other than GET, HEAD or OPTIONS is failed in the browser before it leaves, and the control is listed as blocked.
+   Every press re-checks the live element against its kind's rule. Every press the loader makes runs under a write guard, which lasts until the page settles: tabs, expanders, *Load more*, pagers, the toggle and downloads.
+   - The guard lets GET, HEAD and OPTIONS through, plus a POST whose body is a GraphQL query with no mutation or subscription.
+   - Everything else is failed in the browser before it leaves.
+   - A blocked control is not pressed again. Its note reads "The page tried to save a change when '<label>' was pressed; it was blocked".
+   - A tab or pager that is a link must stay on the same origin and pass the address rules.
+   - A pager needs navigational evidence: a nav or pagination container, or links that change only a page parameter.
+   - A toggle inside a form that posts, or one that submits on change, is never pressed.
+   - Permission and visibility words (access, permission, public, client, edit, role, default and the like) also rule out a toggle.
 
    Anything else that names a file is listed in `skipped: [{label, group, reason}]`, with the reason "not clearly a download: download it yourself", "looks like an action", "would submit a form" or "the button is disabled". This covers a file name used as link text with an address such as `/documents/42`.
    - Each file is identified by its name cell, its group, its tab and its address, so identical *Download* buttons stay distinct. Before each click, the page is put back in the view the file was seen in.

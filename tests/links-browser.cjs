@@ -100,7 +100,7 @@ async function startPlatform() {
   const person = { signin: false, flips: new Set() };
   const flags = { openAccess: false, mfa: false };
   const requests = [];
-  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0, canaryHits: 0, apiActions: 0 };
+  const stats = { streamSent: 0, trapRequests: 0, deleteRequests: 0, mfaDoneAt: 0, canaryHits: 0, apiActions: 0, mutations: 0 };
   const servers = [];
   const listen = (handler, host) => new Promise((resolve, reject) => {
     const server = http.createServer(handler);
@@ -599,6 +599,40 @@ for (const [id, path] of [['b1', 'sheets/export'], ['b2', 'slack/post'], ['b3', 
     /* a switch whose label passes the "show all files" words and also says "mark ... reviewed": the words about actions win */
     PAGES['togglemix-168'] = () => doc('Toggle mix task', `<ul>${dataLink('Mix_A.txt')}</ul><label><input type="checkbox" id="mix"> Show all attachments and mark them reviewed</label><script>
 document.getElementById('mix').onchange = () => { fetch('/hit/pressed-mix'); fetch('${UNSAFE}/togglemix-168/review', { method: 'POST' }); };</script>`);
+    /* ---- Round 6: controls that LOOK like navigation and save something (the write guard and the shapes) ---- */
+    const SAVE = (slug, path, method, body = '') => `fetch('/hit/pressed-${slug}'); fetch('${UNSAFE}/${slug}/${path}', { method: '${method}'${body ? `, body: ${JSON.stringify(body)}` : ''} })`;
+    /* an estimate picker: numbered buttons in a list, the current one marked */
+    PAGES['points-170'] = () => doc('Points task', `${TOGGLE_ON}<h2>Estimate</h2><ul class="points" id="pts">${[1, 2, 3, 5, 8].map((n) => `<li class="${n === 2 ? 'selected' : ''}"><button type="button" data-n="${n}">${n}</button></li>`).join('')}</ul><ul>${dataLink('Pts_A.txt')}</ul>
+<script>document.querySelectorAll('#pts button').forEach((b) => { b.onclick = () => { ${SAVE('points-170', 'estimate', 'PUT', '{"points":1}')}; }; });</script>`);
+    /* a card with move-left and move-right arrows */
+    PAGES['kanban-171'] = () => doc('Kanban task', `${TOGGLE_ON}<div class="card"><button type="button" aria-label="Move to previous stage" id="l">\u2190</button> <span>Status: To do</span> <button type="button" aria-label="Move to next stage" id="r">\u2192</button></div><ul>${dataLink('Kan_A.txt')}</ul>
+<script>for (const id of ['l', 'r']) document.getElementById(id).onclick = () => { ${SAVE('kanban-171', 'status', 'PATCH', '{"status":"In progress"}')}; };</script>`);
+    /* a review wizard: a lone Next saves the step */
+    PAGES['wizard-172'] = () => doc('Wizard task', `${TOGGLE_ON}<p id="s">Step 1 of 3</p><button type="button" id="n">Next</button><ul>${dataLink('Wiz_A.txt')}</ul>
+<script>document.getElementById('n').onclick = () => { ${SAVE('wizard-172', 'steps/1', 'PUT', '{"saved":true}')}; document.getElementById('s').textContent = 'Step 2 of 3'; };</script>`);
+    /* a vote button */
+    PAGES['plusone-173'] = () => doc('Plus one task', `${TOGGLE_ON}<p>Votes: 3</p><button type="button" id="v">+1</button><ul>${dataLink('Vote_A.txt')}</ul><script>document.getElementById('v').onclick = () => { ${SAVE('plusone-173', 'vote', 'POST')}; };</script>`);
+    /* a status picker built as tabs */
+    PAGES['tabstatus-174'] = () => doc('Status tabs task', `${TOGGLE_ON}<div role="tablist" aria-label="Status"><button role="tab" aria-selected="true">To do</button><button role="tab" aria-selected="false">In progress</button><button role="tab" aria-selected="false">Done</button></div><ul>${dataLink('Stat_A.txt')}</ul>
+<script>document.querySelectorAll('[role=tab]').forEach((b) => { b.onclick = () => { document.querySelectorAll('[role=tab]').forEach((x) => x.setAttribute('aria-selected', String(x === b))); ${SAVE('tabstatus-174', 'status', 'PATCH', '{"status":"x"}')}; }; });</script>`);
+    /* tabs that are links to a trash and a sharing page; and to an archive */
+    PAGES['tablink-175'] = () => doc('Tab links task', `${TOGGLE_ON}<div role="tablist"><a role="tab" aria-selected="true" href="/tasks/tablink-175">Files</a><a role="tab" aria-selected="false" href="/projects/7/trash">Trash</a><a role="tab" aria-selected="false" href="/projects/7/share">Sharing</a></div><ul>${dataLink('Tl_A.txt')}</ul>`);
+    PAGES['tablink-176'] = () => doc('Archive tab link task', `${TOGGLE_ON}<div role="tablist"><a role="tab" aria-selected="true" href="/tasks/tablink-176">Files</a><a role="tab" aria-selected="false" href="/tasks/tablink-176/archive">Archive</a></div><ul>${dataLink('Tl2_A.txt')}</ul>`);
+    /* a permission list whose option says "Can view all files" */
+    PAGES['perm-177'] = () => doc('Permission task', `<label>Client access <select id="p"><option value="none">No access</option><option value="read">Can view all files</option><option value="write">Can edit</option></select></label><ul>${dataLink('Perm_A.txt')}</ul>
+<script>document.getElementById('p').onchange = (e) => { ${SAVE('perm-177', 'client-access', 'PUT')}; };</script>`);
+    /* a preferences form that posts when the box is ticked */
+    PAGES['autosubmit-178'] = () => doc('Auto submit task', `<form method="post" action="${UNSAFE}/autosubmit-178/prefs"><label><input type="checkbox" name="show_all" value="1" onchange="fetch('/hit/pressed-autosubmit-178'); this.form.submit()"> Show all files</label></form><ul>${dataLink('Auto_A.txt')}</ul>`);
+    /* tabs whose lists are loaded with a GraphQL POST (a query: must work); a tab that sends a mutation (must be stopped) */
+    PAGES['graphql-179'] = () => doc('GraphQL tabs task', `${TOGGLE_ON}<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button><button role="tab" aria-selected="false" id="t3">Mark seen</button></div><div id="panel"></div><script>
+let cur = 't1';
+const gql = (query, variables) => fetch('/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, variables }) }).then((r) => r.json());
+function render() { for (const k of ['t1', 't2', 't3']) document.getElementById(k).setAttribute('aria-selected', String(k === cur)); const p = document.getElementById('panel');
+  if (cur === 't1') { p.innerHTML = '<ul><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul>'; return; }
+  if (cur === 't2') { p.textContent = 'Loading...'; gql('query Files($tab: String!) { files(tab: $tab) { name } }', { tab: 'ref' }).then((j) => { if (cur === 't2') p.innerHTML = '<ul>' + j.data.files.map((f) => '<li><a href="/data/' + f.name + '">' + f.name + '</a></li>').join('') + '</ul>'; }); return; }
+  p.textContent = 'Loading...'; gql('mutation MarkSeen($id: ID!) { markSeen(id: $id) { ok } }', { id: 7 }).then((j) => { if (cur === 't3') p.innerHTML = '<ul><li><a href="/data/Seen_A.txt">Seen_A.txt</a></li></ul>'; }); }
+for (const k of ['t1', 't2', 't3']) document.getElementById(k).onclick = () => { cur = k; render(); };
+render();</script>`);
     /* links whose addresses are actions, whatever they are called */
     PAGES['actions-167'] = () => doc('Action addresses task', `<ul>${dataLink('Act_Ok.txt')}${[
       ['/api/unsafe/actions-167/remove', ' download', 'Q4 pack'], ['/api/unsafe/actions-167/delete?filename=Q4b.pdf', '', 'Q4b'], ['/docs/15/submit', '', 'Download'], ['/docs/16/actions/run', '', 'Download'], ['/docs/17/cancel', '', 'Download'], ['/docs/18/archive', '', 'Download'],
@@ -639,6 +673,12 @@ document.getElementById('mix').onchange = () => { fetch('/hit/pressed-mix'); fet
     if (u.pathname === '/mfa/done') { stats.mfaDoneAt = Date.now(); return startSession(res, decodeURIComponent(safeNext(u.searchParams.get('next')))); }
     if (u.pathname === '/frame/files') return send(res, 200, 'text/html; charset=utf-8', `<!doctype html><h3>Inside the frame</h3><ul>${li('frame-a')}${li('frame-b')}</ul>`);
     if (u.pathname === '/wander-home') return send(res, 200, 'text/html; charset=utf-8', '<!doctype html><title>Home</title><h1>Home</h1><h2>News</h2><p>Home page of the platform, not the task.</p><ul><li><a href="/data/Home_Doc.txt">Home_Doc.txt</a></li></ul>');
+    if (u.pathname === '/graphql' && req.method === 'POST') {   /* a data query is answered; a mutation is counted (it must never arrive) */
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => { if (/\bmutation\b/i.test(body)) stats.mutations += 1; return send(res, 200, 'application/json', JSON.stringify({ data: { files: [{ name: 'Ref_A.txt' }, { name: 'Ref_B.txt' }] } })); });
+      return undefined;
+    }
     const dlx = /^\/dlx\/([^/]+)$/.exec(u.pathname);   /* the file name is in the path, the token in the query: the bytes depend on the token */
     if (dlx) { const name = decodeURIComponent(dlx[1]); const t = u.searchParams.get('token') || ''; return send(res, 200, 'text/plain', `${t.startsWith('aaa') ? 'INPUT' : 'OUTPUT'} ${name}`, { 'content-disposition': `attachment; filename="${name}"` }); }
     const xl = /^\/xl\/(\d+)\/download$/.exec(u.pathname);   /* no Content-Disposition: Chrome names it download.xlsx, and shows a csv inline */
@@ -1228,6 +1268,9 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
       assert.deepEqual(r.final.skipped, [], `${why}: nothing is left out silently`);
       assert.deepEqual(wrongContent(r.final), [], `${why}: every file has the content of its own name`);
     };
+    const NOT_CLEAR = 'not clearly a download: download it yourself';
+    const requestsTo = (re) => platform.requests.filter((r) => re.test(r.path));
+    const pressed = (name) => platform.count(`/hit/${name}`);
     const notesOf = (r) => JSON.parse(fs.readFileSync(path.join(r.final.folder, 'page.json'), 'utf8')).notes;
     const range = (prefix, n, width = 2, ext = '.txt') => Array.from({ length: n }, (_, i) => `${prefix}${String(i + 1).padStart(width, '0')}${ext}`);
     const third = await batch([
@@ -1427,9 +1470,6 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     for (const r of ninth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
     /* 11e. Round 5: the allowlist (only a download is requested or pressed) and nothing left out without a word (every place that could not
        be covered is a note, every file-like thing that was not downloaded is in skipped). */
-    const NOT_CLEAR = 'not clearly a download: download it yourself';
-    const requestsTo = (re) => platform.requests.filter((r) => re.test(r.path));
-    const pressed = (name) => platform.count(`/hit/${name}`);
     const eleventh = await batch([
       { slug: 'pagenum-110' }, { slug: 'pagelinks-111' }, { slug: 'pageother-112' }, { slug: 'archive-130' }, { slug: 'treeitem-131' }, { slug: 'treeitem-132' }, { slug: 'rerender-133' }, { slug: 'rerender-134' },
     ]);
@@ -1584,6 +1624,63 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.deepEqual(requestsTo(/^\/(docs\/(1[5-9]|2[0-9])(\/|$)|api\/unsafe\/actions-167)/), [], 'not one of the 16 addresses was requested');
     ok('16 links with an action in the address (/remove with a download attribute, /delete?filename=, /submit, /actions/run, /cancel, /archive, ?action=submit, ?method=delete, ?_method=DELETE, /delete/now, /destroy, /trash, /actions, /revoke, /publish, /unsubscribe) are never requested and each is listed as "looks like an action"');
     for (const r of fifteenth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    /* 11f. Round 6: controls that look like navigation and save something. Every press runs with the write guard on; what is not a view is not
+       pressed at all; a tab served by a GraphQL query still works. For each: the server saw no write. */
+    const sixteenth = await batch([
+      { slug: 'points-170' }, { slug: 'kanban-171' }, { slug: 'wizard-172' }, { slug: 'plusone-173' }, { slug: 'tabstatus-174' }, { slug: 'tablink-175' }, { slug: 'tablink-176' }, { slug: 'perm-177' }, { slug: 'autosubmit-178' }, { slug: 'graphql-179' },
+    ]);
+    const noWrite = (slug) => assert.deepEqual(requestsTo(new RegExp(`^/api/unsafe/${slug}`)), [], `${slug}: the server saw no write`);
+    const pts = get(sixteenth, 'points-170');
+    clean(pts, ['Pts_A.txt'], 'points');
+    noWrite('points-170'); assert.equal(pressed('pressed-points-170'), 0); assert.deepEqual(notesOf(pts), []);
+    ok('an estimate picker (numbered buttons 1 2 3 5 8, one marked) is not a pager: nothing was pressed, the server saw no PUT');
+    const kan = get(sixteenth, 'kanban-171');
+    clean(kan, ['Kan_A.txt'], 'kanban');
+    noWrite('kanban-171'); assert.equal(pressed('pressed-kanban-171'), 0); assert.deepEqual(notesOf(kan), []);
+    ok('"Move to previous/next stage" arrows are not a pager and not "Load more": nothing was pressed, the server saw no PATCH');
+    const wiz = get(sixteenth, 'wizard-172');
+    clean(wiz, ['Wiz_A.txt'], 'wizard');
+    noWrite('wizard-172'); assert.equal(pressed('pressed-wizard-172'), 1, 'pressed once, never again');
+    assert.ok(notesOf(wiz).includes("The page tried to save a change when 'Next' was pressed; it was blocked"), notesOf(wiz).join(' | '));
+    ok('a lone Next that saves a wizard step is a "more" button, so it is pressed - once, with the write guard on: the PUT is failed in the browser (the server saw none), the control is not pressed again, and the note says what happened');
+    const vote = get(sixteenth, 'plusone-173');
+    clean(vote, ['Vote_A.txt'], 'plus one');
+    noWrite('plusone-173'); assert.equal(pressed('pressed-plusone-173'), 0);
+    ok('"+1" is not "Load more": the vote button is never pressed');
+    const tst = get(sixteenth, 'tabstatus-174');
+    clean(tst, ['Stat_A.txt'], 'status tabs');
+    noWrite('tabstatus-174');
+    assert.ok(notesOf(tst).some((n) => /^The page tried to save a change when 'In progress' was pressed; it was blocked$/.test(n)), notesOf(tst).join(' | '));
+    assert.ok(pressed('pressed-tabstatus-174') >= 2 && pressed('pressed-tabstatus-174') <= 3, `each tab pressed once: ${pressed('pressed-tabstatus-174')}`);
+    ok('a status picker made of role=tab buttons: each tab is pressed once under the write guard, every PATCH is failed before it leaves the browser, and each blocked tab is in the notes');
+    const tl = get(sixteenth, 'tablink-175');
+    clean(tl, ['Tl_A.txt'], 'tab links');
+    assert.deepEqual(requestsTo(/^\/projects\//), [], 'the trash and sharing tabs were not navigated');
+    assert.match(notesOf(tl).join(' | '), /the tab "Trash" is a link to an address the loader does not open \(the path has the action word "trash"\)/);
+    assert.match(notesOf(tl).join(' | '), /the tab "Sharing" is a link to an address the loader does not open \(the path has the action word "share"\)/);
+    const tl2 = get(sixteenth, 'tablink-176');
+    clean(tl2, ['Tl2_A.txt'], 'archive tab link');
+    assert.deepEqual(requestsTo(/^\/tasks\/tablink-176\/archive/), [], 'the archive tab was not navigated');
+    assert.match(notesOf(tl2).join(' | '), /the tab "Archive" is a link to an address the loader does not open/);
+    ok('tabs that are links to /projects/7/trash, /projects/7/share and /tasks/x/archive are not navigated (an action word in the address), and each is in the notes');
+    const perm = get(sixteenth, 'perm-177');
+    clean(perm, ['Perm_A.txt'], 'permission');
+    assert.equal(perm.asked[0].message, PERSON_MESSAGE, 'no safe switch: the person is asked');
+    noWrite('perm-177'); assert.equal(pressed('pressed-perm-177'), 0);
+    ok('a sharing list whose option says "Can view all files" is not the switch (the list holds permissions): not chosen, the server saw no PUT, the person is asked');
+    const auto = get(sixteenth, 'autosubmit-178');
+    clean(auto, ['Auto_A.txt'], 'auto submit');
+    assert.equal(auto.asked[0].message, PERSON_MESSAGE);
+    noWrite('autosubmit-178'); assert.equal(pressed('pressed-autosubmit-178'), 0);
+    ok('a "Show all files" box in a POST preferences form that submits on change is never ticked: the server saw no POST, the person is asked');
+    const gq = get(sixteenth, 'graphql-179');
+    clean(gq, ['Task_A.txt', 'Ref_A.txt', 'Ref_B.txt'], 'graphql tabs');
+    assert.ok(platform.count('/graphql', 'POST') >= 1, 'the query reached the server');
+    assert.equal(platform.stats.mutations, 0, 'the mutation never did');
+    assert.ok(notesOf(gq).includes("The page tried to save a change when 'Mark seen' was pressed; it was blocked"), notesOf(gq).join(' | '));
+    ok('a tab whose list is loaded with a POST GraphQL query still works (its 2 files are saved); the tab that sends a GraphQL mutation is stopped before it leaves the browser and told');
+    for (const r of sixteenth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
     platform.flags.openAccess = false;
     for (const r of [...first5, ...second5]) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
 

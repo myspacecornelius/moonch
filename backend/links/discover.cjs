@@ -26,7 +26,8 @@
    the person's page is put back (scrolled to the top, the first tab selected). Exports: stabilize, expand, expandAll, gather, replay,
    signature, CandidateSet, unionCandidates, unionDropped, mergeSections, candidateKey, nap. */
 
-const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey, namePhrase, pagerSteps, pageLinkOk, LIMITS } = require('./page.cjs');
+const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey, namePhrase, pagerSteps, pageLinkOk, tabLinkProblem, LIMITS } = require('./page.cjs');
+const { guardWrites } = require('./gate.cjs');
 const { waitForSettled } = require('./tab.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
 
@@ -165,41 +166,101 @@ const stamp = (snap, view) => { if (view) snap.view = { tab: view.tab ? { ...vie
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const urlKey = (href) => { try { const u = new URL(href); u.hash = ''; return u.href; } catch (e) { return String(href); } };
 
+/* EVERY press the loader makes (a tab, an expander, "Load more", a pager, the "show all files" switch, a download) runs with the write guard
+   on, from before the press until the page has settled after it: a request that is not a read (PUT, PATCH, DELETE, a POST that is not a data
+   query) is failed before it leaves the browser. The control that was pressed when the page tried to save something is put in
+   ctx.banned (it is not pressed again, here or in replay) and ctx.skip (its path, for the expanders), and ctx.say gets the sentence. */
+const blockedNote = (label) => `The page tried to save a change when '${label}' was pressed; it was blocked`;
+const newCtx = (say = () => {}) => ({ banned: new Set(), skip: new Set(), say });
+const keyOf = (kind, path, label) => `${kind}|${path}|${label}`;
+async function guarded(tab, ctx, fn) {
+  const st = { count: 0, seen: 0, last: null };
+  const guard = await guardWrites(tab, { onBlocked: () => { st.count += 1; } });
+  try { return await fn(st); } finally {
+    await guard.stop();
+    if (st.count > st.seen && st.last) {   /* a write that came after the last press was looked at: it was that control's */
+      st.seen = st.count; ctx.banned.add(st.last.key); ctx.skip.add(st.last.path); ctx.say(blockedNote(st.last.label));
+    }
+  }
+}
+/* One press under a guard (st comes from guarded). { ok, why? } like the page op, and blocked: true when a write was failed because of it. */
+async function pressOne(tab, st, ctx, kind, item, extra = {}) {
+  st.last = { key: keyOf(kind, item.path, item.label), label: item.label, path: item.path };
+  const r = await pageOp(tab, 'activate', { path: item.path, kind, label: item.label, ...extra });
+  if (!r.ok) return r;
+  await sleep(20);   /* a write the press started reaches the guard in this time */
+  if (st.count > st.seen) { st.seen = st.count; ctx.banned.add(st.last.key); ctx.skip.add(item.path); ctx.say(blockedNote(item.label)); return { ok: true, blocked: true }; }
+  return { ok: true, blocked: false };
+}
+/* A single press with its settle, guarded all the way: { r, since }. */
+async function pressControl(tab, ctx, kind, item, extra, { signal, patientMs } = {}) {
+  return guarded(tab, ctx, async (st) => {
+    const since = Date.now() - 50;
+    const r = await pressOne(tab, st, ctx, kind, item, extra);
+    if (r.ok) await quick(tab, signal, since, patientMs);
+    return r;
+  });
+}
+
 /* The cheap part, one pass: details and expanders. Pushes a snapshot into `snaps` when it did anything. Returns what it did. */
-async function expand(tab, snaps, { signal, view } = {}) {
+async function expand(tab, snaps, { signal, view, ctx = null } = {}) {
+  const c = ctx || newCtx();
   const since = Date.now() - 50;
-  const did = await pageOp(tab, 'expand');
-  if (did.opened || did.expanded) { const r = await quick(tab, signal, since); did.lost = r.lost || 0; snaps.push(stamp(await takePage(tab), view)); }
+  const did = await guarded(tab, c, async (st) => {
+    const r = await pageOp(tab, 'expand', { skip: [...c.skip] });
+    st.last = { key: keyOf('expander', r.path || '', r.label || ''), label: r.label || '', path: r.path || '' };
+    if (r.opened || r.expanded) await quick(tab, signal, since);
+    return r;
+  });
+  if (did.opened || did.expanded) { did.lost = 0; snaps.push(stamp(await takePage(tab), view)); }
   return did;
 }
 
-/* Repeat it until nothing new opens, at most `passes` times: a folder opened in one pass can show another closed folder. With
-   snapshots:false the page is only put into the state (no look is taken). Returns the totals; capped: the last pass still opened
-   something (or the page-side loop was cut); blocked: expanders that would submit a form (not pressed); popups: openers of a menu or
-   dialog whose name says files (not pressed). */
-async function expandAll(tab, snaps, { signal, view, passes = 6, snapshots = true, patientMs } = {}) {
+/* Repeat it until nothing new opens, at most `passes` times: a folder opened in one pass can show another closed folder. A pass presses the
+   expanders ONE AT A TIME (looking again after each: a tree that draws itself anew has new nodes), then settles. With snapshots:false the
+   page is only put into the state (no look is taken). Returns the totals; capped: the last pass still opened something (or a pass was cut);
+   blocked: expanders that would submit a form (not pressed); popups: openers of a menu or dialog whose name says files (not pressed). */
+async function expandAll(tab, snaps, { signal, view, passes = 6, snapshots = true, patientMs, ctx = null } = {}) {
+  const c = ctx || newCtx();
   const total = { opened: 0, expanded: 0, passes: 0, lost: 0, blocked: 0, popups: [], capped: false };
   for (let i = 0; i < passes; i += 1) {
     checker(signal)();
     const since = Date.now() - 50;
-    const did = await pageOp(tab, 'expand');
-    total.blocked = Math.max(total.blocked, did.blocked || 0);
-    for (const p of did.popups || []) if (!total.popups.includes(p)) total.popups.push(p);
-    if (!did.opened && !did.expanded) break;
-    total.opened += did.opened; total.expanded += did.expanded; total.passes += 1;
-    if (did.cut) total.capped = true;
-    total.lost += (await quick(tab, signal, since, patientMs)).lost || 0;
+    const pass = { opened: 0, expanded: 0, cut: false };
+    const lost = await guarded(tab, c, async (st) => {
+      for (let n = 0; n < 400; n += 1) {
+        checker(signal)();
+        const before = st.count;
+        const r = await pageOp(tab, 'expand', { one: true, skip: [...c.skip] });
+        total.blocked += r.blocked || 0;
+        for (const p of r.popups || []) if (!total.popups.includes(p)) total.popups.push(p);
+        pass.opened += r.opened || 0; pass.expanded += r.expanded || 0;
+        if (r.cut) pass.cut = true;
+        if (!r.expanded) break;
+        st.last = { key: keyOf('expander', r.path || '', r.label || ''), label: r.label || '', path: r.path || '' };
+        await sleep(20);
+        if (st.count > before) { st.seen = st.count; c.banned.add(st.last.key); c.skip.add(st.last.path); c.say(blockedNote(st.last.label)); }
+        if (n === 399) pass.cut = true;
+      }
+      if (!pass.opened && !pass.expanded) return 0;
+      return (await quick(tab, signal, since, patientMs)).lost || 0;
+    });
+    if (!pass.opened && !pass.expanded) break;
+    total.opened += pass.opened; total.expanded += pass.expanded; total.passes += 1;
+    if (pass.cut) total.capped = true;
+    total.lost += lost;
     if (snapshots) snaps.push(stamp(await takePage(tab), view));
     if (i === passes - 1) total.capped = true;
   }
   return total;
 }
 
-/* Put the page back into the state a snapshot was taken in: its address (a page of a pager that is made of links), the tab (or the home
-   tab), the page of the pager, the "Load more" presses, the scroll steps. pos is the loader's idea of where the pager is now
-   ({ pages, url }); goto(url) loads an address. Returns { ok } or { ok: false, why }. */
-async function replay(tab, view, home, { signal, pos = null, goto = null, homeUrl = null } = {}) {
+/* Put the page back into the state a snapshot was taken in: its address (a page of a pager made of links), the tab (or the home tab), the
+   page of the pager, the "Load more" presses, the scroll steps. pos is the loader's idea of where the pager is now
+   ({ pages, url }); goto(url) loads an address; ctx holds the controls that must not be pressed again. Returns { ok } or { ok: false, why }. */
+async function replay(tab, view, home, { signal, pos = null, goto = null, homeUrl = null, ctx = null } = {}) {
   const check = checker(signal);
+  const c = ctx || newCtx();
   const at = pos || { pages: 0, url: null };
   const wantUrl = (view && view.pageUrl) || null;
   const wantPages = (view && view.pages) || 0;
@@ -211,33 +272,39 @@ async function replay(tab, view, home, { signal, pos = null, goto = null, homeUr
     const fresh = controls.tabs.find((t) => tabKey(t.label) === wantKey && t.path === want.path) || controls.tabs.find((t) => tabKey(t.label) === wantKey);
     if (!fresh) return { ok: false, why: `the tab "${want.label}" is no longer on the page` };
     if (!fresh.selected) {
-      const since = Date.now() - 50;
-      const r = await pageOp(tab, 'activate', { path: fresh.path, kind: 'tab', label: fresh.label });
+      if (c.banned.has(keyOf('tab', fresh.path, fresh.label))) return { ok: false, why: `the tab "${want.label}" is not pressed again: the page tried to save a change when it was pressed` };
+      if (fresh.href) {
+        const here = (await pageOp(tab, 'where')).href;
+        const why = tabLinkProblem(fresh.href, here);
+        if (why) return { ok: false, why: `the tab "${want.label}" is a link to an address the loader does not open (${why})` };
+      }
+      const r = await pressControl(tab, c, 'tab', fresh, fresh.href ? { href: fresh.href } : {}, { signal });
       if (!r.ok) return { ok: false, why: `the tab "${want.label}" could not be opened again (${r.why})` };
       at.pages = 0;
-      await quick(tab, signal, since);
     }
   }
   while (at.pages < wantPages) {
     check();
     const step = pagerSteps((await pageOp(tab, 'controls')).pager)[0];
     if (!step || step.href) return { ok: false, why: 'the page of the list it was on could not be reached again' };
-    const since = Date.now() - 50;
-    const r = await pageOp(tab, 'activate', { path: step.path, kind: 'pager', label: step.label });
+    if (c.banned.has(keyOf('pager', step.path, step.label))) return { ok: false, why: 'the page control is not pressed again: the page tried to save a change when it was pressed' };
+    const r = await pressControl(tab, c, 'pager', step, {}, { signal });
     if (!r.ok) return { ok: false, why: `the page of the list could not be reached again (${r.why})` };
     at.pages += 1;
-    await quick(tab, signal, since);
   }
-  await expandAll(tab, [], { signal, snapshots: false });
+  await expandAll(tab, [], { signal, snapshots: false, ctx: c });
   for (let round = 0; round < ((view && view.more) || 0); round += 1) {   /* a round presses every "Load more" the page shows, as gather did */
     check();
-    const since = Date.now() - 50;
-    const buttons = (await pageOp(tab, 'controls')).more || [];
-    let pressed = 0;
-    for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, kind: 'more', label: more.label }); if (r.ok) pressed += 1; }
+    const buttons = ((await pageOp(tab, 'controls')).more || []).filter((m) => !c.banned.has(keyOf('more', m.path, m.label)));
+    const pressed = await guarded(tab, c, async (st) => {
+      const since = Date.now() - 50;
+      let n = 0;
+      for (const more of buttons) { const r = await pressOne(tab, st, c, 'more', more); if (r.ok && !r.blocked) n += 1; }
+      if (n) await quick(tab, signal, since);
+      return n;
+    });
     if (!pressed) break;
-    await quick(tab, signal, since);
-    await expandAll(tab, [], { signal, snapshots: false });
+    await expandAll(tab, [], { signal, snapshots: false, ctx: c });
   }
   await pageOp(tab, 'scroll', { reset: true });
   for (let i = 0; i < ((view && view.scroll) || 0); i += 1) {
@@ -255,9 +322,9 @@ async function replay(tab, view, home, { signal, pos = null, goto = null, homeUr
    every scrollable box is at its bottom and the list stopped growing, follow the pager. Pushes a snapshot after every step. Every step waits
    for the answer of an API request that it started (a slow tab, a slow page of the list). budgetMs is the time for the whole page; every
    tab gets at least minPerTabMs. pos: where the pager is ({ pages, url }, kept by the caller); goto(url): load an address (pager links);
-   homeUrl: the address of the task page. Returns { tabs, more, scrolls, pages, home, capped: [sentence] }: capped is the list of
-   things it could not cover completely. */
-async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, maxPages = 100, minPerTabMs = 8000, patientMs, pos = null, goto = null, homeUrl = null } = {}) {
+   homeUrl: the address of the task page; ctx: the controls that were blocked (shared with replay and the caller). Returns { tabs, more,
+   scrolls, pages, home, capped: [sentence] }: capped is the list of things it could not cover completely. */
+async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, maxPages = 100, minPerTabMs = 8000, patientMs, pos = null, goto = null, homeUrl = null, ctx = null } = {}) {
   const check = checker(signal);
   const started = Date.now();
   const at = pos || { pages: 0, url: null };
@@ -265,6 +332,8 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
   for (const s of snaps) known.add(fileCandidates(s));
   const did = { tabs: 0, more: 0, scrolls: 0, pages: 0, home: null, capped: [] };
   const say = (text) => { if (!did.capped.includes(text)) did.capped.push(text); };
+  const base = ctx || newCtx();
+  const c = { banned: base.banned, skip: base.skip, say: (text) => { say(text); base.say(text); } };
   const grab = async (view, since, where) => {
     check();
     const r = await quick(tab, signal, since, patientMs);
@@ -275,7 +344,7 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
   };
   const grabAfter = async (view, where) => {   /* snapshots the expansion takes also count */
     const before = snaps.length;
-    const total = await expandAll(tab, snaps, { signal, view, patientMs });
+    const total = await expandAll(tab, snaps, { signal, view, patientMs, ctx: c });
     if (total.lost) say(LOST(where));
     if (total.capped) say(`folders or sections were still opening when the loader stopped (${plural(total.expanded, 'press', 'presses')} in ${plural(total.passes, 'pass', 'passes')})${where}, so some files may be missing`);
     if (total.blocked) say(`${plural(total.blocked, 'section', 'sections')} that would submit a form if opened ${total.blocked === 1 ? 'was' : 'were'} not opened`);
@@ -284,17 +353,26 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
     for (let i = before; i < snaps.length; i += 1) fresh += known.add(fileCandidates(snaps[i]));
     return fresh;
   };
-  const reportControls = (c) => {
-    if (c.cut && c.cut.tabs) say(`${plural(c.cut.tabs, 'tab', 'tabs')} past the ${LIMITS.tabsMax} the loader opens ${c.cut.tabs === 1 ? 'was' : 'were'} not opened`);
-    if (c.cut && c.cut.more) say(`${plural(c.cut.more, 'control', 'controls')} like "Load more" past the ${LIMITS.moreMax} the loader presses ${c.cut.more === 1 ? 'was' : 'were'} not pressed`);
-    if (c.blocked) say(`${plural(c.blocked, 'control', 'controls')} like "Load more" that would submit a form ${c.blocked === 1 ? 'was' : 'were'} not pressed`);
-    for (const l of c.popups || []) say(`"${l}" opens a menu or dialog that may hold files; it was not opened`);
+  const reportControls = (ctl) => {
+    if (ctl.cut && ctl.cut.tabs) say(`${plural(ctl.cut.tabs, 'tab', 'tabs')} past the ${LIMITS.tabsMax} the loader opens ${ctl.cut.tabs === 1 ? 'was' : 'were'} not opened`);
+    if (ctl.cut && ctl.cut.more) say(`${plural(ctl.cut.more, 'control', 'controls')} like "Load more" past the ${LIMITS.moreMax} the loader presses ${ctl.cut.more === 1 ? 'was' : 'were'} not pressed`);
+    if (ctl.blocked) say(`${plural(ctl.blocked, 'control', 'controls')} like "Load more" that would submit a form ${ctl.blocked === 1 ? 'was' : 'were'} not pressed`);
+    for (const l of ctl.popups || []) say(`"${l}" opens a menu or dialog that may hold files; it was not opened`);
   };
 
+  const here0 = (await pageOp(tab, 'where')).href;
   const controls = await pageOp(tab, 'controls');
   reportControls(controls);
-  const tabs = controls.tabs;
-  const homeTab = tabs.find((t) => t.selected) || null;
+  const homeTab = controls.tabs.find((t) => t.selected) || null;
+  /* a tab that is a link is followed only when its address passes the same tests as a file's, and stays on the site */
+  const tabs = controls.tabs.filter((t) => {
+    if (c.banned.has(keyOf('tab', t.path, t.label))) return false;
+    if (t.href && !t.selected) {
+      const why = tabLinkProblem(t.href, here0);
+      if (why) { say(`the tab "${t.label}" is a link to an address the loader does not open (${why}), so its files were not looked at`); return false; }
+    }
+    return true;
+  });
   did.home = homeTab ? { label: homeTab.label, path: homeTab.path } : null;
 
   /* "Load more": every button the page shows is pressed, round after round, while the rounds add files */
@@ -304,21 +382,26 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
       check();
       if (i >= maxMore) { ended = 'steps'; break; }
       if (over()) { ended = 'time'; break; }
-      const c = await pageOp(tab, 'controls');
-      reportControls(c);
-      if (!c.more || !c.more.length) break;
-      const since = Date.now() - 50;
-      let pressed = 0; let why = '';
-      for (const more of c.more) { const r = await pageOp(tab, 'activate', { path: more.path, kind: 'more', label: more.label }); if (r.ok) pressed += 1; else why = r.why; }
-      if (!pressed) { say(`"${c.more[0].label}"${where} could not be pressed (${why}), so the list may have more files`); break; }
-      did.more += pressed; view.more += 1;
-      const fresh = (await grab(view, since, `after "Load more"${where}`)) + (await grabAfter(view, `after "Load more"${where}`));
-      flat = fresh ? 0 : flat + 1;
+      const ctl = await pageOp(tab, 'controls');
+      reportControls(ctl);
+      const buttons = (ctl.more || []).filter((m) => !c.banned.has(keyOf('more', m.path, m.label)));
+      if (!buttons.length) break;
+      const round = await guarded(tab, c, async (st) => {
+        const since = Date.now() - 50;
+        let pressed = 0; let why = '';
+        for (const more of buttons) { const r = await pressOne(tab, st, c, 'more', more); if (r.ok && !r.blocked) pressed += 1; else if (!r.ok) why = r.why; }
+        if (!pressed) return { pressed, why, fresh: 0 };
+        did.more += pressed; view.more += 1;
+        const fresh = (await grab(view, since, `after "Load more"${where}`)) + (await grabAfter(view, `after "Load more"${where}`));
+        return { pressed, why, fresh };
+      });
+      if (!round.pressed) { if (round.why) say(`"${buttons[0].label}"${where} could not be pressed (${round.why}), so the list may have more files`); break; }
+      flat = round.fresh ? 0 : flat + 1;
       if (flat >= 2) { ended = 'flat'; break; }
     }
     if (ended === 'steps' || ended === 'time') say(`"Load more"${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxMore} presses`} and may have more files`);
     else if (ended === 'flat') {
-      const left = (await pageOp(tab, 'controls')).more || [];
+      const left = ((await pageOp(tab, 'controls')).more || []).filter((m) => !c.banned.has(keyOf('more', m.path, m.label)));
       if (left.length) say(`"${left[0].label}"${where} was still on the page after ${plural(view.more, 'press', 'presses')}; the last 2 added no files`);
     }
   };
@@ -368,14 +451,15 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
     visited.add(urlKey(here));
     for (let k = 0; ; k += 1) {
       check();
-      const c = await pageOp(tab, 'controls');
-      reportControls(c);
-      const pager = c.pager || { found: false, hinted: false };
+      const ctl = await pageOp(tab, 'controls');
+      reportControls(ctl);
+      const pager = ctl.pager || { found: false, hinted: false };
       if (!pager.found) { if (pager.hinted && k === 0) say(`the page${where} has pagination that the loader did not recognise, so only its first page was read`); break; }
       if (k >= maxPages) { say(`pagination${where} stopped at ${maxPages} pages and may have more files`); break; }
       if (over()) { say(`pagination${where} stopped at the time limit and may have more files`); break; }
       let step = null;
       for (const s of pagerSteps(pager)) {
+        if (c.banned.has(keyOf('pager', s.path, s.label))) continue;
         if (s.href) {
           if (visited.has(urlKey(s.href))) continue;
           if (!linksOk || !goto) { say(`the page${where} has pagination links ("${s.label}") that the loader does not follow here, so its other pages were not read`); continue; }
@@ -388,9 +472,9 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
         break;
       }
       const before = known.size;
-      const since = Date.now() - 50;
       const baseline = signature(await takePage(tab));   /* the page as it is, to see whether the press moved it */
       let view;
+      let moved = true;
       if (step.href) {
         await goto(step.href);
         here = (await pageOp(tab, 'where')).href;
@@ -401,13 +485,21 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
         snaps.push(s);
         known.add(fileCandidates(s));
       } else {
-        const r = await pageOp(tab, 'activate', { path: step.path, kind: 'pager', label: step.label });
-        if (!r.ok) { say(`the page control "${step.label}"${where} could not be pressed (${r.why}), so later pages were not read`); break; }
+        const outcome = await guarded(tab, c, async (st) => {
+          const since = Date.now() - 50;
+          const r = await pressOne(tab, st, c, 'pager', step);
+          if (!r.ok || r.blocked) return { r, view: null };
+          const v = { tab: tabInfo, pages: at.pages + 1, pageUrl: at.url, more: 0, scroll: 0 };
+          await grab(v, since, `after page ${at.pages + 2}${where}`);
+          return { r, view: v };
+        });
+        if (!outcome.r.ok) { say(`the page control "${step.label}"${where} could not be pressed (${outcome.r.why}), so later pages were not read`); break; }
+        if (outcome.r.blocked) continue;   /* that control is banned; another one may do */
         at.pages += 1;
-        view = { tab: tabInfo, pages: at.pages, pageUrl: at.url, more: 0, scroll: 0 };
-        await grab(view, since, `after page ${at.pages + 1}${where}`);
-        if (signature(snaps[snaps.length - 1]) === baseline) { at.pages -= 1; break; }   /* nothing moved: the pager is at its end (a Next that never turns off) */
+        view = outcome.view;
+        if (signature(snaps[snaps.length - 1]) === baseline) { at.pages -= 1; moved = false; }   /* nothing moved: the pager is at its end (a Next that never turns off) */
       }
+      if (!moved) break;
       did.pages += 1;
       await explorePage(view, where, over);
       flat = known.size > before ? 0 : flat + 1;
@@ -415,29 +507,36 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
     }
   };
 
-  const explore = async (tabInfo, deadline, opened, since0, linksOk) => {
+  const explore = async (tabInfo, deadline, view, linksOk) => {
     const where = tabInfo ? ` in the tab "${tabInfo.label}"` : '';
-    const view = { tab: tabInfo, pages: 0, pageUrl: at.url, more: 0, scroll: 0 };
     const over = () => Date.now() > deadline;
-    if (opened) await grab(view, since0, `after the tab "${tabInfo.label}" was opened`);   /* the tab as it opens */
     await explorePage(view, where, over);
     await pageLoop(tabInfo, view, where, over, linksOk);
   };
 
-  await explore(did.home, started + budgetMs, false, 0, true);
+  await explore(did.home, started + budgetMs, { tab: did.home, pages: 0, pageUrl: at.url, more: 0, scroll: 0 }, true);
   for (const t of tabs) {
     if (t.selected) continue;
     check();
-    const since = Date.now() - 50;
-    const r = await pageOp(tab, 'activate', { path: t.path, kind: 'tab', label: t.label });
-    if (!r.ok) { say(`the tab "${t.label}" could not be opened (${r.why}), so its files were not looked at`); continue; }
+    const info = { label: t.label, path: t.path };
+    const view = { tab: info, pages: 0, pageUrl: at.url, more: 0, scroll: 0 };
+    /* the press, the settle and the first look at the tab are one guarded step */
+    const opened = await guarded(tab, c, async (st) => {
+      const since = Date.now() - 50;
+      const r = await pressOne(tab, st, c, 'tab', t, t.href ? { href: t.href } : {});
+      if (!r.ok || r.blocked) return r;
+      await grab(view, since, `after the tab "${t.label}" was opened`);
+      return r;
+    });
+    if (!opened.ok) { say(`the tab "${t.label}" could not be opened (${opened.why}), so its files were not looked at`); continue; }
     did.tabs += 1;
     at.pages = 0;
-    await explore({ label: t.label, path: t.path }, Math.max(started + budgetMs, Date.now() + minPerTabMs), true, since, false);
+    if (opened.blocked) continue;   /* the page tried to save something when it was pressed: that tab is not read (it is in the notes) */
+    await explore(info, Math.max(started + budgetMs, Date.now() + minPerTabMs), view, false);
   }
-  if (did.tabs && homeTab) { await pageOp(tab, 'activate', { path: homeTab.path, kind: 'tab', label: homeTab.label }); at.pages = 0; await quick(tab, signal); }
+  if (did.tabs && homeTab && !c.banned.has(keyOf('tab', homeTab.path, homeTab.label))) { await pressControl(tab, c, 'tab', homeTab, homeTab.href ? { href: homeTab.href } : {}, { signal }); at.pages = 0; }
   if (did.pages && at.url && goto) { await goto(homeUrl); at.url = null; at.pages = 0; }   /* back on the first page of a pager made of links */
   return did;
 }
 
-module.exports = { stabilize, expand, expandAll, gather, replay, signature, CandidateSet, unionCandidates, unionWithCheck, unionDropped, mergeSections, candidateKey, tabKey, nap, droppedCandidates, LOST };
+module.exports = { stabilize, expand, expandAll, gather, replay, pressControl, guarded, newCtx, keyOf, blockedNote, signature, CandidateSet, unionCandidates, unionWithCheck, unionDropped, mergeSections, candidateKey, tabKey, nap, droppedCandidates, LOST };

@@ -382,7 +382,8 @@ test('toggle label: show or view, with all or world, and files, attachments or d
     'Notify me about new files', 'Include all files', 'Display all files', 'World files', 'all downloads', 'Show the files', 'Show attachments', 'All files and folders', 'Include all attachments in my daily digest email']) assert.ok(!TOGGLE_LABEL_RE.test(no), no);
   assert.ok(TOGGLE_LABEL_RE.test('x'.repeat(100000) + ' show all files') && !TOGGLE_LABEL_RE.test('show all '.repeat(20000)), 'no catastrophic backtracking');
   /* a label with an action word is never the control, whatever else it says */
-  for (const never of ['Clear all files', 'Delete all files', 'Remove all files', 'Reset all files', 'Archive all files', 'Archived: show all files', 'Move all files', 'Apply to all files', 'Bulk: show all files', 'Select all files', 'Discard all files', 'Detach all files', 'Unlink all files', 'Trash all files', 'Empty all files', 'Show all files in my daily digest email', 'Share all files', 'Send all files', 'Mark all files as reviewed']) assert.ok(TOGGLE_NEVER_RE.test(never), never);
+  for (const never of ['Clear all files', 'Delete all files', 'Remove all files', 'Reset all files', 'Archive all files', 'Archived: show all files', 'Move all files', 'Apply to all files', 'Bulk: show all files', 'Select all files', 'Discard all files', 'Detach all files', 'Unlink all files', 'Trash all files', 'Empty all files', 'Show all files in my daily digest email', 'Share all files', 'Send all files', 'Mark all files as reviewed',
+    'Can view all files', 'Client access: view all files', 'Guest can see all files', 'Show all files to external users', 'Make all files public', 'Show all files publicly', 'Edit: show all files', 'Role: show all files', 'Show all files by default', 'Always show all files', 'Visible to all: files', 'Visibility: all files', 'Permission to view all files']) assert.ok(TOGGLE_NEVER_RE.test(never), never);
   assert.equal(exportedRe, TOGGLE_LABEL_RE);
   assert.equal(exportedFinder, findAllFilesToggle);
 });
@@ -671,7 +672,13 @@ test('pageOps activate: every press needs a kind and the live element must still
   const box = opsSandbox({
     dl: { textContent: ' Download ' }, del: { textContent: 'Delete file' }, named: { textContent: 'Atlas_Notes.txt' }, inform: { textContent: 'Download', form: {} }, scripted: { textContent: 'Download', attrs: { onclick: "document.getElementById('f').submit()" } },
     titled: { textContent: 'Download', attrs: { title: 'Remove this file' } }, formaction: { textContent: 'Download', attrs: { formaction: '/x' } }, empty: { textContent: '' },
-    sel: { tagName: 'SELECT', textContent: 'Added files All files', selectedIndex: 0, options: [{ textContent: 'Added files' }, { textContent: 'Show all files' }, { textContent: 'Mark all files as reviewed' }] },
+    sel: { tagName: 'SELECT', textContent: 'Added files All files', selectedIndex: 0, options: [{ textContent: 'Added files' }, { textContent: 'Show all files' }] },
+    bulk: { tagName: 'SELECT', textContent: 'x', selectedIndex: 0, options: [{ textContent: 'Added files' }, { textContent: 'Show all files' }, { textContent: 'Mark all files as reviewed' }] },
+    perm: { tagName: 'SELECT', textContent: 'x', selectedIndex: 0, options: [{ textContent: 'No access' }, { textContent: 'Can view all files' }] },
+    posting: { attrs: { role: 'switch' }, textContent: 'Show all files', form: { getAttribute: (n) => (n === 'method' ? 'post' : null) } },
+    submitting: { attrs: { role: 'switch', onchange: 'this.form.submit()' }, textContent: 'Show all files' },
+    getform: { attrs: { role: 'switch' }, textContent: 'Show all files', form: { getAttribute: (n) => (n === 'method' ? 'GET' : null) } },
+    tablink: { tagName: 'A', attrs: { role: 'tab', href: '/projects/7/trash' }, href: 'https://x.test/projects/7/trash', textContent: 'Trash' }, pagerlink: { tagName: 'A', attrs: { href: '/t?page=2' }, href: 'https://x.test/t?page=2', textContent: '2' },
     sw: { attrs: { role: 'switch', 'aria-label': 'Show all files' }, textContent: '' }, clear: { attrs: { role: 'switch', 'aria-label': 'Clear all files' }, textContent: '' }, digest: { tagName: 'INPUT', type: 'checkbox', value: 'on', textContent: '', labels: [{ textContent: 'Include all attachments in my daily digest email' }] },
     tab: { attrs: { role: 'tab' }, textContent: 'Reference' }, exp: { attrs: { 'aria-expanded': 'false' }, textContent: 'Archive' }, more: { textContent: 'Load more' }, pager: { textContent: '3' },
     plain: { textContent: 'Show all files' }, plainClear: { textContent: 'Clear all files' }, link: { tagName: 'A', textContent: 'Q3 report', href: 'https://x.test/f/Q3.pdf', attrs: { href: '/f/Q3.pdf', download: '' } }, bare: { tagName: 'A', textContent: 'Q3 report', href: 'https://x.test/f/Q3.pdf', attrs: { href: '/f/Q3.pdf' } },
@@ -718,7 +725,17 @@ test('pageOps activate: every press needs a kind and the live element must still
   assert.equal(box.nodes.sel.selectedIndex, 1);
   assert.deepEqual(box.events, [['sel', 'input'], ['sel', 'change']]);
   assert.match(run(box, { path: '#sel', kind: 'toggle', tkind: 'option', option: 0, label: 'Added files' }).why, /not "show all files"/);
-  assert.match(run(box, { path: '#sel', kind: 'toggle', tkind: 'option', option: 2, label: 'Show all files' }).why, /names an action|not "show all files"/, 'a bulk action in the same list');
+  assert.match(run(box, { path: '#bulk', kind: 'toggle', tkind: 'option', option: 1, label: 'Show all files' }).why, /not views of the files/, 'one action in the list and the list is not the control, whichever option is asked for');
+  assert.match(run(box, { path: '#bulk', kind: 'toggle', tkind: 'option', option: 2, label: 'Show all files' }).why, /names an action|not "show all files"/);
+  assert.match(run(box, { path: '#perm', kind: 'toggle', tkind: 'option', option: 1, label: 'Can view all files' }).why, /names an action|not views of the files/, 'a permission list: "Can view all files" is a sharing setting');
+  assert.match(run(box, { path: '#posting', kind: 'toggle', tkind: 'switch', label: 'Show all files' }).why, /form that saves something/, 'a control in a POST form');
+  assert.match(run(box, { path: '#submitting', kind: 'toggle', tkind: 'switch', label: 'Show all files' }).why, /form that saves something/, 'a control whose onchange submits');
+  assert.equal(run(box, { path: '#getform', kind: 'toggle', tkind: 'switch', label: 'Show all files' }).ok, true, 'a GET form only changes the view');
+  /* a tab or a pager that is a link: only the address the loader looked at; a pager press never leaves the page */
+  assert.match(run(box, { path: '#tablink', kind: 'tab', label: 'Trash' }).why, /link to an address the loader has not looked at/);
+  assert.match(run(box, { path: '#tablink', kind: 'tab', label: 'Trash', href: 'https://x.test/elsewhere' }).why, /has not looked at/);
+  assert.equal(run(box, { path: '#tablink', kind: 'tab', label: 'Trash', href: 'https://x.test/projects/7/trash' }).ok, true, 'the loader vets the address before it asks (a test of the press itself)');
+  assert.match(run(box, { path: '#pagerlink', kind: 'pager', label: '2' }).why, /link that goes to another address/);
   assert.equal(run(box, { path: '#sel', kind: 'toggle', tkind: 'option', option: 0, label: 'Added files', learned: true }).ok, true, 'what the person taught needs no "all files" words, but still no action');
   assert.equal(vm.runInNewContext(`(${pageOps.toString()})(${JSON.stringify({ op: 'nothing' })})`, box.sandbox).ok, false);
 });
@@ -831,7 +848,7 @@ test('pageOps: a path is one CSS path per document joined with >>> - it goes thr
   assert.match(runOp(dom, { op: 'activate', rules: RULES, kind: 'download', path: '#nohost >>> #sh' }).why, /gone/);
   assert.deepEqual(dom.clicks, ['inner', 'sh']);
   const expanded = runOp(dom, { op: 'expand', rules: RULES });
-  assert.deepEqual(expanded, { opened: 1, expanded: 1, popups: [], blocked: 0, cut: false }, 'the closed <details> of the iframe and the expander of the shadow root');
+  assert.deepEqual([expanded.opened, expanded.expanded, expanded.popups, expanded.blocked, expanded.cut, expanded.label], [1, 1, [], 0, false, 'Folder'], 'the closed <details> of the iframe and the expander of the shadow root');
   assert.deepEqual(dom.clicks.slice(2), ['expander'], 'pressed once: a second look does not press it again');
   const controls = runOp(dom, { op: 'controls', rules: RULES });
   assert.deepEqual(controls.more.map((m) => m.label), ['Load more files'], 'the wider label is a button; "Show more" that links to /next is not pressed');
@@ -856,7 +873,9 @@ test('pageOps expand: looks again after every press (a tree that draws itself an
   });
   const out = runOp(dom, { op: 'expand', rules: RULES });
   assert.deepEqual(dom.clicks, ['f0', 'f1', 'f2', 'row'], 'all three folders in ONE call (a fresh look after each press), and the row of the tree item, not the item');
-  assert.deepEqual(out, { opened: 0, expanded: 4, popups: ['Attachments (4)'], blocked: 1, cut: false });
+  assert.deepEqual([out.opened, out.expanded, out.popups, out.blocked, out.cut], [0, 4, ['Attachments (4)'], 1, false]);
+  const skipped = runOp(dom, { op: 'expand', rules: RULES, skip: ['nothing'], one: true });
+  assert.equal(skipped.expanded, 0);
   assert.deepEqual(runOp(dom, { op: 'expand', rules: RULES }).expanded, 0, 'the tree item, the form button and the menus are tried once per node, and the folders are all open');
 });
 test('pageOps scroll: reports whether every scrollable box is at its bottom and how tall the boxes are; probe measures without moving; reset goes back to the top', () => {
@@ -901,6 +920,169 @@ test('pageOps controls: tabs and "Load more" with their caps, a pager made of nu
   assert.deepEqual([capped.more.length, capped.cut.more], [2, 1]);
   const { pagerSteps } = require('../backend/links/page.cjs');
   assert.deepEqual(pagerSteps(out.pager).map((s) => [s.how, s.label]), [['next', 'Next'], ['number', '3']]);
+});
+test('write guard: reads go on, a POST that is a data query goes on, every other request is failed before it leaves the browser; guards nest and the Fetch domain is off when the last one stops; a body is read only to tell a query from a change', async () => {
+  const { guardWrites, isReadQuery } = require('../backend/links/gate.cjs');
+  assert.equal(isReadQuery('{"query":"query Files($t: String) { files(tab: $t) { name } }","variables":{"t":"a"}}'), true);
+  assert.equal(isReadQuery('[{"query":"{ files { name } }"},{"query":"# comment\\nquery A { x }"}]'), true, 'a batch of queries');
+  assert.equal(isReadQuery('query { files { name } }'), true, 'the raw text of a query');
+  for (const bad of ['{"query":"mutation Vote { vote(id: 1) { ok } }"}', '[{"query":"{ a }"},{"query":"mutation { b }"}]', '{"points":3}', '', 'a=1&b=2', '{"extensions":{"persistedQuery":{"sha256Hash":"x"}}}', '{"query":"{ a }","operationName":"mutation"}', '{"query":"subscription { a }"}', '{"query":5}', 'null', '[]', '{"query":"update { a }"}']) assert.equal(isReadQuery(bad), false, bad);
+  assert.equal(isReadQuery('x'.repeat(300000)), false);
+  const sent = []; let paused;
+  const tab = { s: { on: (method, handler) => { paused = handler; return () => { paused = null; }; }, send: async (method, params) => { sent.push([method, params && params.requestId]); return {}; } } };
+  const blocked = [];
+  const outer = await guardWrites(tab, { onBlocked: (b) => blocked.push(['outer', b.method]) });
+  const inner = await guardWrites(tab, { onBlocked: (b) => blocked.push(['inner', b.method]) });
+  assert.equal(sent.filter(([m]) => m === 'Fetch.enable').length, 1, 'one Fetch.enable for both');
+  const ask = (requestId, method, postData, extra = {}) => paused({ requestId, request: { method, postData, ...extra } });
+  await ask('g', 'GET'); await ask('h', 'HEAD'); await ask('o', 'OPTIONS');
+  await ask('q', 'POST', '{"query":"query { files { name } }"}');
+  await ask('m', 'POST', '{"query":"mutation { vote }"}');
+  await ask('p', 'PUT', '{"points":3}'); await ask('d', 'DELETE'); await ask('x', 'PATCH', '{}'); await ask('e', 'POST', undefined);
+  await ask('b', 'POST', undefined, { postDataEntries: [{ bytes: Buffer.from('{"query":"query { a }"}').toString('base64') }] });   /* Chrome sends a small body as entries */
+  await ask('c', 'POST', undefined, { postDataEntries: [{ bytes: Buffer.from('{"query":"mutation { a }"}').toString('base64') }] });
+  await ask('f', 'POST', undefined, { postDataEntries: [{ file: '/tmp/x' }] });
+  assert.deepEqual(sent.filter(([m]) => m === 'Fetch.continueRequest').map(([, id]) => id), ['g', 'h', 'o', 'q', 'b']);
+  assert.deepEqual(sent.filter(([m]) => m === 'Fetch.failRequest').map(([, id]) => id), ['m', 'p', 'd', 'x', 'e', 'c', 'f']);
+  assert.deepEqual(blocked.map(([who, method]) => `${who}:${method}`), ['inner:POST', 'inner:PUT', 'inner:DELETE', 'inner:PATCH', 'inner:POST', 'inner:POST', 'inner:POST'], 'the newest guard is told');
+  await inner.stop();
+  assert.ok(paused, 'the outer guard is still on');
+  await ask('p2', 'PUT');
+  assert.equal(blocked[blocked.length - 1][0], 'outer');
+  await outer.stop();
+  assert.equal(paused, null);
+  assert.equal(sent.filter(([m]) => m === 'Fetch.disable').length, 1, 'off when the last one stops');
+  assert.ok(!JSON.stringify(sent).includes('mutation'), 'nothing of a body is passed on');
+  await outer.stop();
+  assert.deepEqual(await (await guardWrites({}, {})).stop(), undefined, 'a tab without a session: nothing to guard');
+});
+test('discover: every press is guarded - a tab, "Load more", a pager, an expander; the control the page tried to save something with is told, is not pressed again, and its tab is not read; a tab that is a link must pass the address tests', async () => {
+  const D = require('../backend/links/discover.cjs');
+  const guardedTab = (script) => {
+    const base = scriptedTab(script);
+    let paused = null; const sent = [];
+    base.tab.s = { on: (m, h) => { paused = h; return () => { paused = null; }; }, send: async (m, p) => { sent.push([m, p && p.requestId]); return {}; } };
+    base.write = (method = 'PATCH', body = '{}') => paused && paused({ requestId: `r${sent.length}`, request: { method, postData: body } });
+    base.sent = sent; base.isOn = () => Boolean(paused);
+    return base;
+  };
+  /* a status picker made of tabs: pressing "In progress" PATCHes; pressing "Reference" is only a view */
+  const st = { cur: 'Files' };
+  const picker = guardedTab({
+    snapshot: () => fileSnap(...(st.cur === 'Files' ? ['f1'] : st.cur === 'Reference' ? ['r1', 'r2'] : ['p1'])),
+    op: (arg) => {
+      if (arg.op === 'where') return { href: 'https://x.example/t' };
+      if (arg.op === 'controls') return { tabs: ['Files', 'In progress', 'Reference'].map((l) => ({ label: l, path: `tab-${l}`, selected: st.cur === l, href: null })), more: [], pager: NOPAGER };
+      if (arg.op === 'activate') { assert.ok(picker.isOn(), 'the guard is on while the press happens'); st.cur = arg.path.slice(4); if (st.cur === 'In progress') picker.write('PATCH', '{"status":"In progress"}'); return { ok: true }; }
+      return IDLE;
+    },
+  });
+  const ctx = D.newCtx();
+  const said = [];
+  const snaps = [fileSnap('f1')];
+  const did = await D.gather(picker.tab, snaps, { ctx: { ...ctx, say: (t) => said.push(t) } });
+  assert.ok(did.capped.includes("The page tried to save a change when 'In progress' was pressed; it was blocked"), did.capped.join(' | '));
+  assert.ok(ctx.banned.has('tab|tab-In progress|In progress') && !ctx.banned.has('tab|tab-Reference|Reference'));
+  assert.deepEqual(discover.unionCandidates(snaps.map(fileCandidates)).map((c) => c.label).sort(), ['f1', 'r1', 'r2'], 'the tab that tried to save is not read, the other one is');
+  assert.equal(picker.isOn(), false, 'and the guard is off again');
+  assert.deepEqual(picker.sent.filter(([m]) => m === 'Fetch.failRequest').length, 1);
+  const again = await D.replay(picker.tab, { tab: { label: 'In progress', path: 'tab-In progress' }, more: 0, scroll: 0 }, null, { ctx });
+  assert.equal(again.ok, false);
+  assert.match(again.why, /not pressed again: the page tried to save a change/);
+  /* a lone Next that saves a wizard step: pressed once (it is a "more" button), blocked, never again */
+  const wiz = guardedTab({
+    snapshot: () => fileSnap('w'),
+    op: (arg) => {
+      if (arg.op === 'controls') return { tabs: [], more: [{ label: 'Next', path: 'next' }], pager: NOPAGER };
+      if (arg.op === 'activate') { wiz.write('PUT', '{"saved":true}'); return { ok: true }; }
+      return IDLE;
+    },
+  });
+  const wd = await D.gather(wiz.tab, [fileSnap('w')], {});
+  assert.equal(wiz.log.filter((a) => a.op === 'activate').length, 1, 'pressed once');
+  assert.ok(wd.capped.includes("The page tried to save a change when 'Next' was pressed; it was blocked"));
+  /* a pager button that saves: blocked and not pressed again (the pager is not followed any further) */
+  const pg = guardedTab({
+    snapshot: () => fileSnap('g'),
+    op: (arg) => {
+      if (arg.op === 'where') return { href: 'https://x.example/t' };
+      if (arg.op === 'controls') return { tabs: [], more: [], pager: { found: true, hinted: true, next: { label: 'Next', path: 'pn', href: null, disabled: false }, prev: null, nums: [], current: null } };
+      if (arg.op === 'activate') { pg.write('POST', 'a=1'); return { ok: true }; }
+      return IDLE;
+    },
+  });
+  const pd = await D.gather(pg.tab, [fileSnap('g')], {});
+  assert.equal(pg.log.filter((a) => a.op === 'activate').length, 1);
+  assert.ok(pd.capped.some((t) => /The page tried to save a change when 'Next' was pressed/.test(t)));
+  /* an expander that saves: pressed, blocked, skipped from then on */
+  let presses = 0;
+  const ex = guardedTab({
+    snapshot: () => fileSnap('e'),
+    op: (arg) => {
+      if (arg.op === 'expand') { if (presses >= 1 && !(arg.skip || []).includes('exp-1')) { presses += 1; ex.write('DELETE'); return { opened: 0, expanded: 1, label: 'Folder', path: 'exp-1', popups: [], blocked: 0, cut: false }; } if (presses === 0) { presses = 1; ex.write('DELETE'); return { opened: 0, expanded: 1, label: 'Folder', path: 'exp-1', popups: [], blocked: 0, cut: false }; } return { opened: 0, expanded: 0, popups: [], blocked: 0, cut: false }; }
+      return IDLE;
+    },
+  });
+  const exctx = D.newCtx();
+  const exSaid = [];
+  const total = await D.expandAll(ex.tab, [], { snapshots: false, ctx: { ...exctx, say: (t) => exSaid.push(t) } });
+  assert.deepEqual(exSaid, ["The page tried to save a change when 'Folder' was pressed; it was blocked"]);
+  assert.deepEqual([...exctx.skip], ['exp-1']);
+  assert.equal(total.expanded >= 1, true);
+  assert.equal(presses, 1, 'and it was not pressed in the next pass');
+  /* a tab that is a link: an action word in the address, another site, or an address that cannot be read is not followed */
+  const links = guardedTab({
+    snapshot: () => fileSnap('l'),
+    op: (arg) => {
+      if (arg.op === 'where') return { href: 'https://x.example/t' };
+      if (arg.op === 'controls') return { tabs: [{ label: 'Files', path: 'a', selected: true, href: 'https://x.example/t' }, { label: 'Trash', path: 'b', selected: false, href: 'https://x.example/projects/7/trash' }, { label: 'Sharing', path: 'c', selected: false, href: 'https://x.example/projects/7/share' }, { label: 'Other', path: 'd', selected: false, href: 'https://evil.example/t' }, { label: 'View', path: 'e', selected: false, href: 'https://x.example/t/view' }], more: [], pager: NOPAGER };
+      if (arg.op === 'activate') return { ok: true };
+      return IDLE;
+    },
+  });
+  const ld = await D.gather(links.tab, [fileSnap('l')], {});
+  assert.deepEqual(links.log.filter((a) => a.op === 'activate' && a.kind === 'tab').map((a) => [a.path, a.href]).slice(0, 1), [['e', 'https://x.example/t/view']], 'only the harmless address is pressed, and its address goes with the press');
+  const said2 = ld.capped.join(' | ');
+  assert.match(said2, /the tab "Trash" is a link to an address the loader does not open \(the path has the action word "trash"\)/);
+  assert.match(said2, /the tab "Sharing" is a link to an address the loader does not open \(the path has the action word "share"\)/);
+  assert.match(said2, /the tab "Other" is a link to an address the loader does not open \(another site\)/);
+});
+test('pageOps controls: a pager needs a navigation (nav, role=navigation, or a box that says pagination) or links that stay on this list; a row of digits (points, stages) or arrows elsewhere is not one; "+1" is not "Load more"', () => {
+  const { RULES } = require('../backend/links/page.cjs');
+  const sel = 'button,a,[role=button],[role=link],input[type=button]';
+  const ctl = (build, location) => { const dom = opsDom(build); if (location) { dom.sandbox.location = { href: location }; dom.sandbox.URL = URL; } return runOp(dom, { op: 'controls', rules: RULES, caps: { tabs: 50, more: 50 } }); };
+  const points = ctl(({ el, text }) => { const ul = el('UL', { class: 'points' }, [], {}); const b = (n) => el('BUTTON', {}, [text(String(n))], { closest: (q) => (/^ul,ol$/.test(q) ? ul : null) }); return { by: { [sel]: [1, 2, 3, 5, 8].map(b) } }; });
+  assert.deepEqual([points.pager.found, points.more.length], [false, 0], 'estimate points are not pages');
+  const arrows = ctl(({ el, text }) => { const mk = (t, a) => el('BUTTON', { 'aria-label': a }, [text(t)], { closest: () => null }); return { by: { [sel]: [mk('\u2190', 'Move to previous stage'), mk('\u2192', 'Move to next stage')] } }; });
+  assert.deepEqual([arrows.pager.found, arrows.more.length], [false, 0], 'stage arrows are not a pager and not "Load more"');
+  const plus = ctl(({ el, text }) => ({ by: { [sel]: [el('BUTTON', {}, [text('+1')], { closest: () => null }), el('BUTTON', {}, [text('+5 more')], { closest: () => null }), el('BUTTON', {}, [text('Get more')], { closest: () => null })] } }));
+  assert.deepEqual(plus.more.map((m) => m.label), ['+5 more'], '"+1" and "Get more" are not "Load more"; "+5 more" is');
+  const numbered = (hrefs) => ({ el, text }) => { const links = hrefs.map((h, i) => el('A', { href: h }, [text(String(i + 1))], { href: h, closest: () => null })); el('DIV', {}, links); return { by: { [sel]: links } }; };
+  assert.equal(ctl(numbered(['https://x.test/t?page=1', 'https://x.test/t?page=2', 'https://x.test/t?page=3']), 'https://x.test/t').pager.found, true, 'links that change only the page parameter of this list are a pager even outside a nav');
+  assert.equal(ctl(numbered(['https://x.test/projects/1', 'https://x.test/projects/2', 'https://x.test/projects/3']), 'https://x.test/t').pager.found, false, 'numbered links to other pages of the site are not a pager');
+  assert.equal(ctl(numbered(['https://x.test/t?page=1', 'https://x.test/t?page=2']), 'https://x.test/t').pager.nums.map((n) => n.href).every(Boolean), true);
+});
+test('extractPage: a switch, checkbox, tab, button or choice that saves something when it is flipped is marked unsafe - it is in a form that is not GET, or its onchange/onclick mentions submit or form - and so is a list whose options are not all views of the files', () => {
+  const { extractPage, pageArgs, findAllFilesToggle } = require('../backend/links/page.cjs');
+  const { doc, el, text, flat } = tinyDom();
+  const post = { getAttribute: (n) => (n === 'method' ? 'post' : null) };
+  const get = { getAttribute: (n) => (n === 'method' ? 'get' : null) };
+  const option = (label, selected) => ({ textContent: label, selected, disabled: false });
+  const box = (label, extra = {}, attrs = {}) => el('INPUT', { type: 'checkbox', ...attrs }, [], { type: 'checkbox', checked: false, labels: [el('LABEL', {}, [text(label)])], ...extra });
+  const body = el('BODY', {}, [
+    box('Show all files', { form: post }), box('Show all files', { form: null }, { onchange: 'this.form.submit()' }), box('Show all files', { form: get }), box('Show all files'),
+    el('SELECT', { id: 'views' }, [], { type: 'select-one', options: [option('Added files', true), option('All files', false)], selectedOptions: [], value: 'a' }),
+    el('SELECT', { id: 'perm' }, [], { type: 'select-one', options: [option('No access', true), option('Can view all files', false), option('Can edit', false)], selectedOptions: [], value: 'a' }),
+    el('SELECT', { id: 'mixed' }, [], { type: 'select-one', options: [option('Added files', true), option('Show all files', false), option('Mark all files as reviewed', false)], selectedOptions: [], value: 'a' }),
+    el('BUTTON', { 'aria-pressed': 'false', onclick: 'form.submit()' }, [text('Show all files')]),
+  ]);
+  Object.assign(doc, { body, documentElement: body, title: 'T', readyState: 'complete', querySelectorAll: (q) => (q === '*' ? flat(body) : []), querySelector: () => null });
+  const out = JSON.parse(JSON.stringify(vm.runInNewContext(`(${extractPage.toString()})(${JSON.stringify(pageArgs())})`, { document: doc, location: { href: 'https://tasks.atlas.example/t/1', origin: 'https://tasks.atlas.example' }, performance: { now: () => 0 }, CSS: { escape: (x) => x }, URL, URLSearchParams })));
+  assert.deepEqual(out.toggles.filter((t) => t.kind === 'checkbox').map((t) => Boolean(t.unsafe)), [true, true, false, false], 'a POST form, a script that submits; a GET form and a free-standing box are fine');
+  assert.deepEqual(out.toggles.filter((t) => t.kind === 'option').map((t) => [t.label, Boolean(t.unsafe)]), [['Added files', false], ['All files', false], ['No access', true], ['Can view all files', true], ['Can edit', true], ['Added files', true], ['Show all files', true], ['Mark all files as reviewed', true]], 'a list of views is fine; a list with a permission or an action in it is not the control');
+  assert.equal(out.toggles.find((t) => t.kind === 'pressed').unsafe, true);
+  assert.equal(findAllFilesToggle(out.toggles, null).path, out.toggles[2].path, 'the first control that is safe and says so: the one in the GET form');
+  assert.equal(findAllFilesToggle(out.toggles.filter((t) => t.unsafe), null), null, 'when only unsafe ones are left there is none');
 });
 test('pager steps and links: Next first when it is enabled, then the numbers after the current page; a link is followed only when it changes nothing but a page parameter on the same path', () => {
   const { pagerSteps, pageLinkOk } = require('../backend/links/page.cjs');
@@ -1383,8 +1565,8 @@ test('discover expandAll: repeats until nothing new opens (a folder inside a fol
   const { tab } = scriptedTab({ snapshot: () => fileSnap('a', `b${n}`), op: () => { n += 1; return n <= 2 ? { opened: 0, expanded: 1 } : { opened: 0, expanded: 0 }; } });
   const snaps = [];
   const total = await discover.expandAll(tab, snaps, { view: { tab: null, more: 0, scroll: 0 } });
-  assert.deepEqual(total, { opened: 0, expanded: 2, passes: 2, lost: 0, blocked: 0, popups: [], capped: false });
-  assert.equal(snaps.length, 2);
+  assert.deepEqual(total, { opened: 0, expanded: 2, passes: 1, lost: 0, blocked: 0, popups: [], capped: false }, 'a pass presses one expander after the other until none is left, then one look');
+  assert.equal(snaps.length, 1);
   assert.deepEqual(snaps[0].view, { tab: null, pages: 0, pageUrl: null, more: 0, scroll: 0 });
   const stuck = scriptedTab({ snapshot: () => fileSnap('a'), op: () => ({ opened: 1, expanded: 0 }) });
   const stuckTotal = await discover.expandAll(stuck.tab, [], { passes: 3 });
