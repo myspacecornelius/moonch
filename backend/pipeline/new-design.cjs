@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const P = require('./constants.cjs');
 const { StopSignal, BudgetStop, Failure, AttemptRejected, DesignError } = require('./errors.cjs');
-const { sha256Hex, capText, oneLine, writeJsonAtomic, writeTextAtomic, walkFiles, hashFile, delay, usdText } = require('./util.cjs');
+const { sha256Hex, capText, oneLine, writeJsonAtomic, writeTextAtomic, walkFiles, hashFile, delay, usdText, Stopped } = require('./util.cjs');
 const { attemptReserveUsd } = require('./budget.cjs');
 const { SafetyError } = require('./safety.cjs');
 const { buildWork, designerPromptNew, repairPrompt, reviewRepairPrompt, evaluatorRepairPrompt, readDesign, scanDesignFiles, verifyDesignBrief } = require('./design.cjs');
@@ -30,9 +30,15 @@ const { buildCorpus, findQuote, normalizeText } = require('./quotes.cjs');
 const { normalAction } = require('./brief.cjs');
 const R = require('./review.cjs');
 const { suggest } = require('../agents/classify.cjs');
-const { extractText, readerKindOfFile } = require('./extract.cjs');
+const { extractText, extractDetailed, readerKindOfFile, RENDERED_EXTENSIONS, NATIVE_EXTENSIONS } = require('./extract.cjs');
+const { extractToolCalls } = require('../agents/path-audit.cjs');
+const { AgentError } = require('../agents/rounds.cjs');
 
 const round6 = value => Math.round(value * 1e6) / 1e6;
+/* The errors the pipeline raises on purpose and handles itself (a stop, a cap, a refusal, a design that failed a check, a safety stop): everything else that leaves a check
+   is a fault of the harness, not a finding about the design. */
+const isExpected = error => error instanceof StopSignal || error instanceof Stopped || error instanceof BudgetStop || error instanceof Failure || error instanceof AttemptRejected
+  || error instanceof DesignError || error instanceof SafetyError || error instanceof AgentError;
 const MAX_REVIEW_EVALUATIONS = 2; /* the reveal runs at most twice in one attempt: once, and once more after a repair */
 const MAX_REVIEW_REPAIRS = 2;
 
@@ -178,7 +184,8 @@ module.exports = {
         continue;
       }
       nulls++;
-      if (nulls > 1) return { grades, decision, failed: true, reason: last.reason, verdict: last.verdict };
+      /* the grader gave nothing usable twice: the answer was not graded (ungraded), which says nothing about the guideline */
+      if (nulls > 1) return { grades, decision, failed: true, ungraded: true, reason: last.reason, verdict: last.verdict };
     }
   },
 
@@ -192,6 +199,7 @@ module.exports = {
     const guideline = design.guideline + GRADER_FOOTER;
     const failures = [];
     const details = [];
+    const ungraded = [];
     for (const fixed of this._fixedAnswers(design)) {
       this._checkStop(ctl);
       const existing = set.answers.find(item => item.name === fixed.name);
@@ -203,7 +211,7 @@ module.exports = {
       const run = {
         why, at: this.now(), guidelineSha256: guidelineSha, answerSha256: sha256Hex(fixed.text), grades: graded.grades.slice(),
         /* score is the mean of the grades, for reading; the answer passes or fails by the rule: both grades on one side of the threshold, or the majority of three */
-        score: meanScore(graded.grades), rule: graded.grades.length >= 3 ? 'majority' : 'both', passed: !graded.failed && graded.decision.passed === true, unstable: graded.decision.unstable === true, noGrade: graded.failed && graded.grades.length < 2,
+        score: meanScore(graded.grades), rule: graded.grades.length >= 3 ? 'majority' : 'both', passed: !graded.failed && graded.decision.passed === true, unstable: graded.decision.unstable === true, noGrade: graded.ungraded === true,
       };
       entry.runs.push(run);
       entry.sha256 = run.answerSha256;
@@ -216,8 +224,12 @@ module.exports = {
       if (!run.passed) {
         const what = fixed.kind === 'golden' ? 'The golden answer' : 'A permitted alternative';
         if (run.noGrade) {
-          failures.push(`The simulated grader gave ${fixed.kind === 'golden' ? 'the golden answer' : 'a permitted alternative'} no usable score, so the guideline could not be checked against it`);
-          details.push(`The simulated grader could not score ${fixed.kind === 'golden' ? 'your golden answer' : `your alternative answer ${fixed.file}`} against your guideline (no usable score). Make the guideline a clear list of points with how many each is worth.`);
+          const which = fixed.kind === 'golden' ? 'the golden answer' : 'a permitted alternative';
+          /* two grades on opposite sides of the threshold and no third: the majority could not be taken */
+          const thirdMissing = run.grades.length >= 2;
+          failures.push(thirdMissing ? `The simulated grader gave ${which} two grades on opposite sides of the threshold and no third grade could be obtained, so the guideline could not be checked against it` : `The simulated grader gave ${which} no usable score, so the guideline could not be checked against it`);
+          details.push(thirdMissing ? `The simulated grader scored ${fixed.kind === 'golden' ? 'your golden answer' : `your alternative answer ${fixed.file}`} on opposite sides of ${fixed.threshold.toFixed(2)} (grades ${run.grades.map(value => value.toFixed(2)).join(', ')}) and no third grade could be obtained. Nothing in your design was judged by this.` : `The simulated grader could not score ${fixed.kind === 'golden' ? 'your golden answer' : `your alternative answer ${fixed.file}`} against your guideline (no usable score). Make the guideline a clear list of points with how many each is worth.`);
+          ungraded.push(true);
         } else {
           const rule = run.rule === 'majority' ? 'the grades straddled the threshold, so the majority of three decides' : 'both grades decide';
           const grades = run.grades.map(value => value.toFixed(2)).join(', ');
@@ -228,62 +240,122 @@ module.exports = {
     }
     set.passed = set.answers.every(item => item.passed);
     this._save(p);
-    if (failures.length && reject) throw new AttemptRejected('answer-set', failures, details);
+    /* when the only trouble is a grader that gave no grade, the attempt was not judged: it is rejected as incomplete, not as a defect of the guideline */
+    if (failures.length && reject) throw new AttemptRejected('answer-set', failures, details, { incomplete: ungraded.length === failures.length });
     return { passed: failures.length === 0, failures, details };
   },
 
   /* -------------------------------------------------------------- the reviews (D4) */
 
+  /* Where the rendering of a file goes in the reviewer's folder: text-renderings/<name>.txt, the same relative name as the file. A name whose parts are too long for a
+     file name, or that would be a file where another rendering needs a folder (x.docx.txt next to x.docx), gets a name of its own made of its number and a hash. */
+  _renderingPath(name, index, used) {
+    const parts = `${name}.txt`.split('/');
+    let rel = parts.every(part => Buffer.byteLength(part) <= 200) ? parts.join('/') : '';
+    const key = rel.toLowerCase();
+    if (!rel || [...used].some(other => other === key || other.startsWith(`${key}/`) || key.startsWith(`${other}/`))) rel = `_${String(index + 1).padStart(3, '0')}-${sha256Hex(name).slice(0, 12)}.txt`;
+    used.add(rel.toLowerCase());
+    return `text-renderings/${rel}`;
+  },
+
   /* The reviewer's own folder, next to the packet copy: a plain text rendering of every file the Read tool refuses (Word, Excel, slide and RTF files), written
      under text-renderings/ with the same relative name and .txt added. The renderings are the reviewer's copies and never part of the pilot packet. Files that
-     nobody can read are named. Resolves { renderings: [{ file, rendering }], unreadable: [names], partial: [names] }. */
+     nobody can read are named, and so are the renderings that hold only part of their file (a workbook with formulas that have no stored value, a file longer than
+     the rendering). A file that fails on the way is listed as unreadable, whatever the cause: the review goes on without it and says so. Resolves { renderings:
+     [{ file, rendering }], unreadable: [names], partial: [names], native: [names of the PDFs and pictures the reader has to open itself] }. */
   async _prepareBlindFolder(folder, manifest, shouldStop) {
     const renderings = [];
     const unreadable = [];
     const partial = [];
+    const native = [];
+    const used = new Set();
     const LIMIT = 8 * 1024 * 1024;
-    for (const entry of manifest) {
+    for (const [index, entry] of manifest.entries()) {
       if (shouldStop()) throw new StopSignal('stopped');
-      const copy = path.join(folder, 'filesystem', ...entry.name.split('/'));
-      const kind = await readerKindOfFile(copy, entry.name);
-      if (kind === 'unreadable') { unreadable.push(entry.name); continue; }
-      if (kind !== 'rendered') continue;
-      const text = await extractText(copy, { maxChars: LIMIT });
-      const target = path.join(folder, 'text-renderings', ...`${entry.name}.txt`.split('/'));
-      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      const cutShort = text.length >= LIMIT;
-      fs.writeFileSync(target, `TEXT RENDERING of filesystem/${entry.name}, written by the harness for you. It holds the text of the file; layout, pictures and charts are not in it.\n\n${text}${cutShort ? '\n[the rendering stops here: the file goes on]\n' : ''}`, { mode: 0o600 });
-      renderings.push({ file: entry.name, rendering: `text-renderings/${entry.name}.txt` });
-      if (cutShort) partial.push(entry.name);
+      try {
+        const copy = path.join(folder, 'filesystem', ...entry.name.split('/'));
+        const ext = path.extname(entry.name).toLowerCase();
+        if (NATIVE_EXTENSIONS.has(ext)) { native.push(entry.name); continue; }
+        if (!RENDERED_EXTENSIONS.has(ext)) {
+          if (await readerKindOfFile(copy, entry.name) === 'unreadable') unreadable.push(entry.name);
+          continue;
+        }
+        const detail = await extractDetailed(copy, { maxChars: LIMIT });
+        if (typeof detail.text !== 'string' || !detail.text.trim()) { unreadable.push(entry.name); continue; }
+        const rendering = this._renderingPath(entry.name, index, used);
+        const target = path.join(folder, ...rendering.split('/'));
+        fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+        const cutShort = detail.partial || detail.text.length >= LIMIT;
+        fs.writeFileSync(target, `TEXT RENDERING of filesystem/${entry.name}, written by the harness for you. It holds the text of the file; layout, pictures and charts are not in it.\n\n${detail.text}${cutShort ? '\n[the rendering is not the whole file: some of its text could not be turned into text here]\n' : ''}`, { mode: 0o600 });
+        renderings.push({ file: entry.name, rendering });
+        if (cutShort) partial.push(entry.name);
+      } catch (error) {
+        if (error instanceof StopSignal || error instanceof Stopped) throw error;
+        unreadable.push(entry.name);
+      }
     }
     /* the folder holds the packet copy, the prompt, the renderings and the run's scratch: nothing of the designer's */
     const extra = fs.readdirSync(folder).filter(name => !['filesystem', 'prompt.txt', 'text-renderings', '.tmp'].includes(name));
     if (extra.length) throw new SafetyError('The blind reviewer\'s folder holds something that is not the packet, the prompt or a rendering', `The blind reviewer's folder holds ${extra.slice(0, 5).join(', ')}`);
-    return { renderings, unreadable, partial };
+    return { renderings, unreadable, partial, native };
+  },
+
+  /* What the reader's own transcript shows it did: whether any of its Read, Glob or Grep calls touched the packet or a rendering, and which files it opened with
+     Read (names of the packet; renderings by their path under the folder). The harness takes nothing from what the reader says about its work. */
+  _readEvidence(events, folder) {
+    const opened = new Set();
+    let looked = false;
+    if (!Array.isArray(events)) return { looked, opened };
+    /* the runtime reports the paths it works with, which are the real paths of the folder (a temporary folder behind a link, as on macOS, is not the path the folder was given by) */
+    const roots = [folder];
+    try { const real = fs.realpathSync(folder); if (real !== folder) roots.push(real); } catch { /* the folder is gone: the paths as given */ }
+    const relOf = target => {
+      for (const root of roots) {
+        const rel = path.relative(root, path.resolve(root, target || '.')).split(path.sep).join('/');
+        if (rel !== '..' && !rel.startsWith('../') && !path.isAbsolute(rel)) return rel;
+      }
+      return null;
+    };
+    for (const call of extractToolCalls(events)) {
+      if (!['Read', 'Glob', 'Grep'].includes(call.name)) continue;
+      const input = call.input && typeof call.input === 'object' ? call.input : {};
+      const target = typeof input.file_path === 'string' && input.file_path ? input.file_path : typeof input.path === 'string' ? input.path : '';
+      const rel = relOf(target);
+      if (rel === null) continue;
+      const inPacket = rel === 'filesystem' || rel.startsWith('filesystem/');
+      const inRenderings = rel === 'text-renderings' || rel.startsWith('text-renderings/');
+      if (call.name === 'Read') {
+        if (inPacket) { opened.add(rel.slice('filesystem/'.length)); looked = true; } else if (inRenderings) { opened.add(rel); looked = true; }
+      } else if (!target || rel === '' || inPacket || inRenderings) looked = true;
+    }
+    return { looked, opened };
   },
 
   /* Stage 1: a reader with only a copy of the pilot packet and the revised prompt, run with the Read tool and audited like a pilot. A run
      that broke the audit is discarded. Resolves { value, packetSha256 } or throws AttemptRejected when two runs gave nothing usable. The reader gets a text
      rendering of every file its Read tool refuses (see _prepareBlindFolder); a file nobody can read is named to it and recorded in stage1.unreadable, and the
-     blind result is then 'partial', never a silent 'no objection' for that file. */
+     blind result is then 'partial', never a silent 'no objection' for that file. It is 'partial' too when the reader's own transcript shows that it opened no
+     file at all, or did not open a PDF or a picture (stage1.read, stage1.unopened): its answer says nothing about what it did not read. A fault of the harness in
+     a try (a file it cannot write, say) is that try lost, once; a second one ends the attempt as incomplete, not as a finding about the design. */
   async _blindStage(p, ctl, attempt, ctx, round) {
     const design = ctx.holder.design;
     const n = attempt.n;
-    const record = attempt.fairness.stage1 || (attempt.fairness.stage1 = { state: 'running', tries: 0, runs: 0, packetSha256: null, rendered: [], unreadable: [] });
+    const record = attempt.fairness.stage1 || (attempt.fairness.stage1 = { state: 'running', tries: 0, runs: 0, packetSha256: null, rendered: [], unreadable: [], unopened: [], read: null });
     record.runs++;
+    let faults = 0;
     for (let tryNo = 1; tryNo <= 2; tryNo++) {
       this._checkStop(ctl);
       this._reserve(p, 'the blind review', P.CAPS.blindReviewUsd);
       record.tries++;
       const folder = this._reviewFolder(p, `review-${n}-${round}-${tryNo}`);
       let outcome = null;
-      let prepared = { renderings: [], unreadable: [], partial: [] };
+      let prepared = { renderings: [], unreadable: [], partial: [], native: [] };
       try {
         const manifest = await buildWork({ originalDir: this._origDir(p.id), outDir: ctx.outDir, workDir: path.join(folder, 'filesystem'), packet: ctl.packet, design, shouldStop: () => ctl.stop });
         fs.writeFileSync(path.join(folder, 'prompt.txt'), design.prompt + '\n', { mode: 0o600 });
         prepared = await this._prepareBlindFolder(folder, manifest, () => ctl.stop);
         const run = await runReviewer({
-          rt: this.rt, folder, prompt: R.blindPrompt({ prompt: design.prompt, renderings: prepared.renderings, unreadable: [...prepared.unreadable, ...prepared.partial.map(name => `${name} (only the start of its rendering)`)] }), model: p.config.model, effort: P.MIN_GRADER_EFFORT, capUsd: P.CAPS.blindReviewUsd,
+          rt: this.rt, folder, prompt: R.blindPrompt({ prompt: design.prompt, renderings: prepared.renderings, unreadable: [...prepared.unreadable, ...prepared.partial.map(name => `${name} (only part of it could be turned into text)`)] }), model: p.config.model, effort: P.MIN_GRADER_EFFORT, capUsd: P.CAPS.blindReviewUsd,
           transcriptPath: path.join(ctx.attemptDir, `review-${round}-${tryNo}.transcript.jsonl`), projectRoot: this.root, onRunner: this._track(ctl), isolated: { forbiddenText: this._forbiddenText(ctl) },
         });
         this._spend(p, 'design', 'blind-review', `attempt ${n}`, run.costUsd, P.CAPS.blindReviewUsd, !run.summary.spawnError);
@@ -292,24 +364,49 @@ module.exports = {
           record.discarded = (record.discarded || 0) + 1;
         } else if (run.summary.state === 'completed') {
           const parsed = R.parseBlind(run.answer);
-          if (parsed.ok) outcome = { value: { ...parsed.value, unreadable: [...prepared.unreadable, ...prepared.partial] }, packetSha256: packetSha(manifest) };
+          if (parsed.ok) {
+            const evidence = this._readEvidence(run.summary.events, folder);
+            const unopened = prepared.native.filter(name => !evidence.opened.has(name));
+            const governing = [...manifest.map(file => file.name), 'prompt.txt'].some(name => R.sameFile(parsed.value.governingDocument, name));
+            outcome = {
+              value: { ...parsed.value, unreadable: [...prepared.unreadable, ...prepared.partial, ...unopened], ...(evidence.looked ? {} : { notRead: true }) },
+              packetSha256: packetSha(manifest), looked: evidence.looked, unopened, governing,
+            };
+          }
         }
+      } catch (error) {
+        if (isExpected(error)) throw error;
+        faults++;
+        this._logFault(p, error);
       } finally {
         try { fs.rmSync(folder, { recursive: true, force: true }); } catch { /* a leftover folder is private */ }
       }
       if (outcome) {
         record.rendered = prepared.renderings.map(item => item.file);
-        record.unreadable = outcome.value.unreadable;
-        record.state = outcome.value.unreadable.length ? 'partial' : 'ok';
+        record.unreadable = [...prepared.unreadable, ...prepared.partial];
+        record.unopened = outcome.unopened;
+        record.read = outcome.looked;
+        record.governingFound = outcome.governing;
+        record.state = record.unreadable.length || record.unopened.length || !outcome.looked || !outcome.governing ? 'partial' : 'ok';
         record.packetSha256 = outcome.packetSha256;
         ctl.blindNotices = outcome.value.statusNotices;
         this._save(p);
         return outcome;
       }
     }
+    if (faults) {
+      record.state = 'incomplete';
+      this._save(p);
+      throw new AttemptRejected('check', ['A check of the design could not be carried out (the blind review)'], ['The blind review of your packet could not be carried out because of a fault in the harness, not because of the packet. Nothing in your design was judged.'], { incomplete: true });
+    }
     record.state = 'unusable';
     this._save(p);
     throw new AttemptRejected('review', ['The blind review gave no usable answer'], ['The blind review of your packet gave no usable answer twice (the reader was discarded, or its answer could not be read). Make the packet and the prompt plain enough for a reader to work from.']);
+  },
+
+  /* A fault of the harness, kept for the owner in the private error.log of the pipeline (never in the state, which the pilots may see). */
+  _logFault(p, error) {
+    try { fs.appendFileSync(path.join(this.dir, p.id, 'error.log'), `${this.now()} ${String(error && error.stack ? error.stack : error)}\n`); } catch { /* nothing more to do */ }
   },
 
   /* The application check of one clause (stage 2b): governs, in force, not superseded, excludes. The reviewer is shown the packet with the clause's file
@@ -319,7 +416,7 @@ module.exports = {
     const docs = promptText ? [...documents, { name: 'prompt.txt', text: promptText }] : documents;
     const hits = R.supersessionHits(docs, clause, { notices: ctl.blindNotices || [] });
     /* the clause's file, then the brief's authority and evidence files, then every file that holds a passage of supersession wording: the reviewer sees them whole while the budget lasts */
-    const hitFiles = [...new Set(hits.filter(hit => hit.kind === 'passage' && hit.document).map(hit => hit.document))];
+    const hitFiles = [...new Set(hits.filter(hit => (hit.kind === 'passage' || hit.kind === 'summary' || hit.kind === 'notice') && hit.document).map(hit => hit.document))];
     const view = R.packetView(docs, R.PACKET_CAPS.application, [...R.priorityFiles(brief, [clause.file]), ...hitFiles]);
     const corpus = buildCorpus(view.shown);
     const prompt = R.applicationPrompt({ clause, alternative, decision, decisionDate: brief && brief.decision ? brief.decision.decisionDate : '', hits, documents: docs, view });
@@ -331,9 +428,11 @@ module.exports = {
       if (out.ok) parsed = out.value;
     }
     const unscanned = hits.filter(hit => hit.kind === 'unreadable' || hit.unreadable === true).map(hit => hit.document);
-    if (!parsed) return { pass: false, failed: ['unusable'], checks: { governs: false, inForce: false, notSuperseded: false, excludes: false }, dates: null, hits: hits.length, unscanned, cut: view.cut };
+    /* what the harness put to the reviewer, without the words: the id, the kind and the file of each entry */
+    const hitList = hits.map(hit => ({ id: hit.id, kind: hit.kind, document: hit.document }));
+    if (!parsed) return { pass: false, failed: ['unusable'], checks: { governs: false, inForce: false, notSuperseded: false, excludes: false }, dates: null, hits: hits.length, hitList, unscanned, cut: view.cut };
     const checked = R.checkApplication(parsed, { corpus, hits, clause, brief });
-    return { ...checked, hits: hits.length, cut: view.cut };
+    return { ...checked, hits: hits.length, hitList, cut: view.cut };
   },
 
   /* What a check of a clause depends on, as one hash: the files the pilots get (their names and texts), the prompt, the decision and the roles of the files in
@@ -443,7 +542,7 @@ module.exports = {
         notes.push(`the clause quoted against the alternative was not shown to apply (${application.failed.join(', ')})`);
       }
     }
-    const settledPermitted = disposition === 'permitted' && parsed.guidelineCovers === true && Boolean(ctx.settledAlternative(parsed));
+    const settledPermitted = disposition === 'permitted' && parsed.guidelineCovers === true && Boolean(ctx.settledAlternative(parsed, blind.value));
     if (['excluded_by_clause', 'no_alternative', 'equivalent_result'].includes(disposition) || settledPermitted) {
       /* The brief's own claims must apply too, not only exist: the rule of every trap and the clause that rules its strongest alternative out. */
       briefApplication = await this._briefApplications(p, ctl, attempt, ctx, round, done);
@@ -476,6 +575,7 @@ module.exports = {
     const problem = await ctx.tryRead();
     if (problem) throw new AttemptRejected('design', [problem.message], [problem.detail]);
     this._keepOut(ctx.outDir, path.join(ctx.attemptDir, 'out'));
+    this._setPreview(p, attempt, ctx.holder.design);
     return change;
   },
 
@@ -486,12 +586,11 @@ module.exports = {
     const detail = { evaluations: [] };
     ctx.appCache = new Map(); /* the passes of the application checks of the brief's clauses, by everything a check depends on (see _appKey) */
     /* The declared alternative that the reviewer's alternative is, when there is one and the guideline grades its answer at ALTERNATIVE_MIN or more. The
-       harness ties the two by the words of the action (the reviewer's "alternative" and the declared "answer"): a graded answer for some other alternative
-       settles nothing. */
-    ctx.declaredAlternative = (design, parsed) => design.alternatives.find(alternative => R.sameAction(parsed.alternative, alternative.answer)) || null;
-    ctx.settledAlternative = parsed => {
+       reviewer names the declared alternative by its id, and the harness holds the two to each other (the same figures, the same kind of first verb; see
+       R.tiedAlternative): a graded answer for some other alternative settles nothing. */
+    ctx.settledAlternative = (parsed, blind) => {
       const set = attempt.answerSet;
-      const tied = ctx.declaredAlternative(ctx.holder.design, parsed);
+      const tied = R.tiedAlternative(ctx.holder.design.alternatives, parsed, blind);
       const entry = tied && set ? set.answers.find(item => item.name === tied.name) : null;
       return entry && entry.passed ? tied : null;
     };
@@ -506,7 +605,7 @@ module.exports = {
       this._note(p, `Reviewing the design of attempt ${attempt.n} (review ${evaluation} of at most ${MAX_REVIEW_EVALUATIONS})`);
       if (rerunBlind) { blind = await this._blindStage(p, ctl, attempt, ctx, evaluation); rerunBlind = false; }
       const reveal = await this._revealStage(p, ctl, attempt, ctx, blind, evaluation);
-      const application = reveal.application ? { pass: reveal.application.pass, failed: reveal.application.failed, checks: reveal.application.checks, dates: reveal.application.dates, hits: reveal.application.hits, unscanned: reveal.application.unscanned } : null;
+      const application = reveal.application ? { pass: reveal.application.pass, failed: reveal.application.failed, checks: reveal.application.checks, dates: reveal.application.dates, hits: reveal.application.hits, hitList: reveal.application.hitList, unscanned: reveal.application.unscanned } : null;
       const briefApplication = reveal.briefApplication ? { pass: reveal.briefApplication.pass, count: reveal.briefApplication.count, failures: reveal.briefApplication.failures, unscanned: reveal.briefApplication.unscanned } : null;
       fair.stage2 = { disposition: reveal.disposition, objectionClass: reveal.objectionClass, evaluations: evaluation, application, briefApplication, cut: reveal.cut };
       detail.evaluations.push({ blind: blind.value, reveal: reveal.parsed, disposition: reveal.disposition, notes: reveal.notes, application: reveal.application, briefApplication: reveal.briefApplication });
@@ -520,17 +619,20 @@ module.exports = {
         /* The packet allows the alternative. That is not a rejection: it is settled once the guideline accepts it and the declared alternative that is this one has
            a fixed answer that the guideline grades at ALTERNATIVE_MIN or more. Otherwise one repair adds the line to the acceptable variation and writes the
            answer, and the harness checks that what was written is that alternative; then the review runs once more. */
-        if (reveal.parsed.guidelineCovers === true && ctx.settledAlternative(reveal.parsed)) break;
+        if (reveal.parsed.guidelineCovers === true && ctx.settledAlternative(reveal.parsed, blind.value)) break;
         if (last) reject('The reviews found an answer that the packet allows, and the guideline does not yet accept it with a graded answer', finding);
         const before = new Map(ctx.holder.design.alternatives.map(alternative => [alternative.name, alternative.sha256]));
         const change = await this._reviewRepair(p, ctl, attempt, ctx, 'alternative', finding);
         const now = ctx.holder.design;
         if (!change.any) reject('The repair changed nothing, so the permitted alternative was not added', `${finding}\nYour repair changed no file. Add the alternative to the acceptable variation of out/guideline.md, write its answer under out/answers/ and list it in out/brief.json.`);
         if (!now.alternatives.length) reject('The repair did not write an answer for the permitted alternative', `${finding}\nThe design still has no permitted alternative with an answer file under out/answers/. Write one (a strong answer that takes the alternative with correct reasoning) and list it in permittedAlternatives of out/brief.json.`);
-        const produced = ctx.declaredAlternative(now, reveal.parsed);
+        /* what the repair wrote has to be the alternative the review reported: among the answers that are new or changed (else among all of them), the one whose action
+           and figures are the reported alternative's */
+        const reported = reveal.parsed.alternative || (blind.value.alternative && blind.value.alternative.answer) || blind.value.answer;
+        const changed = now.alternatives.filter(alternative => before.get(alternative.name) !== alternative.sha256);
+        const produced = (changed.length ? changed : now.alternatives).find(alternative => R.sameAlternative(reported, alternative.answer)) || null;
         if (!produced) reject('The repair wrote an answer for another alternative than the one the review reported', `${finding}\nThe alternatives your brief lists now are: ${now.alternatives.map(alternative => `"${oneLine(alternative.answer, 160)}"`).join('; ')}. None of them is the alternative the review reported. List the alternative the review found in permittedAlternatives (its answer is what it says) and write the answer that takes it.`);
         if (before.get(produced.name) === produced.sha256 && !change.names.includes('guideline.md')) reject('The repair did not write the answer for the permitted alternative', `${finding}\nYour repair left the answer of this alternative as it was, and did not change out/guideline.md. Write the answer that takes the alternative, and add the alternative to the acceptable variation of the guideline.`);
-        if (R.copiesText(produced.text, now.goldenAnswer)) reject('The answer written for the permitted alternative is a copy of the golden answer', `${finding}\nThe answer ${produced.file} says what the golden answer says. Write an answer that takes the alternative action with correct reasoning.`);
         if (reveal.parsed.guidelineCovers !== true && !change.names.includes('guideline.md')) reject('The repair did not add the permitted alternative to the guideline', `${finding}\nYour repair did not change out/guideline.md. Add the alternative to its "Acceptable variation" section.`);
         if (change.packet) rerunBlind = true;
         await this._answerSetTest(p, ctl, attempt, now, { why: change.packet ? 'after the packet changed' : 'after the permitted alternative was added' });
@@ -730,17 +832,26 @@ module.exports = {
     attempt.editedFiles = first.editedFiles.length;
     attempt.promptSha256 = sha256Hex(first.prompt);
     attempt.taskType = { workflow: first.brief.taskType.workflow, why: first.brief.taskType.why, referenceEntries: first.brief.taskType.referenceEntries };
-    this._save(p);
+    this._setPreview(p, attempt, first);
 
     const ctx = { holder, outDir, attemptDir, designer, total, tryRead };
     try {
       this._note(p, `Checking the design of attempt ${n}: the answer set, the blind review and the reveal`);
       await this._fairnessNew(p, ctl, attempt, ctx);
       if (p.config.fairnessSet === true) await this._diagnosticSuite(p, ctl, attempt, ctx);
-    } catch (error) {
+    } catch (caught) {
+      let error = caught;
+      /* A fault of the harness in a check (not a stop, a cap, a refusal or a finding about the design) must not end the run as "an internal error" after money was spent:
+         the attempt is not judged. It is rejected as incomplete, with a plain reason, and the fault goes to the private error.log. */
+      if (!isExpected(error)) {
+        this._logFault(p, error);
+        error = new AttemptRejected('check', ['A check of the design could not be carried out'], ['A check of your design could not be carried out because of a fault in the harness, not because of the design. Nothing in it was judged.'], { incomplete: true });
+      }
       if (error instanceof AttemptRejected) {
-        attempt.validation = 'failed';
-        if (attempt.fairness.status === 'pending') attempt.fairness.status = error.kind === 'answer-set' && !attempt.fairness.stage1 ? 'not-reached' : 'rejected';
+        attempt.validation = error.incomplete ? 'incomplete' : 'failed';
+        if (attempt.fairness.status === 'pending') attempt.fairness.status = error.incomplete ? 'incomplete' : error.kind === 'answer-set' && !attempt.fairness.stage1 ? 'not-reached' : 'rejected';
+        if (error.incomplete && attempt.fairness.stage1 && attempt.fairness.stage1.state === 'running') attempt.fairness.stage1.state = 'incomplete';
+        p.preview = null;
         this._keepOut(outDir, path.join(attemptDir, 'out'));
         this._save(p);
       }
@@ -769,6 +880,7 @@ module.exports = {
     const bytes = manifest.reduce((sum, file) => sum + file.bytes, 0);
     attempt.validation = 'complete';
     this._freezeRecord(p, ctl, attempt, manifest, 'before the pilots');
+    p.preview = null;
     p.design = {
       attempt: n,
       traps: design.traps,
@@ -787,16 +899,41 @@ module.exports = {
       unscanned: design.unscanned,
       brief: design.brief,
       taskType: attempt.taskType,
-      alternatives: design.alternatives.map(item => ({ name: item.name, file: item.file, answer: item.answer })),
+      alternatives: design.alternatives.map(item => ({ id: item.id, name: item.name, file: item.file, answer: item.answer })),
     };
     this._save(p);
   },
 
-  /* Notes for the owner about what the blind review could not read (a file nobody could open, or only the start of a rendering). */
+  /* What the owner may look at while the checks of a design run (before the design is accepted): the brief, the task type, the files the designer added or edited,
+     its traps and alternatives. Kept in p.preview, shown in the view as the design with checking: true until the design is accepted or rejected. */
+  _setPreview(p, attempt, design) {
+    p.preview = {
+      attempt: attempt.n,
+      traps: design.traps,
+      newFiles: design.newFiles.map(file => ({ name: file.name, bytes: file.bytes })),
+      editedFiles: design.editedFiles.map(file => ({ name: file.name, reason: file.reason, bytes: file.bytes, beforeBytes: file.beforeBytes, diff: file.diff })),
+      notes: design.notes.slice(),
+      repaired: attempt.repaired === true,
+      taskType: attempt.taskType || null,
+      brief: design.brief,
+      alternatives: design.alternatives.map(item => ({ id: item.id, name: item.name, file: item.file, answer: item.answer })),
+      unscanned: Array.isArray(design.unscanned) ? design.unscanned : [],
+    };
+    this._save(p);
+  },
+
+  /* Notes for the owner about what the blind review could not read (a file nobody could open, or only part of a rendering), the PDFs and pictures its reader did not open,
+     and a reader that opened no file at all. */
   _blindNotes(attempt) {
     const stage1 = attempt.fairness && attempt.fairness.stage1;
-    if (!stage1 || !Array.isArray(stage1.unreadable) || !stage1.unreadable.length) return [];
-    return [`The blind review could not read ${stage1.unreadable.length === 1 ? 'this file' : 'these files'} of the packet: ${stage1.unreadable.slice(0, 10).map(name => oneLine(name, 120)).join(', ')}. Its answer says nothing about ${stage1.unreadable.length === 1 ? 'it' : 'them'}; look at ${stage1.unreadable.length === 1 ? 'it' : 'them'} yourself.`];
+    if (!stage1) return [];
+    const notes = [];
+    const list = names => names.slice(0, 10).map(name => oneLine(name, 120)).join(', ');
+    if (Array.isArray(stage1.unreadable) && stage1.unreadable.length) notes.push(`The blind review could not read ${stage1.unreadable.length === 1 ? 'this file' : 'these files'} of the packet in full: ${list(stage1.unreadable)}. Its answer says nothing about ${stage1.unreadable.length === 1 ? 'it' : 'them'}; look at ${stage1.unreadable.length === 1 ? 'it' : 'them'} yourself.`);
+    if (Array.isArray(stage1.unopened) && stage1.unopened.length) notes.push(`The blind reviewer did not open ${stage1.unopened.length === 1 ? 'this PDF or picture' : 'these PDFs or pictures'}: ${list(stage1.unopened)}. Only a reader that opens them can find a notice of a withdrawn document in them; look at ${stage1.unopened.length === 1 ? 'it' : 'them'} yourself.`);
+    if (stage1.read === false) notes.push('The blind reviewer opened no file of the packet (its own record shows no Read, Glob or Grep on the packet), so its answer rests on nothing it read.');
+    if (stage1.governingFound === false) notes.push('The document the blind reviewer named as the one that governs is not a file of the packet.');
+    return notes;
   },
 
   /* -------------------------------------------------------------- the pilots (D6) */
@@ -825,7 +962,11 @@ module.exports = {
     const attempt = p.attempts[p.attempts.length - 1];
     const texts = this._designTexts(p);
     const answer = ctl.answers.get(ref) || '';
+    /* the failed tool call that the harness found in the pilot's own record, if any: the adjudicator is told (it cannot know it from the pilot's final answer) and the claim of
+       tool_failure is checked against the same call */
+    const evidence = this._toolFailureEvidence(ctl, ref);
     const hint = this._hint(p, ctl, ref);
+    hint.failedToolCalls = evidence ? [{ file: evidence.file, error: evidence.error }] : [];
     /* The reviewer is shown the packet (and the prompt) with the authority files first; its quotes are held to what it was shown. */
     const docs = [...ctl.documents, { name: 'prompt.txt', text: texts.prompt }];
     const view = R.packetView(docs, R.PACKET_CAPS.adjudication, R.priorityFiles(ctl.brief));
@@ -859,9 +1000,7 @@ module.exports = {
     }
     /* tool_failure takes a pilot out of the stage and buys a replacement, so the adjudicator's word is not enough: the pilot's own record has to show a failed tool
        call on a file of the packet. Otherwise the claim is an unsupported one. */
-    let evidence = null;
     if (klass === 'tool_failure') {
-      evidence = this._toolFailureEvidence(ctl, ref);
       if (!evidence) { klass = 'unsupported'; counts = false; notes.push('the adjudication said the pilot could not read or open something, but the pilot\'s own record shows no failed tool call on a file of the packet'); }
     }
     record.adjudication = { class: klass, claimed: parsed ? parsed.class : null, counts, note: notes.length ? oneLine(notes.join('; '), 300) : '', application: application ? { pass: application.pass, failed: application.failed } : null };
@@ -875,9 +1014,11 @@ module.exports = {
     this._save(p);
   },
 
-  /* The failed tool call that makes a pilot's "could not read or open something" real: the pilot's own transcript (the agent service's record of its run) is read
-     for a tool result that is an error and that concerns a file of the pilot packet (the file's name stands in the call or in the error). Resolves
-     { file, error } or null. Nothing the adjudicator said is used. */
+  /* The failed tool call that makes a pilot's "could not read or open something" real: the pilot's own transcript (the agent service's record of its run) is read for a
+     tool result that is an error (is_error) of a call on a file of the pilot packet: a Read of that file's path, or a Bash command that names that path and whose error
+     says the file could not be opened or read. The file is found by its path, at a path boundary (a.md is not hosts.data.md), never by a name that merely appears in
+     the text; a command that fails for another reason (a grep with no match) is no failure of the file. Resolves { file, error } or null. Nothing the adjudicator said
+     is used. */
   _toolFailureEvidence(ctl, ref) {
     const [roundId, run] = String(ref).split('#');
     if (!roundId || !/^\d+$/.test(run || '') || !/^[A-Za-z0-9._-]+$/.test(roundId)) return null;
@@ -889,9 +1030,29 @@ module.exports = {
       text = fs.readFileSync(file, 'utf8');
     } catch { return null; }
     const names = (ctl.manifest || []).map(entry => entry.name);
-    const bases = names.map(name => name.split('/').pop().toLowerCase());
+    const NAME = /[A-Za-z0-9_.~+@%-]/;
+    /* the path rel (filesystem/<name>) stands in the text, with nothing that belongs to a name on either side of it */
+    const mentions = (value, rel) => {
+      for (let from = 0; ;) {
+        const at = value.indexOf(rel, from);
+        if (at < 0) return false;
+        if ((at === 0 || !NAME.test(value[at - 1])) && (at + rel.length >= value.length || !NAME.test(value[at + rel.length]))) return true;
+        from = at + 1;
+      }
+    };
+    const fileOf = (call, body) => {
+      const input = call.input && typeof call.input === 'object' ? call.input : {};
+      if (call.name === 'Read') {
+        const target = String(input.file_path || '').replace(/\\/g, '/');
+        return names.find(name => target === name || target === `filesystem/${name}` || target.endsWith(`/filesystem/${name}`)) || null;
+      }
+      if (call.name === 'Bash' && /no such file|permission denied|cannot (?:open|read|access)|can't (?:open|read)|unable to (?:open|read)|is a directory|not a valid|corrupt|encrypted|password/i.test(body)) {
+        const command = String(input.command || '');
+        return names.find(name => mentions(command, `filesystem/${name}`)) || null;
+      }
+      return null;
+    };
     const calls = new Map();
-    const ERROR_RE = /^\s*(?:<tool_use_error>|error:|this tool cannot read|file does not exist|no such file|permission denied|cannot read|unable to read|failed to read|file content .{0,60}exceeds)/i;
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       let event;
@@ -899,13 +1060,12 @@ module.exports = {
       const content = event && event.message && Array.isArray(event.message.content) ? event.message.content : [];
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
-        if (block.type === 'tool_use') { calls.set(block.id, JSON.stringify(block.input || {}).toLowerCase()); continue; }
-        if (block.type !== 'tool_result') continue;
+        if (block.type === 'tool_use') { calls.set(block.id, { name: block.name, input: block.input }); continue; }
+        if (block.type !== 'tool_result' || block.is_error !== true) continue;
         const body = typeof block.content === 'string' ? block.content : JSON.stringify(block.content === undefined ? '' : block.content);
-        if (!(block.is_error === true || ERROR_RE.test(body))) continue;
-        const touched = `${calls.get(block.tool_use_id) || ''} ${body.toLowerCase()}`;
-        const at = bases.findIndex(base => base && touched.includes(base));
-        if (at >= 0) return { file: names[at], error: oneLine(body, 160) };
+        const call = calls.get(block.tool_use_id);
+        const named = call ? fileOf(call, body) : null;
+        if (named) return { file: named, error: oneLine(body, 160) };
       }
     }
     return null;

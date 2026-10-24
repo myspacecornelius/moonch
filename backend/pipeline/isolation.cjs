@@ -22,9 +22,34 @@ const FORBIDDEN_OPTIONS = ['--resume', '-r', '--continue', '-c', '--fork-session
 /* Options every isolated run carries. */
 const REQUIRED_OPTIONS = ['--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence'];
 
+/* Does a text name this folder? The folder has to stand in the text as a path: at a boundary on both sides (the text starts there or the character before is not
+   one a path name is made of, and the folder is followed by the end, a separator or a character no name is made of), so that <root>/private-notes or
+   <root>/private.bak is not <root>/private, and /x<root>/private is not <root>/private either. A text that does not hold the folder as a path, whatever else it
+   holds, is not a text that names it. */
+const NAME_CHAR = /[A-Za-z0-9_.~+@%-]/;
+function namesFolder(text, folder) {
+  const value = String(text);
+  const target = String(folder).replace(/[\\/]+$/, '');
+  if (target.length < 4) return false;
+  for (let from = 0; ;) {
+    const at = value.indexOf(target, from);
+    if (at < 0) return false;
+    const before = at === 0 ? '' : value[at - 1];
+    const after = value[at + target.length] || '';
+    if ((!before || !(NAME_CHAR.test(before) || before === '/' || before === '\\')) && (!after || after === '/' || after === '\\' || !NAME_CHAR.test(after))) return true;
+    from = at + 1;
+  }
+}
+
+/* The names of the environment variables whose value names one of the folders (see namesFolder). */
+function environmentProblems(env, forbiddenText = []) {
+  const named = forbiddenText.filter(item => typeof item === 'string' && item.length >= 4);
+  return Object.entries(isObject(env) ? env : {}).filter(([, value]) => typeof value === 'string' && named.some(item => namesFolder(value, item))).map(([name]) => name);
+}
+
 /* args: the argument list (the prompt is not in it when it goes on stdin). env: the environment the process gets. cwd: its working folder.
-   tmpRoot / projectRoot / homeDir: absolute paths. forbiddenText: strings that must not occur in any environment value (a reference folder, a
-   private folder). tools: the tools this run may have (an array; [] for a run with none); when it is given, the run's --tools and --allowedTools must be exactly
+   tmpRoot / projectRoot / homeDir: absolute paths. forbiddenText: folders that no environment value or argument may name as a path (a reference folder, a
+   private folder; see namesFolder: <root>/private-notes is not <root>/private). tools: the tools this run may have (an array; [] for a run with none); when it is given, the run's --tools and --allowedTools must be exactly
    that list. Returns [text] of what does not hold; [] when everything does. */
 function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = null, forbiddenText = [], tools = undefined }) {
   const problems = [];
@@ -76,12 +101,9 @@ function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = nul
     }
   } catch { /* a folder that does not exist yet has no real path to compare */ }
   const named = forbiddenText.filter(item => typeof item === 'string' && item.length >= 4);
-  for (const item of list) if (named.some(text => item.includes(text))) problems.push('an argument of the run names a private folder');
-  for (const [name, value] of Object.entries(variables)) {
-    if (typeof value !== 'string') continue;
-    if (named.some(item => value.includes(item))) problems.push(`the environment variable ${name} names a private folder`);
-  }
+  for (const item of list) if (named.some(text => namesFolder(item, text))) problems.push('an argument of the run names a private folder');
+  for (const name of environmentProblems(variables, named)) problems.push(`the environment variable ${name} names a private folder`);
   return problems;
 }
 
-module.exports = { isolationProblems, FORBIDDEN_OPTIONS, REQUIRED_OPTIONS };
+module.exports = { isolationProblems, environmentProblems, namesFolder, FORBIDDEN_OPTIONS, REQUIRED_OPTIONS };

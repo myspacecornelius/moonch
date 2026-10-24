@@ -16,11 +16,11 @@ const C = require('../agents/constants.cjs');
 const { parseFigure } = require('../agents/classify.cjs');
 const { DESIGN, INTAKE, SCREEN_BAR, GOLDEN_MIN, ALTERNATIVE_MIN } = require('./constants.cjs');
 const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS, Stopped } = require('./util.cjs');
-const { extractText, scanFile, ZIP_EXTENSIONS } = require('./extract.cjs');
+const { extractText, scanFile, decodeBuffer, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { lineDiff } = require('./diff.cjs');
 const { withheldReason } = require('./classify.cjs');
 const { containsLeak, leakWindows, WindowSet, EMPTY_SHA } = require('./safety.cjs');
-const { parseBrief, briefEvaluatorText, verifyBriefSources } = require('./brief.cjs');
+const { parseBrief, briefEvaluatorText, verifyBriefSources, alternativeProblem } = require('./brief.cjs');
 const { extractText: extractFileText, readerKind } = require('./extract.cjs');
 const { sha256Hex } = require('./util.cjs');
 
@@ -112,7 +112,7 @@ const NEW_TASK = [
   `4. Write out/prompt.txt: the business prompt the pilots receive, at most ${DESIGN.promptChars} characters. It must not mention traps, mechanisms or the guideline.`,
   `5. Write out/guideline.md: the grader guideline, at most ${DESIGN.guidelineChars} characters. Say what a correct answer states, name the correct values, and say which wrong readings fail. If only the reasoning is required, accept every permitted action in an "Acceptable variation" section; if one action is required, the packet must hold the decision rule that makes every other action wrong.`,
   '6. Write out/golden-answer.md: the golden answer that matches your design.',
-  '7. For each permitted alternative (a different action or method that the packet allows), write out/answers/alt-N.md (N from 1): a strong answer that takes that action with correct reasoning. Keep out/answers/ out of out/new and out/edited.',
+  '7. For each permitted alternative (a different action or method that the packet allows), write out/answers/alt-N.md (N from 1): a strong answer that takes that action with correct reasoning, in its own sentences (it may repeat the facts and the calculation it shares with the golden answer, but it must state its own action and figures). The reviewers name the alternative by the name of its file without the folder and the extension (alt-1 for answers/alt-1.md). Keep out/answers/ out of out/new and out/edited.',
   '8. Write out/traps.json, valid JSON in exactly this shape:',
   '{"traps": [{"id": "t1", "title": "short title", "mechanism": "how the trap works", "files": ["file names the trap uses"], "decoy": "the tempting wrong source or reading", "correctValue": "...", "wrongValue": "..."}],',
   ' "gold": {"decision": "phrases a correct answer states, separated by semicolons", "figures": [{"label": "...", "value": 1250, "tolerance": 1}]},',
@@ -131,7 +131,7 @@ const NEW_TASK = [
   '   "whyTempting": {"kind": "money" or "time" or "effort" or "accountability", "source": "the ordinary record that creates the impression"},',
   '   "consequence": {"source": "the record that makes the wrong accommodation really cost something"},',
   '   "strongestAlternative": {"answer": "...", "whyRejected": "the exact words of the clause that rules it out"}}],',
-  ' "permittedAlternatives": [{"answer": "...", "support": "the clause or record that permits it", "file": "answers/alt-1.md"}],',
+  ' "permittedAlternatives": [{"answer": "the action and the figures of the alternative, in the words of the files", "support": "the clause or record that permits it", "file": "answers/alt-1.md"}],',
   ' "permittedAlternativesReason": "why there is none, when the list is empty",',
   ' "controls": [{"scenario": "baseline" or "primary_wrong" or "secondary_wrong" or "combined_wrong", "trap": "id, for secondary_wrong", "action": "...", "figures": [], "changesDecision": true}]}',
   '   controls is needed when there is more than one trap: the baseline, each single wrong path and the combination, each different from the baseline, so that one mechanism cannot mask another.',
@@ -174,7 +174,7 @@ function designerPromptNew({ attempt, attempts, redesign, hasReferences = false,
 function reviewRepairPrompt({ attempt, attempts, what, finding }) {
   const lines = [...NEW_RULES, '- out/              what your last run left. Change it as little as you can.'];
   lines.push('', 'WHAT THE REVIEW FOUND, exactly:', capText(String(finding), 2500), '');
-  if (what === 'alternative') lines.push('This alternative is allowed by the packet. Add it to the "Acceptable variation" section of out/guideline.md, write out/answers/alt-N.md (a strong answer that takes that action with correct reasoning), and list it in permittedAlternatives of out/brief.json with its file. Change nothing else.');
+  if (what === 'alternative') lines.push('This alternative is allowed by the packet. Add it to the "Acceptable variation" section of out/guideline.md, write out/answers/alt-N.md (a strong answer that takes that action with correct reasoning, in its own sentences), and list it in permittedAlternatives of out/brief.json with its file; its "answer" there states the action and the figures of the alternative the review found, in the review\'s words. Change nothing else.');
   else if (what === 'equivalent') lines.push('This is a different presentation or method with the same required conclusion. Add a line to the "Acceptable variation" section of out/guideline.md so that it is accepted. Change nothing else.');
   else lines.push('Supply what is missing in the files the pilots get (a source that states the rule, its scope, its effective date and which document governs), or fix the guideline so that it asks for nothing the files do not hold. Keep every rule below.');
   lines.push(...NEW_TASK, '', `This is a repair turn for design attempt ${attempt} of ${attempts}. You have one short run: do not start the design again.`);
@@ -490,7 +490,7 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
     if (sha256 !== EMPTY_SHA && withheldHashes.has(sha256)) throw fileFault(kind, file.rel, 'is a copy of withheld material');
     if (TEXT_EXTENSIONS.has(path.extname(file.rel).toLowerCase()) && file.bytes <= READ_CAP) {
       let text = '';
-      try { text = fs.readFileSync(file.abs, 'utf8'); } catch { text = ''; }
+      try { text = decodeBuffer(fs.readFileSync(file.abs)) || ''; } catch { text = ''; }
       if (containsLeak(text, windows)) throw fileFault(kind, file.rel, 'holds a long passage of the guideline or the golden answer');
       if (referenceWindows.length && containsLeak(text, referenceWindows)) throw fileFault(kind, file.rel, 'holds a long passage of the reference documents');
     }
@@ -550,7 +550,11 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
     for (const item of brief.permittedAlternatives) {
       const text = readCapped(path.join(outDir, ...item.file.split('/')), 20000, `out/${item.file}`).replace(/\s+$/, '');
       if (!text.trim()) throw new DesignError('The answer of a permitted alternative is empty', `out/${item.file} is empty.`);
-      alternatives.push({ name: item.file.replace(/^answers\//, '').replace(/\.md$/, ''), file: item.file, text, sha256: sha256Hex(text), answer: item.answer });
+      /* its own answer: not the golden answer again (nine tenths of the sentences of each are the other's), and one that states the alternative it is written for */
+      const wrong = alternativeProblem(text, goldenAnswer, item.answer);
+      if (wrong === 'copy') throw new DesignError('The answer of a permitted alternative is a copy of the golden answer', `out/${item.file} says what the golden answer says, sentence for sentence. Write an answer that takes the alternative (${oneLine(item.answer, 160)}) with correct reasoning, in your own sentences; it may repeat the facts and the calculation that it shares with the golden answer.`);
+      if (wrong === 'action') throw new DesignError('The answer of a permitted alternative does not state its alternative', `out/${item.file} is mostly the golden answer and does not state the action or the figures that permittedAlternatives gives for it (${oneLine(item.answer, 160)}). Write the answer that takes that action, and state it with its figures.`);
+      alternatives.push({ id: item.id, name: item.id, file: item.file, text, sha256: sha256Hex(text), answer: item.answer });
     }
     windows = windows.with([...leakWindows(briefEvaluatorText(brief)), ...alternatives.flatMap(item => leakWindows(item.text))]);
     for (const item of alternatives) withheldHashes = new Set([...withheldHashes, item.sha256, sha256Hex(item.text + '\n')]);
@@ -636,7 +640,8 @@ async function scanDesignFiles({ outDir, design, shouldStop }) {
       stopped();
       const abs = path.join(outDir, sub, ...file.name.split('/'));
       const ext = path.extname(file.name).toLowerCase();
-      if (ZIP_EXTENSIONS.has(ext)) {
+      /* the text of a Word, Excel or slide file, and of an RTF file (its control words and formatting runs would break any window of 80 characters if its bytes were read) */
+      if (ZIP_EXTENSIONS.has(ext) || ext === '.rtf') {
         const text = await extractText(abs, { maxChars: ZIP_TEXT_CHARS });
         stopped();
         if (text === null) { unscanned.push({ name: file.name, kind }); continue; }

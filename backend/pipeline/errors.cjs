@@ -26,11 +26,13 @@ class BudgetStop extends Error {
 class Failure extends Error {}
 
 class AttemptRejected extends Error {
-  constructor(kind, reasons, details) {
+  /* options.incomplete: the attempt was not judged (a check could not be carried out); it is rejected so that the run goes on, and its validation is 'incomplete', not 'failed'. */
+  constructor(kind, reasons, details, options = {}) {
     super(reasons[0]);
     this.kind = kind;
     this.reasons = reasons;
     this.details = details || reasons;
+    this.incomplete = options.incomplete === true;
   }
 }
 

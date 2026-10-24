@@ -29,9 +29,9 @@ const { catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackTe
 const { minCapParts, minCapUsd, attemptReserveUsd } = require('./budget.cjs');
 const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak, WindowSet } = require('./safety.cjs');
 const { scanReferences, referenceSummary } = require('./references.cjs');
-const { extractText, textHoldsWindows, readerKindOfFile, ZIP_EXTENSIONS } = require('./extract.cjs');
+const { extractText, textHoldsWindows, readerKindOfFile } = require('./extract.cjs');
 const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, GRADER_FOOTER, MAX_ANSWER_FOR_GRADER } = require('./gates.cjs');
-const { runtimeOf, runToolLess, runDesigner, NOT_FOUND } = require('./models.cjs');
+const { runtimeOf, runToolLess, runDesigner, NOT_FOUND, startEnvironmentProblems } = require('./models.cjs');
 const { buildExport } = require('./export.cjs');
 const { stageStanding } = require('./gates.cjs');
 
@@ -64,6 +64,8 @@ function closeAttempt(attempt) {
     if (isObject(attempt.fairness) && attempt.fairness.status === 'pending') attempt.fairness.status = 'incomplete';
   }
   if (isObject(attempt.fairness) && isObject(attempt.fairness.stage1) && attempt.fairness.stage1.state === 'running') attempt.fairness.stage1.state = 'incomplete';
+  /* a stage that was under way when the run ended has no result */
+  if (isObject(attempt.difficulty)) for (const kind of ['screen', 'test']) if (isObject(attempt.difficulty[kind]) && attempt.difficulty[kind].status === 'running') attempt.difficulty[kind] = { status: 'incomplete' };
   if (isObject(attempt.guidelineRepair)) {
     if (attempt.guidelineRepair.outcome === 'pending') { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended during the repair'; }
     else if (open) { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended before the saved answers were counted again'; }
@@ -629,6 +631,25 @@ class PipelineService {
     return { prompt: read('prompt.txt'), guideline: read('guideline.md'), goldenAnswer: read('golden-answer.md') };
   }
 
+  /* The design while its checks run (designer v2, before it is accepted): what the designer delivered, shown as a design with checking: true. Nothing of the pilots'
+     (the packet, the gold, the fingerprints) exists yet. Same fields as an accepted design. */
+  _previewView(p) {
+    const preview = p.preview;
+    const texts = this._designTexts(p, preview.attempt);
+    const attempt = p.attempts.find(item => item.n === preview.attempt);
+    return {
+      attempt: preview.attempt, checking: !isTerminal(p.stage),
+      traps: clone(preview.traps), gold: null, fingerprints: [],
+      newFiles: clone(preview.newFiles), editedFiles: clone(preview.editedFiles),
+      packet: null, audit: attempt && attempt.audit ? clone(attempt.audit) : null, notes: preview.notes.slice(), repaired: preview.repaired === true,
+      calibration: attempt && attempt.calibration ? clone(attempt.calibration) : null, fairness: attempt && attempt.fairness ? clone(attempt.fairness) : null, guidelineDiff: null, rubricChanges: [],
+      unscanned: clone(preview.unscanned || []),
+      taskType: preview.taskType ? clone(preview.taskType) : null, brief: preview.brief ? clone(preview.brief) : null, alternatives: clone(preview.alternatives || []),
+      answerSet: attempt && attempt.answerSet ? clone(attempt.answerSet) : null, freeze: attempt && Array.isArray(attempt.freeze) ? clone(attempt.freeze) : [],
+      prompt: texts.prompt, guideline: texts.guideline, goldenAnswer: texts.goldenAnswer,
+    };
+  }
+
   _view(p) {
     const texts = this._designTexts(p);
     const designAttempt = p.design ? p.attempts.find(item => item.n === p.design.attempt) : null;
@@ -658,7 +679,7 @@ class PipelineService {
       prompt: texts.prompt,
       guideline: texts.guideline,
       goldenAnswer: texts.goldenAnswer,
-    } : null;
+    } : p.preview ? this._previewView(p) : null;
     /* A reference to the prompt, the guideline or the golden answer: names only, {section, number} or {file}. */
     const ref = item => (item ? (item.kind === 'section' ? { kind: 'section', section: item.name, number: item.index + 1 } : { kind: 'file', file: item.name }) : null);
     const c = p.classification;
@@ -895,6 +916,15 @@ class PipelineService {
   async _classify(p, ctl) {
     this._setStage(p, 'classify', 'Classifying what was captured');
     this._checkStop(ctl);
+    /* Designer v2: the reviews are isolated runs and refuse an environment that names a private folder. The environment they would get is looked at once, here,
+       before anything is paid for, so that the refusal does not come at the first review, after the designer was. (A shell's PWD, OLDPWD and INIT_CWD are not
+       given to a run, and a folder whose name only starts like a private folder is not one.) */
+    if (p.config.designMode === 'new') {
+      const named = startEnvironmentProblems(this.rt, null, this._forbiddenText(ctl));
+      if (named.length) {
+        throw new Failure(`The environment this pipeline was started from names a private folder (${named.slice(0, 3).join(', ')}), and the reviews refuse to run with that. Nothing was started. Start the companion again from a shell where ${named.length === 1 ? 'that variable is' : 'those variables are'} not set.`);
+      }
+    }
     this._reserve(p, 'the classifier', P.CAPS.classifyUsd);
     const files = p.import.files;
     const sections = ctl.sections;
@@ -923,9 +953,10 @@ class PipelineService {
       throw new Failure(`The page has a file that looks like the golden answer (${settled.goldenSuspects.slice(0, 3).map(name => oneLine(name, 80)).join(', ')}) but none was identified as the golden answer. Nothing was started. Check the page text and the file labels, then start again.`);
     }
     const byName = new Map(files.map(file => [file.name, file]));
-    const withhold = (name, why) => {
+    /* soft: the file is withheld and the owner is told, but the start does not stop for it (see the scan below) */
+    const withhold = (name, why, soft = false) => {
       if (!settled.withheld.some(item => item.name === name)) settled.withheld.push({ name, why });
-      if (!settled.warnings.some(item => item.name === name)) settled.warnings.push({ name, why });
+      if (!settled.warnings.some(item => item.name === name)) settled.warnings.push(soft ? { name, why, soft: true } : { name, why });
     };
     /* A packet file that is byte for byte a withheld file is withheld too, whatever its name. */
     const withheldHashes = new Set(settled.withheld.map(item => byName.get(item.name)).filter(Boolean).map(file => file.sha256));
@@ -962,10 +993,8 @@ class PipelineService {
     if (newMode) {
       for (const item of settled.withheld) {
         this._checkStop(ctl);
-        const abs = this._originalFile(p, item.name);
-        const ext = path.extname(item.name).toLowerCase();
-        if (!TEXT_EXTENSIONS.has(ext) && !ZIP_EXTENSIONS.has(ext)) continue;
-        const text = await extractText(abs, { maxChars: 1024 * 1024 });
+        /* whatever kind of file it is, if it has text (RTF, a notice saved as .eml, a file with no extension, as well as plain text and Office files) */
+        const text = await extractText(this._originalFile(p, item.name), { maxChars: 1024 * 1024 });
         if (text) ctl.withheldWindows.push(...leakWindows(text));
       }
     }
@@ -990,14 +1019,29 @@ class PipelineService {
         let leak = null;
         let text = null;
         if (TEXT_EXTENSIONS.has(ext)) {
+          /* streamed, whatever its size and encoding (UTF-8, UTF-16 with a mark); a file with a NUL byte that is no UTF-16 text is never said to be clean */
           leak = await textHoldsWindows(abs, windows, () => ctl.stop);
           text = await extractText(abs, { maxChars: 1024 * 1024 });
-        } else if (ZIP_EXTENSIONS.has(ext)) {
+        } else {
+          /* Word, Excel and slide files, RTF, a notice saved as .eml or .text, a file with no extension: by their text. A PDF, a picture or an old binary file has none. */
           text = await extractText(abs, { maxChars: 4 * 1024 * 1024 });
           leak = text === null ? null : containsLeak(text, windows);
         }
         if (leak === null && text === null) settled.unscanned.push(name);
-        if (leak === true) { withhold(name, 'it holds a long passage of the guideline or the golden answer'); continue; }
+        if (leak === true) {
+          /* A new task: its packet is built from the world files of a task that has its own guideline and golden answer, and a governing document often quotes the
+             very sentence that the old guideline asks for. The new task has its own, so such a file is withheld with a warning and the start goes on (the owner can
+             hand the file on by naming it in keepAsWorld). The old mode stops, as before. */
+          const why = 'it holds a long passage of the guideline or the golden answer';
+          if (newMode && new Set(p.config.keepAsWorld || []).has(name)) {
+            if (!settled.keptAsWorld.some(item => item.name === name)) settled.keptAsWorld.push({ name, why });
+            if (text !== null) addText(text);
+            survivors[kind].push(name);
+            continue;
+          }
+          withhold(name, why, newMode);
+          continue;
+        }
         if (text !== null) addText(text);
         survivors[kind].push(name);
       }
@@ -1034,9 +1078,10 @@ class PipelineService {
       throw new Failure(`${settled.unreadable.length} file${settled.unreadable.length === 1 ? '' : 's'} of the pilot packet cannot be read by the reviewers (no text can be taken from ${settled.unreadable.length === 1 ? 'it' : 'them'}): ${names}${settled.unreadable.length > 5 ? `, and ${settled.unreadable.length - 5} more` : ''}. Convert ${settled.unreadable.length === 1 ? 'it' : 'them'} to text, CSV, Word, Excel, slides, RTF, PDF or a picture, or take ${settled.unreadable.length === 1 ? 'it' : 'them'} out of the task, then start again; or start with "Start even if a world or task file has to be withheld" ticked, and the blind review will say which files it could not read.`);
     }
     /* A file the classifier called a world or task file that the pilots would not get: stop unless the owner said that is fine. */
-    if (settled.warnings.length && !p.config.acceptMissing) {
-      const names = settled.warnings.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
-      throw new Failure(`${settled.warnings.length} file${settled.warnings.length === 1 ? '' : 's'} the classifier called world or task files ${settled.warnings.length === 1 ? 'is' : 'are'} withheld, so the pilots would not get ${settled.warnings.length === 1 ? 'it' : 'them'}: ${names}${settled.warnings.length > 5 ? `, and ${settled.warnings.length - 5} more` : ''}. If the pilots can do without ${settled.warnings.length === 1 ? 'it' : 'them'}, start again with acceptMissing.${newMode ? ' If a file is real evidence although its name looks like an answer, list it in keepAsWorld.' : ''}`);
+    const hard = settled.warnings.filter(item => !item.soft);
+    if (hard.length && !p.config.acceptMissing) {
+      const names = hard.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
+      throw new Failure(`${hard.length} file${hard.length === 1 ? '' : 's'} the classifier called world or task files ${hard.length === 1 ? 'is' : 'are'} withheld, so the pilots would not get ${hard.length === 1 ? 'it' : 'them'}: ${names}${hard.length > 5 ? `, and ${hard.length - 5} more` : ''}. If the pilots can do without ${hard.length === 1 ? 'it' : 'them'}, start again with acceptMissing.${newMode ? ' If a file is real evidence although its name looks like an answer, list it in keepAsWorld.' : ''}`);
     }
   }
 
@@ -1337,6 +1382,7 @@ class PipelineService {
   /* One stage: the pilots, and for a new task the guideline-only repair when evaluator material was at fault. */
   async _runStage(p, ctl, attempt, kind) {
     const newMode = p.config.designMode === 'new';
+    if (newMode) { attempt.difficulty[kind] = { status: 'running' }; this._save(p); }
     let stage = await this._pilotStage(p, ctl, kind);
     if (newMode && !stage.passed) stage = await this._evaluatorRepair(p, ctl, attempt, stage, kind);
     if (newMode) this._setDifficulty(attempt, kind, stage);

@@ -1429,7 +1429,10 @@ test('a repair turn the designer needed is said once in the traps card', async t
 test('the start form has the withheld-files choice: off by default, never needed for the button, sent as acceptMissing, and spent by a start', async t => {
   const { companion, page } = await bootWith(t);
   const form = page.region('start-form');
-  assert.match(form, /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\)<\/strong>/, 'unticked, with the exact label');
+  assert.match(form, /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\), or if the reviewers cannot read a file of the task \(that file goes unchecked\)<\/strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, or when the reviewers cannot read a file of the task, and says which\.<\/span><\/label>/, 'unticked, with the exact label of the new mode, which also covers the files the reviewers cannot read');
+  await page.type('designMode', { value: 'harden' });
+  assert.match(page.region('start-form'), /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\)<\/strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, and says which\.<\/span><\/label>/, 'the harden mode has no reviewers of the packet, so its label is the short one');
+  await page.type('designMode', { value: 'new' });
   assert.ok(!ACK_IDS.includes('acceptMissing') && !/acceptMissing/.test(JSON.stringify(page.pipeline.ACKNOWLEDGEMENTS)), 'it is not an acknowledgement');
   await page.fillLink();
   await page.ackAll();
@@ -2565,7 +2568,7 @@ test('the fields of the new mode: the reference documents line (names only), kee
   const { page } = await bootWith(t, [], { config: V2 });
   const f = formOf(page);
   assert.ok(f.includes(NEW_LEGEND));
-  assert.match(f, /<p class="pl-refs" id="pl-refs">Reference documents: 2 files found in the default folder \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\. The designer and the reviewers read them and their text is sent to Anthropic\. Pilots never see them\.<\/p>/);
+  assert.match(f, /<p class="pl-refs" id="pl-refs">Reference documents: 2 files found in the default folder \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\. The designer reads them; their text is sent to Anthropic\. Pilots never see them\.<\/p>/);
   assert.doesNotMatch(f, /48211|12000/, 'the sizes are not the page\'s business, and never a word of the content');
   assert.match(f, /<label class="field">Keep these files as world files \(optional\)<input type="text" id="pl-keep" data-pl-in="keepAsWorld" data-pl-key="keep-as-world" value=""/);
   assert.match(f, /<small id="pl-keep-hint"><strong>Warning:<\/strong> the pilots get these files, and so does the designer, even if the names look like answers or grading material\./);
@@ -2994,8 +2997,12 @@ test('pilots of the new mode that are not low scores: waiting for the diagnosis,
   assert.equal(cells[0], '\u2713 Counts Diagnosis: the intended error');
   assert.equal(cells[1], 'Waiting for the diagnosis', 'a low score with no diagnosis yet');
   assert.equal(cells[2], 'Does not count: the score is not below 0.45');
-  assert.equal(cells[3], 'Not needed');
+  assert.equal(cells[3], 'Stopped early: not needed');
   assert.equal(cells[4], 'Tool failure: another pilot replaces it');
+  const toolRow = tableRowsOf(page.region('test'))[4];
+  assert.equal(toolRow.Score, 'Tool failure: another pilot replaces it', 'a pilot that was graded and diagnosed is not "waiting for the grader"');
+  assert.equal(toolRow['Below 0.45'], 'Tool failure: another pilot replaces it');
+  assert.doesNotMatch(toolRow.Score + ' | ' + toolRow['Below 0.45'], /Waiting|Pending|No usable score|without a score/);
   assert.doesNotMatch(cells.join(' | '), /undefined|null|\[object/);
   /* while a round runs the diagnosis, the counts and the list are withheld; whether a pilot counts is still shown */
   const hidden = explainedStage('test', [[0.1, 'intended'], [0.2, 'ambiguous']], null, { lows: W, unexplained: W, recount: W }, { 0: { adjudication: W }, 1: { adjudication: W, countsTowardPass: false } });
@@ -3077,7 +3084,8 @@ test('the redesign table of the new mode: the review, the answer set, a repair a
   const setRejected = newAttempt({ n: 2, validation: 'failed', outcome: 'rejected', screen: null, test: null, fairness: newFairness({ status: 'not-reached', stage1: null, stage2: null }), answerSet: answerSetOf({ passed: false }), difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'answer-set', reasons: ['The golden answer scored 0.62 against the guideline'] } });
   const passed = newAttempt({ n: 3, guidelineRepair: { stage: 'screen', outcome: 'applied', classes: ['grader_defect'], changed: ['guideline.md'], reason: '', regrade: null, recounted: null } });
   const { page } = await bootWith(t, [newState({ redesigns: 2, attempts: [rejected, setRejected, passed] })]);
-  const rows = tableRowsOf(page.region('redesigns'));
+  const table = page.region('redesigns');
+  const rows = tableRowsOf(table.slice(0, table.indexOf('<h3>Earlier attempts, in detail</h3>')));
   assert.equal(rows.length, 3);
   assert.match(rows[0].Outcome, /^Rejected before any pilot The reviews found an answer the files support better, or could not settle which answer they support\. The reviews could not settle which answer the files support$/);
   assert.match(rows[0]['Design checks'], /Fairness: rejected \(the files do not settle which answer is right\)/);
@@ -3107,7 +3115,7 @@ test('while a round runs the fields of the new mode are withheld the way the com
   const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
   const d = page.region('design'), b = page.region('brief'), c = page.region('checks'), s = page.region('screen');
   assert.match(d, /<p class="pl-task-type pl-withheld">Task type: Withheld while a round runs<\/p>/);
-  assert.match(d, /Reference documents used: 2 files \(<span class="pl-withheld">Withheld while a round runs<\/span>\)\. Pilots never see them\. Not checked for leaked passages: <span class="pl-withheld">/, 'how many shows, the names do not');
+  assert.match(d, /Reference documents used: 2 files \(<span class="pl-withheld">Withheld while a round runs<\/span>\)\. Pilots never see them\. Some files were not checked whole for leaked passages: <span class="pl-withheld">/, 'how many shows, the names do not');
   assert.match(b, /<h2>What the traps rest on<\/h2>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
   assert.doesNotMatch(b, /Quarterly covenant|Atlas_Facility_Agreement|t1/);
   assert.match(c, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
@@ -3176,13 +3184,14 @@ test('every field of the new mode is read defensively: the wrong type gives noth
   assert.equal(newShape.review.repairs, 1);
 });
 
-test('a new task that is still being designed: the design card shows the reference documents it reads before any trap exists, and a diagnosis note shows once the round is over', async t => {
+test('a new task that is still being designed: the design card says the designer is working and shows the reference documents it reads, and a diagnosis note shows once the round is over', async t => {
   const early = newState({ stage: 'design', running: true, result: null, summary: '', design: null, attempts: [], classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } });
   const { page } = await bootWith(t, [early]);
   const d = page.region('design');
-  assert.match(d, /<h2>The traps<\/h2>/);
-  assert.match(d, /<p class="muted">No trap has been recorded yet\.<\/p>/);
+  assert.match(d, /<h2>The designer is working<\/h2>/);
+  assert.match(d, /<p class="pl-designer-working">The designer is working\. The traps, the brief and the checks of the design show here once the design has passed every check that comes before the pilots\.<\/p>/);
   assert.match(d, /Reference documents used: 2 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\./);
+  assert.doesNotMatch(d, /No trap has been recorded yet|The designer added no new file|No existing world file was edited|Not given|<h2>The traps<\/h2>/, 'nothing the designer has not written is asserted');
   assert.equal(page.region('brief'), '', 'no brief before the designer has delivered one');
   assert.equal(page.region('checks'), '', 'and no checks before an attempt exists');
   /* a diagnosis the companion explained is printed under the class, once the round is over */
@@ -3287,7 +3296,7 @@ test('the reference summary says which files the leak scan read only in part, an
   const { page: whole } = await bootWith(t, [newState({ references: { ...refs, partial: [], unscanned: [], truncated: false } })]);
   assert.doesNotMatch(whole.region('design'), /only in part|Only the first part|Not checked for leaked/);
   const { page: w } = await bootWith(t, [newState({ references: { ...refs, partial: { withheld: true }, unscanned: { withheld: true }, names: { withheld: true } } })]);
-  assert.match(w.region('design'), /Checked for leaked passages only in part: <span class="pl-withheld">Withheld while a round runs<\/span> Not checked for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+  assert.match(w.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
   /* the decision date of the brief */
   const dated = newBrief(); dated.decision = { ...dated.decision, decisionDate: '2025-03-31' };
   const { page: b } = await bootWith(t, [newState({ design: designFacts({ attempt: 1, brief: dated, taskType: dated.taskType, alternatives: [], answerSet: null }) })]);
@@ -3330,7 +3339,7 @@ test('each new field of the review may be withheld or null while a round runs: t
     design: designFacts({ attempt: 1, brief: { ...newBrief(), decision: { ...newBrief().decision, decisionDate: W } }, taskType: newBrief().taskType, alternatives: [], answerSet: null }) });
   const { page: all } = await bootWith(t, [every]);
   for (const region of ['design', 'brief', 'checks']) assert.doesNotMatch(all.region(region), /\[object Object\]|undefined|>null<|NaN/, region);
-  assert.match(all.region('design'), /Checked for leaked passages only in part: <span class="pl-withheld">Withheld while a round runs<\/span> Not checked for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+  assert.match(all.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
 });
 
 test('the new fields of the review are read defensively: any wrong type gives nothing, never an error', () => {
@@ -3563,7 +3572,7 @@ test('files the reviewers cannot read: named in the Check the files card and in 
   await form.type('acceptMissing', { checked: true });
   await form.click('start');
   assert.equal(startBody(companion).acceptMissing, true);
-  assert.match(form.region('start-form') + (await bootWith(t)).page.region('start-form'), /In the new mode it also lets a start go on when the reviewers cannot read a file of the task: that file then goes unchecked\./);
+  assert.match((await bootWith(t)).page.region('start-form'), /or if the reviewers cannot read a file of the task \(that file goes unchecked\)<\/strong>Off by default: .* or when the reviewers cannot read a file of the task, and says which\./);
 });
 
 test('a file that is byte for byte a reference document is listed as withheld with the companion\'s reason, in the reason column of the file list', async t => {
@@ -3706,7 +3715,7 @@ test('the reference line while a round runs: the count of problems stays, their 
   /* the names of the files found are withheld the same way */
   const found = redactPipelineData({ ...V2, references: { default: { exists: true, found: 2, names: REF_NAMES, bytes: 48211, problems: 0, problemList: [] } } });
   const { page: p2 } = await bootWith(t, [], { config: found });
-  assert.ok(formOf(p2).includes('Reference documents: 2 files found in the default folder (' + MARKER + '). The designer and the reviewers read them'));
+  assert.ok(formOf(p2).includes('Reference documents: 2 files found in the default folder (' + MARKER + '). The designer reads them; their text is sent to Anthropic'));
   assert.doesNotMatch(formOf(p2), /Atlas_Review_Handbook|Meridian_Workflow_Catalog/);
   /* a marker for the list while the count is none, and values that are not what they should be */
   for (const odd of [HID, null, 'x', 5, {}, [null, 3, 'y']]) {
@@ -3741,8 +3750,8 @@ test('the real redaction over a full new-mode state that has every field of this
     references: { source: 'default', found: 2, names: REF_NAMES, bytes: 1, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: ['Atlas_Partial_Reference.md'], scannedChars: 5000, truncated: true },
   });
   const red = redactPipelineData(JSON.parse(JSON.stringify(full)));
-  assert.deepEqual(plain(red.ledger.map(e => e.ref)), [HID, HID, HID, HID, HID, HID, HID, HID, 'round-1#1', 'classifier'], 'the reference of a review, an application, an adjudication, a repair, an as- and a diag- call');
-  assert.deepEqual(red.ledger.map(e => [e.kind, e.stage, e.costUsd]), ledger.map(e => [e.kind, e.stage, e.costUsd]), 'the kind, the stage and the cost stay');
+  assert.deepEqual(plain(red.ledger.map(e => [e.kind, e.stage, e.ref])), [['review-work', 'design', HID], ['pilot', 'screen', 'round-1#1'], ['classify', 'classify', 'classifier']], 'the calls of the reviews and the repairs are one entry with a withheld reference, the others stay');
+  assert.equal(red.ledger[0].costUsd, 2.4, 'the one entry carries the cost of all of them');
   assert.deepEqual(plain(red.attempts[0].freeze[0].answers), HID);
   assert.equal(red.attempts[0].freeze[0].packetSha256, 'd1'.repeat(32), 'the freeze hashes stay');
   assert.equal(red.attempts[0].validation, 'complete', 'the validation stays');
@@ -3760,7 +3769,7 @@ test('the real redaction over a full new-mode state that has every field of this
   assert.match(c, /Packet d1d1d1d1d1d1 \(9 files\); prompt e2e2e2e2e2e2/, 'the freeze hashes show');
   assert.match(c, /<span class="pill green">Checks complete<\/span>/, 'the validation shows');
   assert.match(page.region('classify'), /<li>Borealis_Archive\.bin<\/li>/, 'the files the reviewers cannot read are not private');
-  assert.match(page.region('design'), /Checked for leaked passages only in part: <span class="pl-withheld">Withheld while a round runs<\/span> Not checked for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span>/);
+  assert.match(page.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span>/);
 });
 
 test('the fields of this round are read defensively: any wrong type gives nothing, never an error', () => {
@@ -3798,6 +3807,315 @@ test('the fields of this round are read defensively: any wrong type gives nothin
   assert.deepEqual(plain([a.review.stage2.application.cut, a.review.stage2.briefApplication.cut]), [['d.txt'], ['e.txt']]);
   assert.deepEqual(plain(a.answerSet.answers[0].runs.map(r => r.rule)), ['majority', 'both', '']);
   assert.deepEqual(plain(a.screen.pilots[0].previous), { score: 0.5, belowBar: false, countsTowardPass: false, valid: false, class: 'unsupported' });
+});
+
+/* ---- backend round 3: what the real backend emits, against what the page says ---- */
+
+test('the blind review has words for every state: did not finish, running only while the run is running, and any other state as it is', async t => {
+  const stage1 = (state, over = {}) => ({ state, tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0, rendered: [], unreadable: [], ...over });
+  const stateOf = (state, over = {}) => newState({ attempts: [newAttempt({ fairness: newFairness({ stage1: stage1(state) }) })], ...over });
+  const stopped = { stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' } };
+  const live = { stage: 'grade-screen', running: true, result: null };
+  const { page } = await bootWith(t, [stateOf('incomplete', stopped)]);
+  assert.ok(page.region('checks').includes('<li class="pl-blind-incomplete">The blind review did not finish (1 try).</li><li>Second review:'));
+  assert.doesNotMatch(page.region('checks'), /Blind review: running/, 'a review that was cut off is not running');
+  /* a review still marked running on a run that ended was never closed: it did not finish */
+  const { page: ended } = await bootWith(t, [stateOf('running', { stage: 'budget', running: false, result: { verdict: 'budget', message: 'x', validation: 'incomplete' } })]);
+  assert.ok(ended.region('checks').includes('<li class="pl-blind-incomplete">The blind review did not finish (1 try).</li>'));
+  /* while the run is running, running is true */
+  const { page: running } = await bootWith(t, [stateOf('running', live)]);
+  assert.ok(running.region('checks').includes('<li>Blind review: running (1 try).</li>'));
+  assert.doesNotMatch(running.region('checks'), /pl-blind-incomplete|did not finish/);
+  /* the states that gave an answer, or none */
+  for (const [state, words] of [['ok', 'a reader with only the prompt and the files gave an answer'], ['partial', 'a reader with only the prompt and the files gave an answer, but not every file could be read'], ['unusable', 'no usable answer']]) {
+    const { page: p } = await bootWith(t, [stateOf(state)]);
+    assert.ok(p.region('checks').includes('<li>Blind review: ' + words + ' (1 try).</li>'), state);
+  }
+  /* a state the page does not know is shown as the word it is, never as running; none at all says so */
+  const { page: odd } = await bootWith(t, [stateOf('stalled')]);
+  assert.ok(odd.region('checks').includes('<li>Blind review: stalled (1 try).</li>'));
+  const { page: none } = await bootWith(t, [stateOf('')]);
+  assert.ok(none.region('checks').includes('<li>Blind review: no state was reported (1 try).</li>'));
+  assert.doesNotMatch(odd.region('checks') + none.region('checks'), /Blind review: running/);
+  const { page: junk } = await bootWith(t, [stateOf(5), stateOf(null), stateOf({ x: 1 })]);
+  assert.doesNotMatch(junk.region('checks'), /\[object Object\]|undefined|>null<|Blind review: running/);
+});
+
+test('the reference summary says once that some files were not checked whole when a list is withheld, and nothing for an empty or missing list', async t => {
+  const refs = over => newState({ stage: 'grade-screen', running: true, result: null, redacted: true, references: { source: 'default', found: 2, names: HID, bytes: 1, copied: true, files: HID, unscanned: [], partial: [], scannedChars: 5000, truncated: false, ...over } });
+  const summary = page => page.region('design').match(/<p class="pl-refs-summary">[\s\S]*?<\/p>/)[0];
+  const head = 'Reference documents used: 2 files (' + MARKER + '). Pilots never see them.';
+  const once = ' Some files were not checked whole for leaked passages: ' + MARKER;
+  const { page: both } = await bootWith(t, [refs({ unscanned: HID, partial: HID })]);
+  assert.equal(summary(both), '<p class="pl-refs-summary">' + head + once + '</p>');
+  assert.equal((summary(both).match(/not checked whole/g) || []).length, 1, 'once, not once for each list');
+  const { page: one } = await bootWith(t, [refs({ unscanned: HID })]);
+  assert.equal(summary(one), '<p class="pl-refs-summary">' + head + once + '</p>');
+  /* a list that is empty, or not there, says nothing at all */
+  for (const empty of [[], null, undefined]) {
+    const { page: p } = await bootWith(t, [refs({ unscanned: empty, partial: empty })]);
+    assert.equal(summary(p), '<p class="pl-refs-summary">' + head + '</p>', JSON.stringify(empty));
+  }
+  /* a real list and a withheld one: the real one is named, the withheld one says so once */
+  const { page: mixed } = await bootWith(t, [refs({ unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: HID })]);
+  assert.equal(summary(mixed), '<p class="pl-refs-summary">' + head + ' Not checked for leaked passages (their text could not be read, or the scan cap left them out): Meridian_Workflow_Catalog.pdf.' + once + '</p>');
+  /* the general sentence about the scan cap does not repeat a withheld list */
+  const { page: cut } = await bootWith(t, [refs({ truncated: true })]);
+  assert.equal(summary(cut), '<p class="pl-refs-summary">' + head + ' Only the first part of their text was checked for leaked passages.</p>');
+  const { page: cutHid } = await bootWith(t, [refs({ truncated: true, partial: HID })]);
+  assert.doesNotMatch(summary(cutHid), /Only the first part/);
+  /* the real redaction: a list with nothing in it stays an empty list, so a redacted poll of an ordinary run does not warn about the scan */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const plainRefs = newState({ stage: 'grade-screen', running: true, result: null, references: { source: 'default', found: 2, names: REF_NAMES, bytes: 1, copied: true, files: [], unscanned: [], partial: [], scannedChars: 5000, truncated: false } });
+  const red = redactPipelineData(JSON.parse(JSON.stringify(plainRefs)));
+  assert.deepEqual(plain([red.references.unscanned, red.references.partial, red.references.files]), [[], [], []]);
+  assert.deepEqual(plain(red.references.names), HID, 'the names are withheld');
+  const { page: real } = await bootWith(t, [red]);
+  assert.equal(summary(real), '<p class="pl-refs-summary">' + head + '</p>', 'nothing about the scan in an ordinary run');
+  const withList = redactPipelineData(JSON.parse(JSON.stringify({ ...plainRefs, references: { ...plainRefs.references, unscanned: ['Meridian_Workflow_Catalog.pdf'] } })));
+  assert.deepEqual(plain(withList.references.unscanned), HID, 'a list with something in it is withheld');
+  const { page: some } = await bootWith(t, [withList]);
+  assert.equal(summary(some), '<p class="pl-refs-summary">' + head + once + '</p>');
+});
+
+test('an earlier attempt is explained: why it ended, what its pilots counted and did not, and what its checks found, in a section that opens; the latest attempt is not repeated', async t => {
+  const lows = explainedStage('screen', [[0.2, 'permitted_alternative'], [0.3, 'ambiguous']], false);
+  const first = newAttempt({ n: 1, outcome: 'screen-failed', fairness: newFairness({ status: 'passed' }), screen: lows, test: null, difficulty: { status: 'failed', screen: { passed: false, explained: 0, belowBar: 2, of: 2, need: 2, lows: { lowScorers: 2, intended: 0, otherValid: 0, permittedAlternative: 1, graderDefect: 0, ambiguous: 1, toolFailure: 0, unsupported: 0, counted: 0 } }, test: null } });
+  const second = newAttempt({ n: 2, outcome: 'rejected', screen: null, test: null, validation: 'failed', difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'review', reasons: ['The reviews could not settle which answer the files support', 'The clause that rules the other answer out is superseded'] },
+    fairness: newFairness({ status: 'rejected', stage2: { disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, application: null, briefApplication: null, cut: [] } }) });
+  const third = newAttempt({ n: 3, outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null } });
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 2, attempts: [first, second, third] })]);
+  const r = page.region('redesigns');
+  const table = r.slice(0, r.indexOf('<h3>Earlier attempts, in detail</h3>'));
+  assert.equal(tableRowsOf(table).length, 3, 'the table still has one row for each attempt');
+  assert.equal((r.match(/<details class="pl-attempt"/g) || []).length, 2, 'a section for each earlier attempt, none for the latest');
+  assert.doesNotMatch(r, /id="pl-attempt-3"/);
+  assert.doesNotMatch(r, /<details class="pl-attempt"[^>]* open/, 'closed until the owner opens one');
+  const at = n => { const i = r.indexOf('<details class="pl-attempt" id="pl-attempt-' + n + '"'); return r.slice(i, r.indexOf('</details>', i)); };
+  const a1 = at(1), a2 = at(2);
+  assert.ok(a1.startsWith('<details class="pl-attempt" id="pl-attempt-1"><summary>Attempt 1: Screen failed</summary>'));
+  assert.ok(a2.startsWith('<details class="pl-attempt" id="pl-attempt-2"><summary>Attempt 2: Rejected before any pilot</summary>'));
+  /* the first: the counts, and the low scores that did not count, with the diagnosis of each */
+  assert.ok(a1.includes('<p class="pl-attempt-counts">Screen: 2 of 2 below 0.40; 0 count toward the pass; failed.</p>'));
+  assert.match(a1, /Low scores: 2\. By diagnosis: 0 intended, 0 another valid error, 1 permitted alternative, 0 grader defect, 1 ambiguous, 0 tool failure, 0 not supported\. Counted toward the pass: 0\./);
+  assert.match(a1, /<strong>2 low scores did not count toward the pass<\/strong>[\s\S]*<li>Pilot 1 scored 0\.20: a permitted alternative \(the answer is acceptable\)<\/li><li>Pilot 2 scored 0\.30: ambiguous<\/li>/);
+  assert.match(a1, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*Passed/);
+  assert.match(a1, /<h3>Difficulty: do the pilots fail for the intended reason\?<\/h3>[\s\S]*Screen: failed\./);
+  assert.doesNotMatch(a1, /The reviews could not settle which answer the files support|clause that rules the other answer out is superseded/, 'the reasons of the second attempt are not under the first');
+  /* the second: the kind of rejection and each reason, the fairness result, and no stage that never ran */
+  assert.ok(a2.includes('<p class="pl-attempt-why">The reviews found an answer the files support better, or could not settle which answer they support.</p>'));
+  assert.ok(a2.includes('<ul class="pl-names pl-attempt-reasons"><li>The reviews could not settle which answer the files support</li><li>The clause that rules the other answer out is superseded</li></ul>'));
+  assert.match(a2, /<span class="pill red">Rejected<\/span>/);
+  assert.match(a2, /Screen: not run\./, 'an earlier attempt that never ran its screen says not run');
+  assert.doesNotMatch(a2, /pl-attempt-counts|Pilot 1 scored/);
+  /* the older shapes, an attempt of the harden mode, and the table's own columns stay as they were */
+  assert.doesNotMatch(table, /pl-attempt|Pilot 1 scored/, 'the table keeps its columns; the detail is in the sections below it');
+  assert.match(tableRowsOf(table)[1].Outcome, /could not settle which answer the files support$|could not settle which answer the files support The clause/, 'the outcome column still carries the reasons');
+  const { page: old } = await bootWith(t, [doneState()]);
+  assert.doesNotMatch(old.region('redesigns'), /pl-attempt|Earlier attempts/, 'no section for attempts of the harden mode');
+  /* an opened section stays open when the card is painted again: the markup is the same, so it is not repainted */
+  const { page: same } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 2, attempts: [first, second, third] })]);
+  assert.equal(same.region('redesigns'), r);
+  /* while a round runs the checks, the lows and the reasons of an earlier attempt are withheld, and the section says so */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const running = redactPipelineData(JSON.parse(JSON.stringify(newState({ stage: 'grade-screen', running: true, result: null, redesigns: 2, attempts: [first, second, third] }))));
+  const { page: hid } = await bootWith(t, [running]);
+  const h = hid.region('redesigns');
+  assert.equal((h.match(/<details class="pl-attempt"/g) || []).length, 2);
+  assert.doesNotMatch(h, /could not settle which answer the files support<\/li>|clause that rules the other answer out is superseded|Pilot 1 scored|permitted alternative \(the answer/);
+  assert.match(h, /Withheld while a round runs/);
+  assert.doesNotMatch(h, /\[object Object\]|undefined|>null<|NaN/);
+});
+
+test('a pilot that will never get a score says why, in the cells that used to say waiting or pending', async t => {
+  const stageWith = (passed, extra, spec = [[0.31, 'tool_failure'], [0.2, 'intended']]) => explainedStage('screen', spec, passed, {}, extra);
+  const tool = { 0: { toolFailure: true, valid: false, adjudication: adj('tool_failure'), countsTowardPass: false } };
+  /* graded, diagnosed as a tool failure, and not yet decided: the score is not hidden behind "waiting for the grader" */
+  const { page } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ screen: stageWith(null, tool), test: null })] })]);
+  const row = tableRowsOf(page.region('screen'))[0];
+  assert.deepEqual([row.Score, row['Below 0.40'], row['Counts toward the pass']], ['Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it']);
+  assert.doesNotMatch(row.Score + row['Below 0.40'] + row['Counts toward the pass'], /Waiting|Pending|No usable score|without a score/);
+  /* after the stage passed, nothing counts against the design for it */
+  const { page: passed } = await bootWith(t, [newState({ attempts: [newAttempt({ screen: stageWith(true, tool, [[0.31, 'tool_failure'], [0.2, 'intended'], [0.25, 'intended']]) })] })]);
+  assert.equal(tableRowsOf(passed.region('screen'))[0]['Below 0.40'], 'Tool failure: another pilot replaces it');
+  assert.doesNotMatch(passed.region('screen'), /counts against the design/);
+  /* an audit that discarded the pilot */
+  const discarded = explainedStage('screen', [[null, null], [0.2, 'intended']], null, {}, { 0: { state: 'completed', valid: false, audit: { status: 'DISCARDED' }, adjudication: null, countsTowardPass: null } });
+  const { page: d } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ screen: discarded, test: null })] })]);
+  const dr = tableRowsOf(d.region('screen'))[0];
+  assert.deepEqual([dr.Score, dr['Counts toward the pass'], dr.Audit], ['No score (discarded)', 'No score: the audit discarded this pilot', 'DISCARDED']);
+  /* a stage that was cut off: Stop, a restart or the cap */
+  const cutStage = explainedStage('screen', [[null, null], [null, null], [0.2, 'intended']], null, {}, { 0: { state: 'running', valid: false, audit: null, adjudication: null, countsTowardPass: null }, 1: { state: 'cancelled', valid: false, audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: c } = await bootWith(t, [newState({ stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' }, attempts: [newAttempt({ outcome: 'stopped', screen: cutStage, test: null })] })]);
+  const cr = tableRowsOf(c.region('screen'));
+  assert.deepEqual(cr.map(r => r['Counts toward the pass']), ['Stopped before it finished', 'Stopped before it finished', '\u2713 Counts Diagnosis: the intended error']);
+  assert.deepEqual(cr.map(r => r.Audit), ['Stopped before it finished', 'Not audited', 'CLEAN']);
+  assert.doesNotMatch(c.region('screen'), /Waiting for a score|Pending/, 'nothing of an ended run is waiting');
+  /* a pilot stopped because it was not needed */
+  const early = explainedStage('screen', [[0.7, null], [null, null]], false, {}, { 1: { state: 'cancelled', valid: false, stoppedEarly: true, stoppedReason: 'Not needed.', audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: e } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, attempts: [newAttempt({ screen: early, test: null })] })]);
+  const er = tableRowsOf(e.region('screen'))[1];
+  assert.deepEqual([er['Below 0.40'], er['Counts toward the pass'], er.Audit], ['Not needed', 'Stopped early: not needed', 'Not needed']);
+  /* a pilot that is working still waits, and is pending */
+  const working = explainedStage('screen', [[null, null], [null, null]], null, {}, { 0: { state: 'running', valid: false, audit: null, adjudication: null, countsTowardPass: null }, 1: { state: 'queued', valid: false, audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: w } = await bootWith(t, [newState({ stage: 'screen', running: true, result: null, attempts: [newAttempt({ screen: working, test: null })] })]);
+  assert.deepEqual(tableRowsOf(w.region('screen')).map(r => [r['Counts toward the pass'], r.Audit]), [['Waiting for a score', 'Pending'], ['Waiting for a score', 'Pending']]);
+});
+
+test('while the trap designer repairs the guideline the stage line and the timeline say so, not that pilots are working', async t => {
+  const repair = (stage, over = {}) => ({ stage, at: '2026-10-23T10:50:00.000Z', outcome: 'pending', classes: ['grader_defect'], changed: [], reason: '', regrade: null, recounted: null, ...over });
+  const screenFailed = explainedStage('screen', [[0.2, 'grader_defect'], [0.3, 'grader_defect']], false);
+  const state = (stage, rep, over = {}) => newState({ stage, running: true, result: null, message: 'Asking the trap designer to repair the guideline (attempt 1 of 4)', attempts: [newAttempt({ outcome: 'in-progress', screen: screenFailed, test: null, guidelineRepair: rep })], ...over });
+  const { page } = await bootWith(t, [state('screen', repair('screen'))]);
+  assert.equal(page.stage(), 'Screen: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+  assert.equal(stepsOf(page.region('timeline')).find(s => s.label === 'Screen').caption, 'Repairing the guideline');
+  assert.doesNotMatch(page.stage(), /pilots are working/);
+  const { page: test } = await bootWith(t, [state('test', repair('test'), { attempts: [newAttempt({ screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'intended']], true), test: explainedStage('test', [[0.1, 'grader_defect']], false), guidelineRepair: repair('test') })] })]);
+  assert.equal(test.stage(), 'Test: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+  assert.equal(stepsOf(test.region('timeline')).find(s => s.label === 'Test').caption, 'Repairing the guideline');
+  /* no message: the page says it in its own words; a redesign count still follows */
+  const { page: bare } = await bootWith(t, [state('screen', repair('screen'), { message: '', redesigns: 1 })]);
+  assert.equal(bare.stage(), 'Screen: the trap designer is repairing the guideline. Redesign 1 of 3.');
+  /* once the repair is done (or was not used) the pilots are the news again, and an ended run is not repairing */
+  for (const outcome of ['applied', 'failed']) {
+    const { page: p } = await bootWith(t, [state('screen', repair('screen', { outcome, reason: outcome === 'failed' ? 'the repair changed nothing' : '' }))]);
+    assert.equal(p.stage(), 'Screen: two blind pilots are working (both must score below 0.40).', outcome);
+    assert.equal(stepsOf(p.region('timeline')).find(s => s.label === 'Screen').caption, 'In progress', outcome);
+  }
+  const { page: ended } = await bootWith(t, [state('stopped', repair('screen'), { running: false })]);
+  assert.doesNotMatch(ended.stage(), /repair/);
+  /* a repair that is withheld cannot be told: the pilots line stands */
+  const { page: hid } = await bootWith(t, [state('screen', { withheld: true })]);
+  assert.equal(hid.stage(), 'Screen: two blind pilots are working (both must score below 0.40).');
+});
+
+test('money is rounded half up to the cent, as the companion rounds it in its own sentences: 0.145 is 0.15, 27.025 is 27.03, 59.795 is 59.80', async t => {
+  for (const [amount, text] of [[0.145, '0.15'], [27.025, '27.03'], [59.795, '59.80'], [1.005, '1.01'], [0.285, '0.29'], [36.285, '36.29'], [0.14, '0.14'], [0.1449, '0.14'], [12, '12.00'], [0, '0.00'], [41.2, '41.20']]) {
+    const { page } = await bootWith(t, [newState({ stage: 'screen', running: true, result: null, spentUsd: amount, capUsd: 59.795 })]);
+    assert.match(page.region('spend'), new RegExp('<strong>Spent</strong> USD ' + text.replace('.', '\\.') + ' of USD 59\\.80</p>'), String(amount));
+  }
+  /* the cap the run stopped at and the amount spent, in the result */
+  const { page: stopped } = await bootWith(t, [newState({ stage: 'budget', running: false, capUsd: 27.025, spentUsd: 0.145, result: { verdict: 'budget', message: 'x', validation: 'complete' } })]);
+  assert.match(stopped.region('verdict'), /Stopped in the .* step with USD 0\.15 of USD 27\.03 spent\./);
+});
+
+test('the owner is told in the words of the form: the keep field by its label, never as keepAsWorld', async t => {
+  const message = '1 file the classifier called world or task files is withheld, so the pilots would not get it: golden_parent_answer.txt. If the pilots can do without it, start again with acceptMissing. If a file is real evidence although its name looks like an answer, list it in keepAsWorld.';
+  const { page } = await bootWith(t, [newState({ stage: 'failed', running: false, summary: message, error: message, result: { verdict: 'failed', message, validation: 'incomplete' }, attempts: [], design: null, classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } })]);
+  const v = page.region('verdict');
+  assert.doesNotMatch(v, /keepAsWorld|acceptMissing/, 'no field of the API is shown');
+  assert.match(v, /If a file is real evidence although its name looks like an answer, name it in the field \u201CKeep these files as world files\u201D\./);
+  assert.match(v, /start again with the box \u201CStart even if a world or task file has to be withheld\u201D ticked\./);
+});
+
+test('the difficulty of a stage says running while it runs and not reached yet before it, and "not run" only when the attempt ended without it', async t => {
+  const difficulty = (screen, test) => ({ status: 'pending', screen, test });
+  const passedScreen = { passed: true, explained: 2, belowBar: 2, of: 2, need: 2, lows: null };
+  const lines = page => [...page.region('checks').matchAll(/<li>(Screen|Test): ([^<]*)<\/li>/g)].map(m => m[1] + ': ' + m[2]).filter(x => /running|not reached yet|not run|did not finish/.test(x));
+  const live = (stage, d, over = {}) => newState({ stage, running: true, result: null, attempts: [newAttempt({ outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: d, ...over })] });
+  const { page: screen } = await bootWith(t, [live('screen', difficulty(null, null))]);
+  assert.deepEqual(lines(screen), ['Screen: running.', 'Test: not reached yet.']);
+  const { page: test } = await bootWith(t, [live('test', difficulty(passedScreen, null))]);
+  assert.deepEqual(lines(test), ['Test: running.']);
+  const { page: checks } = await bootWith(t, [live('design', difficulty(null, null))]);
+  assert.deepEqual(lines(checks), ['Screen: not reached yet.', 'Test: not reached yet.']);
+  /* the shape the companion sends while a stage runs */
+  const { page: status } = await bootWith(t, [live('screen', difficulty({ status: 'running' }, null))]);
+  assert.deepEqual(lines(status), ['Screen: running.', 'Test: not reached yet.']);
+  const { page: queued } = await bootWith(t, [live('design', difficulty({ status: 'queued' }, { status: 'waiting' }))]);
+  assert.deepEqual(lines(queued), ['Screen: not reached yet.', 'Test: not reached yet.']);
+  /* a run that ended: a stage that never ran is not run, and one that was running did not finish */
+  const ended = (d, over = {}) => newState({ stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' }, attempts: [newAttempt({ outcome: 'stopped', validation: 'incomplete', screen: null, test: null, difficulty: d, ...over })] });
+  const { page: stopped } = await bootWith(t, [ended(difficulty(null, null))]);
+  assert.deepEqual(lines(stopped), ['Screen: not run.', 'Test: not run.']);
+  const { page: cut } = await bootWith(t, [ended(difficulty({ status: 'running' }, null))]);
+  assert.deepEqual(lines(cut), ['Screen: did not finish.', 'Test: not run.']);
+  /* a stage that has a result keeps its words */
+  const { page: decided } = await bootWith(t, [live('test', difficulty(passedScreen, null))]);
+  assert.match(decided.region('checks'), /<li>Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\.<\/li>/);
+  /* shapes the page does not know are not an error */
+  for (const odd of [5, 'x', [], true, {}, { status: 5 }, { status: {} }, [null]]) {
+    const { page: p } = await bootWith(t, [live('screen', difficulty(odd, odd))]);
+    assert.doesNotMatch(p.region('checks'), /\[object Object\]|undefined|>null<|NaN/, JSON.stringify(odd));
+    assert.equal(p.statusIsError(), false);
+  }
+});
+
+test('the design card is drawn when the design exists: until then the designer is working, and a run that ended before it says no design was accepted', async t => {
+  const attempt = newAttempt({ outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null }, fairness: newFairness({ status: 'pending', stage2: null }) });
+  const phase = (over = {}) => newState({ stage: 'design', running: true, result: null, design: null, attempts: [attempt], ...over });
+  const { page } = await bootWith(t, [phase()]);
+  const d = page.region('design');
+  assert.match(d, /<h2>The designer is working<\/h2><\/div><span class="pill violet">Attempt 1<\/span>/);
+  assert.match(d, /<p class="pl-designer-working">The designer is working\./);
+  assert.match(d, /Reference documents used: 2 files/, 'what the designer reads is known');
+  assert.doesNotMatch(d, /The designer added no new file|No existing world file was edited|Edited world files|Not given|No trap has been recorded|Line changes|<h2>The traps<\/h2>/, 'nothing the designer has not written is stated');
+  /* a design the companion has sent: the card is the usual one */
+  const { page: has } = await bootWith(t, [newState()]);
+  assert.match(has.region('design'), /<h2>The traps<\/h2>/);
+  assert.doesNotMatch(has.region('design'), /The designer is working|pl-designer-working/);
+  /* the run ended with attempts and no design */
+  const { page: ended } = await bootWith(t, [phase({ stage: 'failed', running: false, summary: 'x', result: { verdict: 'failed', message: 'x', validation: 'incomplete' } })]);
+  assert.match(ended.region('design'), /<h2>No design was accepted<\/h2>/);
+  assert.match(ended.region('design'), /The run ended before a design had passed the checks that come before the pilots\./);
+  assert.doesNotMatch(ended.region('design'), /The designer is working/);
+  /* a run that ended with no attempt at all has no design card */
+  const { page: none } = await bootWith(t, [phase({ stage: 'failed', running: false, attempts: [], summary: 'x' })]);
+  assert.equal(none.region('design'), '');
+  /* not yet at the design: no card */
+  const { page: early } = await bootWith(t, [phase({ stage: 'classify', attempts: [], classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } })]);
+  assert.equal(early.region('design'), '');
+  /* between designs of a redesign the earlier design stays: its card is not replaced by the shell */
+  const { page: redesign } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [newAttempt({ n: 1, outcome: 'screen-failed', screen: explainedStage('screen', [[0.7, null], [0.3, null]], false), test: null })] })]);
+  assert.match(redesign.region('design'), /<h2>The traps<\/h2>/);
+});
+
+test('the reference files and their sizes are read under whichever name the companion uses: names or files, bytes or size', async t => {
+  const { adapt } = makeAdapter();
+  const files = [{ name: 'Atlas_Review_Handbook.md', bytes: 12, sha256: 'a'.repeat(64) }, { name: 'Meridian_Workflow_Catalog.pdf', size: 20, hash: 'b'.repeat(64) }];
+  const fromFiles = adapt(newState({ references: { source: 'default', found: 2, files, size: 32, unscanned: [], partial: [], truncated: false } }));
+  assert.deepEqual(plain(fromFiles.references.names), ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf']);
+  assert.equal(fromFiles.references.bytes, 32, 'size when there is no bytes');
+  const fromNames = adapt(newState({ references: { source: 'default', found: 2, names: ['A.md', 'B.pdf'], files, bytes: 7, unscanned: [], partial: [], truncated: false } }));
+  assert.deepEqual(plain(fromNames.references.names), ['A.md', 'B.pdf'], 'names first');
+  assert.equal(fromNames.references.bytes, 7);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, names: HID, files: HID } })).references.names), HID);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, files: HID } })).references.names), HID);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, names: 'x', files: 5 } })).references.names), []);
+  const { page } = await bootWith(t, [newState({ references: { source: 'default', found: 2, files, size: 32, unscanned: [], partial: [], truncated: false } })]);
+  assert.match(page.region('design'), /Reference documents used: 2 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\./);
+  /* the default folder in the start form */
+  const cfg = { ...V2, references: { default: { exists: true, found: 2, files, size: 32, problems: 0 } } };
+  const { page: form } = await bootWith(t, [], { config: cfg });
+  assert.ok(formOf(form).includes('Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf).'));
+  const hid = { ...V2, references: { default: { exists: true, found: 2, files: HID, problems: 0 } } };
+  const { page: w } = await bootWith(t, [], { config: hid });
+  assert.ok(formOf(w).includes('found in the default folder (' + MARKER + ').'));
+});
+
+test('the list of hits of an application check (hitList, after the round) gives the lines; the count (hits) is used only when there is no list', async t => {
+  const list = [{ id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt' }, { id: 'u1', kind: 'unreadable', document: 'Old_Ledger.xls' }, { id: 'u2', kind: 'notice', document: 'Meridian_Notice.pdf' }, { id: 'more', kind: 'more', document: '' }];
+  const app = over => failedApplication({ hits: 4, unscanned: ['Old_Ledger.xls'], cut: [], ...over });
+  const { page } = await bootWith(t, [reviewState({ application: app({ hitList: list }) })]);
+  const c = page.region('checks');
+  assert.match(c, /1 place in the files mentions a change of a document\./, 'one passage, not the four hits of every kind');
+  assert.doesNotMatch(c, /4 places/);
+  assert.ok(c.includes('<li class="pl-hit-unreadable"><strong>Old_Ledger.xls</strong>: This file could not be read as text'));
+  assert.ok(c.includes('<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>Meridian_Notice.pdf</strong>'));
+  assert.ok(c.includes('<li class="pl-hit-more">More passages were found than are shown here.</li>'));
+  /* no list: the count, as before */
+  const { page: count } = await bootWith(t, [reviewState({ application: app({}) })]);
+  assert.match(count.region('checks'), /4 places in the files mention a change of a document\./);
+  assert.doesNotMatch(count.region('checks'), /pl-hit-notice|pl-hit-more|pl-hit-unreadable/);
+  /* a list that is withheld, or is not a list, is no list */
+  for (const odd of [{ withheld: true }, 'x', 5, null, {}]) {
+    const { page: p } = await bootWith(t, [reviewState({ application: app({ hitList: odd }) })]);
+    assert.match(p.region('checks'), /4 places in the files mention a change of a document\./, JSON.stringify(odd));
+    assert.doesNotMatch(p.region('checks'), /\[object Object\]|undefined|>null<|NaN/);
+  }
+  /* an entry that is not an object is dropped, and a kind the page does not know is a passage */
+  const { page: odd } = await bootWith(t, [reviewState({ application: app({ hitList: [null, 'x', { id: 'q', kind: 'surprise', document: 'A.txt' }], hits: 3 }) })]);
+  assert.match(odd.region('checks'), /1 place in the files mentions a change of a document\./);
 });
 
 test('the page against the real companion: a folder is imported, classified, designed, screened and tested, and the page shows what the orchestrator really reports', { skip: HAS_BACKEND ? false : 'backend/pipeline is not there yet' }, async t => {

@@ -189,6 +189,8 @@ async function makeWorld(t, options = {}) {
     FINANCE_STUB_SCENARIO: JSON.stringify({ rules, default: options.defaultScenario || {} }),
     FINANCE_STUB_PROMPT_LOG: promptLog,
     FINANCE_STUB_ARGV_LOG: argvLog,
+    /* more variables for the companion's environment; a function sees the folders of the world */
+    ...(typeof options.env === 'function' ? options.env({ root, base, tmpRoot, source }) : options.env || {}),
   };
   const limits = options.limits || { timeoutMs: 60000, killGraceMs: 300, drainMs: 100 };
   const spawns = [];
@@ -2241,8 +2243,8 @@ test('the text of a spreadsheet, a document and a slide file is read without run
   put(dir, 'c.txt', 'plain text\n');
   put(dir, 'd.pdf', '%PDF');
   put(dir, 'e.xlsx', 'not a zip');
-  assert.equal(await extractText(path.join(dir, 'a.docx')), 'First &amp; second\nTab\there\n'.replace('&amp;amp;', '&amp;'));
-  assert.equal(await extractText(path.join(dir, 'b.xlsx')), 'Label Value\nCash 1250');
+  assert.equal(await extractText(path.join(dir, 'a.docx')), 'First &amp; second\nTab\there');
+  assert.equal(await extractText(path.join(dir, 'b.xlsx')), 'Label\tValue\nCash\t1250', 'the cells of a row in columns, a tab between two');
   assert.equal(await extractText(path.join(dir, 'c.txt')), 'plain text\n');
   assert.equal(await extractText(path.join(dir, 'd.pdf')), null);
   assert.equal(await extractText(path.join(dir, 'e.xlsx')), null, 'a damaged zip has no text and is not an error');
@@ -3938,7 +3940,7 @@ test('the service asks for the bands when it starts: a valid override is used, a
    A new task is built from the world files. The invented fixtures below (Atlas, Meridian) stand for a design the stub designer delivers; the
    reviews, the answer set and the adjudications are tool-less runs of the stub, each keyed by the folder it runs in. */
 
-const NEW_TERMS = n => `Atlas facility terms, synthetic, attempt ${n}. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01.\n`;
+const NEW_TERMS = n => `Atlas facility terms, synthetic, attempt ${n}. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\n`;
 const NEW_SUMMARY = n => `Meridian lender summary, synthetic, attempt ${n}. The available facility of 3,050 is shown as a cash line. Draw decision date 2025-04-15.\n`;
 const NEW_TRAP = { id: 't1', title: 'Lender summary overstates cash', mechanism: 'MECH-SECRET-1 the summary shows the available facility as cash', files: ['Meridian_Lender_Summary.txt', 'Cash_Facts.csv'], decoy: 'DECOY-SECRET-1 available facility', correctValue: 'CORRECT-SECRET-1,250', wrongValue: 'WRONG-SECRET-3,050' };
 const CLAUSE = 'Available credit is not cash received.';
@@ -3978,14 +3980,16 @@ function designFilesNew(n, over = {}) {
   return files;
 }
 
-const jsonScenario = (value, extra = {}) => ({ resultText: typeof value === 'string' ? value : JSON.stringify(value), costUsd: 0.01, ...extra });
+/* A blind reviewer's answer (it names a governing document) comes with the call that a reader makes: it opens a file of the packet. */
+const readsPacket = (names = ['Facility_Terms.txt']) => names.map(name => ({ name: 'Read', input: { file_path: `{{cwd}}/filesystem/${name}` }, result: FACILITY }));
+const jsonScenario = (value, extra = {}) => ({ resultText: typeof value === 'string' ? value : JSON.stringify(value), costUsd: 0.01, ...(value && typeof value === 'object' && typeof value.governingDocument === 'string' ? { toolUses: readsPacket() } : {}), ...extra });
 const BLIND = { answer: 'Usable cash is 1,250. Hold the borrowing.', governingDocument: 'Facility_Terms.txt', why: 'The facility terms say available credit is not cash received.', alternative: { answer: '', support: '' } };
 const REVEAL_NONE = { alternative: '', forAlternative: null, againstAlternative: null, objectionClass: 'none', disposition: 'no_alternative', guidelineCovers: true, why: 'No different answer is defensible from the files.' };
 const REVEAL_EXCLUDED = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' }, againstAlternative: { file: 'Facility_Terms.txt', quote: CLAUSE }, objectionClass: 'overlooked_dependency', disposition: 'excluded_by_clause', guidelineCovers: true, why: 'The clause rules the tranches out.' };
 const hitsAddressed = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].map(hit => ({ hit, changesClause: 'no', why: 'The passage does not change the clause.' }));
 const APPLICATION = {
   governs: { answer: 'yes', scope: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, hierarchy: null },
-  inForce: { effectiveDate: '2025-03-01', decisionDate: '2025-04-15', effectiveQuote: { file: 'Facility_Terms.txt', quote: 'Clause 4 was amended on 2025-03-01.' }, decisionQuote: { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' } },
+  inForce: { effectiveDate: '2025-03-01', decisionDate: '2025-04-15', effectiveQuote: { file: 'Facility_Terms.txt', quote: 'These terms take effect on 2025-03-01.' }, decisionQuote: { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' } },
   supersession: hitsAddressed,
   excludes: { answer: 'yes', reasoning: 'The clause says available credit is not cash, so counting it as cash is ruled out.', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } },
 };
@@ -4130,17 +4134,26 @@ test('new mode keepAsWorld: only the owner can hand an answer-like file to the d
   assert.match(view.import.keepAsWorld[0].warning, /looks like an answer/);
 });
 
-test('new mode keepAsWorld: nothing else overrides the withholding rules (another answer-like file, an identical copy of the withheld guideline, a long passage of it)', async t => {
-  const answer = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, 'Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Guidance.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
-  const files = { 'Golden_Parent_Answer.txt': PARENT, 'Rubric_Notes.txt': 'Rubric notes, synthetic.\n', 'Copy_Of_Guidance.txt': `Some notes. ${GUIDELINE} More notes.\n` };
-  const w = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, { name: 'Golden_Parent_Answer.txt', group: 'World files', label: 'Parent' }, { name: 'Rubric_Notes.txt', group: 'World files', label: 'Notes' }, { name: 'Copy_Of_Guidance.txt', group: 'World files', label: 'Notes' }] }), files, rules: [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
-  const { id, view } = await w.runNew({ keepAsWorld: ['Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Guidance.txt'], acceptMissing: true });
+test('new mode keepAsWorld: it hands on an answer-like file and a file that shares a long passage with the old guideline; without it that file is withheld with a warning and the start goes on', async t => {
+  const answer = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, 'Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Notes.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const files = { 'Golden_Parent_Answer.txt': PARENT, 'Rubric_Notes.txt': 'Rubric notes, synthetic.\n', 'Copy_Of_Notes.txt': `Some notes. ${GUIDELINE} More notes.\n` };
+  const w = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, { name: 'Golden_Parent_Answer.txt', group: 'World files', label: 'Parent' }, { name: 'Rubric_Notes.txt', group: 'World files', label: 'Notes' }, { name: 'Copy_Of_Notes.txt', group: 'World files', label: 'Notes' }] }), files, rules: [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.runNew({ keepAsWorld: ['Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Notes.txt'], acceptMissing: true });
   assert.equal(view.stage, 'done', view.message);
   const inputs = designerInputs(w, id);
   assert.equal('task/Golden_Parent_Answer.txt' in inputs, true);
   assert.equal('task/Rubric_Notes.txt' in inputs, true, 'kept by name: the owner said so');
-  assert.equal('task/Copy_Of_Guidance.txt' in inputs, false, 'a file that holds a long passage of the withheld guideline is withheld whatever the owner said');
-  assert.equal(view.classification.withheld.some(item => item.name === 'Copy_Of_Guidance.txt'), true);
+  assert.equal('task/Copy_Of_Notes.txt' in inputs, true, 'a file that shares a passage with the old guideline is the owner\'s to hand on');
+  assert.equal(view.classification.withheld.some(item => item.name === 'Copy_Of_Notes.txt'), false);
+  assert.deepEqual(view.classification.keptAsWorld.filter(item => item.name === 'Copy_Of_Notes.txt').map(item => item.why), ['it holds a long passage of the guideline or the golden answer']);
+  /* without keepAsWorld: the new task has its own guideline, so a governing document that quotes the old one is withheld with a warning, and nothing stops the start */
+  const answerCopy = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, 'Copy_Of_Notes.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const plain = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, { name: 'Copy_Of_Notes.txt', group: 'World files', label: 'Notes' }] }), files: { 'Copy_Of_Notes.txt': files['Copy_Of_Notes.txt'] }, rules: [classifierRule({ answer: answerCopy }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id: plainId, view: plainView } = await plain.runNew();
+  assert.equal(plainView.stage, 'done', plainView.message);
+  assert.equal('task/Copy_Of_Notes.txt' in designerInputs(plain, plainId), false);
+  assert.deepEqual(plainView.classification.warnings.filter(item => item.name === 'Copy_Of_Notes.txt'), [{ name: 'Copy_Of_Notes.txt', why: 'it holds a long passage of the guideline or the golden answer', soft: true }]);
+  assert.equal(plainView.classification.withheld.some(item => item.name === 'Copy_Of_Notes.txt'), true);
 });
 
 test('keepAsWorld, designMode, fairnessSet and referencesDir are checked before anything is created', async t => {
@@ -4789,7 +4802,7 @@ test('the application check: governs, in force (dates compared by the harness an
   failsOnly(v => { v.inForce.decisionDate = '2026-06-30'; }, 'inForce');
   failsOnly(v => { v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }; }, 'inForce');
   failsOnly(v => { v.inForce.decisionQuote = { file: 'Other_Product_Terms.txt', quote: 'Draw decision date 2025-04-15.' }; }, 'inForce');
-  assert.equal(run(v => { v.inForce.effectiveDate = '2025-04-15'; v.inForce.effectiveQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; }).pass, true, 'effective on the decision date is in force when its own quote says so');
+  assert.equal(run(v => { v.inForce.effectiveDate = '2025-04-15'; v.inForce.effectiveQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; }).pass, false, 'the sentence that gives the day of the decision, in another file, says nothing about when the clause takes effect');
   assert.deepEqual([inForce('2025-04-16', '2025-04-15').ok, inForce('2025-04-15', '2025-04-15').ok, inForce('2024-12-31', '2025-01-01').ok], [false, true, true]);
   assert.equal(isoTime('2025-02-29'), null);
   assert.notEqual(isoTime('2024-02-29'), null);
@@ -4803,7 +4816,7 @@ test('the application check: governs, in force (dates compared by the harness an
   /* a packet that says another day than the brief: the brief's day has no quote, so the in-force check cannot be passed on the designer's word */
   assert.equal(run(v => { v.inForce.decisionDate = '2025-04-20'; v.inForce.decisionQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; }, stated('2025-04-20')).pass, false);
   /* an effective date: the quote holds more than one date, and the reported one is the one that takes effect */
-  const two = date => run(v => { v.inForce.effectiveDate = date; v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01.' }; });
+  const two = date => run(v => { v.inForce.effectiveDate = date; v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.' }; });
   assert.equal(two('2025-03-01').pass, true, 'one date, twice');
   const dated = { name: 'Dated_Policy.txt', text: 'Policy header. This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01. It was last reviewed on 2024-05-05.\nThe draw decision is taken on 2027-06-30.\n' };
   const policyCorpus = corpusOf([dated]);
@@ -4819,8 +4832,16 @@ test('the application check: governs, in force (dates compared by the harness an
   assert.equal(policyRun('2020-01-01').checks.inForce, false, 'the date of the policy it replaces is in the same quote, and is not the day this one takes effect');
   assert.equal(policyRun('2024-05-05').checks.inForce, false, 'a date that is not in the quote of the effective date');
   assert.equal(policyRun('2027-03-01', '2024-05-05').checks.inForce, false, 'a decision date that the decision quote does not hold');
-  assert.deepEqual([effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2027-03-01'), effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2020-01-01'), effectiveStated('Draw decision date 2025-04-15.', '2025-04-15'), effectiveStated('Replaces the policy dated 2020-01-01. In force from 2027-03-01.', '2027-03-01'), effectiveStated('Effective 2027-03-01 (reviewed 2024-05-05)', '2024-05-05')], [true, false, true, true, false]);
+  assert.deepEqual([effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2027-03-01'), effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2020-01-01'), effectiveStated('Draw decision date 2025-04-15.', '2025-04-15'), effectiveStated('Replaces the policy dated 2020-01-01. In force from 2027-03-01.', '2027-03-01'), effectiveStated('Effective 2027-03-01 (reviewed 2024-05-05)', '2024-05-05')], [true, false, false, true, false]);
+  /* the cue nearest the date: an earlier "effective" date within the window does not take the place of the one that takes effect */
+  assert.deepEqual([effectiveStated('This policy was effective 2020-01-01, now takes effect on 2025-03-01.', '2025-03-01'), effectiveStated('This policy was effective 2020-01-01, now takes effect on 2025-03-01.', '2020-01-01'),
+    effectiveStated('Version 2 (effective 2020-01-01), version 3 (effective 2025-03-01).', '2025-03-01')], [true, true, true]);
+  /* a period that ends there is not a start, "ineffective" is no cue, and a date with a cue after it is the effective date */
+  assert.deepEqual([effectiveStated('The old policy was in force until 2024-12-31 and the new one takes effect on 2025-01-01.', '2024-12-31'), effectiveStated('Effective through 2024-12-31.', '2024-12-31'), effectiveStated('The notice is ineffective after 2025-01-01.', '2025-01-01'),
+    effectiveStated('2025-03-01 (effective date)', '2025-03-01'), effectiveStated('Dated 2025-03-01.', '2025-03-01')], [false, false, false, true, false]);
   assert.equal(run(v => { v.inForce.effectiveDate = '2025-02-01'; v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'Clause 4 was amended on 2025-03-01.' }; }, stated('2025-04-15')).pass, false);
+  /* the effective date stands in the clause's own document, not in whichever file holds a date */
+  failsOnly(v => { v.inForce.effectiveQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; v.inForce.effectiveDate = '2025-04-15'; }, 'inForce');
   /* not superseded: every hit the harness found must be addressed, and none may change the clause */
   failsOnly(v => { v.supersession = []; }, 'notSuperseded');
   failsOnly(v => { v.supersession = [{ hit: 'h99', changesClause: 'no', why: 'not a hit' }]; }, 'notSuperseded');
@@ -4865,12 +4886,13 @@ test('the supersession scan: wording that replaces the clause is found by the na
   const many = Array.from({ length: 45 }, (_, k) => ({ name: `History_${String(k).padStart(2, '0')}.md`, text: 'History. The Travel Policy was revised in a past year.\n' }));
   const capped = find([policy, ...many]);
   assert.equal(capped.filter(hit => hit.kind === 'passage').length, 40);
-  assert.deepEqual(capped.at(-1), { id: 'more', kind: 'more', document: '', snippet: '5 more passages of supersession wording were found near the clause and are not listed here (the weakest wording is left out)' });
+  assert.deepEqual(capped.filter(hit => hit.kind === 'summary').map(hit => [hit.id, hit.document]), [['s1', 'History_40.md'], ['s2', 'History_41.md'], ['s3', 'History_42.md'], ['s4', 'History_43.md'], ['s5', 'History_44.md']], 'the passages that do not fit are not dropped: one entry for each file that has some');
+  assert.match(capped.at(-1).snippet, /^1 more passage of supersession wording in this file is not listed one by one \(the weakest wording\); the first of them reads: "History\. The Travel Policy was revised in a past year\."$/);
   /* a hit in the clause's own file comes before the others, whatever the order of the files */
   const own = find([...many.slice(0, 3), { name: 'Travel_Policy_2023.md', text: policy.text + 'This policy was amended last year.\n' }]);
   assert.equal(own[0].document, 'Travel_Policy_2023.md');
-  /* a passage must be answered, a 'more' entry cannot be answered (the check does not pass while passages are left out), and a file nobody could read is disclosed:
-     the result names it, and the reviewer is not asked to rule on it */
+  /* a passage must be answered, and so must a summary of the passages that were not listed one by one (the check does not pass until the reviewer has ruled on the
+     file), and a file nobody could read is disclosed: the result names it, and the reviewer is not asked to rule on it */
   const docs = [policy, { name: 'Update_Notice.pdf', text: null }];
   const hits = find(docs);
   const corpus = corpusOf(docs);
@@ -4880,7 +4902,14 @@ test('the supersession scan: wording that replaces the clause is found by the na
   const passages = find([policy, { name: 'Memo_A.txt', text: 'Memo. This note supersedes the Travel Policy for every trip.\n' }]);
   assert.equal(check([], { hits: passages }).failed.includes('notSuperseded'), true, 'a passage that is not answered fails the check');
   assert.equal(check(['h1'], { hits: passages }).failed.includes('notSuperseded'), false);
-  assert.equal(check(['h1', 'h2'], { hits: [...passages, { id: 'more', kind: 'more', document: '', snippet: '2 more passages' }] }).failed.includes('notSuperseded'), true, 'passages left out of the list: the check does not pass');
+  const withSummary = [...passages, { id: 's1', kind: 'summary', document: 'Memo_A.txt', snippet: '2 more passages of supersession wording in this file are not listed one by one' }];
+  assert.equal(check(['h1'], { hits: withSummary }).failed.includes('notSuperseded'), true, 'passages left out of the list: the summary of them is to be answered too');
+  assert.equal(check(['h1', 's1'], { hits: withSummary }).failed.includes('notSuperseded'), false, 'and once it is, the check can pass');
+  /* an entry answered "yes" and "no" is not a "no" */
+  const mixed = supersession => checkApplication(parseApplication(JSON.stringify({ ...APPLICATION, supersession })).value, { corpus, hits: passages, clause });
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'no', why: 'x' }]).failed.includes('notSuperseded'), false);
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'yes', why: 'x' }, { hit: 'h1', changesClause: 'no', why: 'x' }]).failed.includes('notSuperseded'), true, 'yes, then no');
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'no', why: 'x' }, { hit: 'h1', changesClause: 'yes', why: 'x' }]).failed.includes('notSuperseded'), true, 'no, then yes');
   /* a notice that the blind reviewer quoted from a file the harness has no text for is a hit that has to be answered */
   const withNotice = supersessionHits([policy, { name: 'Update_Notice.pdf', text: null }], clause, { notices: [{ file: 'Update_Notice.pdf', quote: 'The Travel Policy 2023 is withdrawn from 1 July.' }] });
   assert.deepEqual(withNotice.map(hit => [hit.id, hit.kind, hit.document]), [['u1', 'notice', 'Update_Notice.pdf']]);
@@ -5423,6 +5452,25 @@ test('adjudication: permitted_alternative, grader_defect, ambiguous and unsuppor
 
 /* the pilot's own record of a failed tool call on a file of its packet */
 const READ_FAILED = { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/filesystem/Cash_Facts.csv' }, result: 'This tool cannot read binary files. The file appears to be a binary .csv file.' }] };
+/* The real runtime marks the result of a call that failed with is_error: true. The tool results of the stub carry no such mark, so a pilot's record is given it, as the
+   pipeline reads it, for the results that say a file could not be read. */
+function failedReadsAreErrors(w) {
+  const original = w.pipeline._toolFailureEvidence.bind(w.pipeline);
+  w.pipeline._toolFailureEvidence = (ctl, ref) => {
+    const [roundId, run] = String(ref).split('#');
+    const file = path.join(w.root, 'private', 'agent-rounds', roundId, 'runs', run, 'transcript.jsonl');
+    try {
+      const lines = fs.readFileSync(file, 'utf8').split('\n').map(line => {
+        if (!line.trim()) return line;
+        const event = JSON.parse(line);
+        for (const block of (event.message && Array.isArray(event.message.content) ? event.message.content : [])) if (block.type === 'tool_result' && /cannot read binary|does not exist/.test(String(block.content))) block.is_error = true;
+        return JSON.stringify(event);
+      });
+      fs.writeFileSync(file, lines.join('\n'));
+    } catch { /* no transcript to mark */ }
+    return original(ctl, ref);
+  };
+}
 
 test('adjudication: tool_failure counts only when the pilot\'s own record shows a failed tool call on a file of its packet; the adjudicator\'s word alone makes it an unsupported low', async t => {
   const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [{}, { delayMs: 500 }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
@@ -5439,13 +5487,46 @@ test('adjudication: tool_failure counts only when the pilot\'s own record shows 
   /* the failed call is in the pilot's record, on a file that is in its packet: accepted. A failed call on some other file is not. */
   const elsewhere = { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/filesystem/Missing_File.txt' }, result: 'File does not exist.' }] };
   const other = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [elsewhere, { delayMs: 500 }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  failedReadsAreErrors(other);
   assert.equal((await other.runNew()).view.attempts[0].screen.pilots[0].adjudication.class, 'unsupported');
+});
+
+test('adjudication: the failed call that proves a tool_failure is a result marked as an error, of a Read or a Bash on the exact path of a packet file; a mention of a name, a grep with no match or an output that begins with "Error" proves nothing', async t => {
+  const w = await newWorld(t, { rules: newRules(1, [0.2]) });
+  const dir = path.join(w.root, 'private', 'agent-rounds', 'rnd-test', 'runs', '1');
+  const record = events => put(dir, 'transcript.jsonl', events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  const call = (id, name, input, content, isError) => [
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, ...(isError === undefined ? {} : { is_error: isError }) }] } },
+  ];
+  const ctl = { manifest: [{ name: 'a.md' }, { name: 'Cash_Facts.csv' }, { name: 'notes/Ledger.xlsx' }] };
+  const evidence = events => { record(events.flat()); return w.pipeline._toolFailureEvidence(ctl, 'rnd-test#1'); };
+  const cwd = '/tmp/finance-studio-pilots/rnd-test-1';
+  /* a Read of a packet file that failed: proof, by absolute path, by relative path and for a file in a folder */
+  assert.deepEqual(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'This tool cannot read binary files.', true)]), { file: 'Cash_Facts.csv', error: 'This tool cannot read binary files.' });
+  assert.equal(evidence([call('t1', 'Read', { file_path: 'filesystem/notes/Ledger.xlsx' }, [{ type: 'text', text: 'File content exceeds the limit' }], true)]).file, 'notes/Ledger.xlsx', 'the error as a list of parts');
+  /* the same call that did not fail, or a failed call on a file that is not in the packet, or whose name only ends like one: no proof */
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'Label,Value', false)]), null);
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'Label,Value')]), null, 'no mark, no failure');
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Missing.txt` }, 'File does not exist.', true)]), null);
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/hosts.data.md` }, 'File does not exist.', true)]), null, 'hosts.data.md is not a.md');
+  assert.equal(evidence([call('t1', 'Read', { file_path: '/etc/hosts.data.md' }, 'File does not exist.', true)]), null);
+  /* Bash: a command that names the path and whose error says the file could not be opened; a grep that found nothing, or a failure of another kind, is not one */
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/Cash_Facts.csv' }, 'cat: filesystem/Cash_Facts.csv: Permission denied', true)]).file, 'Cash_Facts.csv');
+  assert.equal(evidence([call('t1', 'Bash', { command: 'grep -n "limit" filesystem/Cash_Facts.csv' }, 'Exit code 1', true)]), null, 'a grep with no match');
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat /etc/hosts.data.md' }, 'cat: /etc/hosts.data.md: No such file or directory', true)]), null);
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/a.md.bak' }, 'cat: filesystem/a.md.bak: No such file or directory', true)]), null, 'a path of another file that starts like one');
+  /* an output that happens to begin with "Error" and is no failure */
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/Cash_Facts.csv' }, 'Error: timeout in row 4', false)]), null);
+  /* a call that failed later in the record is found too, and the first proof is the one returned */
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/a.md` }, 'ok', false), call('t2', 'Read', { file_path: `${cwd}/filesystem/a.md` }, 'Permission denied', true)]).file, 'a.md');
 });
 
 test('adjudication: tool_failure is a missing pilot, not a loss: the stage runs one replacement round', async t => {
   const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [READ_FAILED, { delayMs: 500 }] })];
   /* the replacement pilot (run 1 of the second round) has its own answer, ANS-1-1 again: the first call of the new round is intended */
   const w = await newWorld(t, { rules: [...rules.slice(0, 2), ...rules.slice(2)] });
+  failedReadsAreErrors(w);
   const { view } = await w.runNew();
   const screen = screenOf(view);
   assert.equal(screen.pilots[0].toolFailure, true);
@@ -6071,7 +6152,7 @@ test('the reference guard covers the whole reference folder: text beyond the fir
 
 /* ---- item 4: the permitted alternative, verified ---- */
 
-const PERMITTED_REVEAL = covers => ({ alternative: 'Proceed in two tranches', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: covers, why: 'The terms leave the tranche structure open.' });
+const PERMITTED_REVEAL = covers => ({ alternative: 'Proceed in two tranches', alternativeId: 'alt-1', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: covers, why: 'The terms leave the tranche structure open.' });
 const WITH_ALT = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches with cash cover', support: 'The terms leave the tranche structure open', file: 'answers/alt-1.md' }] });
 const ALT_FILES = [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n' }, { path: 'out/brief.json', content: JSON.stringify(WITH_ALT) }];
 const altGrade = score => ({ cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: [{ resultText: gradeJson(score), costUsd: 0.02 }, { resultText: gradeJson(score), costUsd: 0.02 }] });
@@ -6360,7 +6441,7 @@ test('packetView: the files that carry the rules are served first and in full, t
   const decoy = `Decoy memo, synthetic. ${'Words that mean little. '.repeat(900)}The very last words of the decoy.\n`;
   const documents = [{ name: 'Decoy_Memo.txt', text: decoy }, { name: 'Authority_Terms.txt', text: authority }, { name: 'Evidence_Log.txt', text: evidence }, { name: 'Scan.pdf', text: '' }];
   const brief = { decision: { authorityFile: 'Authority_Terms.txt' }, files: [{ name: 'Evidence_Log.txt', role: 'evidence' }, { name: 'Decoy_Memo.txt', role: 'decoy' }], traps: [{ rule: { file: 'Authority_Terms.txt' } }] };
-  assert.deepEqual(priorityFiles(brief), ['Authority_Terms.txt', 'Evidence_Log.txt', 'Authority_Terms.txt']);
+  assert.deepEqual(priorityFiles(brief), ['Authority_Terms.txt', 'prompt.txt', 'Evidence_Log.txt', 'Authority_Terms.txt'], 'the prompt of the task comes right after the authority file');
   const cap = 12000;
   const view = packetView(documents, cap, priorityFiles(brief));
   const shown = name => view.shown.find(item => item.name === name).text;
@@ -6460,7 +6541,9 @@ test('a revision history that ends with the withdrawal: the passage is listed wh
   const wide = supersessionHits([{ name: 'Travel_Policy_2023.md', text: policy }, { name: 'Notices.txt', text: far(60, 40) }], clause);
   const listed = wide.filter(hit => hit.kind === 'passage');
   assert.equal(listed.reduce((sum, hit) => sum + hit.snippet.length, 0) <= 36000, true);
-  assert.equal(wide.at(-1).kind, 'more');
+  const summary = wide.find(hit => hit.kind === 'summary');
+  assert.equal(summary.document, 'Notices.txt', 'what is left over is put to the reviewer as one entry for the file');
+  assert.equal(listed.filter(hit => hit.document === 'Notices.txt').length + Number(/^(\d+) more passages/.exec(summary.snippet)[1]), 60, 'every passage is either listed or counted in the entry');
   assert.equal(listed.every(hit => hit.snippet.length >= 100), true, 'no listed passage is cut short');
 });
 
@@ -6491,7 +6574,7 @@ test('the supersession scan reads the headings above the clause, the title of it
   const crowded = find(...history, { name: 'Z_Notice.txt', text: 'Notice. The Travel and Expense Policy is withdrawn from today.\n' });
   assert.equal(crowded[0].document, 'Z_Notice.txt', 'the withdrawal is the first passage');
   assert.equal(crowded.filter(hit => hit.kind === 'passage').length, 40);
-  assert.equal(crowded.at(-1).kind, 'more');
+  assert.equal(crowded.filter(hit => hit.kind === 'summary').length, 6, 'the six weakest are counted, one entry for each of their files');
 });
 
 test('the text taken from Office files holds the parts where a status is written: sheet names, comments, text boxes, the watermark of a header, notes and properties; a notice with another extension is read as text', async t => {
@@ -6636,7 +6719,7 @@ test('the figures of a brief are numbers: a blank, a currency sign alone, a list
 });
 
 test('blindDiffers: the same file by another spelling is the same file; a different alternative, another governing file or an answer that states the wrong path is a difference', () => {
-  const { blindDiffers, sameAction, copiesText, reachesCorrect, answerStatesWrongPath } = require('../backend/pipeline/review.cjs');
+  const { blindDiffers, sameAlternative, alternativeProblem, reachesCorrect, answerStatesWrongPath } = require('../backend/pipeline/review.cjs');
   const brief = briefFor(1);
   const blind = over => ({ ...BLIND, ...over });
   for (const name of ['Facility_Terms.txt', 'Facility_Terms', 'in/Facility_Terms.txt', 'Facility Terms.txt', 'Facility_Terms.txt (clause 4)', 'FACILITY_TERMS.TXT, section 4']) assert.equal(blindDiffers(blind({ governingDocument: name }), brief), false, name);
@@ -6652,8 +6735,8 @@ test('blindDiffers: the same file by another spelling is the same file; a differ
   assert.equal(reachesCorrect('Proceed with the borrowing', brief), false);
   assert.equal(reachesCorrect('Say something else', brief), false);
   /* the same action */
-  assert.deepEqual([sameAction('Proceed in two tranches', 'Proceed in two tranches with cash cover'), sameAction('Proceed in two tranches.', 'proceed in two tranches'), sameAction('Delay the draw by thirty days', 'Proceed in two tranches'), sameAction('', 'x')], [true, true, false, false]);
-  assert.deepEqual([copiesText('Usable cash is 1,250. Hold the borrowing.', 'Usable cash is 1,250.  Hold the borrowing'), copiesText('Take two tranches once cash covers the first.', 'Usable cash is 1,250. Hold the borrowing.')], [true, false]);
+  assert.deepEqual([sameAlternative('Proceed in two tranches', 'Proceed in two tranches with cash cover'), sameAlternative('Proceed in two tranches.', 'proceed in two tranches'), sameAlternative('Delay the draw by thirty days', 'Proceed in two tranches'), sameAlternative('', 'x')], [true, true, false, true]);
+  assert.deepEqual([alternativeProblem('Usable cash is 1,250. Hold the borrowing.', 'Usable cash is 1,250.  Hold the borrowing', 'Proceed in two tranches'), alternativeProblem('Take two tranches once cash covers the first.', 'Usable cash is 1,250. Hold the borrowing.', 'Take two tranches')], ['copy', '']);
 });
 
 test('WindowSet: with() adds, without() takes out the windows that a text already holds, and a reference text shared with the packet is left out of the reference windows', () => {
@@ -6732,7 +6815,7 @@ test('a file nobody can read (an old binary Office file, an archive) stops the s
   assert.deepEqual([stage1.state, stage1.unreadable.slice().sort()], ['partial', ['Archive_Pack.zip', 'Old_Ledger.xls']]);
   assert.match(promptRuns(accepted).find(entry => entry.prompt.startsWith('You are a blind reviewer')).prompt, /Nobody could read these files in this review, and you cannot either: [^\n]*Old_Ledger\.xls/);
   assert.match(promptRuns(accepted).find(entry => entry.prompt.startsWith('You are reviewing a finished task design')).prompt, /"unreadable": \[[^\]]*Old_Ledger\.xls/);
-  assert.equal(view.design.notes.some(note => /The blind review could not read these files of the packet: .*Old_Ledger\.xls/.test(note)), true, 'and the owner is told');
+  assert.equal(view.design.notes.some(note => /The blind review could not read these files of the packet in full: .*Old_Ledger\.xls/.test(note)), true, 'and the owner is told');
 });
 
 test('a file the designer adds must be one the reviewers can read: a binary new file is refused through the repair turn', async t => {
@@ -6796,7 +6879,10 @@ test('a permitted alternative is tied to the answer that was graded: a graded an
   assert.deepEqual(view.attempts[0].answerSet.answers.map(item => [item.name, item.passed]), [['golden', true], ['alt-1', true], ['alt-2', true]]);
   /* the answer written for the alternative is the golden answer under another name */
   const copy = flow(reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-2.md', content: goldenText }, { path: 'out/brief.json', content: JSON.stringify(withB) }] }));
-  await rejectedThenPassed(t, copy, /The answer written for the permitted alternative is a copy of the golden answer/);
+  const copied = await newWorld(t, { rules: copy });
+  const { view: copyView } = await copied.runNew();
+  assert.equal(copyView.attempts[0].outcome, 'rejected');
+  assert.deepEqual([copyView.attempts[0].rejection.kind, copyView.attempts[0].rejection.reasons[0]], ['design', 'The answer of a permitted alternative is a copy of the golden answer'], 'the files of the design are read again after the repair, and a copy is refused there');
   /* the alternative was declared before, the repair left its answer alone and the guideline too */
   const same = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/answers/alt-1.md': ALT_B_TEXT.replace('ALT-2', 'ALT-1') }, brief: { permittedAlternatives: [{ ...ALT_B, file: 'answers/alt-1.md' }] } }, extra: [altRule('ALT-1', 0.9)], reveal: jsonScenario(PERMITTED_REVEAL(false)), repairs: { alternative: { writeFiles: [{ path: 'out/prompt.txt', content: 'Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1 again\n' }], resultText: 'repaired', costUsd: 0.02 } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
   await rejectedThenPassed(t, same, /The repair did not write the answer for the permitted alternative/);
@@ -7120,11 +7206,22 @@ test('REDACTION: the real redactor over a whole new-mode state withholds the ref
   assert.deepEqual(redacted.references.names, { withheld: true });
   assert.deepEqual(redacted.references.files, { withheld: true });
   assert.deepEqual(redactPipelineData({ references: { names: ['A.txt'], files: [], unscanned: ['B.docx'], partial: ['B.docx'], found: 2 } }).references.partial, { withheld: true });
+  /* a list that is empty has nothing to hide: it stays an empty list (the page does not say that something is withheld) */
+  const none = redactPipelineData({ references: { names: [], files: [], unscanned: [], partial: [], truncated: false }, config: { references: { default: { problemList: [], problems: 0 } } } });
+  assert.deepEqual([none.references.names, none.references.files, none.references.unscanned, none.references.partial, none.config.references.default.problemList], [[], [], [], [], []]);
   assert.deepEqual(redactPipelineData(list).config.references.default.problemList, { withheld: true });
   assert.equal(typeof redactPipelineData(list).config.references.default.problems, 'number');
   assert.deepEqual(redacted.attempts[0].freeze.map(record => record.answers), [{ withheld: true }], 'the freeze record before the pilots');
-  assert.deepEqual(redacted.ledger.filter(entry => /^(as|diag)-/.test(view.ledger[redacted.ledger.indexOf(entry)].ref)).every(entry => entry.ref && entry.ref.withheld === true), true);
-  assert.equal(redacted.ledger.filter(entry => entry.kind === 'review-repair').every(entry => entry.ref.withheld === true), true);
+  /* the ledger: the calls of the reviews and the repairs (a second reveal, a repair turn, the grades of the answer set) are one entry of kind review-work with their summed cost */
+  const hiddenKinds = ['blind-review', 'reveal', 'application', 'adjudication', 'review-repair', 'guideline-repair'];
+  const isHidden = entry => hiddenKinds.includes(entry.kind) || /^(?:as|diag)-/.test(String(entry.ref));
+  assert.equal(view.ledger.filter(isHidden).length > 3, true, 'the control: the real ledger has many such calls');
+  assert.equal(redacted.ledger.some(isHidden), false);
+  const work = redacted.ledger.filter(entry => entry.kind === 'review-work');
+  assert.equal(work.length, 1);
+  assert.deepEqual([work[0].ref, work[0].stage], [{ withheld: true }, 'design']);
+  assert.equal(Math.abs(work[0].costUsd - view.ledger.filter(isHidden).reduce((sum, entry) => sum + entry.costUsd, 0)) < 1e-9, true, 'with the cost of all of them');
+  assert.equal(redacted.ledger.length, view.ledger.length - view.ledger.filter(isHidden).length + 1);
   assert.equal(redacted.ledger.filter(entry => entry.kind === 'pilot').every(entry => typeof entry.ref === 'string'), true, 'the references of the pilots stay');
   /* what stays: the hashes of the freeze records and the validation */
   assert.deepEqual(redacted.attempts[0].freeze.map(record => [record.packetSha256, record.guidelineSha256, record.goldenSha256, record.answerSetSha256]), view.attempts[0].freeze.map(record => [record.packetSha256, record.guidelineSha256, record.goldenSha256, record.answerSetSha256]));
@@ -7192,7 +7289,7 @@ test('an isolated run with tools never has more than the reader\'s three, whatev
   fs.writeFileSync(path.join(reviewer, 'prompt.txt'), 'x');
   fs.writeFileSync(path.join(reviewer, 'filesystem', 'A.txt'), 'File, synthetic.\n');
   const ready = await service._prepareBlindFolder(reviewer, [{ name: 'A.txt' }], () => false);
-  assert.deepEqual(ready, { renderings: [], unreadable: [], partial: [] });
+  assert.deepEqual(ready, { renderings: [], unreadable: [], partial: [], native: [] });
   fs.writeFileSync(path.join(reviewer, 'guideline.md'), 'a leftover of the designer');
   await assert.rejects(service._prepareBlindFolder(reviewer, [{ name: 'A.txt' }], () => false), error => error.constructor.name === 'SafetyError' && /holds something that is not the packet/.test(error.message) && /guideline\.md/.test(error.detail));
 });
@@ -7239,4 +7336,693 @@ test('the windows of the withheld material are one WindowSet: a text is checked 
   /* the same answers as the list gives, on a small case */
   const small = leakWindows('The withheld sentence, long enough to be a window of its own, and then some more words to make a second one.');
   for (const text of ['A file that says: the withheld sentence, long enough to be a window of its own, and then some more words', 'A file with nothing of it.']) assert.equal(containsLeak(text, new WindowSet(small)), containsLeak(text, small));
+});
+
+/* ====================================================================== round 3: reading the packet */
+
+const utf8Bytes = text => new TextEncoder().encode(text);
+const zipFile = (dir, rel, parts) => put(dir, rel, Buffer.from(packageEngine.writeZip(Object.entries(parts).map(([name, text]) => ({ name, bytes: utf8Bytes(text) })))));
+const scratchDir = t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-round3-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+
+test('extract: a text file is read by its byte order mark (UTF-8, UTF-16 in either order) or as Windows-1252 when it is not UTF-8, a colour code is taken out, and bytes that are no text give none and are never called clean', async t => {
+  const { extractText, extractDetailed, textHoldsWindows, scanFile } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const sentence = 'The guideline says that the committee approves every draw above 2,400 before the treasurer signs it.';
+  put(dir, 'le.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(sentence, 'utf16le')]));
+  put(dir, 'be.txt', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(sentence, 'utf16le').swap16()]));
+  put(dir, 'bom8.txt', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(sentence)]));
+  put(dir, 'plain.txt', sentence);
+  put(dir, 'cp1252.text', Buffer.from('Caf\u00e9 notice: the d\u00e9p\u00f4t is closed. '.repeat(30), 'latin1'));
+  put(dir, 'ansi.text', '\u001b[31mRED\u001b[0m notice that the policy is withdrawn\u000b\n');
+  put(dir, 'nul.txt', Buffer.from([0x41, 0, 0x42, 0, 0, 0x43]));
+  put(dir, 'nul', Buffer.from([0x41, 0x00, 0x42]));
+  put(dir, 'utf32.txt', Buffer.from([0xff, 0xfe, 0, 0, 0x41, 0, 0, 0]));
+  for (const name of ['le.txt', 'be.txt', 'bom8.txt']) assert.equal(await extractText(path.join(dir, name)), sentence, name);
+  assert.equal((await extractText(path.join(dir, 'cp1252.text'))).startsWith('Caf\u00e9 notice: the d\u00e9p\u00f4t is closed.'), true, 'an 8-bit file keeps its accents');
+  const ansi = await extractText(path.join(dir, 'ansi.text'));
+  assert.equal(ansi.includes('RED notice that the policy is withdrawn') && !ansi.includes('\u001b'), true, 'a text with colour codes is a text');
+  for (const name of ['nul.txt', 'nul', 'utf32.txt']) assert.equal(await extractText(path.join(dir, name)), null, name);
+  /* the leak scan reads the same way, and a file it cannot read as text is not clean */
+  const windows = leakWindows(sentence);
+  for (const name of ['le.txt', 'be.txt', 'bom8.txt', 'plain.txt']) assert.equal(await textHoldsWindows(path.join(dir, name), windows), true, name);
+  for (const name of ['nul.txt', 'utf32.txt']) assert.equal(await textHoldsWindows(path.join(dir, name), windows), null, `${name}: not text, so neither clean nor leaking`);
+  assert.deepEqual(await scanFile(path.join(dir, 'be.txt'), windows), { leak: true, binary: false });
+  assert.equal((await scanFile(path.join(dir, 'nul.txt'), windows)).binary, true);
+  /* a large UTF-16 file: the passage is found past the first chunk, and the text is cut and said to be partial */
+  const filler = Buffer.from('filler words about nothing in particular. '.repeat(40000), 'utf16le');
+  put(dir, 'big.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), filler, Buffer.from(sentence, 'utf16le'), filler]));
+  assert.equal(await textHoldsWindows(path.join(dir, 'big.txt'), windows), true);
+  const cut = await extractDetailed(path.join(dir, 'big.txt'), { maxChars: 1000 });
+  assert.deepEqual([cut.text.length, cut.partial], [1000, true]);
+  assert.equal((await extractDetailed(path.join(dir, 'plain.txt'))).partial, false);
+});
+
+test('extract: a Word file is shown as the file says it, a tracked deletion as deleted, a comment, a header and a footer labelled and the parts in order; the insertion beside a deletion does not run into it', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'tracked.docx', {
+    'word/comments.xml': '<w:comments><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Do not use this clause; legal says the limit is 50.</w:t></w:r></w:p></w:comment></w:comments>',
+    'word/header2.xml': '<w:hdr><w:p><w:r><w:t>Header two</w:t></w:r></w:p></w:hdr>',
+    'word/header10.xml': '<w:hdr><w:p><w:r><w:t>Header ten</w:t></w:r></w:p></w:hdr>',
+    'word/header1.xml': '<w:hdr><w:p><w:r><w:t>DRAFT - SUPERSEDED</w:t></w:r></w:p></w:hdr>',
+    'word/footer1.xml': '<w:ftr><w:p><w:r><w:t>Page 1</w:t></w:r><w:r><w:instrText> PAGE </w:instrText></w:r></w:p></w:ftr>',
+    'word/document.xml': '<w:document><w:body><w:p><w:r><w:t xml:space="preserve">Policy 7. The daily meal limit is </w:t></w:r><w:del w:id="1"><w:r><w:delText>USD 60</w:delText></w:r></w:del><w:ins w:id="2"><w:r><w:t>USD 75</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> per traveller.</w:t></w:r></w:p><w:p><w:del w:id="3"><w:r><w:delText>Clause 9. Approvals are never required.</w:delText></w:r></w:del></w:p><w:p><w:r><w:t>End of policy.</w:t></w:r><w:r><w:tab/><w:t>Signed</w:t></w:r></w:p><mc:AlternateContent><mc:Choice><w:p><w:r><w:t>Box text</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Box text</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>',
+    'docProps/custom.xml': '<Properties><property name="Status"><vt:lpwstr>Draft</vt:lpwstr></property></Properties>',
+  });
+  const text = await extractText(path.join(dir, 'tracked.docx'));
+  assert.equal(text, [
+    'Policy 7. The daily meal limit is [deleted: USD 60] USD 75 per traveller.',
+    '[deleted: Clause 9. Approvals are never required.]',
+    'End of policy. Signed',
+    'Box text',
+    '',
+    '[header: DRAFT - SUPERSEDED]',
+    '',
+    '[header: Header two]',
+    '',
+    '[header: Header ten]',
+    '',
+    '[footer: Page 1]',
+    '',
+    '[comment: Do not use this clause; legal says the limit is 50.]',
+    '',
+    'Status: Draft',
+  ].join('\n'));
+  assert.equal(text.includes('USD 60USD 75'), false);
+  assert.equal(text.indexOf('Policy 7.') < text.indexOf('[comment:'), true, 'the body first, then the headers and the comments');
+});
+
+test('extract: a workbook shows each sheet under its name, its cells in columns with the empty ones kept, dates as dates and a formula with no stored value as the formula, and says it is only partial then; a sheet name, a hidden sheet and a comment are there', async t => {
+  const { extractText, extractDetailed, readerKind } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'two.xlsx', {
+    'xl/workbook.xml': '<workbook><workbookPr/><sheets><sheet name="2023 limits (SUPERSEDED)" sheetId="1" r:id="rId1"/><sheet name="2026 limits" sheetId="2" r:id="rId2"/><sheet name="Hid" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet10.xml"/><Relationship Id="rId3" Target="/xl/worksheets/sheet2.xml"/></Relationships>',
+    'xl/sharedStrings.xml': '<sst><si><t>Daily meal limit</t></si><si><t>Lodging</t></si></sst>',
+    'xl/styles.xml': '<styleSheet><numFmts><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/></cellXfs></styleSheet>',
+    'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1"><v>60</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c><c r="C2"><v>180</v></c></row></sheetData></worksheet>',
+    'xl/worksheets/sheet10.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>75</v></c><c r="D1" s="1"><v>46204</v></c></row><row r="2"><c r="A2"><f>SUM(B1:B1)</f></c><c r="B2" s="2"><v>45000.5</v></c></row></sheetData></worksheet>',
+    'xl/worksheets/sheet2.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>hidden note</t></is></c></row></sheetData></worksheet>',
+    'xl/comments1.xml': '<comments><commentList><comment ref="B1"><text><r><t>Check with legal before use</t></r></text></comment></commentList></comments>',
+  });
+  const book = await extractDetailed(path.join(dir, 'two.xlsx'));
+  assert.equal(book.text, [
+    'Sheet: 2023 limits (SUPERSEDED)', 'Daily meal limit\t\t60', 'Lodging\t\t180', '',
+    'Sheet: 2026 limits', 'Daily meal limit\t75\t\t2026-07-01', '[formula: SUM(B1:B1)]\t2023-03-15 12:00', '',
+    'Sheet: Hid (hidden)', 'hidden note', '',
+    '[1 formula of this workbook had no stored value and is shown as the formula]', '',
+    '[comment: Check with legal before use]',
+  ].join('\n'));
+  assert.equal(book.partial, true, 'a formula that has no stored value makes the rendering partial');
+  /* only formulas: not blank, not unreadable, but partial */
+  zipFile(dir, 'formulas.xlsx', { 'xl/workbook.xml': '<workbook><sheets><sheet name="Calc" sheetId="1" r:id="rId1"/></sheets></workbook>', 'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>', 'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1"><f>1+2</f></c><c r="B1"><f t="shared" si="0"/></c></row></sheetData></worksheet>' });
+  const formulas = await extractDetailed(path.join(dir, 'formulas.xlsx'));
+  assert.deepEqual([formulas.text.split('\n')[0], formulas.text.split('\n')[1], formulas.partial, readerKind('formulas.xlsx', formulas.text)], ['Sheet: Calc', '[formula: 1+2]\t[formula: shared formula]', true, 'rendered']);
+  assert.equal((await extractDetailed(path.join(dir, 'missing.xlsx'))).text, null);
+  /* a workbook with no names to give shows its rows alone, and a sheet the rows of which have no values shows only its name */
+  assert.equal(await extractText(put(dir, 'plain.xlsx', xlsxFile([['Label', 'Value'], ['Cash', 1250]]))), 'Label\tValue\nCash\t1250');
+});
+
+test('extract: RTF keeps the dashes, quotes, cells and rows a word processor writes for them, the text of a header, a comment and a tracked deletion (labelled), the characters of the code page and of Unicode, and leaves the pictures and the tables of fonts out', () => {
+  const { rtfText } = require('../backend/pipeline/extract.cjs');
+  assert.equal(rtfText('{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}Daily limit USD 60\\endash 75 per traveller.\\par don\\rquote t \\lquote x\\rquote  \\emdash end\\par}'), 'Daily limit USD 60\u201375 per traveller.\ndon\u2019t \u2018x\u2019 \u2014end');
+  assert.equal(rtfText('{\\rtf1 USD\\~60 and\\_ 75 per\\-day.\\par Item\\cell 60\\cell\\row Lodging\\cell 180\\cell\\row}'), 'USD 60 and- 75 perday.\nItem\t60\nLodging\t180');
+  assert.equal(rtfText('{\\rtf1{\\header DRAFT - WITHDRAWN}Body text here.{\\deleted old 60}{ new 75}\\par caf\\\'e9 \\u8364? \\u233? and \\\'93quoted\\\'94\\par}'), '[header: DRAFT - WITHDRAWN] Body text here.[deleted: old 60] new 75\ncaf\u00e9 \u20ac \u00e9 and \u201cquoted\u201d');
+  assert.equal(rtfText('{\\rtf1 {\\*\\annotation {\\*\\atnauthor Z}Do not use}Para one\\\nPara two}'), '[comment: Do not use] Para one\nPara two');
+  assert.equal(rtfText('{\\rtf1 {\\pict\\pngblip 89504e47}{\\*\\generator Word}Policy 7: the daily meal limit is 60 per traveller.\\par}'), 'Policy 7: the daily meal limit is 60 per traveller.');
+  assert.equal(rtfText('{\\rtf1\\uc2 a\\u233?? b\\par}'), 'a\u00e9 b');
+});
+
+test('extract: slides come in order (slide 2 before slide 10) with the notes, comments and a master that says something; OpenDocument files keep their tabs, line breaks, sheet names, tracked deletions without the author and date, and notes', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'deck.pptx', {
+    'ppt/slides/slide1.xml': '<p:sld><a:p><a:r><a:t>Slide 1</a:t></a:r></a:p></p:sld>',
+    'ppt/slides/slide10.xml': '<p:sld><a:p><a:r><a:t>Slide 10</a:t></a:r></a:p></p:sld>',
+    'ppt/slides/slide2.xml': '<p:sld><a:p><a:r><a:t>Daily meal limit</a:t></a:r><a:br/><a:r><a:t>USD 60</a:t></a:r></a:p></p:sld>',
+    'ppt/notesSlides/notesSlide2.xml': '<p:notes><a:p><a:r><a:t>speaker note</a:t></a:r></a:p></p:notes>',
+    'ppt/slideMasters/slideMaster1.xml': '<p:sldMaster><a:p><a:r><a:t>MASTER: SUPERSEDED by 2026 deck</a:t></a:r></a:p><a:p><a:r><a:t>Click to edit Master title style</a:t></a:r></a:p></p:sldMaster>',
+    'ppt/comments/modernComment_1.xml': '<p188:cmLst><p188:cm><p188:txBody><a:p><a:r><a:t>modern comment text</a:t></a:r></a:p></p188:txBody></p188:cm></p188:cmLst>',
+  });
+  assert.equal(await extractText(path.join(dir, 'deck.pptx')), 'Slide 1\n\nDaily meal limit\nUSD 60\n\nSlide 10\n\n[notes: speaker note]\n\n[comment: modern comment text]\n\n[master: MASTER: SUPERSEDED by 2026 deck]');
+  zipFile(dir, 't.odt', { 'content.xml': '<office:document-content><office:body><office:text><text:tracked-changes><text:changed-region><text:deletion><office:change-info><dc:creator>Alice</dc:creator><dc:date>2026-01-02T10:00:00</dc:date></office:change-info><text:p>Clause 9. Approvals are never required.</text:p></text:deletion></text:changed-region></text:tracked-changes><text:p>Item<text:tab/>60<text:line-break/>Next line<text:s text:c="2"/>end</text:p><text:p>Body<text:note><text:note-body><text:p>A footnote.</text:p></text:note-body></text:note></text:p></office:text></office:body></office:document-content>' });
+  assert.equal(await extractText(path.join(dir, 't.odt')), '[deleted: Clause 9. Approvals are never required.] Item 60\nNext line end\nBody[footnote: A footnote.]');
+  zipFile(dir, 't.ods', { 'content.xml': '<office:document-content><office:body><office:spreadsheet><table:table table:name="Old limits"><table:table-row><table:table-cell office:value-type="string"><text:p>Meal limit</text:p></table:table-cell><table:table-cell/><table:table-cell office:value="60"><text:p>60</text:p></table:table-cell></table:table-row></table:table><table:table table:name="New limits"><table:table-row><table:table-cell><text:p>Meal limit</text:p></table:table-cell><table:table-cell><text:p>75</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>' });
+  assert.equal(await extractText(path.join(dir, 't.ods')), 'Sheet: Old limits\nMeal limit\t\t60\n\nSheet: New limits\nMeal limit\t75');
+});
+
+test('extract: a hostile part cannot hold the process (a long run of "<", of unclosed tags or rows takes about as long as a clean part of its size), and a part is read to a limit', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const timed = async file => { const started = Date.now(); const text = await extractText(file); return { text, ms: Date.now() - started }; };
+  zipFile(dir, 'lt.docx', { 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>Real text.</w:t></w:r></w:p>${'<'.repeat(400000)}</w:body></w:document>` });
+  zipFile(dir, 'tp.docx', { 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>Real text.</w:t></w:r></w:p>${'<v:textpath '.repeat(100000)}</w:body></w:document>` });
+  zipFile(dir, 'rows.xlsx', { 'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${'<row r="1">'.repeat(100000)}</sheetData></worksheet>` });
+  zipFile(dir, 'deep.docx', { 'word/document.xml': `<w:document>${'<w:p>'.repeat(100000)}<w:t>x</w:t>${'</w:q>'.repeat(100000)}</w:document>` });
+  for (const name of ['lt.docx', 'tp.docx', 'rows.xlsx', 'deep.docx']) {
+    const { ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000, true, `${name}: ${ms} ms`);
+  }
+  assert.equal((await extractText(path.join(dir, 'lt.docx'))).startsWith('Real text.'), true);
+  /* a nest of labelled regions (a tracked deletion in a tracked deletion, a hundred thousand deep) is as cheap as a flat run */
+  zipFile(dir, 'nest.docx', { 'word/document.xml': `<w:document>${'<w:del>'.repeat(100000)}<w:delText>deep</w:delText>${'</w:del>'.repeat(100000)}<w:p><w:r><w:t>After.</w:t></w:r></w:p></w:document>` });
+  put(dir, 'nest.rtf', `{\\rtf1 ${'{\\deleted '.repeat(60000)}deep${'}'.repeat(60000)} After.}`);
+  /* and so is a long run of small ones: a redline with thirty thousand deletions */
+  zipFile(dir, 'many.docx', { 'word/document.xml': `<w:document><w:body>${'<w:p><w:r><w:t>Ordinary text of the policy.</w:t></w:r><w:del><w:r><w:delText>old</w:delText></w:r></w:del></w:p>'.repeat(30000)}</w:body></w:document>` });
+  put(dir, 'many.rtf', `{\\rtf1 ${'Ordinary text of the policy.{\\deleted old}\\par '.repeat(30000)}}`);
+  for (const name of ['many.docx', 'many.rtf']) {
+    const { text, ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000 && text.includes('[deleted: old]'), true, `${name}: ${ms} ms`);
+  }
+  for (const name of ['nest.docx', 'nest.rtf']) {
+    const { text, ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000 && text.includes('[deleted: deep]') && text.includes('After.'), true, `${name}: ${ms} ms, ${JSON.stringify(String(text).slice(0, 80))}`);
+  }
+  /* a text file that is not UTF-8 and has accents on more than one character in a hundred is still a text */
+  put(dir, 'accents.eml', Buffer.from('Subject: Avis\nLe d\u00e9p\u00f4t est ferm\u00e9, \u00e0 compter de la date indiqu\u00e9e. Cette notice est annul\u00e9e.\n'.repeat(5), 'latin1'));
+  assert.equal((await extractText(path.join(dir, 'accents.eml'))).includes('annul\u00e9e'), true);
+});
+
+test('quotes: a line break of a hard-wrapped file is not a sentence boundary, a heading, a list item, a table row and a blank line are; a quote that stops at a decimal point or in the middle of a number or a word is not a whole sentence', () => {
+  const { buildCorpus, findQuote } = require('../backend/pipeline/quotes.cjs');
+  const strict = { strict: true };
+  const find = (text, quote, name = 'F.txt') => findQuote(quote, buildCorpus([{ name, text }]), undefined, strict);
+  const wrapped = 'The employee may not\nclaim travel without approval.\nTaxis are not\nreimbursed under any circumstances.\n';
+  assert.equal(find(wrapped, 'claim travel without approval.'), '', 'a tail that drops the negation on the line before');
+  assert.equal(find(wrapped, 'The employee may not claim travel without approval.'), 'F.txt');
+  assert.equal(find(wrapped, 'reimbursed under any circumstances.'), '');
+  assert.equal(find('The employee may claim travel\nunless the trip is personal.\n', 'The employee may claim travel'), '', 'a quote that stops at a wrapped line end');
+  /* a unit that ended: a heading, a list, a row, a paragraph, a CSV line */
+  assert.equal(find('Daily Meal Limit\nThe limit is USD 60 per day.\n', 'The limit is USD 60 per day.'), 'F.txt', 'under a heading');
+  assert.equal(find('Intro words.\n\nNotice is required here\nand also elsewhere.\n', 'Notice is required here'), '', 'the line ends in the middle of a sentence');
+  assert.equal(find('Intro words\n\nNotice is required before use\n\nOther words here.', 'Notice is required before use'), 'F.txt', 'a paragraph of its own');
+  assert.equal(find('Rule,Limit,Notes\nMeals,60,per day per traveller\nLodging,180,per night per traveller\n', 'Meals,60,per day per traveller', 'F.csv'), 'F.csv', 'a line of a CSV file');
+  /* what follows the quote in the file decides */
+  assert.equal(find('The daily meal limit is 60.50 per day.', 'The daily meal limit is 60.'), '', 'a decimal point is no end of sentence');
+  assert.equal(find('Usable cash is 1,250.75 after fees and holds.', 'Usable cash is 1,250.'), '');
+  assert.equal(find('Draws are made in U.S. dollars only, per the schedule.', 'Draws are made in U.S.'), '', 'an abbreviation before a word in lower case');
+  assert.equal(find('Draws are made in dollars. Draws are not made in euros.', 'Draws are made in dollars.'), 'F.txt');
+  assert.equal(find('Notice: "the late fee is waived always." Then he left.', 'the late fee is waived always.'), 'F.txt', 'a closing quote after the full stop');
+  /* a quote of 40 characters or more is not cut in the middle of a word or a number either */
+  assert.equal(find('The minimum cash reserve for the facility is 1,250,000 dollars at all times.', 'The minimum cash reserve for the facility is 1,250'), '');
+  assert.equal(find('The minimum cash reserve for the facility is 1,250,000 dollars at all times.', 'The minimum cash reserve for the facility is 1,250,000 dollars'), 'F.txt');
+  assert.equal(find('The minimum cash reserve for the facility is 1250 dollars at all times.', 'he minimum cash reserve for the facility is 1250 dollars at all'), '', 'it starts inside a word');
+});
+
+test('packetView: with 90 other files in the packet the priority files are still shown whole, the rest share a fifth of the cap, and the block stays about the size of the cap', () => {
+  const { packetView, priorityFiles } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus, findQuote } = require('../backend/pipeline/quotes.cjs');
+  const rule = 'The late fee is waived whenever the holder gives written notice before the due date.';
+  const authority = `Authority terms, synthetic. ${'Filler sentence about nothing in particular. '.repeat(100)}${rule}\n`;
+  const prompt = `Prompt, synthetic. The decision is taken on 2025-04-15. ${'More prompt words. '.repeat(40)}\n`;
+  const brief = { decision: { authorityFile: 'Authority_Terms.txt' }, files: [], traps: [] };
+  for (const count of [10, 40, 90, 140]) {
+    const ledgers = Array.from({ length: count }, (_, k) => ({ name: `Ledger_${String(k).padStart(3, '0')}.txt`, text: `Ledger ${k}. ${'An entry of the ledger. '.repeat(95)}\n` }));
+    for (const [cap, label] of [[24000, 'adjudication'], [36000, 'reveal'], [44000, 'application']]) {
+      const view = packetView([...ledgers, { name: 'Authority_Terms.txt', text: authority }, { name: 'prompt.txt', text: prompt }], cap, priorityFiles(brief));
+      const shown = name => view.shown.find(item => item.name === name).text;
+      assert.equal(shown('Authority_Terms.txt'), authority, `${count} ledgers, ${label}: the authority file whole`);
+      assert.equal(shown('prompt.txt'), prompt, `${count} ledgers, ${label}: the prompt whole`);
+      assert.equal(findQuote(rule, buildCorpus(view.shown), 'Authority_Terms.txt', { strict: true }), 'Authority_Terms.txt');
+      const total = view.shown.reduce((sum, item) => sum + item.text.length, 0);
+      assert.equal(total <= cap + count * 40, true, `${count} ledgers, ${label}: ${total} characters for a cap of ${cap}`);
+      assert.equal(view.cut.includes('Authority_Terms.txt'), false);
+    }
+  }
+});
+
+/* ---- isolation: the environment of the companion ---- */
+
+test('isolationProblems: a folder is named only as a path (it, or a path below it); a folder that merely starts alike, one that ends alike and a value that holds no path do not name it; an argument is held to the same', () => {
+  const { isolationProblems, namesFolder, environmentProblems } = require('../backend/pipeline/isolation.cjs');
+  const priv = '/home/user/moonch/private';
+  const yes = ['/home/user/moonch/private', '/home/user/moonch/private/', '/home/user/moonch/private/references', '--dir=/home/user/moonch/private/references', '/bin:/home/user/moonch/private/bin:/usr/bin', 'see /home/user/moonch/private for it', '"/home/user/moonch/private/x y"'];
+  const no = ['/home/user/moonch/private-notes', '/home/user/moonch/private-notes/references', '/home/user/moonch/private.bak', '/home/user/moonch/private_old/x', '/x/home/user/moonch/private', '/home/user/moonch/privateer', '/home/user/moonch', '', 'private', '1'];
+  for (const text of yes) assert.equal(namesFolder(text, priv), true, text);
+  for (const text of no) assert.equal(namesFolder(text, priv), false, text);
+  assert.deepEqual(environmentProblems({ OLDPWD: `${priv}/references`, PWD: '/home/user/moonch/private-notes', NOTES: '/home/user/moonch/private.bak', LANG: 'C' }, [priv]), ['OLDPWD']);
+  assert.deepEqual(environmentProblems({ REFS: '/home/user/refs-archive/2024', OTHER: '/home/user/refs/2024' }, ['/home/user/refs']), ['OTHER'], 'the owner\'s reference folder is held to the same boundary');
+  /* in a whole check: a sibling folder in the arguments or the environment is no problem, the folder itself is */
+  const tmpRoot = '/tmp/work';
+  const cwd = '/tmp/work/finance-studio-pipelines/x/runs/review-1';
+  const env = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CONFIG_DIR: `${cwd}/.tmp/claude-config`, TMPDIR: `${cwd}/.tmp`, CLAUDE_CODE_TMPDIR: `${cwd}/.tmp`, PATH: '/usr/bin' };
+  const sound = { args: ISOLATED_ARGS, env, cwd, tmpRoot, projectRoot: '/home/user/moonch', homeDir: '/home/user', forbiddenText: [priv, '/home/user/refs'] };
+  assert.deepEqual(isolationProblems({ ...sound, env: { ...env, OLDPWD: '/home/user/moonch/private-notes', INIT_CWD: '/home/user/refs-archive' }, args: [...ISOLATED_ARGS, '--note', '/home/user/moonch/private-notes/a'] }), []);
+  assert.match(isolationProblems({ ...sound, env: { ...env, OLDPWD: `${priv}/references` } }).join(';'), /the environment variable OLDPWD names a private folder/);
+  assert.match(isolationProblems({ ...sound, args: [...ISOLATED_ARGS, `--note=${priv}/references`] }).join(';'), /an argument of the run names a private folder/);
+});
+
+test('isolation: a companion started from inside the private folder (PWD, OLDPWD and INIT_CWD below it) with a folder named private-notes beside it runs: no run of the pipeline is given those variables, none is refused, and a sibling folder in the environment is no problem', async t => {
+  const spawned = [];
+  const w = await newWorld(t, {
+    rules: permittedFlowRules(), onSpawn: record => spawned.push(record),
+    env: ({ root }) => ({ PWD: path.join(root, 'private', 'references'), OLDPWD: path.join(root, 'private'), INIT_CWD: path.join(root, 'private', 'pipelines'), NOTES_DIR: path.join(root, 'private-notes'), SIBLING: `${path.join(root, 'private')}.bak/x` }),
+  });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const own = spawned.filter(record => /\/runs\/(?:review|reveal|apply|adjudicate|grade|classify)|\/designer$/.test(record.cwd || ''));
+  assert.equal(own.length >= 8, true, `the pipeline's own runs: ${own.length}`);
+  for (const record of own) {
+    assert.equal('OLDPWD' in record.env, false, record.cwd);
+    assert.equal('INIT_CWD' in record.env, false, record.cwd);
+    assert.equal(record.env.PWD, record.cwd, 'PWD is the folder of the run, not the folder the companion was started from');
+    assert.equal(record.env.NOTES_DIR, path.join(w.root, 'private-notes'), 'a sibling folder stays in the environment');
+    assert.equal(record.env.SIBLING, `${path.join(w.root, 'private')}.bak/x`);
+    /* the reviews run in the temporary root and are held to every exclusion; the classifier, the designer and the graders run in the private folder itself */
+    if (/\/runs\/(?:review|reveal|apply|adjudicate)-/.test(record.cwd)) assert.deepEqual(isolationProblems({ args: record.args, env: record.env, cwd: record.cwd, tmpRoot: w.tmpRoot, projectRoot: w.root, homeDir: os.homedir(), forbiddenText: [path.join(w.root, 'private')] }), [], record.cwd);
+  }
+  /* a variable that does name the private folder is found at the start, before the classifier is paid for, and the message names the variable and not its value */
+  const named = [];
+  const bad = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), onSpawn: record => named.push(record), env: ({ root }) => ({ MY_REFS: path.join(root, 'private', 'references') }) });
+  const stopped = await bad.runNew();
+  assert.equal(stopped.view.stage, 'failed');
+  assert.match(stopped.view.message, /names a private folder \(MY_REFS\)/);
+  assert.equal(stopped.view.message.includes(bad.root), false, 'no path in the message');
+  assert.deepEqual([stopped.view.spentUsd, named.length, stopped.view.ledger.length], [0, 0, 0], 'nothing was paid for and nothing was started');
+  /* the folder the owner names for the references is held to the same boundary */
+  const refs = path.join(w.base, 'my-references');
+  const sibling = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), env: ({ base }) => ({ ARCHIVE: path.join(base, 'my-references-old') }) });
+  fs.mkdirSync(path.join(sibling.base, 'my-references'), { recursive: true });
+  put(path.join(sibling.base, 'my-references'), 'Draw_Review_Notes.md', REF_NOTE);
+  assert.equal((await sibling.runNew({ referencesDir: path.join(sibling.base, 'my-references') })).view.stage, 'done');
+  void refs;
+});
+
+/* ---- reading the packet at classification ---- */
+
+test('a world file saved as UTF-16 that holds the old guideline is found like its UTF-8 copy, a file that cannot be read as text is listed as not scanned and never as clean, and an RTF file is read by its text', async t => {
+  const utf16 = text => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+  const notes = `Some notes. ${GUIDELINE} More notes.\n`;
+  const rtf = `{\\rtf1\\ansi Some {\\b notes}. ${GUIDELINE.slice(0, 60)}{\\i ${GUIDELINE.slice(60)}} More notes.\\par}`;
+  const files = { 'Reviewer_Notes_Q3.txt': utf16(notes), 'Reviewer_Notes_Q4.txt': notes, 'Reviewer_Notes_Q5.txt': Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(notes, 'utf16le').swap16()]), 'Reviewer_Notes_Q6.rtf': rtf, 'Binary_Ledger_Q7.txt': Buffer.from([0x41, 0, 0x42, 0, 0xff, 0, 0x01]), 'Clean_Notes_Q8.txt': utf16('Nothing of the guideline here, only an ordinary note about the quarter.\n') };
+  const names = Object.keys(files);
+  const answer = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, ...names], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const w = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, ...names.map(name => ({ name, group: 'World files', label: 'Notes' }))] }), files, rules: [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const withheld = view.classification.withheld.filter(item => item.why === 'it holds a long passage of the guideline or the golden answer').map(item => item.name).sort();
+  assert.deepEqual(withheld, ['Reviewer_Notes_Q3.txt', 'Reviewer_Notes_Q4.txt', 'Reviewer_Notes_Q5.txt', 'Reviewer_Notes_Q6.rtf'], 'UTF-16 in either order, UTF-8 and RTF alike');
+  assert.deepEqual(view.classification.unscanned, ['Binary_Ledger_Q7.txt'], 'a file with a NUL byte that is no UTF-16 text is not scanned, and is not called clean');
+  const inputs = designerInputs(w, id);
+  for (const name of ['Reviewer_Notes_Q3.txt', 'Reviewer_Notes_Q5.txt', 'Reviewer_Notes_Q6.rtf']) assert.equal(`task/${name}` in inputs, false, name);
+  assert.equal(Buffer.from(inputs['task/Clean_Notes_Q8.txt'] || '', 'utf8').length > 0, true, 'a UTF-16 note without a passage of it goes on');
+});
+
+test('the windows of a withheld file are made of its text whatever its kind (an RTF file, a notice saved as .eml), and a new file of the designer that copies a passage of one, or of the designer\'s own golden answer through formatting runs in an RTF file, is refused', async t => {
+  const sentence = 'Parent reconciliation, synthetic: the borrower closes the quarter with usable cash of 900 and the lender confirms it in writing on the closing date.';
+  const parentRtf = `{\\rtf1\\ansi Parent reconciliation, {\\b synthetic}: the borrower closes the quarter with usable cash of {\\i 900} and the lender confirms it in writing on the closing date.\\par}`;
+  const cases = [
+    { label: 'a passage of a withheld RTF file', world: { 'Golden_Parent_Answer.rtf': parentRtf }, files: { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${sentence}\n` } },
+    { label: 'a passage of a withheld notice saved as .eml', world: { 'Golden_Parent_Answer.eml': `Subject: parent\n\n${sentence}\n` }, files: { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${sentence}\n` } },
+    { label: 'the golden answer of the designer through bold runs of an RTF file', world: {}, files: { 'out/new/Lender_Letter.rtf': '{\\rtf1 Usable cash is {\\b 1,250} and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK}' }, newFiles: ['Meridian_Lender_Summary.txt', 'Lender_Letter.rtf'] },
+    { label: 'the golden answer of the designer in a UTF-16 text file', world: {}, files: { 'out/new/Lender_Notes.txt': { base64: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\n', 'utf16le')]).toString('base64') } }, newFiles: ['Meridian_Lender_Summary.txt', 'Lender_Notes.txt'] },
+  ];
+  for (const { label, world, files, newFiles } of cases) {
+    const answer = { ...NEW_CLASSIFIER, worldFiles: [...WORLD_NAMES, ...Object.keys(world)] };
+    const rules = [classifierRule({ answer }), ...newAttemptRules(1, [0.2], { design: { files, trapsExtra: newFiles ? { newFiles } : {} }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const w = await newWorld(t, { files: world, rules });
+    const { view } = await w.runNew({ acceptMissing: true });
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    assert.equal(view.attempts[0].outcome, 'rejected', label);
+    assert.equal(view.attempts[0].rejection.kind, 'design', label);
+    assert.equal(view.attempts[0].rejection.reasons.some(reason => /holds a long passage of the guideline or the golden answer/.test(reason)), true, `${label}: ${JSON.stringify(view.attempts[0].rejection)}`);
+  }
+});
+
+/* ---- the blind review: what the reader did, and what the harness could write for it ---- */
+
+test('the blind review is "ok" only when the reader\'s own record shows it opened the packet: no Read, Glob or Grep on it makes the review partial, and so does a PDF or a picture that it did not open', async t => {
+  const PDF = 'Scan_Pages.pdf';
+  const files = { [PDF]: '%PDF-1.4 synthetic binary \u0000\u0001\u0002 no text layer here' };
+  const run = async (toolUses, label) => {
+    const w = await newWorld(t, { files, rules: [classifierFor([PDF]), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { toolUses }) })] });
+    const { view } = await w.runNew();
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    return view;
+  };
+  const read = name => ({ name: 'Read', input: { file_path: `{{cwd}}/filesystem/${name}` }, result: 'x' });
+  const ok = await run([read('Facility_Terms.txt'), read(PDF)], 'both opened');
+  const stage1 = view => view.attempts[0].fairness.stage1;
+  assert.deepEqual([stage1(ok).state, stage1(ok).read, stage1(ok).unopened], ['ok', true, []]);
+  assert.equal(ok.design.notes.some(note => /blind review/.test(note)), false);
+  /* the text was read, the PDF was not: partial, the file is named, and so is the note for the owner */
+  const skipped = await run([read('Facility_Terms.txt')], 'the PDF not opened');
+  assert.deepEqual([stage1(skipped).state, stage1(skipped).read, stage1(skipped).unopened], ['partial', true, [PDF]]);
+  assert.equal(skipped.attempts[0].outcome, 'passed', 'disclosed, not a failure');
+  assert.equal(skipped.design.notes.some(note => /did not open this PDF or picture: Scan_Pages\.pdf/.test(note)), true);
+  /* a reader that opened no file at all */
+  const none = await run([], 'nothing opened');
+  assert.deepEqual([stage1(none).state, stage1(none).read, stage1(none).unopened], ['partial', false, [PDF]]);
+  assert.equal(none.design.notes.some(note => /opened no file of the packet/.test(note)), true);
+  /* nothing to open but text files, and the reader opened none: partial for that alone */
+  const nothing = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { toolUses: [] }) }) });
+  const nothingView = (await nothing.runNew()).view;
+  assert.deepEqual([nothingView.attempts[0].fairness.stage1.state, nothingView.attempts[0].fairness.stage1.read, nothingView.attempts[0].fairness.stage1.unopened], ['partial', false, []]);
+  /* a Grep of the packet is a look at it; a Read of a file outside it is not */
+  const grep = await run([{ name: 'Grep', input: { pattern: 'cash', path: '{{cwd}}/filesystem' }, result: 'x' }, read(PDF)], 'a grep');
+  assert.deepEqual([stage1(grep).state, stage1(grep).read], ['ok', true]);
+  const elsewhere = await run([{ name: 'Read', input: { file_path: '{{cwd}}/prompt.txt' }, result: 'x' }], 'only the prompt');
+  assert.equal(stage1(elsewhere).read, false, 'the prompt is not the packet');
+  /* the reader names a governing document that is no file of the packet */
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario({ ...BLIND, governingDocument: 'The Atlas Facility Agreement, section 4' }) }) });
+  const named = (await w.runNew()).view;
+  assert.deepEqual([named.attempts[0].fairness.stage1.state, named.attempts[0].fairness.stage1.governingFound], ['partial', false]);
+});
+
+test('the renderings of the blind folder: a name too long for a file name, or one that would need a file to be a folder, gets a name of its own; a file that fails is listed as unreadable and a rendering that is not the whole file is partial', async t => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const folder = scratchDir(t);
+  const docx = text => ({ 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>` });
+  const longName = `${'a'.repeat(247)}.docx`;
+  zipFile(folder, `filesystem/${longName}`, docx('Long name text.'));
+  zipFile(folder, 'filesystem/x.docx', docx('Plain name text.'));
+  zipFile(folder, 'filesystem/x.docx.txt/inner.docx', docx('Inner text.'));
+  put(folder, 'filesystem/broken.docx', 'not a zip file at all');
+  put(folder, 'filesystem/scan.pdf', '%PDF-1.4');
+  put(folder, 'filesystem/old.xls', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0, 0]));
+  zipFile(folder, 'filesystem/formulas.xlsx', { 'xl/workbook.xml': '<workbook><sheets><sheet name="Calc" sheetId="1" r:id="rId1"/></sheets></workbook>', 'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>', 'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1"><f>1+2</f></c></row></sheetData></worksheet>' });
+  put(folder, 'prompt.txt', 'x');
+  /* a rendering that cannot be written (a folder stands where its file goes): that file is listed, and the others are made */
+  zipFile(folder, 'filesystem/blocked.docx', docx('Blocked text.'));
+  fs.mkdirSync(path.join(folder, 'text-renderings', 'blocked.docx.txt'), { recursive: true });
+  const names = [longName, 'x.docx', 'x.docx.txt/inner.docx', 'broken.docx', 'scan.pdf', 'old.xls', 'formulas.xlsx', 'blocked.docx'];
+  const ready = await service._prepareBlindFolder(folder, names.map(name => ({ name })), () => false);
+  assert.deepEqual(ready.unreadable, ['broken.docx', 'old.xls', 'blocked.docx'], 'a damaged file, an old binary one and one that could not be written: named, and the review goes on');
+  assert.deepEqual(ready.native, ['scan.pdf']);
+  assert.deepEqual(ready.partial, ['formulas.xlsx'], 'only the formulas of the workbook are there');
+  assert.deepEqual(ready.renderings.map(item => item.file), [longName, 'x.docx', 'x.docx.txt/inner.docx', 'formulas.xlsx']);
+  const texts = ready.renderings.map(item => fs.readFileSync(path.join(folder, ...item.rendering.split('/')), 'utf8'));
+  assert.deepEqual(texts.map(text => /Long name text|Plain name text|Inner text|\[formula: 1\+2\]/.exec(text)[0]), ['Long name text', 'Plain name text', 'Inner text', '[formula: 1+2]']);
+  for (const item of ready.renderings) for (const part of item.rendering.split('/')) assert.equal(Buffer.byteLength(part) <= 200, true, `${part.length} characters`);
+  assert.equal(new Set(ready.renderings.map(item => item.rendering.toLowerCase())).size, 4, 'four different paths');
+  assert.equal(ready.renderings[1].rendering, 'text-renderings/x.docx.txt', 'an ordinary name keeps its own');
+  assert.deepEqual(fs.readdirSync(folder).sort(), ['.tmp', 'filesystem', 'prompt.txt', 'text-renderings'].filter(name => fs.existsSync(path.join(folder, name))).sort());
+});
+
+test('a fault of the harness in the blind review or in the reveal is not "an internal error" after the designer was paid: the try is lost once, and then the attempt is rejected as incomplete with a plain reason and the next attempt goes on', async t => {
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2]), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  let calls = 0;
+  const original = w.pipeline._prepareBlindFolder.bind(w.pipeline);
+  w.pipeline._prepareBlindFolder = async (...args) => { calls++; if (calls <= 2) throw new TypeError('boom in the blind folder'); return original(...args); };
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.deepEqual([first.outcome, first.validation, first.fairness.status, first.fairness.stage1.state, first.rejection.kind], ['rejected', 'incomplete', 'incomplete', 'incomplete', 'check']);
+  assert.deepEqual(first.rejection.reasons, ['A check of the design could not be carried out (the blind review)']);
+  assert.equal(JSON.stringify(view).includes('boom'), false, 'the fault is in the private log, not in the state');
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'error.log'), 'utf8'), /TypeError: boom in the blind folder/);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  assert.equal(view.result.validation, 'complete');
+  /* the first try lost and the second one fine: the review is made */
+  const once = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  let seen = 0;
+  const keep = once.pipeline._prepareBlindFolder.bind(once.pipeline);
+  once.pipeline._prepareBlindFolder = async (...args) => { seen++; if (seen === 1) throw new RangeError('once'); return keep(...args); };
+  const done = (await once.runNew()).view;
+  assert.deepEqual([done.stage, done.attempts[0].outcome, done.attempts[0].fairness.stage1.tries], ['done', 'passed', 2]);
+  /* a fault anywhere else on the way (here the reveal) is the same */
+  const reveal = await newWorld(t, { rules });
+  let revealed = 0;
+  const realReveal = reveal.pipeline._revealStage.bind(reveal.pipeline);
+  reveal.pipeline._revealStage = async (...args) => { revealed++; if (revealed === 1) throw new TypeError('boom in the reveal'); return realReveal(...args); };
+  const { id: revealId, view: revealView } = await reveal.runNew();
+  assert.equal(revealView.stage, 'done', revealView.message);
+  assert.deepEqual([revealView.attempts[0].outcome, revealView.attempts[0].validation, revealView.attempts[0].rejection.reasons], ['rejected', 'incomplete', ['A check of the design could not be carried out']]);
+  assert.match(fs.readFileSync(path.join(reveal.priv(revealId), 'error.log'), 'utf8'), /boom in the reveal/);
+  /* when every attempt is lost this way, the run ends as failed and its result is incomplete: nothing passed */
+  const lost = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2]), ...newAttemptRules(2, [0.2]), ...newAttemptRules(3, [0.2]), ...newAttemptRules(4, [0.2])] });
+  lost.pipeline._revealStage = async () => { throw new TypeError('always'); };
+  const final = (await lost.runNew()).view;
+  assert.deepEqual([final.stage, final.result.verdict, final.result.validation], ['failed', 'failed', 'incomplete']);
+  assert.equal(final.message.includes('internal error'), false);
+});
+
+/* ---- permitted alternatives: which one is meant, and whether its answer is its own ---- */
+
+test('permitted alternatives: two statements of an action are the same when their figures, units and first verbs agree; a different amount, unit, direction or negation is another alternative, and a paraphrase is the same', () => {
+  const { sameAlternative, tiedAlternative } = require('../backend/pipeline/review.cjs');
+  const same = [
+    ['Release the money in two stages, the second only once funded cash covers it', 'Proceed in two tranches with cash cover'],
+    ['Pay 4,500', 'Pay 4500'], ['Pay $4,500 now', 'Pay USD 4,500 now'],
+    ['Postpone the draw by thirty days', 'Delay the draw by 30 days'],
+    ['Pay 4,500 in two tranches', 'Pay 4,500 in two tranches of 2,250 each'],
+    ['Defer 4.5k of the draw', 'Defer 4,500 of the draw'],
+    ['Reject the full draw now', 'Decline the draw in full'],
+    ['Hold the borrowing and tell the lender', 'Do hold the borrowing'],
+  ];
+  const different = [
+    ['Delay the draw by sixty days', 'Delay the draw by thirty days'],
+    ['Defer 2,400 of the draw', 'Defer 1,200 of the draw'],
+    ['Reject the full draw now', 'Approve the full draw now'],
+    ['Do not proceed in two tranches', 'Proceed in two tranches'],
+    ['Delay by 30 days', 'Delay by 30 weeks'],
+    ['Proceed in two tranches', 'Proceed in one tranche'],
+    ['Delay the draw by two hundred and fifty days', 'Delay the draw by 250 weeks'],
+    ['Delay the draw by thirty days', 'Proceed in two tranches'],
+  ];
+  for (const [a, b] of same) assert.equal(sameAlternative(a, b) && sameAlternative(b, a), true, `${a} / ${b}`);
+  for (const [a, b] of different) assert.equal(sameAlternative(a, b) || sameAlternative(b, a), false, `${a} / ${b}`);
+  assert.equal(sameAlternative('', 'Delay the draw'), true, 'nothing to compare says nothing against it');
+  /* tied: the reviewer names the declared alternative by its id, and the two are held to each other; the first of two similar ones is not taken for the second */
+  const declared = [{ id: 'alt-1', name: 'alt-1', answer: 'Delay the draw by thirty days' }, { id: 'alt-2', name: 'alt-2', answer: 'Delay the draw by sixty days' }];
+  const parsed = (alternative, alternativeId) => ({ alternative, alternativeId });
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', 'alt-1')).name, 'alt-1');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 60 days', 'ALT-2')).name, 'alt-2');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 60 days', 'alt-1')), null, 'the id of the other alternative');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', '')), null, 'no id');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', 'alt-9')), null, 'an id that nothing has');
+  assert.equal(tiedAlternative(declared, parsed('', 'alt-1'), { alternative: { answer: 'Delay it thirty days' } }).name, 'alt-1', 'with no words of its own, the blind reviewer\'s alternative stands for them');
+  assert.equal(tiedAlternative(declared, parsed('', 'alt-2'), { alternative: { answer: 'Delay it thirty days' } }), null);
+  assert.equal(tiedAlternative(null, parsed('x', 'alt-1')), null);
+});
+
+test('permitted alternatives: an answer is refused as a copy only when it says what the golden answer says, sentence for sentence, or is mostly its sentences without stating the alternative; one that keeps the facts and the calculation and changes the recommendation is its own', () => {
+  const { alternativeProblem } = require('../backend/pipeline/review.cjs');
+  const lines = [
+    'The facility terms say that available credit is not cash received and the draw needs funded cash.',
+    'Opening usable cash is 100 and a confirmed funded draw of 500 brings the funded cash to 600.',
+    'A further funded receipt of 650 is confirmed on the lender statement, so usable cash is 1,250.',
+    'The lender summary shows an available facility of 3,050 as a cash line, which is not cash received.',
+    'The treasury mandate requires sign-off before any borrowing is made against the facility.',
+    'The decision date is 2025-04-15 and the terms in force on that date are the amended terms.',
+    'The calculation of usable cash therefore excludes the available facility from the total.',
+    'The evidence of the cash facts file and the executed terms agree on every figure used here.',
+    'No clause lets the borrower count unused credit as cash for the purpose of this review.',
+    'The committee note repeats that only funded cash may be counted toward the liquidity test.',
+    'The result is a liquidity position of 1,250 against the minimum reserve required by the terms.',
+  ];
+  const golden = `${lines.join(' ')} Hold the borrowing until further funded cash is confirmed.`;
+  const own = `${lines.join(' ')} Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.`;
+  assert.equal(alternativeProblem(golden, golden, 'Proceed in two tranches'), 'copy', 'byte for byte');
+  assert.equal(alternativeProblem(golden.toUpperCase().replace(/\./g, '. '), golden, 'Proceed in two tranches'), 'copy', 'case and spacing');
+  assert.equal(alternativeProblem(own, golden, 'Proceed in two tranches'), '', 'the same facts and calculation, its own recommendation');
+  const nearly = `${lines.join(' ')} Hold the borrowing until all the funds are confirmed.`;
+  assert.equal(alternativeProblem(nearly, golden, 'Proceed in two tranches'), 'copy', 'eleven of twelve sentences the golden answer\'s and the twelfth no alternative');
+  assert.equal(alternativeProblem(own, golden, 'Proceed in two tranches with cash cover of 1,250'), '');
+  /* the first five lines under a header and a trailer, the recommendation still the golden answer's: it does not state the alternative */
+  const dressed = `ALTERNATIVE ANSWER\n${lines.slice(0, 5).join(' ')}\nPrepared for the committee.`;
+  assert.equal(alternativeProblem(dressed, golden, 'Proceed in two tranches'), 'action');
+  assert.equal(alternativeProblem(dressed, golden, 'Defer 2,400 of the draw'), 'action', 'its figures are not in it either');
+  assert.equal(alternativeProblem(`${dressed}\nThe borrower should proceed in two tranches.`, golden, 'Proceed in two tranches'), '', 'once it states the alternative');
+  /* an answer of its own, with other sentences, is not compared further */
+  assert.equal(alternativeProblem('Delay the draw by thirty days until the funded cash covers it; hold the borrowing meanwhile.', golden, 'Delay the draw by thirty days'), '');
+});
+
+test('permitted alternatives, end to end: the reviewer\'s id ties the declared alternative to its answer only when the two agree; a paraphrase is settled without a repair, a different amount is not, and a declared answer that is the golden answer is refused at the first reading', async t => {
+  const reportOf = (alternative, alternativeId, over = {}) => ({ ...PERMITTED_REVEAL(true), alternative, alternativeId, ...over });
+  const design = { files: { 'out/answers/alt-1.md': ALT_A_TEXT }, brief: { permittedAlternatives: [ALT_A] } };
+  const flow = (reveal, repairs = { alternative: reviseOnly(1, 'REVISED-ONE') }) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    design, extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), goldenRegrade, altRule('ALT-1', 0.9)], reveal: jsonScenario(reveal), repairs,
+  }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  /* a paraphrase of the declared alternative, named by its id: settled at once */
+  const same = await newWorld(t, { rules: flow(reportOf('Postpone the draw by 30 days', 'alt-1')) });
+  const { view } = await same.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual([view.attempts[0].fairness.repairs, view.attempts[0].fairness.stage2.evaluations, view.attempts[0].outcome], [0, 1, 'passed']);
+  /* the alternative has no words of its own in the reveal: the blind reviewer's alternative is compared instead */
+  const blind = jsonScenario({ ...BLIND, alternative: { answer: 'Delay it thirty days', support: 'The timing is open' } });
+  const viaBlind = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design, blind, extra: [altRule('ALT-1', 0.9)], reveal: jsonScenario(reportOf('', 'alt-1')) })] });
+  assert.equal((await viaBlind.runNew()).view.attempts[0].fairness.repairs, 0);
+  /* a different amount under the declared alternative's id: nothing was written or graded for it, so a repair that writes nothing for it is not enough */
+  await rejectedThenPassed(t, flow(reportOf('Delay the draw by sixty days', 'alt-1')), /The repair wrote an answer for another alternative than the one the review reported/);
+  /* the reviewer names no id: the same words settle nothing by themselves, and the repair is asked for */
+  const noId = await newWorld(t, { rules: flow(reportOf('Postpone the draw by 30 days', '')) });
+  const noIdView = (await noId.runNew()).view;
+  assert.equal(noIdView.attempts[0].fairness.repairs, 1, 'a repair was asked for');
+  /* a declared answer that is the golden answer, word for word, is refused where the design is read: the designer is told, and repairs it */
+  const goldenText = 'Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\n';
+  const copied = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/answers/alt-1.md': goldenText }, brief: { permittedAlternatives: [ALT_A] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const copiedView = (await copied.runNew()).view;
+  assert.equal(copiedView.stage, 'done', copiedView.message);
+  assert.deepEqual([copiedView.attempts[0].repaired, copiedView.attempts[0].outcome, copiedView.attempts[0].rejection.kind, copiedView.attempts[0].rejection.reasons[0]], [true, 'rejected', 'design', 'The answer of a permitted alternative is a copy of the golden answer'], 'refused where the design is read, after the repair turn');
+  assert.equal(copiedView.attempts[1].outcome, 'passed');
+  const repairPrompt = promptRuns(copied).find(run => run.prompt.includes('repair turn for design attempt 1'));
+  assert.match(repairPrompt.prompt, /says what the golden answer says, sentence for sentence/);
+  assert.match(promptRuns(same).find(run => run.prompt.startsWith('You are reviewing a finished task design')).prompt, /<<<DECLARED ALTERNATIVES\nalt-1: Delay the draw by thirty days\nDECLARED ALTERNATIVES>>>/);
+});
+
+/* ---- the supersession scan: what the blind reviewer quoted, and what is put to the reviewer ---- */
+
+test('the supersession scan puts to the reviewer a notice that the blind reviewer quoted from a file that has text, unless a passage already holds the words; words that are not in the file, and a file the harness cannot match, are listed as the reviewer said them', () => {
+  const { supersessionHits } = require('../backend/pipeline/review.cjs');
+  const clause = { file: 'Travel_Policy_2023.md', quote: 'Meals are reimbursed up to the daily limit under Section 4.2.' };
+  const policy = { name: 'Travel_Policy_2023.md', text: 'Travel policy 2023, synthetic. Meals are reimbursed up to the daily limit under Section 4.2.\n' };
+  const memo = { name: 'Memo_A.txt', text: 'Memo. The Travel Policy 2023 applies until 31 December 2024 only. Nothing else changes.\n' };
+  assert.deepEqual(supersessionHits([policy, memo], clause), [], 'the scan\'s own wording does not know "applies until"');
+  const notice = { file: 'Memo_A.txt', quote: 'The Travel Policy 2023 applies until 31 December 2024 only.' };
+  const hits = supersessionHits([policy, memo], clause, { notices: [notice] });
+  assert.deepEqual(hits.map(hit => [hit.id, hit.kind, hit.document]), [['n1', 'notice', 'Memo_A.txt']]);
+  assert.match(hits[0].snippet, /applies until 31 December 2024 only\. Nothing else changes\./, 'with the words around it');
+  assert.equal(hits[0].unreadable, undefined, 'the file has text: it is not one that nobody could read');
+  /* the file named by another spelling is the same file */
+  assert.equal(supersessionHits([policy, memo], clause, { notices: [{ ...notice, file: 'Memo_A' }] }).length, 1);
+  /* words a passage already holds are put once */
+  const replaced = { name: 'Memo_B.txt', text: 'Memo. This note supersedes the Travel Policy for every trip.\n' };
+  const once = supersessionHits([policy, replaced], clause, { notices: [{ file: 'Memo_B.txt', quote: 'This note supersedes the Travel Policy for every trip.' }] });
+  assert.deepEqual(once.map(hit => [hit.id, hit.kind]), [['h1', 'passage']]);
+  /* words that are not in the file are listed as the reviewer said them; a file that is none of the packet's is listed under the name given */
+  const odd = supersessionHits([policy, memo], clause, { notices: [{ file: 'Memo_A.txt', quote: 'The policy ends in June.' }, { file: 'Elsewhere.pdf', quote: 'The policy is withdrawn.' }] });
+  assert.deepEqual(odd.map(hit => [hit.id, hit.kind, hit.document]), [['n1', 'notice', 'Elsewhere.pdf'], ['n2', 'notice', 'Memo_A.txt']], 'the one that says "withdrawn" first');
+  assert.match(odd.find(hit => hit.document === 'Memo_A.txt').snippet, /they are not word for word in the text the harness has\) "The policy ends in June\."/);
+  assert.match(odd.find(hit => hit.document === 'Elsewhere.pdf').snippet, /cannot match to a file of the packet\) "The policy is withdrawn\."/);
+});
+
+test('a notice that the blind reviewer quoted from a file with text reaches the application check, and the check does not pass until the reviewer has answered it', async t => {
+  const notice = { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' };
+  const blind = jsonScenario({ ...BLIND, statusNotices: [notice] });
+  const answered = { ...APPLICATION, supersession: [...hitsAddressed, { hit: 'n1', changesClause: 'no', why: 'The sentence says nothing about the terms being replaced.' }] };
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind, reveal: jsonScenario(REVEAL_EXCLUDED), application: jsonScenario(answered) }) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const application = promptRuns(w).find(run => run.prompt.includes('You are checking whether one quoted clause'));
+  assert.match(application.prompt, /n1 \(Meridian_Lender_Summary\.txt\): .*The available facility of 3,050 is shown as a cash line\./);
+  assert.deepEqual(view.attempts[0].fairness.stage2.application.hitList.filter(hit => hit.kind === 'notice'), [{ id: 'n1', kind: 'notice', document: 'Meridian_Lender_Summary.txt' }]);
+  assert.equal(view.attempts[0].fairness.stage2.application.pass, true);
+  /* the same reviewer, not answering it */
+  const silent = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { blind, reveal: jsonScenario(REVEAL_EXCLUDED), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const silentView = (await silent.runNew()).view;
+  assert.deepEqual(silentView.attempts[0].fairness.stage2.application.failed, ['notSuperseded']);
+});
+
+test('the view: the design is shown while its checks run (checking: true, the brief and the task type, no packet yet), a stage that is under way has difficulty {status: "running"}, and what the application check was shown is listed by id, kind and file', async t => {
+  let atReview = null;
+  let atPilot = null;
+  const w = await newWorld(t, {
+    rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) }),
+    onSpawn: record => {
+      const [entry] = [...w.pipeline.pipelines.values()];
+      if (!entry) return;
+      if (/\/runs\/review-/.test(record.cwd || '') && !atReview) atReview = w.pipeline._view(entry.state);
+      if (/finance-studio-pilots\/rnd-/.test(record.cwd || '') && !atPilot) atPilot = w.pipeline._view(entry.state);
+    },
+  });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(atReview.design.checking, true);
+  assert.deepEqual([atReview.design.attempt, atReview.design.taskType.workflow, atReview.design.brief.decision.authorityFile, atReview.design.packet, atReview.design.gold, atReview.design.alternatives], [1, 'Facility draw review', 'Facility_Terms.txt', null, null, []]);
+  assert.equal(atReview.design.newFiles.map(file => file.name).includes('Meridian_Lender_Summary.txt'), true);
+  assert.equal('checking' in view.design, false, 'the accepted design is not "checking"');
+  assert.equal(view.design.packet.fileCount > 0, true);
+  assert.deepEqual(atPilot.attempts[0].difficulty.screen, { status: 'running' });
+  assert.equal(atPilot.attempts[0].difficulty.test, null, 'the test has not started');
+  assert.equal(typeof view.attempts[0].difficulty.screen.passed, 'boolean');
+  const application = view.attempts[0].fairness.stage2.application;
+  assert.equal(application.hitList.length, application.hits, 'the number and the list agree');
+  assert.equal(application.hitList.length > 0 && application.hitList.every(hit => /^h\d+$/.test(hit.id) && hit.kind === 'passage' && typeof hit.document === 'string' && Object.keys(hit).sort().join() === 'document,id,kind'), true, 'no words of the files in the list');
+  /* a run that ended with its checks under way keeps the design it was checking, no longer "checking" */
+  const stopped = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { hang: true }) }) });
+  const { id } = await stopped.pipeline.start(stopped.body({ designMode: 'new' }));
+  await waitFor(() => stopped.pipeline.get(id).then(item => item.attempts[0] && item.attempts[0].fairness.stage1 && item.attempts[0].fairness.stage1.state === 'running' && item.design && item.design.checking));
+  await stopped.pipeline.stop(id);
+  const ended = await stopped.pipeline.whenDone(id);
+  assert.equal(ended.stage, 'stopped');
+  assert.equal(ended.design.checking, false);
+  assert.equal(ended.attempts[0].fairness.stage1.state, 'incomplete');
+  assert.equal(ended.result.validation, 'incomplete');
+});
+
+test('the answer set: two grades on opposite sides of the threshold and no third grade is a grader that gave nothing, said so, and the attempt is incomplete and not a defect of the guideline', async t => {
+  const garbage = 'the grader said nothing useful';
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.95, 0.5, garbage, garbage])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  const first = view.attempts[0];
+  assert.deepEqual([first.outcome, first.validation, first.fairness.status, first.rejection.kind], ['rejected', 'incomplete', 'incomplete', 'answer-set']);
+  assert.match(first.rejection.reasons[0], /^The simulated grader gave the golden answer two grades on opposite sides of the threshold and no third grade could be obtained, so the guideline could not be checked against it$/);
+  assert.equal(first.rejection.reasons[0].includes('did not reach'), false);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /no third grade could be obtained\. Nothing in your design was judged by this/);
+  assert.equal(graderCallsOf(view, 'as-1-golden'), 4);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  /* and when no grade at all came, the same: not graded */
+  const none = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [garbage, garbage])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const noneView = (await none.runNew()).view;
+  assert.deepEqual([noneView.attempts[0].validation, noneView.attempts[0].rejection.reasons[0]], ['incomplete', 'The simulated grader gave the golden answer no usable score, so the guideline could not be checked against it']);
+  /* a real shortfall is still a defect of the guideline */
+  const low = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.5, 0.5])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const lowView = (await low.runNew()).view;
+  assert.deepEqual([lowView.attempts[0].validation, /did not reach 0\.90/.test(lowView.attempts[0].rejection.reasons[0])], ['failed', true]);
+});
+
+test('redaction: a pilot that was graded again after a guideline repair is not marked as one while a round runs', () => {
+  const { redactPipelineData } = require('../backend/pipeline/redact.cjs');
+  const redacted = redactPipelineData({ attempts: [{ screen: { pilots: [{ id: 'p1', score: 0.2, regraded: true, previous: { score: 0.3 } }, { id: 'p2', score: 0.1, regraded: false }] } }] });
+  assert.deepEqual(redacted.attempts[0].screen.pilots.map(pilot => [pilot.id, pilot.regraded, pilot.previous]), [['p1', { withheld: true }, { withheld: true }], ['p2', { withheld: true }, undefined]]);
+});
+
+test('extract: an RTF file is read past a large picture at its start, and its text is partial only when it was cut; a file that is only a picture has no text', async t => {
+  const { extractText, extractDetailed, readerKindOfFile } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const picture = '89504e470d0a1a0a'.repeat(700000); /* 5.6 million characters of hex */
+  put(dir, 'Memo_Pict.rtf', `{\\rtf1 {\\pict\\pngblip ${picture}}\\par Policy 7: the daily meal limit is 60 per traveller.\\par}`);
+  assert.equal(await extractText(path.join(dir, 'Memo_Pict.rtf')), 'Policy 7: the daily meal limit is 60 per traveller.');
+  assert.equal(await readerKindOfFile(path.join(dir, 'Memo_Pict.rtf'), 'Memo_Pict.rtf'), 'rendered', 'a readable RTF file is not called unreadable because a picture comes first');
+  assert.equal((await extractDetailed(path.join(dir, 'Memo_Pict.rtf'))).partial, false);
+  put(dir, 'Long.rtf', `{\\rtf1 ${'Words of the policy that go on and on. '.repeat(500)}}`);
+  const cut = await extractDetailed(path.join(dir, 'Long.rtf'), { maxChars: 1000 });
+  assert.deepEqual([cut.text.length, cut.partial], [1000, true]);
+  put(dir, 'Only_Pict.rtf', `{\\rtf1 {\\pict\\pngblip 89504e47}}`);
+  assert.equal(await extractText(path.join(dir, 'Only_Pict.rtf')), '');
+  assert.equal(await readerKindOfFile(path.join(dir, 'Only_Pict.rtf'), 'Only_Pict.rtf'), 'unreadable');
+});
+
+test('the reader\'s record is read against the real path of its folder too: a runtime that reports /private/var/... for a folder given as /var/... (a link) is not taken for a reader that opened nothing', t => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const base = scratchDir(t);
+  const real = path.join(base, 'real', 'runs', 'review-1');
+  fs.mkdirSync(path.join(real, 'filesystem'), { recursive: true });
+  fs.symlinkSync(path.join(base, 'real'), path.join(base, 'link'));
+  const given = path.join(base, 'link', 'runs', 'review-1');
+  const events = calls => calls.map((call, index) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${index}`, ...call }] } }));
+  const seen = service._readEvidence(events([{ name: 'Read', input: { file_path: path.join(real, 'filesystem', 'Scan.pdf') } }, { name: 'Read', input: { file_path: 'filesystem/Facility_Terms.txt' } }]), given);
+  assert.deepEqual([seen.looked, [...seen.opened].sort()], [true, ['Facility_Terms.txt', 'Scan.pdf']]);
+  assert.equal(service._readEvidence(events([{ name: 'Read', input: { file_path: '/etc/hostname' } }, { name: 'Read', input: { file_path: path.join(real, 'prompt.txt') } }, { name: 'Bash', input: { command: 'ls filesystem' } }]), given).looked, false, 'a file outside the packet, the prompt and a program are no look at the packet');
+  assert.equal(service._readEvidence(events([{ name: 'Glob', input: { pattern: '**/*.pdf', path: given } }]), given).looked, true);
+  assert.equal(service._readEvidence(events([{ name: 'Grep', input: { pattern: 'x' } }]), given).looked, true, 'a Grep with no path searches the folder');
+  assert.equal(service._readEvidence(null, given).looked, false, 'no record, no evidence');
+});
+
+test('the application check: the effective date stands in the clause\'s own document (or the higher one of a policy and a procedure), whatever other file holds a sentence that says something takes effect', () => {
+  const { checkApplication, parseApplication } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const policy = { name: 'Dated_Policy.txt', text: 'Policy header, synthetic. This policy takes effect on 2027-03-01 and covers every draw.\nThe draw decision is taken on 2027-06-30.\nExcess cash is never counted as usable cash.\n' };
+  const memo = { name: 'Other_Memo.txt', text: 'Other note, synthetic. This note takes effect on 2027-03-01 and covers nothing.\n' };
+  const corpus = buildCorpus([policy, memo]);
+  const clause = { file: 'Dated_Policy.txt', quote: 'Excess cash is never counted as usable cash.' };
+  const run = effectiveFile => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    Object.assign(value.inForce, { effectiveDate: '2027-03-01', decisionDate: '2027-06-30', effectiveQuote: { file: effectiveFile, quote: effectiveFile === 'Dated_Policy.txt' ? 'This policy takes effect on 2027-03-01 and covers every draw.' : 'This note takes effect on 2027-03-01 and covers nothing.' }, decisionQuote: { file: 'Dated_Policy.txt', quote: 'The draw decision is taken on 2027-06-30.' } });
+    value.governs.scope = { file: 'Dated_Policy.txt', quote: 'This policy takes effect on 2027-03-01 and covers every draw.' };
+    value.excludes.quote = { file: 'Dated_Policy.txt', quote: 'Excess cash is never counted as usable cash.' };
+    value.supersession = [];
+    return checkApplication(parseApplication(JSON.stringify(value)).value, { corpus, hits: [], clause, brief: null });
+  };
+  assert.deepEqual([run('Dated_Policy.txt').pass, run('Dated_Policy.txt').checks.inForce], [true, true], 'the control: the clause\'s own document says it');
+  assert.deepEqual([run('Other_Memo.txt').pass, run('Other_Memo.txt').failed], [false, ['inForce']], 'the same sentence in another file says nothing about this clause');
 });

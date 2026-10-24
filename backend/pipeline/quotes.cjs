@@ -17,14 +17,29 @@ function normalizeText(text) {
   return foldTypography(text).replace(/\s+/g, ' ').trim();
 }
 
-/* The same folding, and the places in the folded text where a line of the original began (white space that held a line break): a line is a boundary
-   of a sentence in a list, under a heading or in a table cell, where nothing marks it with a full stop. Resolves { norm, lineStarts: Set of positions }. */
-function normalizeWithLines(text) {
+/* Does a line of text end a unit on its own, so that the next line begins something new? A sentence does (it ends in a full stop, a question or exclamation
+   mark, a colon or a semicolon, with a closing quote or bracket after it); so does a heading (a short line of capitalised words, or a mark of one), an item of a
+   list, and a row of a table. A line that stops in the middle of a sentence because the file was wrapped there does not. */
+const ENDS_SENTENCE_RE = /[.!?:;]["')\]]*$/;
+const MARKED_LINE_RE = /^(?:#{1,6}\s|[-*\u2022]\s|\d{1,3}[.)]\s|\(?[A-Za-z]{1,2}[.)]\s|\|)/;
+function endsUnit(line) {
+  const text = line.trim();
+  if (!text) return true;
+  if (ENDS_SENTENCE_RE.test(text) || MARKED_LINE_RE.test(text) || text.includes('\t') || text.includes('|')) return true;
+  const words = text.split(/\s+/);
+  return text.length <= 70 && words.length <= 10 && !/,$/.test(text) && words.filter(word => /^[A-Z0-9(]/.test(word)).length / words.length >= 0.6;
+}
+
+/* The same folding, and the places in the folded text where a new unit began on a new line: a line break is a boundary of a sentence when the line before it
+   ends one (a full stop, a heading, an item of a list, a row of a table, a blank line between paragraphs, any line of a CSV file), and is not when the file was
+   wrapped in the middle of a sentence. Resolves { norm, lineStarts: Set of positions }. options.everyLine: every line is a unit (a CSV file). */
+function normalizeWithLines(text, options = {}) {
   const s = foldTypography(text);
   let norm = '';
   const lineStarts = new Set();
   const re = /\s+/g;
   let last = 0;
+  let lineBegin = 0;
   let match;
   const push = piece => { norm += piece; };
   while ((match = re.exec(s)) !== null) {
@@ -32,7 +47,12 @@ function normalizeWithLines(text) {
     last = match.index + match[0].length;
     if (norm.length === 0 || last >= s.length) continue; /* leading and trailing white space is dropped */
     push(' ');
-    if (/[\n\r]/.test(match[0])) lineStarts.add(norm.length);
+    const breaks = (match[0].match(/\n/g) || []).length + (match[0].includes('\r') && !match[0].includes('\n') ? 1 : 0);
+    if (breaks > 0) {
+      const line = s.slice(lineBegin, match.index);
+      if (options.everyLine === true || breaks > 1 || endsUnit(line)) lineStarts.add(norm.length);
+      lineBegin = last;
+    }
   }
   push(s.slice(last));
   return { norm, lineStarts };
@@ -40,12 +60,14 @@ function normalizeWithLines(text) {
 
 /* A corpus: [{ name, text }] -> [{ name, norm, lineStarts }] so that many quotes are looked up without normalising again. */
 function buildCorpus(documents) {
-  return documents.filter(item => item && typeof item.text === 'string').map(item => ({ name: item.name, ...normalizeWithLines(item.text) }));
+  return documents.filter(item => item && typeof item.text === 'string').map(item => ({ name: item.name, ...normalizeWithLines(item.text, { everyLine: /\.(?:csv|tsv)$/i.test(String(item.name || '')) }) }));
 }
 
 /* Does the quote, found at `at` in the folded text, start and end as a whole sentence? A sentence starts at the start of the text, after a full stop (or ? ! :
-   ;), at the start of a line, after a list marker, a heading mark or a table bar, and ends with a full stop (also before a closing quote or bracket), at the
-   end of the text, at the end of a line or before a table bar. lineStarts: the positions where a line began (see normalizeWithLines). */
+   ;), at the start of a line that follows a unit that ended (see endsUnit), after a list marker, a heading mark or a table bar, and ends with a full stop (also
+   before a closing quote or bracket) that is followed by the end of the text or by a space and a word that does not start in lower case (so a full stop inside
+   60.50 or before "dollars" in "U.S. dollars" does not end it), at the end of the text, at the end of a line that ends a unit, or before a table bar.
+   lineStarts: the positions where a new unit began on a new line (see normalizeWithLines). */
 const LIST_MARKER_RE = /(?:^|\s)(?:[-*\u2022]|#{1,6}|\d{1,3}[.)]|\(?[A-Za-z]{1,2}[.)]|\|)\s$/;
 function wholeSentence(norm, at, length, lineStarts = null) {
   const lines = lineStarts instanceof Set ? lineStarts : null;
@@ -54,8 +76,23 @@ function wholeSentence(norm, at, length, lineStarts = null) {
   while (start > 0 && '"\'([{'.includes(norm[start - 1])) start--;
   const before = start === 0 || (lines && lines.has(start)) || /[.!?:;]["')\]]* $/.test(norm.slice(Math.max(0, start - 6), start)) || LIST_MARKER_RE.test(norm.slice(Math.max(0, start - 8), start));
   const end = at + length;
-  const after = end >= norm.length || /[.!?]["')\]]*$/.test(norm.slice(at, end)) || (lines && lines.has(end + 1) && norm[end] === ' ') || norm.slice(end, end + 2) === ' |';
-  return before && after;
+  const stops = /[.!?]["')\]]*$/.test(norm.slice(at, end));
+  /* what follows the quote in the file decides, not the last character of the quote */
+  let past = end;
+  while (past < norm.length && '"\')]'.includes(norm[past])) past++; /* a closing quote or bracket right after the full stop belongs to the sentence */
+  const after = end >= norm.length
+    || (stops && (past >= norm.length || (norm[past] === ' ' && !/^ ?[a-z]/.test(norm.slice(past, past + 2)))))
+    || (lines && lines.has(end + 1) && norm[end] === ' ')
+    || norm.slice(end, end + 2) === ' |';
+  return Boolean(before && after);
+}
+
+/* Does the quote, found at `at`, stop in the middle of a word or of a number (1,250 cut from 1,250,000; 60 from 60.50) or start in the middle of a word? */
+function cutsInside(norm, at, length) {
+  const end = at + length;
+  if (at > 0 && /[A-Za-z0-9]/.test(norm[at]) && /[A-Za-z0-9]/.test(norm[at - 1])) return true;
+  if (end < norm.length && /[A-Za-z0-9]/.test(norm[end - 1]) && /[A-Za-z0-9]/.test(norm[end])) return true;
+  return end < norm.length && /[0-9]/.test(norm[end - 1]) && /^[.,]\d/.test(norm.slice(end, end + 2));
 }
 
 /* Is the quote long enough and found in one of the documents? Returns the name of the document, or ''. `name` limits the search to the document of that
@@ -72,7 +109,7 @@ function findQuote(quote, corpus, name, options = {}) {
     if (limited && document.name !== name) continue;
     let at = document.norm.indexOf(wanted);
     while (at >= 0) {
-      if (!strict || wanted.length >= MIN_CLAUSE_QUOTE_CHARS || wholeSentence(document.norm, at, wanted.length, document.lineStarts)) return document.name;
+      if (!strict || (!cutsInside(document.norm, at, wanted.length) && (wanted.length >= MIN_CLAUSE_QUOTE_CHARS || wholeSentence(document.norm, at, wanted.length, document.lineStarts)))) return document.name;
       at = document.norm.indexOf(wanted, at + 1);
     }
   }

@@ -284,7 +284,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await count('#pl-start-form input[type=checkbox]'), 6, 'the four acknowledgements, the withheld-files choice and the diagnostic answers');
     /* the design mode and the fields of the new mode */
     assert.equal(await evaluate('[...document.querySelectorAll("#pl-start-form select[data-pl-in=designMode] option")].map(o=>o.textContent+(o.selected?"*":"")).join("|")'), 'New task from the world files*|Harden the existing task');
-    assert.equal(await text('#pl-refs'), 'Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). The designer and the reviewers read them and their text is sent to Anthropic. Pilots never see them.');
+    assert.equal(await text('#pl-refs'), 'Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). The designer reads them; their text is sent to Anthropic. Pilots never see them.');
     assert.match(await text('#pl-keep-hint'), /^Warning: the pilots get these files, and so does the designer, even if the names look like answers or grading material\./);
     assert.match(await text('.pl-fairness-set'), /^Also run the diagnostic answers \(adds up to USD 3\.00 per attempt\)/);
     await evaluate('(()=>{const s=document.querySelector("#pl-start-form select[data-pl-in=designMode]");s.value="harden";s.dispatchEvent(new Event("change",{bubbles:true}));})()');
@@ -552,7 +552,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
       assert.deepEqual(gone, [], 'nothing of the brief, the golden answer or the paths is on the page while a round runs');
       assert.equal(await text('#pl-brief .pl-withheld'), 'Withheld while a round runs');
       assert.match(await text('#pl-design .pl-task-type'), /^Task type: Withheld while a round runs$/);
-      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Checked for leaked passages only in part: Withheld while a round runs Not checked for leaked passages: Withheld while a round runs/);
+      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Some files were not checked whole for leaked passages: Withheld while a round runs/);
       const leaked = await evaluate('(()=>{const t=document.body.innerText;return ["Atlas_Partial_Reference","Atlas_Rendered_Ledger","Meridian_Hidden_Scan","Meridian_Workflow_Catalog","as-golden","diag-1"].filter(x=>t.includes(x))})()');
       assert.deepEqual(leaked, [], 'the files the leak scan read in part, the files turned into text and the files nobody could read are not on the page');
       assert.match(await text('#pl-classify'), /Borealis_Archive\.bin/, 'the files the reviewers cannot read are not private');
@@ -608,7 +608,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-screen .card-title'), /Screen failed/);
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(2)'), 'Stopped: not needed\nNot graded: the screen was already decided after pilot 1.');
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(3)'), 'Not needed');
-    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Not needed', 'the column of the count toward the pass');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Stopped early: not needed', 'the column of the count toward the pass');
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(5)'), 'Not needed', 'and the audit column');
     assert.equal(await evaluate('document.querySelector("#pl-screen thead th:nth-child(4)").textContent'), 'Counts toward the pass');
     assert.match(await text('#pl-screen tbody tr:nth-child(1) td:nth-child(3)'), /No/);
@@ -678,7 +678,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(fairText, /Application check of the clause that rules the other answer out: passed\./);
     assert.ok(!/Screen|Test|pilot/.test(fairText), 'no pilot result in the fairness list');
     assert.match(diffText, /^Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\./);
-    assert.match(diffText, /Test: not run\.$/);
+    assert.match(diffText, /Test: running\.$/);
     assert.ok(!/review|clause/i.test(diffText), 'no review in the difficulty list');
     assert.equal(await evaluate('document.querySelector("#pl-checks .pl-unstable").checkVisibility()'), true, 'the unstable grade is marked where it can be seen');
     assert.match(await text('#pl-checks .pl-unstable'), /^Unstable: the grades fell on both sides of the line, so a third grade decided\. All grades: 0\.90, 0\.80, 0\.88\.$/);
@@ -852,7 +852,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await waitFor(stageIs('^Import:'), 'the third pipeline', 5000);
     assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 3, 'a third start was posted');
     set({ stage: 'budget', running: false, capUsd: 30, spentUsd: 24.5, references: NEW_REFS, design: null, summary: 'Stopped before the blind review: USD 24.50 spent, and the step could cost up to USD 2.30.', result: { verdict: 'incomplete', message: 'x', validation: 'incomplete' },
-      attempts: [newAttempt({ validation: 'incomplete', outcome: 'budget', fairness: { ...FAIRNESS, status: 'incomplete', stage2: null }, difficulty: { status: 'pending', screen: null, test: null }, screen: null, test: null, freeze: [], calibration: null })] });
+      attempts: [newAttempt({ validation: 'incomplete', outcome: 'budget', fairness: { ...FAIRNESS, status: 'incomplete', stage1: { ...FAIRNESS.stage1, state: 'incomplete' }, stage2: null }, difficulty: { status: 'pending', screen: null, test: null }, screen: null, test: null, freeze: [], calibration: null })] });
     await waitFor(stageIs('^Stopped at the cap'), 'the incomplete result', POLL_WAIT);
     assert.equal(await text('#pl-stage'), 'Stopped at the cap, in the Design step: the next call would pass the total cap, so it was not started.');
     assert.equal(await text('#pl-verdict h2'), 'The checks did not finish');
@@ -861,6 +861,8 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await text('#pl-checks .pl-incomplete'), 'The checks did not finish. Nothing here counts as a pass: a design passes only after every check of it has finished.');
     assert.match(await text('#pl-checks .card-title'), /Checks did not finish/);
     assert.match(await text('#pl-checks .pl-review'), /Second review: not run\./);
+    assert.equal(await text('#pl-checks .pl-blind-incomplete'), 'The blind review did not finish (1 try).', 'a review that was cut off is not shown as running');
+    assert.ok(!/Blind review: running/.test(await text('#pl-checks')));
     assert.match(await text('#pl-checks .pl-difficulty'), /Screen: not run\.\s+Test: not run\./);
     assert.equal(await evaluate('/passed|Passed/.test(document.querySelector("#pl-verdict").innerText.replace("Nothing here counts as a pass","")+document.querySelector("#pl-checks .pl-difficulty").innerText)'), false, 'nothing reads as a pass');
     assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-checks .pl-incomplete")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-checks")).borderLeftColor'), true, 'the notice is marked');
@@ -872,6 +874,64 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('04e-incomplete-390', 390, 844);
     await viewport(1440, 1000);
     pass('a run stopped before its checks finished says so plainly in the checks card and the result, and nothing reads as a pass');
+
+    /* ---------- what the real backend emits: the designer working, the repair stage line, an earlier attempt explained ---------- */
+    {
+      const [, ended] = [...pipelines][0];
+      const saved = JSON.parse(JSON.stringify({ stage: ended.stage, running: ended.running, capUsd: ended.capUsd, spentUsd: ended.spentUsd, references: ended.references, design: ended.design, summary: ended.summary, result: ended.result, attempts: ended.attempts, message: ended.message || '', redesigns: ended.redesigns || 0 }));
+      /* a fourth pipeline: an ended one is not polled, so the page is given a running one */
+      await click('[data-pl=new]');
+      await waitFor('!!document.querySelector("#pl-url")', 'the form to open for the fourth pipeline');
+      await evaluate('document.querySelector("#pl-url").focus()');
+      await call('Input.insertText', { text: TASK_LINK });
+      for (const id of ACK_IDS) await click('#pl-start-form input[data-id="' + id + '"]');
+      await click('[data-pl=start]');
+      await waitFor(stageIs('^Import:'), 'the fourth pipeline', 5000);
+      /* the checks before the pilots: the design is not there yet */
+      const checking = newAttempt({ validation: 'pending', outcome: 'in-progress', screen: null, test: null, freeze: [], calibration: null, difficulty: { status: 'pending', screen: null, test: null }, fairness: { ...FAIRNESS, status: 'pending', stage1: { ...FAIRNESS.stage1, state: 'running' }, stage2: null } });
+      set({ stage: 'design', running: true, result: null, summary: '', design: null, attempts: [checking], message: 'Checking the design' });
+      await waitFor('/The designer is working/.test((document.querySelector("#pl-design")||{}).innerText||"")', 'the designer working', POLL_WAIT);
+      assert.equal(await text('#pl-design h2'), 'The designer is working');
+      assert.match(await text('#pl-design .pl-designer-working'), /^The designer is working\. The traps, the brief and the checks of the design show here once the design has passed every check that comes before the pilots\.$/);
+      assert.equal(await evaluate('["The designer added no new file","No existing world file was edited","Not given","Line changes"].filter(x=>document.querySelector("#pl-design").innerText.includes(x)).length'), 0, 'nothing the designer has not written is stated');
+      assert.match(await text('#pl-checks .pl-review'), /Blind review: running \(1 try\)\./, 'while the run is running, running is true');
+      assert.equal(await text('#pl-checks .pl-difficulty li:nth-child(1)'), 'Screen: not reached yet.');
+      /* the trap designer repairs the guideline: the stage reads screen again, and no pilot runs */
+      const repair = { stage: 'screen', at: new Date().toISOString(), outcome: 'pending', classes: ['grader_defect'], changed: [], reason: '', regrade: null, recounted: null };
+      set({ stage: 'screen', design: newDesign(), message: 'Asking the trap designer to repair the guideline (attempt 1 of 4)', attempts: [newAttempt({ outcome: 'in-progress', screen: explainedStage('screen', [[0.2, 'grader_defect'], [0.3, 'grader_defect']], false), test: null, guidelineRepair: repair })] });
+      await waitFor('/^Screen: Asking the trap designer/.test(document.querySelector("#pl-stage").textContent)', 'the repair stage line', POLL_WAIT);
+      assert.equal(await text('#pl-stage'), 'Screen: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+      assert.equal(await text('#pl-timeline [aria-current=step] small'), 'Repairing the guideline');
+      /* an earlier attempt, explained in a section the owner opens */
+      const earlier = newAttempt({ n: 1, outcome: 'screen-failed', fairness: FAIRNESS, screen: explainedStage('screen', [[0.2, 'permitted_alternative'], [0.3, 'ambiguous']], false), test: null, difficulty: { status: 'failed', screen: { passed: false, explained: 0, belowBar: 2, of: 2, need: 2, lows: null }, test: null } });
+      const current = newAttempt({ n: 2, outcome: 'in-progress', validation: 'pending', screen: null, test: null, freeze: [], difficulty: { status: 'pending', screen: null, test: null } });
+      set({ stage: 'redesign', redesigns: 1, message: 'Preparing the feedback for the next design', attempts: [earlier, current] });
+      await waitFor('!!document.querySelector("#pl-redesigns details.pl-attempt")', 'the earlier attempt section', POLL_WAIT);
+      assert.equal(await count('#pl-redesigns details.pl-attempt'), 1, 'one section, for the earlier attempt only');
+      assert.equal(await text('#pl-redesigns details.pl-attempt > summary'), 'Attempt 1: Screen failed');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), false, 'closed at first');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns .pl-attempt-counts").checkVisibility()'), false, 'and its text is not on screen');
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt > summary").focus()');
+      await press('Enter');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), true, 'Enter opens it');
+      assert.equal(await text('#pl-redesigns .pl-attempt-counts'), 'Screen: 2 of 2 below 0.40; 0 count toward the pass; failed.');
+      assert.equal(await evaluate('[...document.querySelectorAll("#pl-redesigns .pl-attempt .pl-unexplained li")].map(li=>li.textContent).join("|")'), 'Pilot 1 scored 0.20: a permitted alternative (the answer is acceptable)|Pilot 2 scored 0.30: ambiguous');
+      /* a poll that changes the card around it does not close the section the owner opened */
+      setAttempt({ traps: ['A second trap, written for the next design'] });
+      await waitFor('/A second trap, written for the next design/.test(document.querySelector("#pl-redesigns").innerText)', 'the card to be painted again', POLL_WAIT);
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), true, 'still open after the card was painted again');
+      await noHorizontalOverflow('an earlier attempt explained');
+      await noOverflowAtPhone('an earlier attempt explained');
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").scrollIntoView()');
+      await shot('06b-earlier-attempt-1440', 1440, 1000);
+      await viewport(390, 844);
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").scrollIntoView()');
+      await shot('06b-earlier-attempt-390', 390, 844);
+      await viewport(1440, 1000);
+      pass('while the checks run the design card says the designer is working; the repair of the guideline shows in the stage line and the timeline; an earlier attempt is explained in a section that opens from the keyboard and stays open when the card is painted again');
+      set({ ...saved, running: false });
+      await waitFor('/^Stopped at the cap/.test(document.querySelector("#pl-stage").textContent)', 'the finished pipeline again', POLL_WAIT);
+    }
 
     /* ---------- leaving and coming back ---------- */
     await click('[data-dash-tab="overview"]');

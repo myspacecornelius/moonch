@@ -28,8 +28,10 @@ const APPLICATION_CHECKS = 1 + 2 * P.DESIGN.traps;
                rerun after a repair), the application checks of the reveal's clause and of every clause of the brief (APPLICATION_CHECKS calls), two repair
                turns for what the reviews find, and the answer set (the golden answer and up to MAX_ALTERNATIVES
                permitted alternatives, ANSWER_SET_GRADES grades each at worst); per pilot the grader calls and one adjudication call.
-   Everything the run reserves later for a rerun (a regrade after a guideline revision, a second pass of the reviews) is reserved when it is
-   needed; a rerun the cap cannot pay for ends the run as incomplete. */
+   This is a typical worst case and not the last one: every review retried in each of two evaluations, every application check failing, the answer set graded
+   again after each repair and a null grade asked for again come to about USD 48 before the first pilot, which no usable cap pays for. Whatever goes beyond the
+   reserve (a second try of a review, a regrade after a guideline revision, a second pass of the reviews) is reserved call by call when it is needed; a call the
+   cap cannot pay for ends the run as incomplete, and nothing passes without its checks. */
 function minCapParts(designCapUsd = P.CAPS.designUsd, mode = P.DEFAULT_DESIGN_MODE, options = {}) {
   const caps = P.CAPS;
   const common = caps.classifyUsd + designCapUsd + caps.repairUsd;

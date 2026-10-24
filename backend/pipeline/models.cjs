@@ -15,7 +15,7 @@ const { buildArgs, ClaudeRun, summarizeEvents, detectClaude, pilotEnv, preparePi
 const { auditToolCalls } = require('../agents/path-audit.cjs');
 const { redactFilesUnder } = require('../agents/pilot-token.cjs');
 const C = require('../agents/constants.cjs');
-const { isolationProblems } = require('./isolation.cjs');
+const { isolationProblems, environmentProblems } = require('./isolation.cjs');
 
 const TOOL_LESS_TIMEOUT_MS = 10 * 60 * 1000;
 const NOT_FOUND = 'Claude Code was not found. Install it, or run it once in your own terminal to sign in. Nothing was started';
@@ -42,6 +42,30 @@ function runtimeOf(agents, options) {
     companionPort: () => null,
     runners,
   };
+}
+
+/* The variables a shell sets to remember where it was: the folder it is in, the one it was in before, and the one an npm script was started from. They say
+   nothing a run needs, and they name whatever folder the owner started the companion from (often the private folder, or a reference folder). A run of the
+   pipeline's own is not given them: PWD is the run's folder, the other two are left out. */
+const CWD_VARIABLES = ['PWD', 'OLDPWD', 'INIT_CWD'];
+
+/* The environment of one run of the pipeline's own: the runtime's pilot environment (a private configuration and scratch folder, no memory files, the
+   dedicated token when there is one) without the variables that only remember a working folder. */
+function runEnvironment(rt, scratch, token, folder) {
+  const env = { ...rt.preparedEnv(scratch, token) };
+  for (const name of CWD_VARIABLES) delete env[name];
+  env.PWD = folder;
+  return env;
+}
+
+/* What the environment of a run of the pipeline's own would be, checked once when the pipeline starts, before anything is paid for: the names of the
+   variables that hold a path inside one of the folders. (It is built exactly as a run builds it, in a folder under the temporary root.) */
+function startEnvironmentProblems(rt, token, forbiddenText) {
+  const folder = path.join(rt.tmpRoot || require('node:os').tmpdir(), 'finance-studio-pipelines', 'start-check');
+  const env = { ...rt.childEnv(path.join(folder, '.tmp'), token) };
+  for (const name of CWD_VARIABLES) delete env[name];
+  env.PWD = folder;
+  return environmentProblems(env, forbiddenText);
 }
 
 /* An isolated run (designer v2: a reviewer, an adjudicator, the blind reader) is checked, before its process exists, against the exclusions of
@@ -84,7 +108,7 @@ async function runToolLess({ rt, folder, prompt, model, effort, capUsd, onRunner
   const { runtime, token } = await prepare(rt, args);
   const scratch = path.join(folder, '.tmp');
   fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-  const env = rt.preparedEnv(scratch, token);
+  const env = runEnvironment(rt, scratch, token, folder);
   requireIsolation(rt, isolated, { args, env, folder, tools: [] });
   const runner = new ClaudeRun({
     bin: runtime.path,
@@ -111,7 +135,7 @@ async function runAudited({ rt, folder, prompt, model, effort, capUsd, tools, tr
   const args = buildArgs({ prompt, model, effort, tools, maxBudgetUsd: capUsd, promptVia: 'stdin' });
   const { runtime, token } = await prepare(rt, args);
   const scratch = path.join(folder, '.tmp');
-  const env = rt.preparedEnv(scratch, token);
+  const env = runEnvironment(rt, scratch, token, folder);
   /* an isolated run with tools is a reader: it never has more than the reader's three, whatever the caller asked for */
   requireIsolation(rt, isolated, { args, env, folder, tools: REVIEWER_TOOLS });
   const runner = new ClaudeRun({
@@ -163,4 +187,4 @@ const runDesigner = options => runAudited({ ...options, tools: C.TOOLS.slice() }
 const REVIEWER_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
 const runReviewer = options => runAudited({ ...options, tools: REVIEWER_TOOLS.slice() });
 
-module.exports = { runtimeOf, runToolLess, runDesigner, runReviewer, runAudited, REVIEWER_TOOLS, NOT_FOUND };
+module.exports = { runtimeOf, runToolLess, runDesigner, runReviewer, runAudited, startEnvironmentProblems, CWD_VARIABLES, REVIEWER_TOOLS, NOT_FOUND };

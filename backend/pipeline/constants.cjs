@@ -53,7 +53,7 @@ const MAX_ALTERNATIVES = 2;
 const FAIRNESS_SET_USD = 3;
 const DESIGN_MODES = ['new', 'harden'];
 const DEFAULT_DESIGN_MODE = 'new';
-/* The reference documents of the owner: the designer and the reveal-side reviews read them, pilots never. */
+/* The reference documents of the owner: only the designer reads them. No reviewer is given one (the blind review, the reveal, the application check and the adjudication see the packet and the task alone), and pilots never see them. */
 const REFERENCES = { files: 20, bytes: 8 * 1024 * 1024, depth: 2, extensions: ['.md', '.txt', '.pdf', '.docx', '.xlsx', '.csv', '.json'] };
 /* A quote in a review or in the brief is only evidence when it is this long and found, word for word, in the text it names. */
 const MIN_QUOTE_CHARS = 12;

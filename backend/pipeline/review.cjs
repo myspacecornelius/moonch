@@ -12,7 +12,7 @@
 const P = require('./constants.cjs');
 const { isObject, oneLine, capText } = require('./util.cjs');
 const { normalizeText, buildCorpus, findQuote, inForce, datesIn, datesAt } = require('./quotes.cjs');
-const { normalAction } = require('./brief.cjs');
+const { normalAction, sameAlternative, alternativeProblem, alternativeIdOf } = require('./brief.cjs');
 const STRICT = { strict: true };
 
 const MAX_PROMPT_BYTES = 100 * 1024; /* the runtime takes one prompt of at most 120 KiB */
@@ -41,10 +41,10 @@ const quoteOf = value => (isObject(value) ? { file: str(value.file, 300), quote:
 const PACKET_CAPS = { reveal: 36000, application: 44000, adjudication: 24000 };
 
 /* The files of the packet as one data block of about `cap` characters, and what was shown of each: [{ name, text }] -> { block, shown, cut }.
-   A packet that fits is shown whole. Otherwise the files named in `priority` are served first, in that order, each in full while the budget lasts (the rest of
-   the files keep a floor of a fifth of the cap, and a priority file that comes later keeps at least 500 characters); every other file shares what is left,
-   a short file giving its unused share back. A file that is cut ends in a marker that says so, and `cut` names it. A file with no readable text is shown as
-   such. */
+   A packet that fits is shown whole. Otherwise the files named in `priority` are served first, in that order, each in full while their budget lasts (the cap
+   less a fifth of it, which is kept for the other files whatever their number; a later priority file keeps a small floor, paid for by all of them together, so
+   that an early one cannot take everything); every other file shares what is left, the shortest first, a short file giving its unused share back. A file that is
+   cut ends in a marker that says so, and `cut` names it. A file with no readable text is shown as such. */
 function packetView(documents, cap, priority = []) {
   const docs = documents.map(item => ({ name: item.name, text: typeof item.text === 'string' ? item.text : null }));
   const rank = new Map();
@@ -58,11 +58,13 @@ function packetView(documents, cap, priority = []) {
     const lead = readable.filter(item => rank.has(item.name)).sort((a, b) => rank.get(a.name) - rank.get(b.name));
     const rest = readable.filter(item => !rank.has(item.name));
     const restTotal = rest.reduce((sum, item) => sum + item.text.length, 0);
-    let left = cap - Math.min(restTotal, Math.max(Math.floor(cap * 0.2), 500 * rest.length));
+    const leadBudget = cap - Math.min(restTotal, Math.floor(cap * 0.2));
+    const floor = lead.length ? Math.min(500, Math.floor(leadBudget * 0.3 / lead.length)) : 0;
+    let left = leadBudget;
     let used = 0;
     lead.forEach((item, index) => {
-      const later = 500 * (lead.length - index - 1);
-      const size = Math.min(item.text.length, Math.max(500, left - later));
+      const later = floor * (lead.length - index - 1);
+      const size = Math.min(item.text.length, Math.max(Math.min(floor, item.text.length), left - later));
       take.set(item.name, size);
       left -= size;
       used += size;
@@ -71,7 +73,7 @@ function packetView(documents, cap, priority = []) {
     let pool = Math.max(0, cap - used);
     while (queue.length) {
       const item = queue.shift();
-      const size = Math.min(item.text.length, Math.max(500, Math.floor(pool / (queue.length + 1))));
+      const size = Math.min(item.text.length, Math.max(Math.min(item.text.length, 40), Math.floor(pool / (queue.length + 1))));
       take.set(item.name, size);
       pool = Math.max(0, pool - size);
     }
@@ -101,11 +103,13 @@ function headTail(value, max) {
   return { text: `${head}\n[cut here: ${hidden} characters are not shown to you]\n${tail}`, parts: [head, tail], hidden };
 }
 
-/* The files a review should see in full first: the authority file of the decision, the files the brief lists as authority or evidence, the files its rules
-   name, and any file the caller adds (these come first). */
+/* The files a review should see in full first: any file the caller adds (these come first), the authority file of the decision, the prompt of the task (it holds
+   the date of the decision and often the rule; it is a file of the packet for the checks that read one), the files the brief lists as authority or evidence, and the
+   files its rules name. */
 function priorityFiles(brief, extra = []) {
   const names = [...extra];
   if (brief && brief.decision) names.push(brief.decision.authorityFile);
+  names.push('prompt.txt');
   if (brief && Array.isArray(brief.files)) for (const file of brief.files) if (file.role === 'authority' || file.role === 'evidence') names.push(file.name);
   if (brief && Array.isArray(brief.traps)) for (const trap of brief.traps) names.push(trap.rule.file);
   return names.filter(Boolean);
@@ -183,6 +187,7 @@ function revealPrompt({ prompt, guideline, goldenAnswer, brief, blind, documents
     const shownGolden = piece('the golden answer', String(goldenAnswer), 10000);
     const shownBrief = piece('the brief', JSON.stringify(brief, null, 1), 12000);
     const shownBlind = piece('the blind review', JSON.stringify(blind, null, 1), 6000);
+    const declared = (brief && Array.isArray(brief.permittedAlternatives) ? brief.permittedAlternatives : []).map(item => `${item.id || alternativeIdOf(item.file)}: ${oneLine(item.answer, 500)}`);
     if (report) { report.cut = cut; report.promptParts = shownPrompt.parts; }
     return [
       'You are reviewing a finished task design against a blind reviewer\'s reading of it. You are given the answer the grader will treat as right and the answer a blind reviewer reached from the files alone.',
@@ -197,14 +202,16 @@ function revealPrompt({ prompt, guideline, goldenAnswer, brief, blind, documents
       '- objectionClass is one of: ' + OBJECTION_CLASSES.join(', ') + '. A class that names something missing or in conflict (missing_requirement, conflicting_authority, inaccessible_evidence, rubric_requirement_absent_from_packet) means the question is not settled: use disposition unresolved with it.',
       '- disposition is one of: excluded_by_clause (a specific instruction in the files rules the alternative out), permitted (the files legitimately allow it), equivalent_result (a different presentation or method with the same required conclusion: say in "alternative" what conclusion it reaches), unresolved (the files do not settle it), no_alternative (there is no different answer a careful solver could defend; objectionClass none).',
       '- guidelineCovers is true when the guideline already accepts the alternative.',
+      '- alternativeId: the design declares permitted alternatives, each with an id (listed under DECLARED ALTERNATIVES). When the alternative you found is one of them, give its id; when it is none of them, or there are none, give an empty string. The id counts only when the declared alternative says the same action and the same figures as yours.',
       '- The blind review lists, in "unreadable", files that nobody could read in it. Its answer says nothing about them.',
-      '- Reply with one JSON object and nothing else: {"alternative": "<the answer>", "forAlternative": {"file": "...", "quote": "..."}, "againstAlternative": {"file": "...", "quote": "..."} or null, "objectionClass": "...", "disposition": "...", "guidelineCovers": true or false, "why": "<one or two sentences>"}',
+      '- Reply with one JSON object and nothing else: {"alternative": "<the answer, with its action and figures>", "alternativeId": "<id or empty>", "forAlternative": {"file": "...", "quote": "..."}, "againstAlternative": {"file": "...", "quote": "..."} or null, "objectionClass": "...", "disposition": "...", "guidelineCovers": true or false, "why": "<one or two sentences>"}',
       '',
       '<<<PROMPT', shownPrompt.text, 'PROMPT>>>', '',
       '<<<GUIDELINE', shownGuideline.text, 'GUIDELINE>>>', '',
       '<<<GOLDEN ANSWER', shownGolden.text, 'GOLDEN ANSWER>>>', '',
       '<<<BRIEF', shownBrief.text, 'BRIEF>>>', '',
       '<<<BLIND REVIEW', shownBlind.text, 'BLIND REVIEW>>>', '',
+      '<<<DECLARED ALTERNATIVES', declared.length ? declared.join('\n') : '(none)', 'DECLARED ALTERNATIVES>>>', '',
       '<<<FILES', packet.block, 'FILES>>>',
     ].join('\n') + '\n';
   });
@@ -218,7 +225,7 @@ function parseReveal(output) {
   return {
     ok: true,
     value: {
-      alternative: str(data.alternative, 4000), forAlternative: quoteOf(data.forAlternative), againstAlternative: quoteOf(data.againstAlternative),
+      alternative: str(data.alternative, 4000), alternativeId: str(data.alternativeId, 64), forAlternative: quoteOf(data.forAlternative), againstAlternative: quoteOf(data.againstAlternative),
       objectionClass: data.objectionClass, disposition: data.disposition, guidelineCovers: data.guidelineCovers === true, why: str(data.why, 2000),
     },
   };
@@ -233,33 +240,17 @@ const sameFile = (a, b) => {
   return x === y || (Math.min(x.length, y.length) >= 4 && (` ${x} `.includes(` ${y} `) || ` ${y} `.includes(` ${x} `)));
 };
 
-/* Do two statements of an action say the same thing? Their words are the same, one holds the other (three words or more), or they share three fifths of their
-   words. Used to tie what a reviewer calls an alternative to the alternative a design declares. */
-function sameAction(a, b) {
-  const x = normalAction(a);
-  const y = normalAction(b);
-  if (!x || !y) return false;
-  if (x === y) return true;
-  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-  if (short.split(' ').length >= 3 && ` ${long} `.includes(` ${short} `)) return true;
-  const first = new Set(x.split(' '));
-  const second = new Set(y.split(' '));
-  const shared = [...first].filter(word => second.has(word)).length;
-  return shared / (first.size + second.size - shared) >= 0.6;
-}
-
-/* Is a text a copy of another? Its words are the same, or nine tenths of the words of the two are shared. Used to refuse an alternative answer that is the
-   golden answer under another name. */
-function copiesText(a, b) {
-  const words = text => String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const x = words(a);
-  const y = words(b);
-  if (!x.length || !y.length) return false;
-  if (x.join(' ') === y.join(' ')) return true;
-  const first = new Set(x);
-  const second = new Set(y);
-  const shared = [...first].filter(word => second.has(word)).length;
-  return shared / (first.size + second.size - shared) >= 0.9;
+/* The declared alternative that the reviewer's alternative is, or null. The reviewer names it by its id (alternativeId, one of the ids the reveal prompt lists), and
+   the harness holds the two to each other: the figures of the reviewer's alternative and of the declared one agree, and so do their first verbs (see brief.cjs
+   sameAlternative). A reviewer that names no id, an id that no declared alternative has, or an alternative that is another one than the id says, ties nothing. What
+   the reviewer's alternative is, in words, is its own text, else the blind reviewer's alternative, else the blind reviewer's answer. */
+function tiedAlternative(alternatives, parsed, blind = null) {
+  const wanted = String(parsed && parsed.alternativeId || '').trim().toLowerCase();
+  if (!wanted || !Array.isArray(alternatives)) return null;
+  const declared = alternatives.find(item => String(item.id || item.name).toLowerCase() === wanted);
+  if (!declared) return null;
+  const reported = parsed.alternative || (blind && blind.alternative && blind.alternative.answer) || (blind && blind.answer) || '';
+  return sameAlternative(reported, declared.answer) ? declared : null;
 }
 
 /* The numbers a text states, as numbers (1,250 and 1250.5 are read; a figure with a comma and no thousands group is not). */
@@ -356,6 +347,7 @@ const SUPERSESSION_RE = /\b(?:supersed(?:e|es|ed|ing)|supercede[sd]?|replac(?:e|
 /* The wording that ends or replaces a document, as against wording that only changes it (revised, amended, restated, effective from a date). Listed first. */
 const STRONG_RE = /supersed|supercede|replac|rescind|withdr|revok|annul|abolish|repeal|void|cancel|no longer|retir|terminat|obsolete|outdated|out of date|expir|succeeded by|lapse|discontinu|in place of|takes? precedence|overrid|ceas/i;
 const MAX_HITS = 40;
+const MAX_SUMMARIES = 15; /* entries for the passages that are not listed, one for each file, at most this many */
 const HIT_CHARS = 36000; /* the passages listed together, at most; a passage that is listed is listed whole */
 const WINDOW = 300;
 const MERGE_MAX = 1800; /* passages whose windows touch are one passage, up to this many characters */
@@ -439,30 +431,35 @@ function scanForms(document) {
   return forms;
 }
 
-/* Passages of supersession wording near the clause, and the files that could not be scanned: [{ id, kind, document, snippet }]. kind is
+/* Passages of supersession wording near the clause, notices the blind reviewer found, and the files that could not be scanned: [{ id, kind, document, snippet }].
+   kind is
      'passage'    wording within 300 characters of something that names the clause (its file, its title, its section, its first words), or anywhere in a file
                   whose name carries the name of the clause's file (an update or a notice of the same policy); passages whose windows touch are one passage, up
-                  to 1,800 characters, and a passage that is listed is listed whole;
-     'notice'     a file the harness has no text for (a PDF, a picture) in which the blind reviewer, who could open it, quoted wording that withdraws or replaces
-                  something (options.notices: [{ file, quote }]);
-     'unreadable' a file with no readable text and no such notice: nobody scanned it for wording that supersedes the clause. It is disclosed, not judged;
-     'more'       the passages that do not fit the list (at most 40 passages and 36,000 characters are listed, the strongest wording first): counted, and the check
-                  does not pass while any are left out.
+                  to 1,800 characters, and a passage that is listed is listed whole (ids h1, h2, ...);
+     'notice'     words that the blind reviewer, who opened every file it could, quoted as saying that a document is withdrawn or replaced (options.notices:
+                  [{ file, quote }]): in a file the harness has no text for (a PDF, a picture: ids u1, u2, ...), or in a file it has text for, when no passage above
+                  already holds them (ids n1, n2, ...). Words that are not word for word in the file are listed as the reviewer said them;
+     'summary'    the weaker passages that do not fit the list (at most 40 passages and 36,000 characters are listed, the strongest wording first), one entry for each
+                  file that has some, with their number and the first of them (ids s1, s2, ...); the file itself is among the files the reviewer is shown;
+     'unreadable' a file with no readable text and no such notice: nobody scanned it for wording that supersedes the clause. It is disclosed, not judged.
    A file name that carries a word of supersession next to the name of the clause's file is a passage too. Hits in the clause's own file come first within the
-   same strength. documents: [{ name, text }]; clause: { file, quote }. The reviewer must address every passage and notice. */
+   same strength. documents: [{ name, text }]; clause: { file, quote }. The reviewer must address every passage, notice and summary. */
 function supersessionHits(documents, clause, options = {}) {
   const clauseDocument = documents.find(item => item.name === clause.file);
   const refs = supersessionRefs(clause, clauseDocument ? clauseDocument.text : '');
   const own = squashSpaces(fold(String(clause.file || '').replace(/^.*\//, '').replace(/\.[^.]*$/, '')));
   const policy = trimmedStem(clause.file);
-  const notices = Array.isArray(options.notices) ? options.notices.filter(item => isObject(item) && item.file && item.quote) : [];
+  const sayings = (Array.isArray(options.notices) ? options.notices : []).filter(item => isObject(item) && item.file && item.quote).map(item => ({
+    file: String(item.file), quote: String(item.quote), document: documents.find(document => document.name === item.file) || documents.find(document => sameFile(item.file, document.name)) || null,
+  }));
   const found = [];
+  const noticed = [];
   const unreadable = [];
   for (const [order, document] of documents.entries()) {
     const nameWords = squashSpaces(fold(String(document.name).replace(/^.*\//, '').replace(/\.[^.]*$/, '')));
     const related = document.name !== clause.file && policy.length >= 6 && nameWords.includes(policy);
     if (typeof document.text !== 'string' || !document.text.trim()) {
-      unreadable.push({ name: document.name, said: notices.filter(item => sameFile(item.file, document.name)).map(item => item.quote) });
+      unreadable.push({ name: document.name, said: sayings.filter(item => item.document === document).map(item => item.quote) });
       continue;
     }
     if (related) {
@@ -470,6 +467,7 @@ function supersessionHits(documents, clause, options = {}) {
       if (named) found.push({ document: document.name, label: `(the name of the file) ${document.name}`, strong: STRONG_RE.test(named[0]), group: 1, order });
     }
     const { flat, lower } = scanForms(document);
+    const mine = [];
     let last = null;
     SUPERSESSION_RE.lastIndex = 0;
     let match;
@@ -482,9 +480,23 @@ function supersessionHits(documents, clause, options = {}) {
       if (last && from <= last.to && to - last.from <= MERGE_MAX) { last.to = to; last.strong = last.strong || strong; continue; }
       last = { document: document.name, from, to, flat, strong, group: document.name === clause.file ? 0 : (related || (own && around.includes(own))) ? 1 : 2, order };
       found.push(last);
+      mine.push(last);
+    }
+    /* what the blind reviewer quoted from this file: a passage above that holds the words already puts them to the reviewer; otherwise they are a notice of their own */
+    for (const saying of sayings.filter(item => item.document === document)) {
+      const wanted = normalizeText(saying.quote);
+      const at = wanted ? flat.indexOf(wanted) : -1;
+      if (at >= 0 && mine.some(item => item.from <= at && item.to >= at + wanted.length)) continue;
+      noticed.push(at >= 0
+        ? { document: document.name, from: Math.max(0, at - WINDOW), to: Math.min(flat.length, at + wanted.length + WINDOW), flat, strong: STRONG_RE.test(saying.quote) }
+        : { document: document.name, label: `(the blind reviewer quoted these words from this file; they are not word for word in the text the harness has) "${oneLine(saying.quote, 500)}"`, strong: STRONG_RE.test(saying.quote) });
     }
   }
+  for (const saying of sayings.filter(item => !item.document)) {
+    noticed.push({ document: oneLine(saying.file, 200), label: `(the blind reviewer quoted these words from a file that the harness cannot match to a file of the packet) "${oneLine(saying.quote, 500)}"`, strong: STRONG_RE.test(saying.quote) });
+  }
   found.sort((a, b) => (a.strong ? 0 : 1) - (b.strong ? 0 : 1) || a.group - b.group || a.order - b.order);
+  noticed.sort((a, b) => (a.strong ? 0 : 1) - (b.strong ? 0 : 1));
   const hits = [];
   let chars = 0;
   let listed = 0;
@@ -495,7 +507,24 @@ function supersessionHits(documents, clause, options = {}) {
     chars += snippet.length;
     hits.push({ id: `h${listed}`, kind: 'passage', document: item.document, snippet });
   }
-  if (found.length > listed) hits.push({ id: 'more', kind: 'more', document: '', snippet: `${found.length - listed} more passages of supersession wording were found near the clause and are not listed here (the weakest wording is left out)` });
+  noticed.forEach((item, index) => hits.push({ id: `n${index + 1}`, kind: 'notice', document: item.document, snippet: item.label || item.flat.slice(item.from, item.to) }));
+  /* the passages that did not fit are not dropped: each file that has some is put to the reviewer as one entry, with its number and the first of them */
+  const left = new Map();
+  for (const item of found.slice(listed)) {
+    const entry = left.get(item.document) || { count: 0, first: item };
+    entry.count++;
+    left.set(item.document, entry);
+  }
+  let summaries = 0;
+  let others = 0;
+  let otherFiles = 0;
+  for (const [document, entry] of left) {
+    if (summaries >= MAX_SUMMARIES) { others += entry.count; otherFiles++; continue; }
+    summaries++;
+    const first = entry.first.label || entry.first.flat.slice(entry.first.from, entry.first.to);
+    hits.push({ id: `s${summaries}`, kind: 'summary', document, snippet: `${entry.count} more passage${entry.count === 1 ? '' : 's'} of supersession wording in this file ${entry.count === 1 ? 'is' : 'are'} not listed one by one (the weakest wording); the first of them reads: "${oneLine(first, 400)}"` });
+  }
+  if (others) hits.push({ id: `s${summaries + 1}`, kind: 'summary', document: '', snippet: `${others} more passages of supersession wording in ${otherFiles} other file${otherFiles === 1 ? '' : 's'} are not listed (the weakest wording of the packet)` });
   unreadable.forEach((item, index) => {
     if (item.said.length) hits.push({ id: `u${index + 1}`, kind: 'notice', document: item.name, unreadable: true, snippet: `(the harness has no text for this file; the blind reviewer, who could open it, quoted) ${item.said.map(quote => `"${oneLine(quote, 500)}"`).join(' ')}` });
     else hits.push({ id: `u${index + 1}`, kind: 'unreadable', document: item.name, snippet: '(nobody could read this file here, so it was not scanned for wording that supersedes the clause; you are not asked to rule on it, and the owner is told it was not scanned)' });
@@ -514,7 +543,7 @@ function applicationPrompt({ clause, alternative, decision, decisionDate, hits, 
     '- You have no tools and no other files. Use only the text below.',
     '- governs: does the clause\'s own scope sentence cover this decision (not another product, period, entity or process)? Give that scope sentence as a quote from the same file as the clause. When the files hold a policy and a procedure, say which document is higher and whether the lower one implements the higher (relation "implements", with the quote that says so, from the clause\'s file or the higher file, and "higher" is the exact name of a file below) or varies it (relation "varies"); with no such relation use "none" or null.',
     '- inForce: the effective date of the document and the date of the decision, each as an ISO date (YYYY-MM-DD) that appears in the quote you give for it, in a form the harness reads (2025-03-01, 1 March 2025, March 1, 2025 or the 1st day of March, 2025). When a quote holds more than one date, the effective date is the one the sentence says takes effect. The harness compares them' + (decisionDate ? `; the decision is taken on ${decisionDate}, and your quote for it must hold that date` : '') + '.',
-    '- supersession: the harness found the passages listed under HITS. For every entry that is a passage or a notice (an id that starts with h, or u with a quote) say whether it changes the clause. A passage may be wording near the clause that replaces, amends or withdraws it. An "unreadable" entry is a file nobody could scan: you are not asked to rule on it. A "more" entry counts passages that are not listed; the check cannot pass while there are any. Do not leave an entry out.',
+    '- supersession: the harness found the passages listed under HITS. For every entry that is a passage, a notice or a summary (an id that starts with h, n, s, or u with a quote) say once whether it changes the clause: "yes" or "no", never both. A passage may be wording near the clause that replaces, amends or withdraws it; a notice is wording that the blind reviewer found in a file; a summary stands for passages of one file that are not listed one by one, so read that file below and say whether any of them changes the clause. An "unreadable" entry is a file nobody could scan: you are not asked to rule on it. Do not leave an entry out.',
     '- excludes: how the clause\'s words, applied to the alternative, rule it out. Use the words of the files only; do not appeal to unstated intent.',
     QUOTE_RULE,
     CUT_RULE,
@@ -556,20 +585,33 @@ const namesFile = (text, file) => {
   return (stem.length >= 4 && said.includes(stem)) || (full.length >= 4 && said.includes(full));
 };
 
-const EFFECT_CUE_RE = /(?:effective|take[sn]? effect|taking effect|in force|into (?:force|effect)|applies? (?:from|as of)|valid from|from and including)[^.;]{0,40}$/i;
+/* The words that say a document takes effect, as one word or phrase (not inside another word: "ineffective" is not one). */
+const EFFECT_CUE_SOURCE = '(?<![A-Za-z])(?:effective|takes? effect|taking effect|in force|into (?:force|effect)|applies? (?:from|as of)|valid from|from and including|commenc(?:es|ed|ing)|comes? into|enters? into|w\\.?e\\.?f\\.?|starts? (?:on|from)|start date)';
+/* What may stand between the cue and the date: not the end of a sentence, not another date, not the end of a period ("in force until 2024-12-31" ends the
+   document; it does not start it). */
+const END_OF_PERIOD_RE = /^\s*(?:until|till|through|thru|to|before|up to|ending|ends?)\b/i;
+const AFTER_CUE_RE = /^\s*[([,:-]?\s*(?:the\s+)?(?:effective(?: date)?|takes? effect|comes? into (?:force|effect)|in force)\b/i;
 
-/* Is `date` the date the quote gives as the day the document takes effect? A quote with one date gives that date. A quote with several (a policy header that
-   also says when it was reviewed, or which policy it replaces) gives it only where the words next to the date say it takes effect. */
+/* Is `date` (one of the dates in `quote`, at item.index) the day the document takes effect? The nearest cue before it says so: the words are within 40 characters
+   of it, with no full stop or semicolon and no other date between them, and they do not say that a period ends there; or a cue stands right after it
+   ("2025-03-01 (effective date)"). A date with no such cue is not the effective date, whether the quote holds one date or several. */
+function effectCueAt(norm, item) {
+  const before = norm.slice(Math.max(0, item.index - 70), item.index);
+  const cues = [...before.matchAll(new RegExp(EFFECT_CUE_SOURCE, 'gi'))];
+  for (let i = cues.length - 1; i >= 0; i--) {
+    const gap = before.slice(cues[i].index + cues[i][0].length);
+    if (gap.length > 40 || /[.;]/.test(gap) || datesAt(gap).length || END_OF_PERIOD_RE.test(gap)) continue;
+    return true;
+  }
+  return AFTER_CUE_RE.test(norm.slice(item.end, item.end + 40));
+}
+
+/* Is `date` the date the quote gives as the day the document takes effect? See effectCueAt. */
 function effectiveStated(quote, date) {
   const dates = datesAt(quote);
   if (!dates.some(item => item.iso === date)) return false;
-  if (new Set(dates.map(item => item.iso)).size === 1) return true;
   const norm = normalizeText(quote);
-  return dates.filter(item => item.iso === date).some(item => {
-    const before = norm.slice(Math.max(0, item.index - 70), item.index);
-    const cue = EFFECT_CUE_RE.exec(before);
-    return Boolean(cue) && datesAt(before.slice(cue.index)).length === 0;
-  });
+  return dates.filter(item => item.iso === date).some(item => effectCueAt(norm, item));
 }
 
 /* The harness's judgement of an application check. Resolves { pass, failed: [which of governs, inForce, notSuperseded, excludes failed], checks, dates,
@@ -598,7 +640,9 @@ function checkApplication(parsed, { corpus, hits, clause = null, brief = null })
   if (!(parsed.governs.answer === 'yes' && scopeOk && hierarchyOk)) failed.push('governs');
   const { effectiveDate, decisionDate, effectiveQuote, decisionQuote } = parsed.inForce;
   const force = inForce(effectiveDate, decisionDate);
-  let dated = force.ok && found(effectiveQuote) && effectiveStated(effectiveQuote.quote, effectiveDate);
+  /* the effective date stands in the clause's own document (or, for a procedure that implements a policy, in the policy) */
+  const effectiveFileOk = !clause || !clause.file || (effectiveQuote && (effectiveQuote.file === clause.file || (implemented && effectiveQuote.file === hierarchy.higher)));
+  let dated = force.ok && found(effectiveQuote) && effectiveFileOk && effectiveStated(effectiveQuote.quote, effectiveDate);
   /* The decision date stands in a quote of the files in every case; when the brief states it, it is also that date. */
   dated = dated && found(decisionQuote) && datesIn(decisionQuote.quote).includes(decisionDate);
   const stated = brief && brief.decision && brief.decision.decisionDate;
@@ -609,9 +653,11 @@ function checkApplication(parsed, { corpus, hits, clause = null, brief = null })
     if (known.length && !known.includes(effectiveDate)) dated = false;
   }
   if (!dated) failed.push('inForce');
-  const addressed = new Map(parsed.supersession.map(item => [item.hit, item]));
-  const required = hits.filter(hit => hit.kind === 'passage' || hit.kind === 'notice');
-  if (required.some(hit => !addressed.has(hit.id) || addressed.get(hit.id).changesClause !== 'no') || hits.some(hit => hit.kind === 'more')) failed.push('notSuperseded');
+  /* every passage, notice and summary is answered, and answered "no" once: an answer of "yes" anywhere, or "yes" and "no" for the same entry, is not a "no" */
+  const answers = new Map();
+  for (const item of parsed.supersession) answers.set(item.hit, (answers.get(item.hit) || new Set()).add(item.changesClause));
+  const required = hits.filter(hit => hit.kind === 'passage' || hit.kind === 'notice' || hit.kind === 'summary');
+  if (required.some(hit => { const said = answers.get(hit.id); return !said || said.size !== 1 || !said.has('no'); })) failed.push('notSuperseded');
   if (!(parsed.excludes.answer === 'yes' && parsed.excludes.reasoning.length >= 20 && found(parsed.excludes.quote))) failed.push('excludes');
   return {
     pass: failed.length === 0, failed,
@@ -641,7 +687,7 @@ function adjudicationPrompt({ guideline, brief, documents, answer, graderReason,
     DATA_RULE,
     '- You have no tools and no other files. Use only the text below.',
     '- A figure that matches a figure of the brief is only a hint: it may come from another calculation or from a permitted decision.',
-    '- class is one of: intended (the action the answer adopts AND the reasoning that supports it establish the intended error of the brief: quote both from the answer, and say how they match the brief\'s wrong path), other_valid_error (the answer violates a guideline item for another reason: quote the action the answer adopts, from the answer, name the guideline item and quote the clause of the files that it violates), permitted_alternative (the answer is in fact acceptable under the files, so the low score is a defect of the guideline or the golden answer), grader_defect (the grading was wrong for the answer), ambiguous (the files leave it open), tool_failure (the pilot could not read or open something it needed: the harness checks this against the pilot\'s own record), unsupported (none of these is shown).',
+    '- class is one of: intended (the action the answer adopts AND the reasoning that supports it establish the intended error of the brief: quote both from the answer, and say how they match the brief\'s wrong path), other_valid_error (the answer violates a guideline item for another reason: quote the action the answer adopts, from the answer, name the guideline item and quote the clause of the files that it violates), permitted_alternative (the answer is in fact acceptable under the files, so the low score is a defect of the guideline or the golden answer), grader_defect (the grading was wrong for the answer), ambiguous (the files leave it open), tool_failure (the pilot could not read or open something it needed: the harness checks this against the pilot\'s own record, and the HINT lists the failed calls it found there), unsupported (none of these is shown).',
     '- A figure match with a different action or a different reasoning is other_valid_error or unsupported, never intended.',
     QUOTE_RULE,
     CUT_RULE,
@@ -699,7 +745,7 @@ function checkAdjudication(parsed, { answerText, answerParts = null, corpus }) {
 }
 
 module.exports = {
-  OBJECTION_CLASSES, DISPOSITIONS, MISSING_CLASSES, PACKET_CAPS, extractJson, packetView, headTail, priorityFiles, blindDiffers, sameAction, copiesText, sameFile, reachesCorrect, answerStatesWrongPath, effectiveStated,
+  OBJECTION_CLASSES, DISPOSITIONS, MISSING_CLASSES, PACKET_CAPS, extractJson, packetView, headTail, priorityFiles, blindDiffers, tiedAlternative, sameAlternative, alternativeProblem, sameFile, reachesCorrect, answerStatesWrongPath, effectiveStated,
   blindPrompt, parseBlind, revealPrompt, parseReveal, checkReveal,
   supersessionHits, applicationPrompt, parseApplication, checkApplication,
   adjudicationPrompt, parseAdjudication, checkAdjudication,

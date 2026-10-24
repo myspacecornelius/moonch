@@ -130,6 +130,12 @@
 .pl-refs-details{margin:0 0 12px;font-size:.86rem}
 .pl-review-none{margin:8px 0 0;font-size:.9rem;line-height:1.5}
 .pl-unreadable{margin:0 0 14px}
+.pl-attempt{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:2px 14px 10px}
+.pl-attempt>summary{cursor:pointer;padding:10px 0;font-weight:650;line-height:1.4;overflow-wrap:anywhere}
+.pl-attempt[open]>summary{border-bottom:1px solid var(--line);margin-bottom:6px}
+.pl-attempt-counts,.pl-attempt-why{margin:8px 0 0;font-size:.9rem;line-height:1.5}
+.pl-blind-incomplete{color:var(--warn-ink)}
+.pl-designer-working{margin:0 0 10px;font-size:.92rem;line-height:1.55}
 .pl-freeze{margin:0 0 4px;padding-left:22px;font-size:.88rem;line-height:1.55}
 .pl-freeze li{margin:8px 0}
 .pl-regrade,.pl-recounted{margin:4px 0 0;font-size:.84rem}
