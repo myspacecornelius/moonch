@@ -48,8 +48,68 @@ const design = (withheld = false) => ({
   fingerprints: withheld ? { withheld: true } : [{ id: 'fp-alpha', label: 'Counts available credit as cash', tokens: ['available facility counted'], figures: ['1,900'] }],
 });
 const ZIP = Buffer.from('PK synthetic zip bytes');
-/* the rules GET /api/pipeline reports: the default total cap and the least total cap of one full attempt (1.15 x (6.25 + 7 x (3 + 1.5)) = 43.42 with the pilot cap of 3) */
-const CONFIG = { defaultCapUsd: 50, screenBar: 0.4, testBar: 0.45, headroom: 1.15, minCap: { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 } };
+/* the rules GET /api/pipeline reports: the default total cap, both design modes with the parts of their least total cap (1.15 x (20.5 + 7 x (3 + 1.5)) = 59.80 for the new mode at the default pilot cap),
+   the diagnostic suite, the review caps and the default reference folder (names only) */
+const NEW_MIN = { fixedUsd: 20.5, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 };
+const REF_NAMES = ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf'];
+const CONFIG = {
+  defaultCapUsd: 60, screenBar: 0.4, testBar: 0.45, headroom: 1.15, designModes: ['new', 'harden'], defaultDesignMode: 'new', alternativeMin: 0.85, fairnessSetCapUsd: 3, minCapFairnessSetUsd: 3,
+  minCap: NEW_MIN, minCapByMode: { new: NEW_MIN, harden: { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 } },
+  blindReviewCapUsd: 1.5, revealReviewCapUsd: 0.5, applicationCapUsd: 0.5, adjudicationCapUsd: 0.5,
+  references: { maxFiles: 20, maxBytes: 8388608, extensions: ['.md', '.txt', '.pdf'], default: { exists: true, found: 2, names: REF_NAMES, bytes: 48211, problems: 0 } },
+};
+/* ---- a full attempt of the new mode, in the shape of backend/pipeline (invented: Atlas and Meridian) ---- */
+const COUNTING = new Set(['intended', 'other_valid_error']);
+const LOW_KEY = { intended: 'intended', other_valid_error: 'otherValid', permitted_alternative: 'permittedAlternative', grader_defect: 'graderDefect', ambiguous: 'ambiguous', tool_failure: 'toolFailure', unsupported: 'unsupported' };
+const adj = klass => ({ class: klass, claimed: klass, counts: COUNTING.has(klass), note: '', application: null });
+function explainedStage(name, spec, passed, over = {}) {
+  const bar = name === 'test' ? 0.45 : 0.4, extra = {};
+  const lows = { lowScorers: 0, intended: 0, otherValid: 0, permittedAlternative: 0, graderDefect: 0, ambiguous: 0, toolFailure: 0, unsupported: 0, counted: 0 }, unexplained = [];
+  spec.forEach(([score, klass], i) => {
+    const low = typeof score === 'number' && score < bar;
+    extra[i] = low && klass ? { adjudication: adj(klass), countsTowardPass: COUNTING.has(klass) } : { adjudication: null, countsTowardPass: low ? null : false };
+    if (!low) return;
+    lows.lowScorers++;
+    if (klass) lows[LOW_KEY[klass]]++;
+    if (COUNTING.has(klass)) lows.counted++; else unexplained.push({ pilot: 'p' + (i + 1), class: klass || 'unsupported', score });
+  });
+  return { ...stageOf(name, spec.map(x => x[0]), passed, extra), explained: lows.counted, lows, unexplained, recount: null, ...over };
+}
+const TRAP_RULE = 'Leverage is measured on funded debt net of cash held in the blocked account.';
+const BRIEF = {
+  taskType: { workflow: 'Quarterly covenant review', why: 'The world files hold a facility agreement, a ledger and an amendment that a covenant review can use.', referenceEntries: ['Covenant walkthrough'] },
+  decision: { ask: 'Does the Atlas borrower meet its leverage covenant at quarter end?', mandate: 'Advise the credit committee whether a waiver is needed.', authorityFile: 'Atlas_Facility_Agreement.txt', effectiveDate: '2025-01-01', decisionDate: '2025-03-31' },
+  files: [{ name: 'Atlas_Facility_Agreement.txt', role: 'authority' }, { name: 'Atlas_Ledger.csv', role: 'evidence' }, { name: 'Meridian_Old_Schedule.csv', role: 'decoy' }],
+  traps: [{ id: 't1', primary: true, rule: { file: 'Atlas_Facility_Agreement.txt', clause: TRAP_RULE },
+    correctPath: { reasoning: 'Net the blocked cash against funded debt before the ratio.', action: 'Report the covenant as met', figures: [{ label: 'Net leverage', value: 3.4, tolerance: 0.05 }] },
+    wrongPath: { reasoning: 'Use gross funded debt, as the ledger line shows it.', action: 'Report the covenant as breached', figures: [{ label: 'Net leverage', value: 4.1, tolerance: 0.05 }] },
+    changesDecision: 'required_conclusion', whyTempting: { kind: 'effort', source: 'The ledger has one gross debt line that is quick to use.' }, consequence: { source: 'A breach report triggers the default notice of the amendment.' },
+    strongestAlternative: { answer: 'Report the covenant as met and ask for a waiver', whyRejected: 'No waiver is needed while the ratio is inside the limit.' } }],
+  permittedAlternatives: [{ answer: 'Report the covenant as met and add a monitoring step', support: 'The agreement lets the committee add monitoring.', file: 'answers/alt-1.md' }], permittedAlternativesReason: '', controls: [], primary: 't1',
+};
+const CHECK = { pass: true, failed: [], checks: { governs: true, inForce: true, notSuperseded: true, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' }, hits: 0 };
+const FAIRNESS = { status: 'passed', repairs: 0, stage1: { state: 'ok', tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0 }, stage2: { disposition: 'excluded_by_clause', objectionClass: 'permitted_discretion', evaluations: 1, application: CHECK, briefApplication: null } };
+const ANSWER_SET = { goldenMin: 0.9, alternativeMin: 0.85, passed: true, answers: [
+  { name: 'golden', kind: 'golden', file: 'golden-answer.md', threshold: 0.9, sha256: 'b'.repeat(64), score: 0.95, grades: [0.96, 0.94], passed: true, unstable: false, runs: [{ why: 'first grading', grades: [0.96, 0.94], score: 0.95, passed: true, unstable: false }] },
+  { name: 'alt-1', kind: 'alternative', file: 'answers/alt-1.md', threshold: 0.85, sha256: 'c'.repeat(64), score: 0.8767, grades: [0.9, 0.8, 0.88], passed: true, unstable: true, runs: [{ why: 'first grading', grades: [0.9, 0.8, 0.88], score: 0.8767, passed: true, unstable: true }] }] };
+const FREEZE = { n: 1, at: '2026-10-23T10:20:00.000Z', reason: 'before the pilots', packetSha256: 'd1'.repeat(32), packetFiles: 9, promptSha256: 'e2'.repeat(32), guidelineSha256: 'f3'.repeat(32), goldenSha256: 'a4'.repeat(32), answerSetSha256: 'b5'.repeat(32), answers: [{ name: 'golden', sha256: 'c6'.repeat(32) }], pilot: { model: 'claude-opus-5-5', effort: 'medium', capUsd: 3 }, grader: { model: 'claude-sonnet-5-5', effort: 'medium' }, budget: { totalCapUsd: 60, designCapUsd: 5, pilotCapUsd: 3 } };
+const newAttempt = (over = {}) => ({ ...attempt({ n: 1 }), mode: 'new', validation: 'complete', traps: ['Gross debt used for the ratio'], fairness: FAIRNESS, answerSet: ANSWER_SET, calibration: { score: 0.95, verdict: 'meets-guidance', reason: 'Matches every rubric line.' }, freeze: [FREEZE], guidelineRepair: null, diagnostic: null, taskType: BRIEF.taskType,
+  difficulty: { status: 'pending', screen: null, test: null }, screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true),
+  test: explainedStage('test', [[0.1, 'intended'], [0.2, 'ambiguous'], [0.3, 'other_valid_error'], [0.8, null], [null, null]], null, {}), ...over });
+const newDesign = () => ({ ...design(), traps: [{ id: 't1', title: 'Gross debt used for the ratio', files: ['Atlas_Ledger.csv'], mechanism: 'm', decoy: 'Meridian_Old_Schedule.csv', correctValue: '3.4', wrongValue: '4.1' }], editedFiles: [], unscanned: [], fairness: FAIRNESS, taskType: BRIEF.taskType, brief: BRIEF, alternatives: [{ name: 'alt-1', file: 'answers/alt-1.md', answer: 'Report the covenant as met and add a monitoring step' }], answerSet: ANSWER_SET, freeze: [FREEZE] });
+const NEW_REFS = { source: 'default', found: 2, names: REF_NAMES, bytes: 48211, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: [], scannedChars: 5000, truncated: false };
+/* the second review of a design that the checks rejected: a clause that did not apply, files that could not be read, and files the reviewers saw only in part */
+const FAILED_STAGE2 = {
+  disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, cut: ['Atlas_Facility_Agreement.txt', 'Meridian_Long_Ledger.csv'],
+  application: { pass: false, failed: ['notSuperseded'], checks: { governs: true, inForce: true, notSuperseded: false, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' },
+    hits: [{ id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt', snippet: 'This amendment replaces the schedule.' }, { id: 'more', kind: 'more', document: '', snippet: '3 more passages of supersession wording were found near the clause and are not listed here' }, { id: 'u1', kind: 'unreadable', document: 'Meridian_Policy_Scan.pdf', snippet: 'x' }],
+    unscanned: ['Meridian_Policy_Scan.pdf', 'Atlas_Appendix.xlsx'] },
+  briefApplication: { pass: false, count: 4, failures: [{ trap: 1, part: 'rule', failed: ['governs', 'inForce'] }, { trap: 2, part: 'whyRejected', failed: ['notSuperseded'] }], unscanned: ['Meridian_Policy_Scan.pdf'] },
+};
+/* Two states captured from the real PipelineService (the stub model) through GET /api/pipeline/:id: a design whose reviews are running (design.checking true, no packet, no gold),
+   and a run whose first attempt was lost to a check that could not be carried out (rejection.kind check) and whose second attempt passed. Nothing in them is written by hand. */
+const REAL_PREVIEW = JSON.parse("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-0660441b46a7\",\"label\":\"Pipeline 066044\",\"createdAt\":\"2026-10-24T21:43:00.628Z\",\"updatedAt\":\"2026-10-24T21:43:01.501Z\",\"endedAt\":null,\"stage\":\"design\",\"running\":true,\"message\":\"Reviewing the design of attempt 1 (review 1 of at most 2)\",\"quotesRejection\":false,\"summary\":\"\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":0.1,\"remainingUsd\":59.9,\"ledger\":[{\"at\":\"2026-10-24T21:43:00.884Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.134Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.349Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.499Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"Task files\":1,\"World files\":2},\"sections\":[{\"heading\":\"Business prompt\",\"chars\":111},{\"heading\":\"Grader guideline\",\"chars\":223},{\"heading\":\"Golden answer\",\"chars\":60},{\"heading\":\"Delivery notes\",\"chars\":29}],\"toggle\":null,\"page\":{\"origin\":\"https://tasks.example\",\"path\":\"/review/atlas-4821\"},\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"Task files\",\"label\":\"Supplement\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"World files\",\"label\":\"Cash facts\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"World files\",\"label\":\"Facility terms\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":{\"kind\":\"section\",\"section\":\"Business prompt\",\"number\":1},\"guideline\":{\"kind\":\"section\",\"section\":\"Grader guideline\",\"number\":2},\"goldenAnswer\":{\"kind\":\"section\",\"section\":\"Golden answer\",\"number\":3},\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":1,\"redesigns\":0,\"design\":{\"attempt\":1,\"checking\":true,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":null,\"fingerprints\":[],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 1. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":null,\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"pending\",\"stage1\":{\"state\":\"running\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"guidelineDiff\":null,\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:43:01.500Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1\",\"guideline\":\"Revised guideline for the Atlas task, attempt 1. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:43:00.932Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"in-progress\",\"repaired\":false,\"rejection\":null,\"validation\":\"pending\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:43:01.500Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"pending\",\"stage1\":{\"state\":\"running\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":null,\"references\":{\"source\":\"default\",\"found\":2,\"names\":[\"Close_Checklist_Guide.txt\",\"Draw_Review_Notes.md\"],\"bytes\":582,\"copied\":true,\"files\":[{\"name\":\"Close_Checklist_Guide.txt\",\"bytes\":257,\"sha256\":\"3d7120da29afa31cd2c26c16b3adfcbfd43547e20cfec585f680dafe0a1003bd\"},{\"name\":\"Draw_Review_Notes.md\",\"bytes\":325,\"sha256\":\"17850defa5fbdc33db5c9acc1746933a7ddb5b5beab96ad945ed968749f06010\"}],\"unscanned\":[],\"partial\":[],\"scannedChars\":582,\"truncated\":false}}");
+const REAL_CHECK_KIND = JSON.parse("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-c0510b4508c5\",\"label\":\"Pipeline c0510b\",\"createdAt\":\"2026-10-24T21:51:46.759Z\",\"updatedAt\":\"2026-10-24T21:51:52.294Z\",\"endedAt\":\"2026-10-24T21:51:52.292Z\",\"stage\":\"done\",\"running\":false,\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"quotesRejection\":false,\"summary\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":1.11,\"remainingUsd\":58.89,\"ledger\":[{\"at\":\"2026-10-24T21:51:47.014Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.247Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.498Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.697Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.932Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 2\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.138Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-2-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.321Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-2-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.500Z\",\"stage\":\"design\",\"kind\":\"blind-review\",\"ref\":\"attempt 2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.698Z\",\"stage\":\"design\",\"kind\":\"reveal\",\"ref\":\"attempt 2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.887Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1r\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.096Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1w\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.571Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.755Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.953Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.957Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.154Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.366Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.845Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.028Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.219Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.222Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.420Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.582Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.584Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.736Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.908Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.912Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.102Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.285Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.289Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#5\",\"costUsd\":0.1,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"(none)\":3},\"sections\":[],\"toggle\":null,\"page\":null,\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"\",\"label\":\"\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":null,\"guideline\":null,\"goldenAnswer\":null,\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":2,\"redesigns\":1,\"design\":{\"attempt\":2,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":{\"decision\":\"hold\",\"figures\":[{\"label\":\"Usable cash\",\"value\":\"1,250\",\"tolerance\":1}]},\"fingerprints\":[{\"id\":\"fp-credit\",\"label\":\"Counts available credit as cash\",\"tokens\":[\"available facility counted\"],\"figures\":[{\"label\":\"Wrong cash\",\"value\":3050,\"tolerance\":1}]}],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 2. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":{\"fileCount\":4,\"bytes\":487,\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":227,\"sha256\":\"4128772feab1ba5cd6fbaaca2c17486e7fd4346be5d8c2468945f927a56ff091\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135,\"sha256\":\"e30de5f29b58ece6bb4c1384959511a655ef0095ff78f1b687b0cbdec02aefe7\"}]},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"guidelineDiff\":{\"available\":false,\"added\":0,\"removed\":0,\"lines\":[],\"truncated\":false},\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:48.322Z\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"answerSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:49.113Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"packetFiles\":4,\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"goldenSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"answerSetSha256\":\"a8e0cd6dfe5c355fa3a56b869522f97d728cca512947302b1bb433cb8b161314\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV2\",\"guideline\":\"Revised guideline for the Atlas task, attempt 2. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 2. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:51:47.025Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"rejected\",\"repaired\":false,\"rejection\":{\"kind\":\"check\",\"reasons\":[\"A check of the design could not be carried out (the blind review)\"]},\"validation\":\"incomplete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:47.699Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"incomplete\",\"stage1\":{\"state\":\"incomplete\",\"tries\":2,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}},{\"n\":2,\"startedAt\":\"2026-10-24T21:51:47.742Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":{\"name\":\"screen\",\"rule\":\"both of the 2 pilots score below 0.40\",\"bar\":0.4,\"need\":2,\"of\":2,\"roundIds\":[\"rnd-1e1e700eaf0e\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-1e1e700eaf0e\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-1e1e700eaf0e\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false}],\"counted\":2,\"belowBar\":2,\"explained\":2,\"passed\":true,\"stoppedEarly\":null,\"replacementRound\":false,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:51:49.118Z\",\"endedAt\":\"2026-10-24T21:51:50.370Z\",\"lows\":{\"lowScorers\":2,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":2},\"unexplained\":[]},\"test\":{\"name\":\"test\",\"rule\":\"at least 4 of the 5 pilots score below 0.45\",\"bar\":0.45,\"need\":4,\"of\":5,\"roundIds\":[\"rnd-5288ac9d637c\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-5288ac9d637c\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-5288ac9d637c\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":3,\"id\":\"p3\",\"round\":\"rnd-5288ac9d637c\",\"run\":3,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.1,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.10\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":4,\"id\":\"p4\",\"round\":\"rnd-5288ac9d637c\",\"run\":4,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":5,\"id\":\"p5\",\"round\":\"rnd-5288ac9d637c\",\"run\":5,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":null,\"regrade\":null,\"verdict\":null,\"reason\":\"\",\"valid\":false,\"belowBar\":null,\"stoppedEarly\":true,\"stoppedReason\":\"Not graded: the test was already decided after pilot 4.\",\"adjudication\":null,\"countsTowardPass\":null,\"toolFailure\":false}],\"counted\":4,\"belowBar\":4,\"explained\":4,\"passed\":true,\"stoppedEarly\":{\"afterPilot\":4,\"score\":0.2},\"replacementRound\":false,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:51:50.373Z\",\"endedAt\":\"2026-10-24T21:51:52.292Z\",\"lows\":{\"lowScorers\":4,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":4},\"unexplained\":[]},\"outcome\":\"passed\",\"repaired\":false,\"rejection\":null,\"validation\":\"complete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:48.322Z\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"answerSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:49.113Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"packetFiles\":4,\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"goldenSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"answerSetSha256\":\"a8e0cd6dfe5c355fa3a56b869522f97d728cca512947302b1bb433cb8b161314\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"guidelineRepair\":null,\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"difficulty\":{\"status\":\"passed\",\"screen\":{\"passed\":true,\"explained\":2,\"belowBar\":2,\"of\":2,\"need\":2,\"lows\":{\"lowScorers\":2,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":2}},\"test\":{\"passed\":true,\"explained\":4,\"belowBar\":4,\"of\":5,\"need\":4,\"lows\":{\"lowScorers\":4,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":4}}},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":{\"verdict\":\"success\",\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"validation\":\"complete\"},\"references\":{\"source\":\"none\",\"found\":0,\"names\":[],\"bytes\":0,\"copied\":false,\"files\":[],\"unscanned\":[],\"partial\":[],\"scannedChars\":0,\"truncated\":false}}");
 function handleApi(req, res, url, body) {
   const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
   if (req.method === 'POST') {
@@ -60,7 +120,7 @@ function handleApi(req, res, url, body) {
   if (req.method === 'GET' && url === '/api/pipeline') return send(200, { pipelines: [...pipelines.values()].map(p => ({ id: p.id, label: p.label, createdAt: p.createdAt, stage: p.stage, running: !ENDED.includes(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.capUsd, attempt: p.attempts.length, redesigns: p.redesigns })), running: null, config: CONFIG });
   if (req.method === 'POST' && url === '/api/pipeline/start') {
     if ([...pipelines.values()].some(p => !ENDED.includes(p.stage))) return send(409, { error: 'A pipeline is already running.' });
-    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, config: { acceptMissing: false, screenBar: 0.4, testBar: 0.45 }, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
+    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, config: { acceptMissing: false, screenBar: 0.4, testBar: 0.45, designMode: body.designMode, fairnessSet: body.fairnessSet === true, keepAsWorld: body.keepAsWorld || [] }, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
     pipelines.set(state.id, state);
     return send(200, { id: state.id });
   }
@@ -165,6 +225,14 @@ async function noHorizontalOverflow(label) {
   }
   await viewport(1440, 1000);
 }
+async function noOverflowAtPhone(label) {
+  for (const [w, h] of [[390, 844], [320, 640]]) {
+    await viewport(w, h);
+    const o = await overflow();
+    assert.ok(o.scroll <= o.inner, `${label}: horizontal overflow at ${w}x${h}: scrollWidth ${o.scroll} > ${o.inner}`);
+  }
+  await viewport(1440, 1000);
+}
 /* The page repaints from a poll every 2 seconds; wait for the next one that shows what the fake companion now holds. */
 const POLL_WAIT = 6000;
 const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage")||{}).textContent||"")`;
@@ -214,10 +282,24 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await text('[data-pl=start]'), 'Approve and start');
     assert.match(await text('#pl-why'), /Enter the task link/);
     assert.equal(await count('#pl-root button.primary'), 1, 'one yellow primary');
-    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '50', 'the companion\'s default total cap');
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+    assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '60', 'the companion\'s default total cap');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80. The reviews and the adjudication of low scores are part of every attempt.', 'the default total cap pays for it: no warning');
     assert.equal(await count('#pl-start-form input[data-pl-in=ack]'), 4);
-    assert.equal(await count('#pl-start-form input[type=checkbox]'), 5, 'the four acknowledgements and the withheld-files choice');
+    assert.equal(await count('#pl-start-form input[type=checkbox]'), 6, 'the four acknowledgements, the withheld-files choice and the diagnostic answers');
+    /* the design mode and the fields of the new mode */
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-start-form select[data-pl-in=designMode] option")].map(o=>o.textContent+(o.selected?"*":"")).join("|")'), 'New task from the world files*|Harden the existing task');
+    assert.equal(await text('#pl-refs'), 'Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). The designer reads them; their text is sent to Anthropic. Pilots never see them.');
+    assert.match(await text('#pl-keep-hint'), /^Warning: the pilots get these files, and so does the designer, even if the names look like answers or grading material\./);
+    assert.match(await text('.pl-fairness-set'), /^Also run the diagnostic answers \(adds up to USD 3\.00 per attempt\)/);
+    await evaluate('(()=>{const s=document.querySelector("#pl-start-form select[data-pl-in=designMode]");s.value="harden";s.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await waitFor('!document.querySelector("#pl-keep")', 'the harden mode to hide the fields of the new mode');
+    assert.equal(await exists('#pl-refs'), false);
+    assert.equal(await exists('.pl-fairness-set'), false);
+    assert.equal(await count('#pl-start-form input[type=checkbox]'), 5);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 41.40. The fairness review is part of every attempt.', 'the harden mode has its own figure');
+    assert.equal(await focused(), 'design-mode', 'the keyboard stays on the choice');
+    await evaluate('(()=>{const s=document.querySelector("#pl-start-form select[data-pl-in=designMode]");s.value="new";s.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await waitFor('!!document.querySelector("#pl-keep")', 'the fields of the new mode to come back');
     assert.equal(await evaluate('document.querySelectorAll("#pl-root [role=status][aria-live=polite]").length >= 3'), true, 'live regions for the message, the stage and the wait');
     await noHorizontalOverflow('start card');
     pass('the view opens in the shell with its own header, one yellow primary (disabled with its reason), four acknowledgements and no horizontal overflow at three sizes');
@@ -233,30 +315,43 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await call('Input.insertText', { text: TASK_LINK });
     await delay(80);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/);
-    /* the least total cap, typed live: the figure follows the pilot cap, and Start waits for a cap that covers it */
+    /* the least total cap, typed live: the figure follows the pilot cap and the diagnostic switch, and a total cap below it warns and does not block */
+    const SENT = ' The reviews and the adjudication of low scores are part of every attempt.';
     await evaluate('document.querySelector("#pl-cap").focus();document.querySelector("#pl-cap").select()');
     await call('Input.insertText', { text: '40' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT + ' With this total cap the run may stop at the cap before the 5-pilot test.');
     assert.doesNotMatch(await text('#pl-why'), /at least USD/, 'a low total cap warns and does not block');
     await evaluate('document.querySelector("#pl-cap").select()');
-    await call('Input.insertText', { text: '50' });
+    await call('Input.insertText', { text: '60' });
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT);
+    await click('#pl-start-form input[data-pl-in=fairnessSet]');
+    await delay(80);
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 63.25.' + SENT + ' With this total cap the run may stop at the cap before the 5-pilot test.', 'the diagnostic answers go over the default total cap of 60');
+    await click('#pl-start-form input[data-pl-in=fairnessSet]');
     await evaluate('document.querySelector("#pl-pilot-cap").focus();document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '5' });
     await delay(80);
-    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\./, 'the figure follows the pilot cap as it is typed');
-    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\. With this total cap the run may stop/, 'and warns while the total cap is below it');
+    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 75\.90\./, 'the figure follows the pilot cap as it is typed');
+    assert.match(await text('#pl-cap-min'), /USD 75\.90\. The reviews and the adjudication of low scores are part of every attempt\. With this total cap the run may stop/, 'and warns while the total cap is below it');
     assert.equal(await evaluate('document.querySelector("#pl-cap").getAttribute("aria-describedby")'), 'pl-cap-hint pl-cap-min');
     await evaluate('document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '3' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + SENT);
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/, 'a cap that covers it: the next reason is the acknowledgements');
+    /* the files to keep as world files, typed into the field */
+    await evaluate('document.querySelector("#pl-keep").focus()');
+    await call('Input.insertText', { text: 'Atlas_Parent_Answer.xlsx, Meridian_Notes.txt' });
+    await delay(80);
     await shot('01b-min-cap-1440', 1440, 1000);
+    await shot('01c-new-mode-390', 390, 844);
+    await viewport(1440, 1000);
     await evaluate('document.querySelector("#pl-url").focus()');
     const order = [];
-    for (let i = 0; i < 6; i++) { await press('Tab'); order.push(await focused()); }
-    assert.deepEqual(order, ['cap', 'model', 'effort', 'pilot-cap', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
+    for (let i = 0; i < 9; i++) { await press('Tab'); order.push(await focused()); }
+    assert.deepEqual(order, ['design-mode', 'cap', 'model', 'effort', 'pilot-cap', 'keep-as-world', 'fairness-set', 'accept-missing', 'ack-shell-access'], 'Tab walks the fields in reading order');
     assert.equal(await evaluate('document.querySelector("[data-pl-key=accept-missing]").checked'), false, 'the withheld-files choice is off unless the person turns it on');
     for (let i = 0; i < 4; i++) {
       await press('Space');
@@ -276,14 +371,14 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const start = posts.find(p => p.url === '/api/pipeline/start');
     assert.ok(start, 'the page posted a start');
     assert.equal(start.nonce, NONCE);
-    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 50, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
+    assert.deepEqual(start.body, { url: TASK_LINK, capUsd: 60, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, designMode: 'new', keepAsWorld: ['Atlas_Parent_Answer.xlsx', 'Meridian_Notes.txt'], acknowledgements: ACK_IDS });
     assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 1);
     assert.equal(await focused(), 'pl-stage', 'the keyboard moves to the stage line');
     assert.equal(await evaluate('document.body.innerHTML.includes("SECRET-TOKEN-123")'), false, 'the link is nowhere in the page');
     assert.equal(await exists('[data-pl=start]'), false);
     assert.match(await text('#pl-start-form'), /A pipeline is running/);
     assert.equal(await exists('[data-pl=stop]'), true, 'Stop is visible while it runs');
-    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 50\.00/);
+    assert.match(await text('#pl-spend'), /Spent USD 0\.00 of USD 60\.00/);
     pass('Enter on the button posts once with the nonce and the exact body; the link leaves the page; the keyboard lands on the stage line; Stop and the spend line show');
     await noHorizontalOverflow('running');
 
@@ -321,8 +416,10 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     const continuesBefore = posts.filter(p => p.url.endsWith('/continue')).length;
     set({
       import: { fileCount: 40, page: { origin: 'https://tasks.example', path: '/review/atlas-4821' }, toggle: { found: true, label: 'Show all files', flipped: true, filesBefore: 4, filesAfter: 40, learned: false },
-        skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES },
+        skipped: [{ name: 'Atlas_Thumbs.db', why: 'a system file' }, { name: 'Atlas_Archive_2019.zip', why: 'larger than the size cap' }], files: FETCHED, notes: CONFIRM_NOTES,
+        keepAsWorld: [{ name: 'Atlas_Parent_Answer.xlsx', present: true, warning: 'its name looks like an answer or grading material (a file named like an answer), and it goes to the designer and the pilots as a world file' }, { name: 'Meridian_Notes.txt', present: false, warning: 'the task has no file by this name' }] },
       waiting: { kind: 'confirm-files', message: '40 files were fetched. Compare them with the files listed on the task page, then press Continue.', since: new Date().toISOString() },
+      classification: { unreadable: ['Borealis_Old_Report.xls', 'Atlas_Archive.bin'] },
     });
     await waitFor(stageIs('^Waiting for you: check the files$'), 'the confirm-files wait', POLL_WAIT);
     assert.equal(await text('#pl-wait h2'), 'Check the files');
@@ -334,6 +431,20 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.equal(await count('#pl-wait .pl-notes li'), 3, 'the three notes');
     assert.match(await text('#pl-wait .pl-notes'), /The loader could not fully cover these places/);
     assert.equal(await evaluate('document.querySelector("#pl-wait .pl-notes").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the notes come before the files');
+    /* the files the owner asked to keep as world files, with the companion's warning */
+    assert.equal(await text('#pl-wait .pl-kept strong'), 'You asked to keep 2 files as world files');
+    assert.match(await text('#pl-wait .pl-kept'), /The designer and the pilots get these files, even if the name looks like an answer or grading material\./);
+    assert.match(await text('#pl-wait .pl-kept li:nth-child(1)'), /^Atlas_Parent_Answer\.xlsx\s+its name looks like an answer or grading material[\s\S]*goes to the designer and the pilots as a world file$/);
+    assert.match(await text('#pl-wait .pl-kept li:nth-child(2)'), /^Meridian_Notes\.txt\s+the task has no file by this name\s+Not among the files that were fetched\.$/);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-kept").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the warning comes before the list of files');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-wait .pl-kept")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-wait .pl-files-box")).borderLeftColor'), true, 'and it is marked as a warning');
+    assert.match(await text('#pl-import .pl-kept'), /You asked to keep 2 files as world files/, 'the import card shows it too');
+    /* the files the reviewers cannot read: named with the plain reason, above the list of files, and marked as a warning */
+    assert.equal(await text('#pl-wait .pl-unreadable strong'), 'The reviewers cannot read these files');
+    assert.match(await text('#pl-wait .pl-unreadable .pl-warning-lead'), /^The reviewers cannot read these files, so a start is refused unless you accept that they go unchecked\. To accept it, tick .Start even if a world or task file has to be withheld. in the start form\.$/);
+    assert.deepEqual(JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-wait .pl-unreadable li")].map(li=>li.textContent))')), ['Borealis_Old_Report.xls', 'Atlas_Archive.bin']);
+    assert.equal(await evaluate('document.querySelector("#pl-wait .pl-unreadable").getBoundingClientRect().top < document.querySelector("#pl-wait .pl-files-box").getBoundingClientRect().top'), true, 'the warning comes before the list of files');
+    assert.equal(await count('#pl-wait .pl-unreadable'), 1);
     assert.match(await text('#pl-wait'), /Skipped \(2\)[\s\S]*Atlas_Thumbs\.db\s+a system file[\s\S]*Atlas_Archive_2019\.zip\s+larger than the size cap/);
     assert.match(await text('#pl-wait'), /Show all files[\s\S]*Found and turned on \(\u201CShow all files\u201D\)\. 4 files offered before, 40 after\./);
     assert.equal(await evaluate('[...document.querySelectorAll("#pl-wait .pl-confirm-actions button")].map(b=>b.textContent.trim()).join("|")'), 'Every file is there: continue|Stop');
@@ -364,6 +475,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await press('Enter');
     await waitFor('!document.querySelector("#pl-wait [data-pl=continue]")', 'the confirm wait to end', 5000);
     assert.equal(posts.filter(p => p.url.endsWith('/continue')).length, continuesBefore + 1, 'one more continue was posted');
+    set({ classification: undefined });
     pass('the confirm-files wait shows "Check the files": the message, three notes above the list, 40 files with groups in a scrolling box, the skipped files, the toggle result, and two buttons that fit a phone and work from the keyboard');
 
     /* ---------- classify, design ---------- */
@@ -371,7 +483,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await waitFor(stageIs('^Classify:'), 'classify', POLL_WAIT);
     assert.match(await text('#pl-import'), /9 files in all · 5 world · 3 task · 2 withheld · 1 other/);
     assert.match(await text('#pl-import'), /Found and turned on \(“Show all files”\)\. 4 files offered before, 9 after\./);
-    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 50\.00/);
+    assert.match(await text('#pl-spend'), /USD 0\.40 of USD 60\.00/);
     assert.equal(await evaluate('document.querySelector("#pl-timeline [aria-current=step] strong").textContent'), 'Classify');
     assert.match(await text('#pl-spend'), /Classifying what was captured/, 'the companion\'s progress message shows under the stage');
     set({ stage: 'design', classification: { prompt: { kind: 'section', section: 'Business request', number: 2 }, guideline: { kind: 'file', file: 'Atlas_Grader_Guide.docx' }, goldenAnswer: { kind: 'file', file: 'Atlas_Reference_Answer.docx' }, worldFiles: ['Atlas_Facility_Schedule.csv', 'Meridian_Ledger.xlsx'], taskFiles: ['Atlas_Brief.txt'], other: [], withheld: [{ name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }, { name: 'Atlas_Reference_Answer.docx', why: 'it is the golden answer' }], notes: [], warnings: [{ name: 'Meridian_Ledger.xlsx', why: 'it holds a long passage of the guideline or the golden answer' }] }, design: design(), attempt: 1, attempts: [attempt()] });
@@ -427,6 +539,39 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('03-screen-withheld-1440', 1440, 1000);
     pass('while a round runs the withheld fields read "Withheld while a round runs", the notice explains, and the golden answer is nowhere in the page');
 
+    /* ---------- the new mode while a round runs: what the companion's own redaction leaves of a full attempt ---------- */
+    {
+      const { redactPipelineData } = require(path.join(root, 'backend', 'pipeline', 'redact.cjs'));
+      const [id, state] = [...pipelines][0];
+      const ledgerEntry = (kind, ref) => ({ at: new Date().toISOString(), stage: 'design', kind, ref, costUsd: 0.3, estimated: false });
+      const running = { ...state, redacted: false, stage: 'screen', design: newDesign(), references: { ...NEW_REFS, partial: ['Atlas_Partial_Reference.md'] }, config: { ...state.config, designMode: 'new' },
+        classification: { worldFiles: ['Atlas_Ledger.csv'], taskFiles: [], other: [], withheld: [], unreadable: ['Borealis_Archive.bin'] },
+        ledger: [ledgerEntry('blind-review', 'attempt 1'), ledgerEntry('reveal', 'alt-1'), ledgerEntry('grader', 'as-golden'), ledgerEntry('grader', 'diag-1')],
+        attempts: [newAttempt({ outcome: 'in-progress', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [null, null]], null),
+          fairness: { ...FAIRNESS, stage1: { ...FAIRNESS.stage1, state: 'partial', rendered: ['Atlas_Rendered_Ledger.xlsx'], unreadable: ['Meridian_Hidden_Scan.bin'] } },
+          freeze: [{ ...FREEZE, answers: [{ name: 'alt-1', sha256: 'c6'.repeat(32) }] }] })] };
+      pipelines.set(id, redactPipelineData(JSON.parse(JSON.stringify(running))));
+      await waitFor('/Withheld while a round runs/.test((document.querySelector("#pl-brief")||{}).innerText||"")', 'the new mode while a round runs', POLL_WAIT);
+      const gone = await evaluate('(()=>{const t=document.body.innerText;return ["Quarterly covenant review","Atlas_Facility_Agreement","Report the covenant","Net the blocked cash","breached","Usable cash is 1,250"].filter(x=>t.includes(x))})()');
+      assert.deepEqual(gone, [], 'nothing of the brief, the golden answer or the paths is on the page while a round runs');
+      assert.equal(await text('#pl-brief .pl-withheld'), 'Withheld while a round runs');
+      assert.match(await text('#pl-design .pl-task-type'), /^Task type: Withheld while a round runs$/);
+      assert.match(await text('#pl-design .pl-refs-summary'), /^Reference documents used: 2 files \(Withheld while a round runs\)\. Pilots never see them\. Some files were not checked whole for leaked passages: Withheld while a round runs/);
+      const leaked = await evaluate('(()=>{const t=document.body.innerText;return ["Atlas_Partial_Reference","Atlas_Rendered_Ledger","Meridian_Hidden_Scan","Meridian_Workflow_Catalog","as-golden","diag-1"].filter(x=>t.includes(x))})()');
+      assert.deepEqual(leaked, [], 'the files the leak scan read in part, the files turned into text and the files nobody could read are not on the page');
+      assert.match(await text('#pl-classify'), /Borealis_Archive\.bin/, 'the files the reviewers cannot read are not private');
+      assert.match(await text('#pl-checks .pl-freeze li:first-child'), /Packet d1d1d1d1d1d1 \(9 files\)/, 'the freeze hashes stay visible');
+      assert.deepEqual(await evaluate('[...document.querySelectorAll("#pl-checks h3")].map(h=>h.textContent)'), ['Fairness: could another answer be better supported?', 'Difficulty: do the pilots fail for the intended reason?', 'Answer set: can the guideline grade the fixed answers?', 'Guideline repair', 'Diagnostic answers', 'Freeze records'], 'a repair or a diagnostic that may exist is withheld, not left out');
+      assert.equal(await evaluate('[...document.querySelectorAll("#pl-checks .pl-withheld")].length >= 3'), true, 'the fairness, the answer set and the counts are withheld');
+      assert.match(await text('#pl-checks .card-title'), /Checks complete/, 'that the checks finished is not private');
+      assert.match(await text('#pl-screen .pl-lows'), /^Counts by class: Withheld while a round runs$/);
+      assert.match(await text('#pl-screen tbody tr:first-child td:nth-child(4)'), /Counts\s+Withheld while a round runs/, 'whether a pilot counts shows, the diagnosis does not');
+      await noHorizontalOverflow('the new mode withheld');
+      await noOverflowAtPhone('the new mode withheld');
+      await shot('03c-new-withheld-1440', 1440, 1000);
+      pipelines.set(id, { ...pipelines.get(id), attempts: [], references: null, redacted: false });
+    }
+
     /* ---------- the screen and the test ---------- */
     set({ redacted: false, design: design() });
     setAttempt({ screen: stageOf('screen', [0.31, 0.12], true), test: stageOf('test', [0.1, 0.2, 0.9, 0.3], null, { 3: { state: 'running', score: null, valid: false, belowBar: null, audit: null } }) });
@@ -467,7 +612,9 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-screen .card-title'), /Screen failed/);
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(2)'), 'Stopped: not needed\nNot graded: the screen was already decided after pilot 1.');
     assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(3)'), 'Not needed');
-    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Not needed');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Stopped early: not needed', 'the column of the count toward the pass');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(5)'), 'Not needed', 'and the audit column');
+    assert.equal(await evaluate('document.querySelector("#pl-screen thead th:nth-child(4)").textContent'), 'Counts toward the pass');
     assert.match(await text('#pl-screen tbody tr:nth-child(1) td:nth-child(3)'), /No/);
     assert.equal(await evaluate('document.querySelector("#pl-screen tbody tr:nth-child(2) .pill").className'), 'pill ', 'the audit badge is plain: neither amber nor red');
     assert.equal(await evaluate('document.querySelectorAll("#pl-screen .pill.amber, #pl-screen .pill.red").length'), 1, 'only the Screen failed pill is red, and it comes with its words');
@@ -508,6 +655,122 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await shot('04d-test-stopped-390', 390, 844);
     await viewport(1440, 1000);
     pass('the two bars show in their own stage (below 0.40 for the screen, below 0.45 for the test); a screen stopped after pilot 1 and a test stopped after 2 pilots at or above the bar show the pilots that were not needed as "Stopped: not needed" with their reason, and the stage says why it stopped');
+
+    /* ---------- a full attempt of the new mode: the brief, fairness and difficulty apart, the answer set, the freeze, and which low scores count ---------- */
+    set({ stage: 'test', running: true, redacted: false, redesigns: 0, summary: '', result: null, design: newDesign(), references: { ...NEW_REFS, partial: ['Atlas_Review_Handbook.md'], truncated: true },
+      attempts: [newAttempt({ difficulty: { status: 'pending', screen: { passed: true, explained: 2, belowBar: 2, of: 2, need: 2, lows: explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true).lows }, test: null } })] });
+    await waitFor(stageIs('^Test: five blind'), 'the new mode attempt', POLL_WAIT);
+    await waitFor('!!document.querySelector("#pl-brief .pl-brief-table")', 'the brief');
+    assert.match(await text('#pl-design .pl-task-type'), /^Task type: Quarterly covenant review\. Why: The world files hold/);
+    assert.equal(await text('#pl-design .pl-refs-summary'), 'Reference documents used: 2 files (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf). Pilots never see them. Checked for leaked passages only in part: Atlas_Review_Handbook.md. Not checked for leaked passages (their text could not be read, or the scan cap left them out): Meridian_Workflow_Catalog.pdf.');
+    assert.equal(await text('#pl-brief .pl-brief-decision dt:last-of-type'), 'Decision date');
+    assert.equal(await text('#pl-brief .pl-brief-decision dd:last-of-type'), '2025-03-31');
+    assert.equal(await text('#pl-brief h2'), 'What the traps rest on');
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-brief thead th")].map(h=>h.textContent).join("|")'), 'Trap|Rule|Correct path|Wrong path|Why it is tempting|Strongest alternative');
+    const brief = JSON.parse(await evaluate('JSON.stringify(Object.fromEntries([...document.querySelectorAll("#pl-brief tbody tr:first-child td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])))'));
+    assert.ok(brief.Rule.includes('Atlas_Facility_Agreement.txt') && brief.Rule.includes(TRAP_RULE), 'the rule and its clause are in the rule column');
+    assert.ok(brief['Correct path'].includes('Report the covenant as met') && brief['Correct path'].includes('3.4') && !/breached|4\.1/.test(brief['Correct path']), 'the correct path is in its own column');
+    assert.ok(brief['Wrong path'].includes('Report the covenant as breached') && brief['Wrong path'].includes('4.1') && !brief['Wrong path'].includes('Report the covenant as met'), 'and the wrong path in its own');
+    assert.ok(brief['Why it is tempting'].startsWith('effort') && brief['Why it is tempting'].includes('What it costs'), 'why it is tempting');
+    assert.ok(brief['Strongest alternative'].includes('ask for a waiver') && brief['Strongest alternative'].includes('Ruled out by: No waiver is needed'), 'the strongest alternative and the clause that rules it out');
+    assert.equal(await text('#pl-brief .pl-alt-score'), 'Its answer scored 0.88 against the guideline (it needs 0.85), and the grades were unstable.');
+    /* fairness and difficulty: two headings, two lists, each with its own words */
+    assert.deepEqual(await evaluate('[...document.querySelectorAll("#pl-checks h3")].map(h=>h.textContent)'), ['Fairness: could another answer be better supported?', 'Difficulty: do the pilots fail for the intended reason?', 'Answer set: can the guideline grade the fixed answers?', 'Freeze records']);
+    const fairText = await text('#pl-checks .pl-review'), diffText = await text('#pl-checks .pl-difficulty');
+    assert.match(fairText, /Blind review: a reader with only the prompt and the files gave an answer \(1 try\)\./);
+    assert.match(fairText, /Second review: the other answer is ruled out by a clause of the files \(objection: permitted discretion\)\./);
+    assert.match(fairText, /Application check of the clause that rules the other answer out: passed\./);
+    assert.ok(!/Screen|Test|pilot/.test(fairText), 'no pilot result in the fairness list');
+    assert.match(diffText, /^Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\./);
+    assert.match(diffText, /Test: running\.$/);
+    assert.ok(!/review|clause/i.test(diffText), 'no review in the difficulty list');
+    assert.equal(await evaluate('document.querySelector("#pl-checks .pl-unstable").checkVisibility()'), true, 'the unstable grade is marked where it can be seen');
+    assert.match(await text('#pl-checks .pl-unstable'), /^Unstable: the grades fell on both sides of the line, so a third grade decided\. All grades: 0\.90, 0\.80, 0\.88\.$/);
+    const answers = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-answers tbody tr")].map(r=>Object.fromEntries([["row",r.querySelector("th").innerText.replace(/\\s+/g," ").trim()],...[...r.querySelectorAll("td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])])))'));
+    assert.deepEqual(answers.map(a => [a.row, a.Needs, a.Grades, a.Score]), [['Golden answer', '0.90', '0.96, 0.94', '0.95'], ['Permitted alternative alt-1', '0.85', '0.90, 0.80, 0.88', '0.88']]);
+    assert.ok(!answers[0].Result.includes('Unstable') && answers[1].Result.includes('Unstable'), 'only the unstable answer is marked');
+    assert.match(await text('#pl-checks .pl-freeze li:first-child'), /^Freeze 1 \(before the pilots\)[\s\S]*Packet d1d1d1d1d1d1 \(9 files\); prompt e2e2e2e2e2e2; guideline f3f3f3f3f3f3; golden answer a4a4a4a4a4a4; answer set b5b5b5b5b5b5\./);
+    /* a design the checks rejected: the checks of the brief's clauses by trap, a file that could not be read, and the files the reviewers saw in part */
+    setAttempt({ fairness: { ...FAIRNESS, status: 'rejected', stage2: FAILED_STAGE2 } });
+    await waitFor('/Trap 2, why the alternative is rejected/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the failed checks', POLL_WAIT);
+    const items = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-review > li")].map(li=>li.innerText.replace(/\\s+/g," ").trim()))'));
+    assert.equal(items.length, 4, 'the blind review, the second review and one line for each check');
+    const app = items.find(x => x.startsWith('Application check of the clause that rules the other answer out')), brf = items.find(x => x.startsWith('Application check of the clauses the brief rests on'));
+    assert.match(app, /^Application check of the clause that rules the other answer out: failed\. it may be superseded\. In force from 2025-01-01; decision on 2025-03-31\. 1 place in the files mentions a change of a document\./);
+    assert.ok(app.includes('Meridian_Policy_Scan.pdf: This file could not be read as text, so it could not be checked for a later document that replaces it.'));
+    assert.ok(app.includes('More passages were found than are shown here (3 more).'));
+    assert.ok(app.includes('These files could not be read as text, so they could not be checked for a later document that replaces the clause: Atlas_Appendix.xlsx.'));
+    assert.ok(brf.startsWith('Application check of the clauses the brief rests on: failed. 4 checks made.'), brf);
+    assert.ok(brf.includes('Trap 1, the rule clause: it does not govern this decision; it is not shown to be in force.') && brf.includes('Trap 2, why the alternative is rejected: it may be superseded.'));
+    assert.ok(!app.includes('Trap 1') && !brf.includes('More passages'), 'each failure is under its own check');
+    assert.equal(await text('#pl-checks .pl-cut'), 'The reviewers saw these files only in part: Atlas_Facility_Agreement.txt, Meridian_Long_Ledger.csv.');
+    assert.equal(await evaluate('document.querySelectorAll("#pl-checks .pl-hit-unreadable").length'), 1);
+    await noOverflowAtPhone('the failed checks');
+    await shot('03g-new-failed-checks-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03g-new-failed-checks-390', 390, 844);
+    await viewport(1440, 1000);
+    /* the blind review that could not read every file, a hit that is a notice, the files a check saw only in part, and the rule that decided each grade */
+    setAttempt({
+      fairness: { ...FAIRNESS, stage1: { ...FAIRNESS.stage1, state: 'partial', rendered: ['Atlas_Ledger.xlsx', 'Meridian_Schedule.docx'], unreadable: ['Borealis_Scan.bin'] },
+        stage2: { ...FAIRNESS.stage2, application: { ...CHECK, hits: [{ id: 'u1', kind: 'notice', document: 'Meridian_Notice.pdf', unreadable: true, snippet: 'quoted words that must not be shown' }], unscanned: ['Meridian_Notice.pdf'], cut: ['Atlas_Facility_Agreement.txt'] } } },
+      answerSet: { ...ANSWER_SET, answers: ANSWER_SET.answers.map(a => ({ ...a, runs: a.runs.map(r => ({ ...r, rule: a.grades.length > 2 ? 'majority' : 'both' })) })) },
+    });
+    await waitFor('/Nobody could read these files/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the partial blind review', POLL_WAIT);
+    const lines2 = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-review > li")].map(li=>li.innerText.replace(/\\s+/g," ").trim()))'));
+    assert.ok(lines2[0].startsWith('Blind review: a reader with only the prompt and the files gave an answer, but not every file could be read'), lines2[0]);
+    assert.equal(lines2[1], 'These files were turned into text for the blind reviewer: Atlas_Ledger.xlsx, Meridian_Schedule.docx.');
+    assert.equal(lines2[2], 'Nobody could read these files, so the blind review is partial for them: Borealis_Scan.bin.');
+    const app2 = lines2.find(x => x.startsWith('Application check of the clause that rules the other answer out'));
+    assert.ok(app2.includes('A reviewer quoted this from a file that only the blind reader could open: Meridian_Notice.pdf (the quote itself is not shown here).'), app2);
+    assert.ok(app2.includes('The check saw these files only in part: Atlas_Facility_Agreement.txt.'), app2);
+    assert.equal((app2.match(/Meridian_Notice\.pdf/g) || []).length, 1, 'a file is named once');
+    assert.ok(!(await text('#pl-checks')).includes('quoted words that must not be shown'), 'the quote is not shown');
+    const answers2 = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-checks .pl-answers tbody tr")].map(r=>Object.fromEntries([["row",r.querySelector("th").innerText.replace(/\\s+/g," ").trim()],...[...r.querySelectorAll("td")].map(c=>[c.getAttribute("data-label"),c.innerText.replace(/\\s+/g," ").trim()])])))'));
+    assert.deepEqual(answers2.map(a => a.Grades), ['0.96, 0.94 Decided by: both grades must pass', '0.90, 0.80, 0.88 Decided by: the majority of the grades']);
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-checks .pl-rule")].length===2&&[...document.querySelectorAll("#pl-checks .pl-rule")].every(e=>e.checkVisibility())'), true, 'each rule is on screen, under its grades');
+    await noOverflowAtPhone('the partial blind review');
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03h-new-partial-blind-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks .pl-review").scrollIntoView()');
+    await shot('03h-new-partial-blind-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('the blind review that could not read every file names the files turned into text and the files nobody could read; a notice names its document without the quote; each grade says which rule decided it');
+    /* a design refused before any review: it says so, and lists nothing */
+    setAttempt({ fairness: { status: 'not-reached', repairs: 0, stage1: null, stage2: null } });
+    await waitFor('!!document.querySelector("#pl-checks .pl-review-none")', 'the design refused before the reviews', POLL_WAIT);
+    assert.equal(await text('#pl-checks .pl-review-none'), 'No review ran: the design was refused before the reviews.');
+    assert.equal(await count('#pl-checks .pl-review'), 0, 'no list of reviews');
+    assert.ok(!/Blind review|Second review/.test(await text('#pl-checks')), 'no review is listed');
+    await noOverflowAtPhone('the design refused before the reviews');
+    pass('a design refused before the reviews says "No review ran" and lists no review');
+    setAttempt({ fairness: FAIRNESS, answerSet: ANSWER_SET });
+    await waitFor('!/Trap 2, why the alternative is rejected/.test((document.querySelector("#pl-checks")||{}).innerText||"")', 'the passing checks again', POLL_WAIT);
+    /* the pilots of the test: which low scores count, and the ones that do not are marked with their diagnosis */
+    const counts = JSON.parse(await evaluate('JSON.stringify([...document.querySelectorAll("#pl-test tbody tr")].map(r=>r.querySelector("td[data-label=\\"Counts toward the pass\\"]").innerText.replace(/\\s+/g," ").trim()))'));
+    assert.deepEqual(counts, ['\u2713 Counts Diagnosis: the intended error', '! Low score that does not count Diagnosis: ambiguous', '\u2713 Counts Diagnosis: another valid error', 'Does not count: the score is not below 0.45', 'Waiting for a score']);
+    assert.equal(await count('#pl-test .pl-nocount'), 1);
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-test .pl-nocount")).color!==getComputedStyle(document.querySelector("#pl-test .pl-counts")).color'), true, 'a counting pilot and one that does not look different, and each has its words');
+    assert.equal(await text('#pl-test .pl-unexplained li'), 'Pilot 2 scored 0.20: ambiguous');
+    assert.match(await text('#pl-test .pl-lows'), /^Low scores: 3\. By diagnosis: 1 intended, 1 another valid error, 0 permitted alternative, 0 grader defect, 1 ambiguous, 0 tool failure, 0 not supported\. Counted toward the pass: 2\.$/);
+    assert.equal(await text('#pl-test .pl-tally'), '3 of 5 below 0.45; 2 count toward the pass; 4 needed.');
+    await noHorizontalOverflow('the new mode cards');
+    await noOverflowAtPhone('the new mode cards');
+    await shot('03d-new-brief-1440', 1440, 1000);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('03e-new-checks-1440', 1440, 1000);
+    await viewport(390, 844);
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-brief thead")).position'), 'absolute', 'at phone width the brief table folds into labels per cell');
+    await evaluate('document.querySelector("#pl-brief").scrollIntoView()');
+    await shot('03d-new-brief-390', 390, 844);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('03e-new-checks-390', 390, 844);
+    await evaluate('document.querySelector("#pl-test").scrollIntoView()');
+    await shot('03f-new-test-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('a full attempt of the new mode: the task type, the brief with each trap in its own columns, fairness and difficulty as two separate results, the answer set with an unstable grade marked, the freeze record, and each pilot saying whether its low score counts');
 
     /* ---------- done: result and export ---------- */
     set({ stage: 'done', running: false, spentUsd: 17.4, redesigns: 2, summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 3). Export the private zip to take the design away.', attempts: [
@@ -583,6 +846,124 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await viewport(1440, 1000);
     pass('a stop at the cap before the test marks Test as where it stopped, the Test card says it was not started, and the result says why in plain words');
 
+    /* ---------- the checks did not finish: a third pipeline that the cap stopped before the blind review ---------- */
+    await click('[data-pl=new]');
+    await waitFor('!!document.querySelector("#pl-url")', 'the form to open for the third pipeline');
+    await evaluate('document.querySelector("#pl-url").focus()');
+    await call('Input.insertText', { text: TASK_LINK });
+    for (const id of ACK_IDS) await click('#pl-start-form input[data-id="' + id + '"]');
+    await click('[data-pl=start]');
+    await waitFor(stageIs('^Import:'), 'the third pipeline', 5000);
+    assert.equal(posts.filter(p => p.url === '/api/pipeline/start').length, 3, 'a third start was posted');
+    set({ stage: 'budget', running: false, capUsd: 30, spentUsd: 24.5, references: NEW_REFS, design: null, summary: 'Stopped before the blind review: USD 24.50 spent, and the step could cost up to USD 2.30.', result: { verdict: 'incomplete', message: 'x', validation: 'incomplete' },
+      attempts: [newAttempt({ validation: 'incomplete', outcome: 'budget', fairness: { ...FAIRNESS, status: 'incomplete', stage1: { ...FAIRNESS.stage1, state: 'incomplete' }, stage2: null }, difficulty: { status: 'pending', screen: null, test: null }, screen: null, test: null, freeze: [], calibration: null })] });
+    await waitFor(stageIs('^Stopped at the cap'), 'the incomplete result', POLL_WAIT);
+    assert.equal(await text('#pl-stage'), 'Stopped at the cap, in the Design step: the next call would pass the total cap, so it was not started.');
+    assert.equal(await text('#pl-verdict h2'), 'The checks did not finish');
+    assert.match(await text('#pl-verdict .card-title'), /Incomplete/);
+    assert.equal(await text('#pl-verdict .pl-incomplete'), 'The checks did not finish. Nothing here counts as a pass: a design passes only after every check of it has finished.');
+    assert.equal(await text('#pl-checks .pl-incomplete'), 'The checks did not finish. Nothing here counts as a pass: a design passes only after every check of it has finished.');
+    assert.match(await text('#pl-checks .card-title'), /Checks did not finish/);
+    assert.match(await text('#pl-checks .pl-review'), /Second review: not run\./);
+    assert.equal(await text('#pl-checks .pl-blind-incomplete'), 'The blind review did not finish (1 try).', 'a review that was cut off is not shown as running');
+    assert.ok(!/Blind review: running/.test(await text('#pl-checks')));
+    assert.match(await text('#pl-checks .pl-difficulty'), /Screen: not run\.\s+Test: not run\./);
+    assert.equal(await evaluate('/passed|Passed/.test(document.querySelector("#pl-verdict").innerText.replace("Nothing here counts as a pass","")+document.querySelector("#pl-checks .pl-difficulty").innerText)'), false, 'nothing reads as a pass');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-checks .pl-incomplete")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-checks")).borderLeftColor'), true, 'the notice is marked');
+    await noHorizontalOverflow('the checks did not finish');
+    await noOverflowAtPhone('the checks did not finish');
+    await shot('04e-incomplete-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-checks").scrollIntoView()');
+    await shot('04e-incomplete-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('a run stopped before its checks finished says so plainly in the checks card and the result, and nothing reads as a pass');
+
+    /* ---------- what the real backend emits: the designer working, the repair stage line, an earlier attempt explained ---------- */
+    {
+      /* a fourth pipeline: an ended one is not polled, so the page is given a running one */
+      await click('[data-pl=new]');
+      await waitFor('!!document.querySelector("#pl-url")', 'the form to open for the fourth pipeline');
+      await evaluate('document.querySelector("#pl-url").focus()');
+      await call('Input.insertText', { text: TASK_LINK });
+      for (const id of ACK_IDS) await click('#pl-start-form input[data-id="' + id + '"]');
+      await click('[data-pl=start]');
+      await waitFor(stageIs('^Import:'), 'the fourth pipeline', 5000);
+      /* the checks before the pilots: the design is not there yet */
+      const checking = newAttempt({ validation: 'pending', outcome: 'in-progress', screen: null, test: null, freeze: [], calibration: null, difficulty: { status: 'pending', screen: null, test: null }, fairness: { ...FAIRNESS, status: 'pending', stage1: { ...FAIRNESS.stage1, state: 'running' }, stage2: null } });
+      set({ stage: 'design', running: true, result: null, summary: '', design: null, attempts: [checking], message: 'Checking the design' });
+      await waitFor('/The designer is working/.test((document.querySelector("#pl-design")||{}).innerText||"")', 'the designer working', POLL_WAIT);
+      assert.equal(await text('#pl-design h2'), 'The designer is working');
+      assert.match(await text('#pl-design .pl-designer-working'), /^The designer is working\. The traps, the brief and the checks of the design show here once the design has passed every check that comes before the pilots\.$/);
+      assert.equal(await evaluate('["The designer added no new file","No existing world file was edited","Not given","Line changes"].filter(x=>document.querySelector("#pl-design").innerText.includes(x)).length'), 0, 'nothing the designer has not written is stated');
+      assert.match(await text('#pl-checks .pl-review'), /Blind review: running \(1 try\)\./, 'while the run is running, running is true');
+      assert.equal(await text('#pl-checks .pl-difficulty li:nth-child(1)'), 'Screen: not reached yet.');
+      /* the trap designer repairs the guideline: the stage reads screen again, and no pilot runs */
+      const repair = { stage: 'screen', at: new Date().toISOString(), outcome: 'pending', classes: ['grader_defect'], changed: [], reason: '', regrade: null, recounted: null };
+      set({ stage: 'screen', design: newDesign(), message: 'Asking the trap designer to repair the guideline (attempt 1 of 4)', attempts: [newAttempt({ outcome: 'in-progress', screen: explainedStage('screen', [[0.2, 'grader_defect'], [0.3, 'grader_defect']], false), test: null, guidelineRepair: repair })] });
+      await waitFor('/^Screen: Asking the trap designer/.test(document.querySelector("#pl-stage").textContent)', 'the repair stage line', POLL_WAIT);
+      assert.equal(await text('#pl-stage'), 'Screen: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+      assert.equal(await text('#pl-timeline [aria-current=step] small'), 'Repairing the guideline');
+      /* an earlier attempt, explained in a section the owner opens */
+      const earlier = newAttempt({ n: 1, outcome: 'screen-failed', fairness: FAIRNESS, screen: explainedStage('screen', [[0.2, 'permitted_alternative'], [0.3, 'ambiguous']], false), test: null, difficulty: { status: 'failed', screen: { passed: false, explained: 0, belowBar: 2, of: 2, need: 2, lows: null }, test: null } });
+      const current = newAttempt({ n: 2, outcome: 'in-progress', validation: 'pending', screen: null, test: null, freeze: [], difficulty: { status: 'pending', screen: null, test: null } });
+      set({ stage: 'redesign', redesigns: 1, message: 'Preparing the feedback for the next design', attempts: [earlier, current] });
+      await waitFor('!!document.querySelector("#pl-redesigns details.pl-attempt")', 'the earlier attempt section', POLL_WAIT);
+      assert.equal(await count('#pl-redesigns details.pl-attempt'), 1, 'one section, for the earlier attempt only');
+      assert.equal(await text('#pl-redesigns details.pl-attempt > summary'), 'Attempt 1: Screen failed');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), false, 'closed at first');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns .pl-attempt-counts").checkVisibility()'), false, 'and its text is not on screen');
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt > summary").focus()');
+      await press('Enter');
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), true, 'Enter opens it');
+      assert.equal(await text('#pl-redesigns .pl-attempt-counts'), 'Screen: 2 of 2 below 0.40; 0 count toward the pass; failed.');
+      assert.equal(await evaluate('[...document.querySelectorAll("#pl-redesigns .pl-attempt .pl-unexplained li")].map(li=>li.textContent).join("|")'), 'Pilot 1 scored 0.20: a permitted alternative (the answer is acceptable)|Pilot 2 scored 0.30: ambiguous');
+      /* a poll that changes the card around it does not close the section the owner opened */
+      setAttempt({ traps: ['A second trap, written for the next design'] });
+      await waitFor('/A second trap, written for the next design/.test(document.querySelector("#pl-redesigns").innerText)', 'the card to be painted again', POLL_WAIT);
+      assert.equal(await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").open'), true, 'still open after the card was painted again');
+      await noHorizontalOverflow('an earlier attempt explained');
+      await noOverflowAtPhone('an earlier attempt explained');
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").scrollIntoView()');
+      await shot('06b-earlier-attempt-1440', 1440, 1000);
+      await viewport(390, 844);
+      await evaluate('document.querySelector("#pl-redesigns details.pl-attempt").scrollIntoView()');
+      await shot('06b-earlier-attempt-390', 390, 844);
+      await viewport(1440, 1000);
+      pass('while the checks run the design card says the designer is working; the repair of the guideline shows in the stage line and the timeline; an earlier attempt is explained in a section that opens from the keyboard and stays open when the card is painted again');
+      /* the real states: a design being checked, and a run with a check that could not be carried out */
+      const [realId] = [...pipelines][0];
+      pipelines.set(realId, { ...JSON.parse(JSON.stringify(REAL_PREVIEW)), id: realId });
+      await waitFor('/The design being checked/.test((document.querySelector("#pl-design")||{}).innerText||"")', 'the real design being checked', POLL_WAIT);
+      assert.equal(await text('#pl-design h2'), 'The design being checked');
+      assert.equal(await text('#pl-design .pl-preview'), 'Checking this design: the reviews are running. This is what the designer wrote. It is not accepted until every check has passed.');
+      assert.equal(await evaluate('getComputedStyle(document.querySelector("#pl-design .pl-preview")).borderLeftColor!==getComputedStyle(document.querySelector("#pl-design")).borderLeftColor'), true, 'the note is marked');
+      assert.equal(await text('#pl-stage'), 'Design: checking the design before any pilot runs.');
+      assert.match(await text('#pl-brief .card-title'), /What the traps rest on\s+Attempt 1\s+Being checked$/);
+      assert.equal(await evaluate('["Gold and fingerprints","Rubric changes","Line changes","Not given"].filter(x=>document.querySelector("#pl-design").innerText.includes(x)).length'), 0, 'nothing is said of what does not exist yet');
+      assert.equal(await exists('[data-pl=export]'), false, 'a design that is not accepted cannot be exported');
+      await noHorizontalOverflow('the real design being checked');
+      await noOverflowAtPhone('the real design being checked');
+      await evaluate('document.querySelector("#pl-design").scrollIntoView()');
+      await shot('03i-real-preview-1440', 1440, 1000);
+      await viewport(390, 844);
+      await evaluate('document.querySelector("#pl-design").scrollIntoView()');
+      await shot('03i-real-preview-390', 390, 844);
+      await viewport(1440, 1000);
+      pipelines.set(realId, { ...JSON.parse(JSON.stringify(REAL_CHECK_KIND)), id: realId });
+      await waitFor('!!document.querySelector("#pl-redesigns details.pl-attempt")', 'the real run with a check that could not be carried out', POLL_WAIT);
+      assert.equal(await text('#pl-redesigns details.pl-attempt > summary'), 'Attempt 1: A check could not be carried out');
+      assert.match(await text('#pl-redesigns tbody tr:first-child td:nth-child(5)'), /^A check could not be carried out\s+The design was not judged: a check of it could not be carried out\.\s+A check of the design could not be carried out \(the blind review\)$/);
+      assert.equal(await text('#pl-redesigns tbody tr:nth-child(2) td:nth-child(5)'), 'Passed');
+      assert.equal(await exists('[data-pl=export]'), true, 'an accepted design can be exported');
+      assert.equal(await text('#pl-design h2'), 'The traps');
+      assert.equal(await evaluate('document.body.innerText.includes("[object Object]")||document.body.innerText.includes("undefined")'), false);
+      await noHorizontalOverflow('the real run with a check that could not be carried out');
+      await noOverflowAtPhone('the real run with a check that could not be carried out');
+      pass('real states from the companion: a design being checked is drawn as such, with no gold or packet, no export and a marked note; a run with a check that could not be carried out says so, and its second attempt passes');
+
+    }
+
     /* ---------- leaving and coming back ---------- */
     await click('[data-dash-tab="overview"]');
     await waitFor('window.FinanceDashboard.getView()==="overview"', 'the overview');
@@ -590,7 +971,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await delay(2600);
     assert.equal(gets.length, getsAway, 'no request while another page shows');
     await click('[data-dash-tab="pipeline"]');
-    await waitFor('/^Stopped at the cap/.test(document.querySelector("#pl-stage").textContent)', 'the page to come back with the finished pipeline');
+    await waitFor('/^Done: the 5-pilot test passed/.test(document.querySelector("#pl-stage").textContent)', 'the page to come back with the finished pipeline');
     pass('leaving the page stops its requests, and coming back shows the pipeline again');
 
     /* ---------- no outside requests, no errors ---------- */

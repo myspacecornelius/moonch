@@ -184,6 +184,9 @@ function readTextFile(file, max) {
 /* Whitespace collapsed and lower case, for the leak check. */
 const squash = text => String(text).replace(/\s+/gu, ' ').trim().toLowerCase();
 
+/* A sum of money in dollars to the cent, half a cent rounded up: 27.025 is 27.03 (toFixed(2) gives 27.02 for it). */
+const usdText = value => (Math.round(Math.round(Number(value) * 1e6) / 1e6 * 100 + 1e-7) / 100).toFixed(2);
+
 function removeTree(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -191,6 +194,6 @@ function removeTree(dir) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 module.exports = {
-  isObject, sha256Hex, clone, CONTROL_RE, JUNK_NAMES, JUNK_FILE_RE, isJunkName, Stopped, copyHashed, TEXT_EXTENSIONS, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson,
+  usdText, isObject, sha256Hex, clone, CONTROL_RE, JUNK_NAMES, JUNK_FILE_RE, isJunkName, Stopped, copyHashed, TEXT_EXTENSIONS, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson,
   within, nameProblem, walkFiles, copyVerified, readTextFile, squash, removeTree, delay, hashFile,
 };

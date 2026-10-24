@@ -189,12 +189,19 @@ async function makeWorld(t, options = {}) {
     FINANCE_STUB_SCENARIO: JSON.stringify({ rules, default: options.defaultScenario || {} }),
     FINANCE_STUB_PROMPT_LOG: promptLog,
     FINANCE_STUB_ARGV_LOG: argvLog,
+    /* more variables for the companion's environment; a function sees the folders of the world */
+    ...(typeof options.env === 'function' ? options.env({ root, base, tmpRoot, source }) : options.env || {}),
   };
   const limits = options.limits || { timeoutMs: 60000, killGraceMs: 300, drainMs: 100 };
   const spawns = [];
   /* every process any run starts, so a test can say that none was */
-  const spawnFn = (bin, args, spawnOptions) => { spawns.push(args); return childProcess.spawn(bin, args, spawnOptions); };
-  const realAgents = options.agents || createAgentService({ root, env, claudeBin: STUB, tmpRoot, limits, ...(options.countSpawns ? { spawnFn } : {}) });
+  const spawnFn = (bin, args, spawnOptions) => {
+    spawns.push(args);
+    /* options.onSpawn sees every process before it starts: its arguments, the environment and working folder it is given, and what its folder holds */
+    if (options.onSpawn) options.onSpawn({ args, env: spawnOptions && spawnOptions.env, cwd: spawnOptions && spawnOptions.cwd, tree: spawnOptions && spawnOptions.cwd ? readTree(spawnOptions.cwd) : {} });
+    return childProcess.spawn(bin, args, spawnOptions);
+  };
+  const realAgents = options.agents || createAgentService({ root, env, claudeBin: STUB, tmpRoot, limits, ...(options.countSpawns || options.onSpawn ? { spawnFn } : {}) });
   const agents = options.wrapAgents ? options.wrapAgents(realAgents) : realAgents;
   const stages = [];
   const pipeline = createPipelineService({
@@ -202,7 +209,7 @@ async function makeWorld(t, options = {}) {
     onStage: (stage, info) => { stages.push(stage); if (options.onStage) options.onStage(stage, info, world); },
   });
   const world = { base, root, source, tmpRoot, env, rules, agents, pipeline, stages, spawns, promptLog, argvLog, pilotsDir: path.join(tmpRoot, 'finance-studio-pilots'), workRoot: path.join(tmpRoot, 'finance-studio-pipelines'), priv: id => path.join(root, 'private', 'pipelines', id) };
-  world.body = (extra = {}) => ({ sourceDir: source, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS.slice(), ...extra });
+  world.body = (extra = {}) => ({ sourceDir: source, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS.slice(), ...extra });
   world.run = async (extra) => {
     const { id } = await pipeline.start(world.body(extra));
     return { id, view: await pipeline.whenDone(id) };
@@ -437,7 +444,7 @@ test('the constants are the rules of the spec', () => {
   assert.equal(P.TEST_PILOTS, 5);
   assert.equal(P.TEST_NEED, 4);
   assert.equal(P.MAX_REDESIGNS, 3);
-  assert.equal(P.DEFAULT_CAP_USD, 50);
+  assert.equal(P.DEFAULT_CAP_USD, 60);
   assert.equal(P.MAX_CAP_USD, 200);
   assert.deepEqual(P.ACKNOWLEDGEMENTS, ['shell-access', 'network', 'isolation-by-audit', 'model-reads-task']);
   assert.throws(() => { P.PASS_BAR = 1; }, TypeError, 'frozen');
@@ -563,7 +570,7 @@ test('a classifier that does not fit the cap is not started, and a cap too small
   const w = await makeWorld(t, { minCapCheck: false });
   const { view } = await w.run({ capUsd: 0.4 });
   assert.equal(view.stage, 'budget');
-  assert.match(view.message, /Stopped before the classifier: USD 0\.00 spent, the step could cost up to USD 0\.57 \(with 15% headroom\), and the cap is USD 0\.40/);
+  assert.match(view.message, /Stopped before the classifier: USD 0\.00 spent, the step could cost up to USD 0\.58 \(with 15% headroom\), and the cap is USD 0\.40/);
   assert.equal(promptRuns(w).length, 0, 'no model was started');
 });
 
@@ -783,7 +790,7 @@ test('a task link: the loader is started with the link, the page is followed, th
   const w = await makeWorld(t);
   const linked = fakeLoader(w.root);
   const service = createPipelineService({ root: w.root, agents: w.agents, links: linked, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
-  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.stage, 'done', view.message);
   assert.deepEqual(linked.calls.start, [LINK], 'the loader got the link');
@@ -810,7 +817,7 @@ test('files the loader could not download (the person went on without them) are 
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { skipped: [{ label: 'Board_Pack.pdf', group: 'World files', reason: 'HTTP 403' }, { label: '', group: '', reason: '' }] });
   const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
-  const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.import.fileCount, 3);
   assert.deepEqual(view.import.skipped, [
@@ -830,7 +837,7 @@ test('the loader waits for the person: sign-in, then the show-all-files switch; 
     { state: 'done' },
   ] });
   const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
-  const { id } = await service.start({ url: LINK, capUsd: 0.4, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, capUsd: 0.4, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   const signIn = await waitFor(async () => { const v = await service.get(id); return v.waiting ? v : null; }, { label: 'the sign-in wait' });
   assert.equal(signIn.stage, 'import');
   assert.equal(signIn.waiting.kind, 'needs-sign-in');
@@ -856,7 +863,7 @@ test('a load that fails, a start that is refused, a file that does not match its
   const w = await makeWorld(t);
   const run = async (loader, expected) => {
     const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, minCapCheck: false });
-    const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+    const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
     const view = await service.whenDone(id);
     assert.equal(view.stage, 'failed', view.message);
     assert.match(view.message, expected);
@@ -876,7 +883,7 @@ test('a loader that never finishes is cancelled after the import limit', async t
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { script: [{ state: 'loading', wait: true }] });
   const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false, importTimeoutMs: 80, minCapCheck: false });
-  const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, ...BUDGET_STOP, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   const view = await service.whenDone(id);
   assert.equal(view.stage, 'failed');
   assert.match(view.message, /did not finish in time/);
@@ -887,7 +894,7 @@ test('Stop while the loader waits for the person cancels the load', async t => {
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { script: [{ state: 'needs-sign-in', message: 'Sign in.', wait: true }] });
   const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
-  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   await waitFor(async () => (await service.get(id)).waiting, { label: 'the wait' });
   const view = await service.stop(id);
   assert.equal(view.stage, 'stopped');
@@ -1520,11 +1527,11 @@ test('start validates everything before anything is created', async t => {
   assert.equal((await w.pipeline.list()).pipelines.length, 0);
   assert.equal(promptRuns(w).length, 0);
   /* the default values are accepted: the total cap pays for one full attempt at the default caps, and the designer's cap is 5.00 */
-  const { id } = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS });
+  const { id } = await w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS });
   const view = await w.pipeline.whenDone(id);
   assert.deepEqual([view.config.capUsd, view.config.model, view.config.effort, view.config.graderModel, view.config.pilotCapUsd, view.config.designCapUsd], [P.DEFAULT_CAP_USD, C.DEFAULT_MODEL, C.DEFAULT_EFFORT, C.GRADER_MODEL, 3, 5]);
   /* a total cap does not move the designer's default cap */
-  const small = await w.pipeline.start({ sourceDir: w.source, capUsd: 45, acknowledgements: ACKS });
+  const small = await w.pipeline.start({ sourceDir: w.source, capUsd: 45, designMode: 'harden', acknowledgements: ACKS });
   assert.equal((await w.pipeline.whenDone(small.id)).config.designCapUsd, 5);
   assert.match(view.label, /^Pipeline [0-9a-f]{6}$/);
 });
@@ -2088,7 +2095,7 @@ test('Stop pressed while the loader is still starting cancels the load as soon a
   const w = await makeWorld(t);
   const loader = fakeLoader(w.root, { startDelay: 60 });
   const service = createPipelineService({ root: w.root, agents: w.agents, links: loader, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot, pollMs: 5, confirmFiles: false });
-  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const { id } = await service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   const view = await service.stop(id);
   assert.equal(view.stage, 'stopped');
   assert.deepEqual(loader.calls.cancel, [LINK_ID], 'cancelled once, with the id the loader gave');
@@ -2236,8 +2243,8 @@ test('the text of a spreadsheet, a document and a slide file is read without run
   put(dir, 'c.txt', 'plain text\n');
   put(dir, 'd.pdf', '%PDF');
   put(dir, 'e.xlsx', 'not a zip');
-  assert.equal(await extractText(path.join(dir, 'a.docx')), 'First &amp; second\nTab\there\n'.replace('&amp;amp;', '&amp;'));
-  assert.equal(await extractText(path.join(dir, 'b.xlsx')), 'Label Value\nCash 1250');
+  assert.equal(await extractText(path.join(dir, 'a.docx')), 'First &amp; second\nTab\there');
+  assert.equal(await extractText(path.join(dir, 'b.xlsx')), 'Label\tValue\nCash\t1250', 'the cells of a row in columns, a tab between two');
   assert.equal(await extractText(path.join(dir, 'c.txt')), 'plain text\n');
   assert.equal(await extractText(path.join(dir, 'd.pdf')), null);
   assert.equal(await extractText(path.join(dir, 'e.xlsx')), null, 'a damaged zip has no text and is not an error');
@@ -2282,10 +2289,10 @@ test('a runtime that cannot be found stops start() before a link is opened', asy
   const agents = createAgentService({ root: base, claudeBin: path.join(base, 'no-such-claude'), env: cleanEnv(), tmpRoot: outer });
   const loader = fakeLoader(base);
   const service = createPipelineService({ root: base, agents, links: loader, tmpRoot: path.join(outer, 'tmp'), env: cleanEnv() });
-  await assert.rejects(service.start({ url: LINK, acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
+  await assert.rejects(service.start({ url: LINK, designMode: 'harden', acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
   assert.deepEqual(loader.calls.start, [], 'the link loader (Chrome) was never started');
   assert.equal(service.busy(), false, 'the place is free again');
-  await assert.rejects(service.start({ sourceDir: path.join(outer, 'source'), acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
+  await assert.rejects(service.start({ sourceDir: path.join(outer, 'source'), designMode: 'harden', acknowledgements: ACKS }), error => error.status === 409 && /Claude Code was not found/.test(error.message));
   assert.equal((await service.list()).pipelines.length, 0);
   assert.equal(fs.existsSync(path.join(outer, 'tmp')), false, 'no working folder was made');
 });
@@ -3263,7 +3270,7 @@ const loaderService = (t, w, loader, extra = {}) => {
   t.after(() => service.shutdown().catch(() => {}));
   return service;
 };
-const startLinked = (service, extra = {}) => service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS, ...extra });
+const startLinked = (service, extra = {}) => service.start({ url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS, ...extra });
 
 test('Stop ends the pipeline only when the loader has closed its browser, so busy() stays true until then and the next start is not refused', async t => {
   const w = await makeWorld(t);
@@ -3335,7 +3342,7 @@ test('POST /api/pipeline/:id/continue answers a stale Continue with 409, not 500
   const loader = (root) => fakeLoader(root, { script: [{ state: 'needs-sign-in', message: 'Sign in in the Chrome window.', wait: true }], continueError: Object.assign(new Error('Nothing is waiting for you.'), { status: 409 }) });
   const probe = await makeWorld(t);
   const w = await makeWorld(t, { loader: loader(probe.root), server: true });
-  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   assert.equal(started.status, 200, started.text);
   const id = started.json.id;
   await waitFor(async () => (await w.get(`/api/pipeline/${id}`)).json.waiting, { label: 'the wait' });
@@ -3349,7 +3356,7 @@ test('POST /api/pipeline/:id/continue answers a stale Continue with 409, not 500
 test('POST /api/pipeline/:id/continue answers another loader fault with 502 and the scrubbed message, not a generic 500', async t => {
   const probe = await makeWorld(t);
   const w = await makeWorld(t, { loader: fakeLoader(probe.root, { script: [{ state: 'needs-person', message: 'Turn it on.', wait: true }], continueError: new Error(`connection to ${LINK} was reset`) }), server: true });
-  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   assert.equal(started.status, 200, started.text);
   const id = started.json.id;
   await waitFor(async () => (await w.get(`/api/pipeline/${id}`)).json.waiting, { label: 'the wait' });
@@ -3364,7 +3371,7 @@ test('POST /api/pipeline/:id/continue answers another loader fault with 502 and 
 /* ---------------------------------------------------------------- the total cap has to pay for one full attempt */
 
 test('the least total cap: the parts are exposed, the formula is the sum of the caps with the headroom, and the default cap passes it', async t => {
-  const parts = minCapParts();
+  const parts = minCapParts(P.CAPS.designUsd, 'harden');
   assert.deepEqual(Object.keys(parts).sort(), ['fixedUsd', 'headroom', 'perPilotUsd', 'pilots']);
   /* fixedUsd: the classifier, the designer (at its default cap), one repair, two grader calls on the golden answer and two fairness reviews */
   assert.equal(parts.fixedUsd, P.CAPS.classifyUsd + P.CAPS.designUsd + P.CAPS.repairUsd + 2 * P.CAPS.graderUsd + 2 * P.CAPS.fairnessUsd);
@@ -3373,20 +3380,20 @@ test('the least total cap: the parts are exposed, the formula is the sum of the 
   assert.equal(parts.headroom, P.HEADROOM);
   assert.deepEqual(parts, { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 });
   const w = await makeWorld(t, { server: true });
-  assert.deepEqual((await w.pipeline.list()).config.minCap, parts);
-  assert.deepEqual((await w.get('/api/pipeline')).json.config.minCap, parts, 'and so does GET /api/pipeline');
-  /* the default total cap is reported next to it, and it is the one that passes the rule */
-  assert.equal((await w.pipeline.list()).config.defaultCapUsd, 50);
+  assert.deepEqual((await w.pipeline.list()).config.minCapByMode.harden, parts);
+  assert.deepEqual((await w.get('/api/pipeline')).json.config.minCapByMode.harden, parts, 'and so does GET /api/pipeline');
+  /* the default total cap is reported next to it, and it passes the rule of the 'harden' mode (the 'new' mode needs more: see its own test) */
+  assert.equal((await w.pipeline.list()).config.defaultCapUsd, 60);
   assert.equal((await w.get('/api/pipeline')).json.config.defaultCapUsd, P.DEFAULT_CAP_USD);
   /* ceil to the cent of headroom x (fixed + pilots x (pilot cap + per pilot)) */
-  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }), 41.4);
-  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 1 }), 25.3);
-  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 1 }), 20.13, '1.15 x (3.5 + 7 x 2) = 20.125, rounded up to the cent');
-  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 0.5 }), 16.1);
-  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 0.05 }), Math.ceil(1.15 * (8 + 7 * 1.05) * 100 - 1e-9) / 100);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3, mode: 'harden' }), 41.4);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 1, mode: 'harden' }), 25.3);
+  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 1, mode: 'harden' }), 20.13, '1.15 x (3.5 + 7 x 2) = 20.125, rounded up to the cent');
+  assert.equal(minCapUsd({ designCapUsd: 0.5, pilotCapUsd: 0.5, mode: 'harden' }), 16.1);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 0.05, mode: 'harden' }), Math.ceil(1.15 * (8 + 7 * 1.05) * 100 - 1e-9) / 100);
   /* the default cap pays for it at the default pilot cap, and the page can compute the same from the parts */
   const page = pilotCap => Math.ceil(Math.round(parts.headroom * (parts.fixedUsd + parts.pilots * (pilotCap + parts.perPilotUsd)) * 1e6) / 1e4) / 100;
-  assert.equal(page(C.BUDGET_USD.pilotDefault), minCapUsd({ designCapUsd: P.CAPS.designUsd, pilotCapUsd: C.BUDGET_USD.pilotDefault }));
+  assert.equal(page(C.BUDGET_USD.pilotDefault), minCapUsd({ designCapUsd: P.CAPS.designUsd, pilotCapUsd: C.BUDGET_USD.pilotDefault, mode: 'harden' }));
   assert.ok(P.DEFAULT_CAP_USD >= page(C.BUDGET_USD.pilotDefault), `${P.DEFAULT_CAP_USD} must pay for ${page(C.BUDGET_USD.pilotDefault)}`);
   /* even at the largest pilot cap the least cap is inside the largest cap that is accepted */
   assert.ok(page(C.BUDGET_USD.maxUsd) <= P.MAX_CAP_USD);
@@ -3394,13 +3401,13 @@ test('the least total cap: the parts are exposed, the formula is the sum of the 
 
 test('by default start accepts a total cap below one full attempt (the run ends at the cap); with minCapCheck it refuses, says what the least is, and creates nothing', async t => {
   const open = await makeWorld(t);
-  const low = await open.pipeline.start({ sourceDir: open.source, acknowledgements: ACKS, capUsd: 10 });
+  const low = await open.pipeline.start({ sourceDir: open.source, designMode: 'harden', acknowledgements: ACKS, capUsd: 10 });
   const lowView = await open.pipeline.whenDone(low.id);
   assert.equal(lowView.config.capUsd, 10, 'accepted as typed');
   assert.equal(lowView.stage, 'budget', 'the run ends at the cap instead of being refused');
   const w = await makeWorld(t, { minCapCheck: true });
   const refused = async (extra, least) => {
-    await assert.rejects(w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, ...extra }), error => {
+    await assert.rejects(w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS, ...extra }), error => {
       assert.ok(error instanceof AgentError);
       assert.equal(error.status, 400);
       assert.equal(error.message, `A full attempt (design, the 2-pilot screen and the 5-pilot test) can cost up to USD ${least} with these caps; set the total cap to at least USD ${least}`);
@@ -3416,11 +3423,11 @@ test('by default start accepts a total cap below one full attempt (the run ends 
   assert.equal((await w.pipeline.list()).pipelines.length, 0);
   assert.equal(promptRuns(w).length, 0);
   /* the least is enough, and 25.30 pays for a pilot cap of 1.00 */
-  const a = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 41.4 });
+  const a = await w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS, capUsd: 41.4 });
   assert.equal((await w.pipeline.whenDone(a.id)).config.capUsd, 41.4);
-  const b = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 25.3, pilotCapUsd: 1 });
+  const b = await w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS, capUsd: 25.3, pilotCapUsd: 1 });
   assert.equal((await w.pipeline.whenDone(b.id)).config.capUsd, 25.3);
-  const c = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 20.13, pilotCapUsd: 1, designCapUsd: 0.5 });
+  const c = await w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS, capUsd: 20.13, pilotCapUsd: 1, designCapUsd: 0.5 });
   assert.equal((await w.pipeline.whenDone(c.id)).config.designCapUsd, 0.5);
   /* the HTTP route answers 400 with the same words */
   const server = await makeWorld(t, { server: true, minCapCheck: true });
@@ -3433,9 +3440,9 @@ test('every step of a worst-case first attempt fits under the least cap, whateve
   const w = await makeWorld(t);
   for (const pilotCapUsd of [0.05, 0.5, 1, 3, 10, 20]) {
     for (const designCapUsd of [0.5, 2, 5, 20]) {
-      const cap = minCapUsd({ designCapUsd, pilotCapUsd });
+      const cap = minCapUsd({ designCapUsd, pilotCapUsd, mode: 'harden' });
       if (cap > P.MAX_CAP_USD) continue;
-      const p = { spentUsd: 0, config: { capUsd: cap } };
+      const p = { spentUsd: 0, config: { capUsd: cap }, attempts: [] };
       const step = (what, reserve, spend = reserve) => { w.pipeline._reserve(p, what, reserve); p.spentUsd += spend; };
       /* every run spends its whole cap: classifier, designer and its repair turn, the golden answer graded twice, the fairness review twice,
          then 2 + 5 pilots each with the pilot cap and two grader calls */
@@ -3460,7 +3467,7 @@ test('a pipeline with the default caps, every run spending its whole cap, reache
   ];
   const w = await makeWorld(t, { rules });
   /* no cap given: the defaults */
-  const { id } = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS });
+  const { id } = await w.pipeline.start({ sourceDir: w.source, designMode: 'harden', acknowledgements: ACKS });
   const view = await w.pipeline.whenDone(id);
   assert.equal(view.config.capUsd, P.DEFAULT_CAP_USD);
   assert.equal(view.config.pilotCapUsd, C.BUDGET_USD.pilotDefault);
@@ -3841,7 +3848,7 @@ test('POST /api/pipeline/:id/continue ends the confirm-files wait', async t => {
   for (const key of ['start', 'get', 'continue', 'cancel', 'waitFor', 'shutdown']) lazy[key] = (...args) => holder.loader[key](...args);
   const w = await makeWorld(t, { loader: lazy, server: true, minCapCheck: false });
   holder.loader = fakeLoader(w.root);
-  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, acknowledgements: ACKS });
+  const started = await w.post('/api/pipeline/start', { url: LINK, capUsd: 30, model: 'claude-opus-5-5', effort: 'low', pilotCapUsd: 1, designMode: 'harden', acknowledgements: ACKS });
   assert.equal(started.status, 200, started.text);
   const id = started.json.id;
   const wait = await waitFor(async () => { const r = await w.get(`/api/pipeline/${id}`); return r.json && r.json.waiting ? r : null; }, { label: 'the wait' });
@@ -3927,4 +3934,4095 @@ test('the service asks for the bands when it starts: a valid override is used, a
   /* the test keeps its own band: 0.44 is inside [0.40, 0.50], so it is graded twice */
   const third = view.attempts[0].test.pilots[2].regrade;
   assert.deepEqual(third && [third.first, third.second], [0.44, 0.44]);
+});
+
+/* ====================================================================== designer v2: designMode 'new'
+   A new task is built from the world files. The invented fixtures below (Atlas, Meridian) stand for a design the stub designer delivers; the
+   reviews, the answer set and the adjudications are tool-less runs of the stub, each keyed by the folder it runs in. */
+
+const NEW_TERMS = n => `Atlas facility terms, synthetic, attempt ${n}. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\n`;
+const NEW_SUMMARY = n => `Meridian lender summary, synthetic, attempt ${n}. The available facility of 3,050 is shown as a cash line. Draw decision date 2025-04-15.\n`;
+const NEW_TRAP = { id: 't1', title: 'Lender summary overstates cash', mechanism: 'MECH-SECRET-1 the summary shows the available facility as cash', files: ['Meridian_Lender_Summary.txt', 'Cash_Facts.csv'], decoy: 'DECOY-SECRET-1 available facility', correctValue: 'CORRECT-SECRET-1,250', wrongValue: 'WRONG-SECRET-3,050' };
+const CLAUSE = 'Available credit is not cash received.';
+
+function briefFor(n, over = {}) {
+  return {
+    taskType: { workflow: 'Facility draw review', why: 'The world files hold facility terms and cash facts.', referenceEntries: ['entry one'] },
+    decision: { ask: 'Whether the borrowing can proceed', mandate: 'Treasury sign-off', authorityFile: 'Facility_Terms.txt', effectiveDate: '2025-03-01' },
+    files: [{ name: 'Facility_Terms.txt', role: 'authority' }, { name: 'Cash_Facts.csv', role: 'evidence' }, { name: 'Meridian_Lender_Summary.txt', role: 'decoy' }, { name: 'Atlas_Supplement.txt', role: 'baseline' }],
+    traps: [{
+      id: 't1', primary: true,
+      rule: { file: 'Facility_Terms.txt', clause: CLAUSE },
+      correctPath: { reasoning: 'Only funded cash is usable.', action: 'Hold the borrowing', figures: [{ label: 'Usable cash', value: 1250, tolerance: 1 }] },
+      wrongPath: { reasoning: 'Counts the available facility as cash.', action: 'Proceed with the borrowing', figures: [{ label: 'Usable cash', value: 3050, tolerance: 1 }] },
+      changesDecision: 'required_conclusion',
+      whyTempting: { kind: 'money', source: 'The lender summary shows the available facility on a cash line.' },
+      consequence: { source: 'The borrowing would be drawn against cash that is not there.' },
+      strongestAlternative: { answer: 'Proceed in two tranches', whyRejected: CLAUSE },
+    }],
+    permittedAlternatives: [],
+    permittedAlternativesReason: 'The facility terms leave no discretion.',
+    controls: [],
+    ...over,
+  };
+}
+
+/* The files the designer of attempt n writes in the 'new' mode: the design of designFiles, one trap, the brief, and the facility terms that state the rule.
+   over: { brief, files: { 'out/x': content | null } }. */
+function designFilesNew(n, over = {}) {
+  const skip = new Set(['out/new/Meridian_Lender_Summary.txt', 'out/edited/Facility_Terms.txt']);
+  let files = designFiles(n, { traps: { traps: [NEW_TRAP], ...(over.trapsExtra || {}) } }).filter(file => !skip.has(file.path));
+  files.push({ path: 'out/new/Meridian_Lender_Summary.txt', content: NEW_SUMMARY(n) }, { path: 'out/edited/Facility_Terms.txt', content: NEW_TERMS(n) }, { path: 'out/brief.json', content: JSON.stringify(briefFor(n, over.brief)) });
+  for (const [rel, content] of Object.entries(over.files || {})) {
+    files = files.filter(file => file.path !== rel);
+    if (content !== null) files.push(typeof content === 'object' ? { path: rel, ...content } : { path: rel, content });
+  }
+  return files;
+}
+
+/* A blind reviewer's answer (it names a governing document) comes with the call that a reader makes: it opens a file of the packet. */
+const readsPacket = (names = ['Facility_Terms.txt']) => names.map(name => ({ name: 'Read', input: { file_path: `{{cwd}}/filesystem/${name}` }, result: FACILITY }));
+const jsonScenario = (value, extra = {}) => ({ resultText: typeof value === 'string' ? value : JSON.stringify(value), costUsd: 0.01, ...(value && typeof value === 'object' && typeof value.governingDocument === 'string' ? { toolUses: readsPacket() } : {}), ...extra });
+const BLIND = { answer: 'Usable cash is 1,250. Hold the borrowing.', governingDocument: 'Facility_Terms.txt', why: 'The facility terms say available credit is not cash received.', alternative: { answer: '', support: '' } };
+const REVEAL_NONE = { alternative: '', forAlternative: null, againstAlternative: null, objectionClass: 'none', disposition: 'no_alternative', guidelineCovers: true, why: 'No different answer is defensible from the files.' };
+const REVEAL_EXCLUDED = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' }, againstAlternative: { file: 'Facility_Terms.txt', quote: CLAUSE }, objectionClass: 'overlooked_dependency', disposition: 'excluded_by_clause', guidelineCovers: true, why: 'The clause rules the tranches out.' };
+const hitsAddressed = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].map(hit => ({ hit, changesClause: 'no', why: 'The passage does not change the clause.' }));
+const APPLICATION = {
+  governs: { answer: 'yes', scope: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, hierarchy: null },
+  inForce: { effectiveDate: '2025-03-01', decisionDate: '2025-04-15', effectiveQuote: { file: 'Facility_Terms.txt', quote: 'These terms take effect on 2025-03-01.' }, decisionQuote: { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' } },
+  supersession: hitsAddressed,
+  excludes: { answer: 'yes', reasoning: 'The clause says available credit is not cash, so counting it as cash is ruled out.', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } },
+};
+const adjudication = (klass, extra = {}) => ({ class: klass, adoptedAction: { quote: 'the available facility counted as cash' }, rationale: { quote: 'Cash is 3,050 because' }, matchesBrief: 'The answer counts the available facility as cash, the brief\'s wrong path.', guidelineItem: 'Usable cash of 1,250', clause: { file: 'Facility_Terms.txt', quote: CLAUSE }, why: 'Explained.', ...extra });
+
+/* All the rules of attempt n of a 'new' task. opts: designCost, repairs: { alternative, equivalent, missing, evaluator, design }, blind, reveal, application, adjudication (a
+   scenario for every pilot below its bar), goldenScore, extra (rules placed first), design (for designFilesNew), pilotCost. */
+function newAttemptRules(n, scores, opts = {}) {
+  const pilotScenarios = scores.map((score, index) => ({
+    resultText: `ANS-${n}-${index + 1} ${score < 0.45 ? 'Cash is 3,050 because the available facility counted as cash. Proceed.' : 'Usable cash is 1,250. Hold the borrowing.'}`,
+    costUsd: opts.pilotCost === undefined ? 0.1 : opts.pilotCost,
+    ...(opts.pilotExtra && opts.pilotExtra[index] ? opts.pilotExtra[index] : {}),
+  }));
+  const designer = {
+    toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/task/Facility_Terms.txt' }, result: FACILITY }],
+    writeFiles: designFilesNew(n, opts.design || {}),
+    resultText: `Designed the traps of attempt ${n}.`,
+    costUsd: opts.designCost === undefined ? 0.05 : opts.designCost,
+    ...(opts.designerExtra || {}),
+  };
+  const repairs = opts.repairs || {};
+  const graderCost = opts.graderCost === undefined ? 0.02 : opts.graderCost;
+  const rules = [
+    ...(opts.extra || []),
+    ...(repairs.alternative ? [{ prompt: 'This alternative is allowed by the packet', scenario: repairs.alternative }] : []),
+    ...(repairs.equivalent ? [{ prompt: 'This is a different presentation or method', scenario: repairs.equivalent }] : []),
+    ...(repairs.missing ? [{ prompt: 'Supply what is missing', scenario: repairs.missing }] : []),
+    ...(repairs.evaluator ? [{ prompt: `guideline repair for design attempt ${n} of`, scenario: repairs.evaluator }] : []),
+    ...(repairs.design ? [{ prompt: `repair turn for design attempt ${n} of`, scenario: repairs.design === 'clean' ? { ...designer, costUsd: 0.03 } : repairs.design }] : []),
+    { prompt: `design attempt ${n} of`, scenario: designer },
+    { cwd: 'finance-studio-pilots/rnd-[0-9a-f]+-\\d+$', prompt: `PV${n}`, scenario: pilotScenarios },
+    { cwd: `/runs/review-${n}-`, scenario: opts.blind || jsonScenario(BLIND) },
+    { cwd: `/runs/reveal-${n}-`, scenario: opts.reveal || jsonScenario(REVEAL_NONE) },
+    { cwd: `/runs/apply-${n}-`, scenario: opts.application || jsonScenario(APPLICATION) },
+    { cwd: '/runs/adjudicate-', prompt: `ANS-${n}-`, scenario: opts.adjudication || jsonScenario(adjudication('intended')) },
+    { cwd: GRADE_CWD, prompt: `<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held, attempt ${n}`, scenario: { resultText: gradeJson(opts.goldenScore === undefined ? 0.95 : opts.goldenScore), costUsd: graderCost } },
+  ];
+  scores.forEach((score, index) => rules.push({ cwd: GRADE_CWD, prompt: `<<<ANSWER\\nANS-${n}-${index + 1}\\b`, scenario: { resultText: gradeJson(score), costUsd: graderCost } }));
+  return rules;
+}
+
+/* A world for a new task: the three files, no page (so no prompt, guideline or golden answer is named), the classifier names the files only. */
+async function newWorld(t, options = {}) {
+  const answer = { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const rules = options.rules || [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await makeWorld(t, { page: false, ...options, rules });
+  w.runNew = extra => w.run({ designMode: 'new', ...extra });
+  return w;
+}
+
+test('a new task from the world files: the whole run passes, the designer gets no old prompt, guideline or golden answer, and fairness and difficulty are kept apart', async t => {
+  const w = await newWorld(t);
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.result.verdict, 'success');
+  assert.equal(view.result.validation, 'complete');
+  assert.equal(view.config.designMode, 'new');
+  const attempt = view.attempts[0];
+  assert.equal(attempt.outcome, 'passed');
+  assert.equal(attempt.validation, 'complete');
+  assert.equal(attempt.fairness.status, 'passed');
+  assert.equal(attempt.fairness.stage1.state, 'ok');
+  assert.equal(attempt.fairness.stage2.disposition, 'no_alternative');
+  assert.equal(attempt.difficulty.status, 'passed');
+  assert.deepEqual(view.attempts[0].answerSet.answers.map(item => [item.name, item.passed, item.grades.length]), [['golden', true, 2]]);
+  assert.ok(attempt.freeze.length === 1);
+});
+
+/* The files the designer was given: everything in its folder except what it wrote itself (out/) and its scratch (.tmp). */
+const designerInputs = (w, id) => {
+  const all = readTree(path.join(w.priv(id), 'designer'));
+  return Object.fromEntries(Object.entries(all).filter(([rel]) => !rel.startsWith('out/') && !rel.startsWith('.tmp/')));
+};
+
+test('new mode: the designer is given the world files and the ideas, never the prompt, the guideline or the golden answer of the task page; the harness still withholds them', async t => {
+  const w = await newWorld(t, { page: pageJson(), rules: [classifierRule(), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const inputs = designerInputs(w, id);
+  assert.deepEqual(Object.keys(inputs).sort(), ['ideas.txt', 'task/Atlas_Supplement.txt', 'task/Cash_Facts.csv', 'task/Facility_Terms.txt']);
+  for (const [rel, text] of Object.entries(inputs)) {
+    for (const secret of [PROMPT, 'GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc', 'Award full credit only when']) assert.equal(text.includes(secret), false, `${rel} must not hold ${secret}`);
+  }
+  /* what the designer was told: its prompt (on stdin) names the world files and no old text */
+  const designerPrompt = promptRuns(w).find(run => run.prompt.includes('You are the trap designer for one new finance task'));
+  assert.ok(designerPrompt, 'the new-mode designer prompt was used');
+  assert.equal(designerPrompt.via, 'stdin');
+  for (const secret of [PROMPT, 'GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc']) assert.equal(designerPrompt.prompt.includes(secret), false);
+  assert.match(designerPrompt.prompt, /task\/ +the world files and task files/);
+  assert.equal(/reference\//.test(designerPrompt.prompt), false, 'no reference folder is mentioned when there are no reference documents');
+  /* the old guideline and golden answer are still identified (so they are withheld and their passages are guarded) */
+  assert.deepEqual(view.classification.guideline, { kind: 'section', section: 'Grader guideline', number: 2 });
+  for (const text of Object.values(pilotFiles(w))) for (const secret of ['GUIDELINE-MARKER-7f3a', 'GOLDEN-MARKER-91bc']) assert.equal(text.includes(secret), false);
+});
+
+test('new mode: a long passage of the old guideline in a new file still fails the attempt', async t => {
+  const leak = { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${GUIDELINE} Award full credit only when the executed facility terms are applied.\n` };
+  const rules = [classifierRule(), ...newAttemptRules(1, [0.2], { design: { files: leak }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { page: pageJson(), rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].validation, 'failed');
+  assert.equal(view.attempts[0].rejection.kind, 'design');
+  assert.equal(view.attempts[0].rejection.reasons.some(reason => /passage of the guideline or the golden answer/.test(reason)), true);
+  assert.equal(JSON.stringify(view.attempts[0].rejection.reasons).includes('Meridian'), false, 'the public reason names no file');
+  assert.equal(view.redesigns, 1);
+  assert.equal(view.attempts[1].outcome, 'passed');
+});
+
+const PARENT = 'Parent answer file, synthetic. Usable cash in the prior period was 900.\n';
+
+test('new mode keepAsWorld: only the owner can hand an answer-like file to the designer and the pilots, and acceptMissing only silences the warning', async t => {
+  const answer = { prompt: null, guideline: null, goldenAnswer: null, worldFiles: [...WORLD_NAMES, 'Golden_Parent_Answer.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const rules = [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  /* nothing said: the file is withheld, and the run stops before a designer is paid for, telling the owner how to keep it */
+  const refused = await newWorld(t, { rules, files: { 'Golden_Parent_Answer.txt': PARENT } });
+  const stopped = await refused.runNew();
+  assert.equal(stopped.view.stage, 'failed');
+  assert.match(stopped.view.error, /Golden_Parent_Answer\.txt/);
+  assert.match(stopped.view.error, /keepAsWorld/);
+  /* acceptMissing: the run goes on without the file, and the designer and the pilots never get it */
+  const accepted = await newWorld(t, { rules, files: { 'Golden_Parent_Answer.txt': PARENT } });
+  const ran = await accepted.runNew({ acceptMissing: true });
+  assert.equal(ran.view.stage, 'done', ran.view.message);
+  assert.deepEqual(ran.view.classification.withheld.map(item => item.name), ['Golden_Parent_Answer.txt']);
+  assert.equal('task/Golden_Parent_Answer.txt' in designerInputs(accepted, ran.id), false);
+  assert.equal(Object.keys(pilotFiles(accepted)).some(name => name.endsWith('Golden_Parent_Answer.txt')), false);
+  /* keepAsWorld: the owner's exception. The file is a world file for the designer and the pilots, and the view says so with a warning */
+  const kept = await newWorld(t, { rules, files: { 'Golden_Parent_Answer.txt': PARENT } });
+  const { id, view } = await kept.runNew({ keepAsWorld: ['Golden_Parent_Answer.txt'] });
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.config.keepAsWorld, ['Golden_Parent_Answer.txt']);
+  assert.equal(designerInputs(kept, id)['task/Golden_Parent_Answer.txt'], PARENT);
+  assert.equal(Object.entries(pilotFiles(kept)).some(([name, text]) => name.endsWith('Golden_Parent_Answer.txt') && text === PARENT), true, 'the pilots get it');
+  assert.equal(view.classification.worldFiles.includes('Golden_Parent_Answer.txt'), true);
+  assert.equal(view.classification.withheld.length, 0);
+  assert.equal(view.classification.keptAsWorld.length, 1);
+  assert.match(view.classification.keptAsWorld[0].why, /golden/);
+  assert.equal(view.import.keepAsWorld.length, 1);
+  assert.equal(view.import.keepAsWorld[0].present, true);
+  assert.match(view.import.keepAsWorld[0].warning, /looks like an answer/);
+});
+
+test('new mode keepAsWorld: it hands on an answer-like file and a file that shares a long passage with the old guideline; without it that file is withheld with a warning and the start goes on', async t => {
+  const answer = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, 'Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Notes.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const files = { 'Golden_Parent_Answer.txt': PARENT, 'Rubric_Notes.txt': 'Rubric notes, synthetic.\n', 'Copy_Of_Notes.txt': `Some notes. ${GUIDELINE} More notes.\n` };
+  const w = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, { name: 'Golden_Parent_Answer.txt', group: 'World files', label: 'Parent' }, { name: 'Rubric_Notes.txt', group: 'World files', label: 'Notes' }, { name: 'Copy_Of_Notes.txt', group: 'World files', label: 'Notes' }] }), files, rules: [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.runNew({ keepAsWorld: ['Golden_Parent_Answer.txt', 'Rubric_Notes.txt', 'Copy_Of_Notes.txt'], acceptMissing: true });
+  assert.equal(view.stage, 'done', view.message);
+  const inputs = designerInputs(w, id);
+  assert.equal('task/Golden_Parent_Answer.txt' in inputs, true);
+  assert.equal('task/Rubric_Notes.txt' in inputs, true, 'kept by name: the owner said so');
+  assert.equal('task/Copy_Of_Notes.txt' in inputs, true, 'a file that shares a passage with the old guideline is the owner\'s to hand on');
+  assert.equal(view.classification.withheld.some(item => item.name === 'Copy_Of_Notes.txt'), false);
+  assert.deepEqual(view.classification.keptAsWorld.filter(item => item.name === 'Copy_Of_Notes.txt').map(item => item.why), ['it holds a long passage of the guideline or the golden answer']);
+  /* without keepAsWorld: the new task has its own guideline, so a governing document that quotes the old one is withheld with a warning, and nothing stops the start */
+  const answerCopy = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, 'Copy_Of_Notes.txt'], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const plain = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, { name: 'Copy_Of_Notes.txt', group: 'World files', label: 'Notes' }] }), files: { 'Copy_Of_Notes.txt': files['Copy_Of_Notes.txt'] }, rules: [classifierRule({ answer: answerCopy }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id: plainId, view: plainView } = await plain.runNew();
+  assert.equal(plainView.stage, 'done', plainView.message);
+  assert.equal('task/Copy_Of_Notes.txt' in designerInputs(plain, plainId), false);
+  assert.deepEqual(plainView.classification.warnings.filter(item => item.name === 'Copy_Of_Notes.txt'), [{ name: 'Copy_Of_Notes.txt', why: 'it holds a long passage of the guideline or the golden answer', soft: true }]);
+  assert.equal(plainView.classification.withheld.some(item => item.name === 'Copy_Of_Notes.txt'), true);
+});
+
+test('keepAsWorld, designMode, fairnessSet and referencesDir are checked before anything is created', async t => {
+  const w = await newWorld(t);
+  const refuses = async (extra, pattern) => {
+    await assert.rejects(w.pipeline.start(w.body({ designMode: 'new', ...extra })), error => { assert.ok(error instanceof AgentError); assert.equal(error.status, 400); assert.match(error.message, pattern); return true; });
+  };
+  await refuses({ designMode: 'other' }, /designMode must be one of: new, harden/);
+  await refuses({ designMode: 7 }, /designMode must be one of/);
+  await refuses({ keepAsWorld: 'a.txt' }, /keepAsWorld must be a list/);
+  await refuses({ keepAsWorld: ['../x'] }, /keepAsWorld holds a name/);
+  await refuses({ keepAsWorld: [3] }, /keepAsWorld holds a name/);
+  await refuses({ keepAsWorld: Array.from({ length: 51 }, (_, k) => `f${k}.txt`) }, /at most 50/);
+  await refuses({ fairnessSet: 'yes' }, /fairnessSet must be true or false/);
+  await refuses({ designMode: 'harden', keepAsWorld: ['a.txt'] }, /keepAsWorld is for designMode new/);
+  await refuses({ designMode: 'harden', fairnessSet: true }, /fairnessSet is for designMode new/);
+  await refuses({ designMode: 'harden', referencesDir: w.base }, /referencesDir is for designMode new/);
+  assert.equal(fs.existsSync(w.workRoot), false, 'nothing was created for a refused start');
+  assert.equal((await w.pipeline.list()).pipelines.length, 0);
+  /* the default mode is new */
+  const { id } = await w.pipeline.start({ ...w.body(), designMode: undefined });
+  assert.equal((await w.pipeline.get(id)).config.designMode, 'new');
+  await w.pipeline.stop(id).catch(() => {});
+  await w.pipeline.whenDone(id);
+});
+
+/* ---- the reference documents (invented text) ---- */
+
+const REF_NOTE = 'Reference note one, synthetic. A good draw review starts from the funding record, separates cash that has arrived from credit that is only available, and ends with a clear recommendation that the approver can sign. REF-MARKER-5c1d The review names the document that governs each figure and says what would change the answer.\n';
+const REF_GUIDE = 'Reference guide two, synthetic. A close checklist lists each account, who owns it, when it was reconciled and which entries are still open. REF-MARKER-77aa Open entries older than one period are escalated to the controller with the reason they remain open.\n';
+const refDir = w => path.join(w.root, 'private', 'references');
+const putRefs = (w, files = { 'Draw_Review_Notes.md': REF_NOTE, 'Close_Checklist_Guide.txt': REF_GUIDE }) => { for (const [name, data] of Object.entries(files)) put(refDir(w), name, data); return refDir(w); };
+const attemptFiles = (w, id, n) => readTree(path.join(w.priv(id), 'attempts', String(n)));
+
+test('reference documents: the default folder is found, its names (never its words) are shown, and the designer gets a hashed copy that the pilots never see', async t => {
+  const w = await newWorld(t, { server: true });
+  putRefs(w);
+  const listed = (await w.get('/api/pipeline')).json.config.references;
+  assert.deepEqual(listed.default, { exists: true, found: 2, names: ['Close_Checklist_Guide.txt', 'Draw_Review_Notes.md'], bytes: REF_NOTE.length + REF_GUIDE.length, problems: 0, problemList: [] });
+  assert.deepEqual([listed.maxFiles, listed.maxBytes, listed.extensions], [20, 8 * 1024 * 1024, ['.md', '.txt', '.pdf', '.docx', '.xlsx', '.csv', '.json']]);
+  assert.equal(JSON.stringify(listed).includes('REF-MARKER'), false, 'the start form gets names and counts, never content');
+  /* the designer reads one of them: its log (private) holds the text, as a real designer's would */
+  const rules = [classifierRule({ answer: { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] } }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designerExtra: { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/reference/Draw_Review_Notes.md' }, result: REF_NOTE }] } })];
+  const second = await newWorld(t, { rules });
+  putRefs(second);
+  const { id, view } = await second.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.references.names, ['Close_Checklist_Guide.txt', 'Draw_Review_Notes.md']);
+  assert.equal(view.references.source, 'default');
+  assert.equal(view.references.copied, true);
+  assert.deepEqual(view.references.files.map(file => [file.name, file.bytes, file.sha256]), [['Close_Checklist_Guide.txt', REF_GUIDE.length, sha(REF_GUIDE)], ['Draw_Review_Notes.md', REF_NOTE.length, sha(REF_NOTE)]]);
+  assert.equal(JSON.stringify(view).includes('REF-MARKER'), false, 'the view carries names, sizes and hashes only');
+  const inputs = designerInputs(second, id);
+  assert.equal(inputs['reference/Draw_Review_Notes.md'], REF_NOTE);
+  assert.equal(inputs['reference/Close_Checklist_Guide.txt'], REF_GUIDE);
+  const designerPrompt = promptRuns(second).find(run => run.prompt.includes('You are the trap designer for one new finance task'));
+  assert.match(designerPrompt.prompt, /reference\/ +the owner's reference documents/);
+  assert.equal(designerPrompt.prompt.includes('REF-MARKER'), false, 'the prompt names the folder, it does not carry the text');
+  /* the private copy sits with the pipeline; nothing of it is in a pilot's folder or anywhere a pilot could be given */
+  assert.equal(fs.readFileSync(path.join(second.priv(id), 'references', 'Draw_Review_Notes.md'), 'utf8'), REF_NOTE);
+  for (const text of Object.values(pilotFiles(second))) assert.equal(text.includes('REF-MARKER'), false);
+});
+
+test('reference documents: an explicit folder, none at all (false), and a pipeline without any still work', async t => {
+  const w = await newWorld(t);
+  putRefs(w);
+  const elsewhere = path.join(w.base, 'elsewhere');
+  put(elsewhere, 'Notes.json', '{"note": "synthetic reference"}');
+  const named = await w.runNew({ referencesDir: elsewhere });
+  assert.equal(named.view.stage, 'done', named.view.message);
+  assert.deepEqual([named.view.references.source, named.view.references.names], ['folder', ['Notes.json']]);
+  assert.equal('reference/Notes.json' in designerInputs(w, named.id), true);
+  const none = await w.runNew({ referencesDir: false });
+  assert.equal(none.view.stage, 'done', none.view.message);
+  assert.deepEqual([none.view.references.source, none.view.references.found], ['none', 0]);
+  assert.equal(Object.keys(designerInputs(w, none.id)).some(name => name.startsWith('reference/')), false, 'false means none, although the default folder exists');
+});
+
+test('reference documents: the limits and the refusals, each before anything is created', async t => {
+  const w = await newWorld(t);
+  const refuses = async (dir, pattern) => {
+    await assert.rejects(w.pipeline.start(w.body({ designMode: 'new', referencesDir: dir })), error => { assert.ok(error instanceof AgentError); assert.equal(error.status, 400); assert.match(error.message, pattern); return true; });
+  };
+  const make = name => path.join(w.base, name);
+  /* 20 files are fine, 21 are not */
+  const twenty = make('twenty');
+  for (let k = 0; k < 20; k++) put(twenty, `n${String(k).padStart(2, '0')}.txt`, `reference ${k}\n`);
+  const ok = await w.pipeline.start(w.body({ designMode: 'new', referencesDir: twenty }));
+  assert.equal((await w.pipeline.get(ok.id)).references.found, 20);
+  await w.pipeline.stop(ok.id).catch(() => {});
+  await w.pipeline.whenDone(ok.id);
+  const twentyOne = make('twenty-one');
+  for (let k = 0; k < 21; k++) put(twentyOne, `n${String(k).padStart(2, '0')}.txt`, `reference ${k}\n`);
+  await refuses(twentyOne, /more than 20 files|holds 21 files; the limit is 20/);
+  /* 8 MB in all */
+  const big = make('big');
+  put(big, 'a.txt', Buffer.alloc(8 * 1024 * 1024, 97));
+  put(big, 'b.txt', 'x');
+  await refuses(big, /together are \d+ MB; the limit is 8 MB/);
+  const exact = make('exact');
+  put(exact, 'a.txt', Buffer.alloc(8 * 1024 * 1024, 97));
+  const fits = await w.pipeline.start(w.body({ designMode: 'new', referencesDir: exact }));
+  assert.equal((await w.pipeline.get(fits.id)).references.bytes, 8 * 1024 * 1024);
+  await w.pipeline.stop(fits.id).catch(() => {});
+  await w.pipeline.whenDone(fits.id);
+  /* a link, a file type the designer cannot read, a folder nested too deep, a link in place of the folder, a missing folder, a file, the Studio's own folders */
+  const linked = make('linked');
+  put(linked, 'real.txt', 'x');
+  fs.symlinkSync(path.join(linked, 'real.txt'), path.join(linked, 'link.txt'));
+  await refuses(linked, /symbolic link/);
+  const exe = make('exe');
+  put(exe, 'tool.exe', 'x');
+  await refuses(exe, /not one of \.md \.txt \.pdf \.docx \.xlsx \.csv \.json/);
+  const deep = make('deep');
+  put(deep, 'a/b/c.txt', 'x');
+  await refuses(deep, /nested deeper than 2 levels|cannot be used/);
+  const folderLink = make('folder-link');
+  fs.symlinkSync(twenty, folderLink);
+  await refuses(folderLink, /not a plain folder/);
+  await refuses(make('missing'), /does not exist/);
+  await refuses(path.join(twenty, 'n00.txt'), /not a plain folder/);
+  await refuses(w.workRoot, /working folders of the Studio/);
+  await refuses(path.join(w.tmpRoot, 'finance-studio-pilots'), /working folders of the Studio/);
+  const empty = make('empty');
+  fs.mkdirSync(empty);
+  await refuses(empty, /holds no usable files/);
+  assert.equal((await w.pipeline.list()).pipelines.length, 2, 'only the two accepted folders made a pipeline');
+});
+
+test('reference documents: a long passage of one in a new file or in the prompt fails the attempt through the repair turn; the public reason names neither file nor passage; a PDF is disclosed as unscanned', async t => {
+  const passage = REF_NOTE.slice(20, 220);
+  assert.ok(passage.length > 109);
+  const leak = { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${passage}\n` };
+  const promptLeak = { 'out/prompt.txt': `Assess the Atlas liquidity position using the supplied records. ${passage} PV2\n` };
+  const rules = [
+    classifierRule({ answer: { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] } }),
+    ...newAttemptRules(1, [0.2], { design: { files: leak }, repairs: { design: 'clean' } }),
+    ...newAttemptRules(2, [0.2], { design: { files: promptLeak }, repairs: { design: 'clean' } }),
+    ...newAttemptRules(3, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  putRefs(w, { 'Draw_Review_Notes.md': REF_NOTE, 'Scan_Notes.pdf': Buffer.from('%PDF-1.4 synthetic binary \u0000\u0001\u0002 not text') });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[1].outcome, 'rejected');
+  assert.equal(view.attempts[2].outcome, 'passed');
+  for (const attempt of view.attempts.slice(0, 2)) {
+    assert.equal(attempt.rejection.reasons.some(reason => /long passage of the reference documents/.test(reason)), true);
+    const text = JSON.stringify(attempt.rejection.reasons);
+    assert.equal(text.includes('Meridian_Lender_Summary'), false);
+    assert.equal(text.includes('REF-MARKER'), false);
+    assert.equal(text.includes('Draw_Review_Notes'), false);
+  }
+  /* the designer is told exactly which file (private feedback), the owner is not */
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8');
+  assert.match(feedback, /Meridian_Lender_Summary\.txt/);
+  assert.deepEqual(view.references.unscanned, ['Scan_Notes.pdf'], 'a PDF has no text the guard can use: it is disclosed as unscanned');
+});
+
+test('reference documents: a marker planted in a reference reaches the designer and its private log, and nothing a pilot, the blind reviewer or a grader has', async t => {
+  const rules = [
+    classifierRule({ answer: { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] } }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designerExtra: { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/reference/Draw_Review_Notes.md' }, result: REF_NOTE }] } }),
+  ];
+  const spawned = [];
+  const w = await newWorld(t, { rules, onSpawn: record => spawned.push(record) });
+  putRefs(w);
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const MARKERS = ['REF-MARKER-5c1d', 'REF-MARKER-77aa', 'Draw_Review_Notes', 'Close_Checklist_Guide'];
+  /* the designer's log has it, under private/pipelines, and nowhere the API serves */
+  const designerLog = fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'design.transcript.jsonl'), 'utf8');
+  assert.match(designerLog, /REF-MARKER-5c1d/);
+  assert.equal(path.relative(path.join(w.root, 'private', 'pipelines'), path.join(w.priv(id), 'attempts', '1', 'design.transcript.jsonl')).startsWith('..'), false);
+  /* every other transcript, evidence copy and log of the pipeline and of the pilot rounds is free of it */
+  const holders = {};
+  const collect = (dir, label) => { for (const [rel, text] of Object.entries(readTree(dir))) holders[`${label}/${rel}`] = text; };
+  collect(path.join(w.root, 'private', 'agent-rounds'), 'rounds');
+  for (const [rel, text] of Object.entries(attemptFiles(w, id, 1))) if (!rel.startsWith('design.transcript') && !rel.startsWith('out/') && rel !== 'design-summary.txt') holders[`attempt/${rel}`] = text;
+  assert.ok(Object.keys(holders).some(name => name.startsWith('rounds/')), 'the pilot rounds left evidence to look at');
+  assert.ok(Object.keys(holders).some(name => /review-1-1\.transcript\.jsonl$/.test(name)), 'and so did the blind reviewer');
+  for (const [name, text] of Object.entries(holders)) for (const marker of MARKERS) assert.equal(text.includes(marker), false, `${name} must not hold ${marker}`);
+  /* the prompts, arguments and environments of every process other than the designer's */
+  for (const run of promptRuns(w)) {
+    if (run.prompt.includes('You are the trap designer for one new finance task')) continue;
+    for (const marker of MARKERS) assert.equal(run.prompt.includes(marker), false, `a prompt holds ${marker}`);
+  }
+  for (const record of spawned) {
+    const designer = record.cwd && record.cwd.endsWith(path.join('designer'));
+    const text = JSON.stringify([record.args, Object.fromEntries(Object.entries(record.env || {}).filter(([name]) => !name.startsWith('FINANCE_STUB_')))]);
+    if (!designer) for (const marker of MARKERS) assert.equal(text.includes(marker), false, `a process was given ${marker}`);
+    if (!designer) assert.equal(Object.values(record.tree).some(content => MARKERS.some(marker => content.includes(marker))), false, 'and no folder it ran in holds a reference');
+  }
+  /* the API view: names, sizes and hashes are the most it carries, and while a round runs even the names are withheld */
+  const redacted = redactPipelineData(await w.pipeline.get(id));
+  assert.deepEqual(redacted.references.names, { withheld: true });
+  assert.deepEqual(redacted.references.files, { withheld: true });
+  assert.equal(redacted.references.found, 2);
+});
+
+/* ---- the brief: every deterministic rule ---- */
+
+const { parseBrief, verifyBriefSources } = require('../backend/pipeline/brief.cjs');
+const { DesignError } = require('../backend/pipeline/errors.cjs');
+const BRIEF_FILES = new Set(['Facility_Terms.txt', 'Cash_Facts.csv', 'Meridian_Lender_Summary.txt', 'Atlas_Supplement.txt']);
+const parseOf = (mutate, ctx = {}) => {
+  const brief = briefFor(1);
+  mutate(brief);
+  return parseBrief(JSON.stringify(brief), { traps: [{ id: 't1' }], files: BRIEF_FILES, ...ctx });
+};
+const faults = (mutate, pattern, ctx) => assert.throws(() => parseOf(mutate, ctx), error => {
+  assert.ok(error instanceof DesignError, String(error && error.stack));
+  assert.match(error.message, pattern, 'the public message');
+  assert.equal(typeof error.detail, 'string');
+  return true;
+});
+
+test('the brief: a sound one is read, and every field, role, kind and file is checked', () => {
+  const brief = parseOf(() => {});
+  assert.equal(brief.primary, 't1');
+  assert.equal(brief.traps[0].changesDecision, 'required_conclusion');
+  assert.equal(brief.files.length, 4);
+  assert.throws(() => parseBrief('{not json', { traps: [], files: BRIEF_FILES }), /not valid JSON/);
+  assert.throws(() => parseBrief('[]', { traps: [], files: BRIEF_FILES }), /not an object/);
+  faults(b => { delete b.taskType; }, /needs a task type/);
+  faults(b => { b.taskType.workflow = ' '; }, /task type workflow/);
+  faults(b => { delete b.decision; }, /needs a decision/);
+  faults(b => { b.decision.mandate = ''; }, /mandate/);
+  faults(b => { b.decision.authorityFile = 'Cash_Facts.csv'; }, /not listed as an authority file/);
+  faults(b => { b.files = []; }, /list of the files and their roles/);
+  faults(b => { b.files[0].role = 'judge'; }, /valid role/);
+  faults(b => { b.files[1].name = 'Missing.txt'; }, /pilots do not get/);
+  for (const name of ['guideline.md', 'golden-answer.md', 'brief.json', 'traps.json', 'answers.json', 'answers/alt-1.md', 'sub/guideline.md']) {
+    faults(b => { b.files.push({ name, role: 'evidence' }); }, /evaluator file/, { files: new Set([...BRIEF_FILES, name]) });
+  }
+  faults(b => { b.files = b.files.filter(file => file.role !== 'authority'); b.decision.authorityFile = 'x'; }, /needs an authority file/);
+  faults(b => { b.traps = []; }, /1 to 3 traps/);
+  faults(b => { b.traps = [1, 2, 3, 4].map(k => ({ ...b.traps[0], id: `t${k}`, primary: k === 1 })); }, /1 to 3 traps/);
+  faults(b => { b.traps[0].primary = false; }, /exactly one primary/);
+  faults(b => { delete b.traps[0].rule; }, /rule it rests on/);
+  faults(b => { b.traps[0].rule.file = 'Elsewhere.txt'; }, /names a file that the pilots do not get/);
+  faults(b => { delete b.traps[0].wrongPath; }, /path in the brief is missing/);
+  faults(b => { b.traps[0].correctPath.action = ''; }, /action of each path/);
+  faults(b => { b.traps[0].wrongPath.figures = [{ label: 'x', value: 'many' }]; }, /numeric value/);
+  faults(b => { b.traps[0].wrongPath.figures = [{ label: 'x', value: 1, tolerance: -1 }]; }, /tolerance of zero or more/);
+  faults(b => { b.traps[0].whyTempting.kind = 'greed'; }, /whyTempting/);
+  faults(b => { delete b.traps[0].consequence; }, /consequence/);
+  faults(b => { delete b.traps[0].strongestAlternative; }, /strongest alternative/);
+  faults(b => { b.traps[0].strongestAlternative.whyRejected = ''; }, /rules the strongest alternative out/);
+  faults(b => { b.traps[0].id = 't9'; }, /not the traps of traps\.json/);
+  faults(b => { b.traps.push({ ...b.traps[0] }); }, /unique id|exactly one primary/);
+  faults(b => { delete b.permittedAlternatives; }, /needs permittedAlternatives/);
+  faults(b => { b.permittedAlternatives = [{ answer: 'a', support: 's', file: 'alt.md' }]; }, /answer file under answers/);
+  faults(b => { b.permittedAlternatives = [1, 2, 3].map(k => ({ answer: 'a', support: 's', file: `answers/alt-${k}.md` })); }, /at most 2/);
+  faults(b => { b.permittedAlternatives = [{ answer: 'a', support: 's', file: 'answers/alt-1.md' }, { answer: 'b', support: 's', file: 'answers/alt-1.md' }]; }, /share an answer file/);
+  faults(b => { b.permittedAlternativesReason = ''; }, /needs a reason/);
+  assert.equal(parseOf(b => { b.permittedAlternatives = [{ answer: 'a', support: 's', file: 'answers/alt-1.md' }]; b.permittedAlternativesReason = ''; }).permittedAlternatives.length, 1);
+});
+
+test('the brief: the wrong path must change a required conclusion or a materially required calculation; arithmetic movement alone is not enough', () => {
+  /* the actions are the same after normalisation: not a different conclusion, whatever the figures say */
+  faults(b => { b.traps[0].wrongPath.action = '  HOLD the borrowing!  '; }, /does not change a required conclusion or calculation/);
+  faults(b => { b.traps[0].wrongPath.action = b.traps[0].correctPath.action; b.traps[0].wrongPath.figures = [{ label: 'Usable cash', value: 9999, tolerance: 1 }]; }, /does not change a required conclusion/);
+  /* changesDecision neither: never */
+  faults(b => { b.traps[0].changesDecision = 'neither'; }, /does not change a required conclusion/);
+  faults(b => { b.traps[0].changesDecision = 'maybe'; }, /needs changesDecision/);
+  /* a different action with identical arithmetic is a changed conclusion */
+  assert.ok(parseOf(b => { b.traps[0].wrongPath.figures = [{ label: 'Usable cash', value: 1250, tolerance: 1 }]; }));
+  /* a calculation: the figures differ beyond the larger tolerance */
+  assert.ok(parseOf(b => { const t = b.traps[0]; t.changesDecision = 'required_calculation'; t.wrongPath.action = t.correctPath.action; t.wrongPath.figures = [{ label: 'Usable cash', value: 1300, tolerance: 1 }]; }));
+  faults(b => { const t = b.traps[0]; t.changesDecision = 'required_calculation'; t.wrongPath.action = t.correctPath.action; t.wrongPath.figures = [{ label: 'Usable cash', value: 1255, tolerance: 10 }]; }, /does not change a required conclusion or calculation/);
+  faults(b => { const t = b.traps[0]; t.changesDecision = 'required_calculation'; t.wrongPath.action = t.correctPath.action; t.wrongPath.figures = [{ label: 'Usable cash', value: 1255, tolerance: 0 }]; t.correctPath.figures[0].tolerance = 10; }, /does not change/, undefined);
+  /* arithmetic movement alone does not satisfy a required conclusion */
+  faults(b => { const t = b.traps[0]; t.wrongPath.action = t.correctPath.action; t.wrongPath.figures = [{ label: 'Usable cash', value: 9000, tolerance: 1 }]; }, /does not change a required conclusion/);
+  /* only figures that pair up are compared: a figure only one side has, a label changed on a figure whose value is the same, and a path with no figure at
+     all are not differences, so the wrong path cannot be made to look different by adding or renaming a figure */
+  const calculation = figures => b => { const t = b.traps[0]; t.changesDecision = 'required_calculation'; t.wrongPath.action = t.correctPath.action; t.wrongPath.figures = figures; };
+  faults(calculation([{ label: 'Usable cash', value: 1250, tolerance: 1 }, { label: 'Extra', value: 1, tolerance: 0 }]), /does not change a required conclusion or calculation/);
+  faults(calculation([{ label: 'Usable cash if the facility counted', value: 1250, tolerance: 1 }]), /does not change a required conclusion or calculation/);
+  faults(calculation([]), /does not change a required conclusion or calculation/);
+  faults(calculation([{ label: 'USABLE   cash', value: 1250.4, tolerance: 0 }]), /does not change/, undefined);
+  /* a label is matched with case and punctuation folded; when the labels share nothing the lists are paired by position */
+  assert.ok(parseOf(calculation([{ label: 'usable CASH', value: 1300, tolerance: 1 }])));
+  assert.ok(parseOf(calculation([{ label: 'Another name', value: 3050, tolerance: 1 }])));
+  faults(calculation([{ label: 'Another name', value: 1250, tolerance: 1 }]), /does not change a required conclusion or calculation/);
+});
+
+test('the brief: an optional decision date must be an ISO date that exists', () => {
+  assert.equal(parseOf(b => { b.decision.decisionDate = '2025-04-15'; }).decision.decisionDate, '2025-04-15');
+  assert.equal(parseOf(() => {}).decision.decisionDate, undefined);
+  faults(b => { b.decision.decisionDate = '15 April 2025'; }, /decision date of the brief is not an ISO date/);
+  faults(b => { b.decision.decisionDate = '2025-02-30'; }, /decision date of the brief is not an ISO date/);
+});
+
+test('the brief: with more than one trap there are controls for the baseline, each single wrong path and the combination, each different from the baseline', () => {
+  const twoTraps = mutate => {
+    const brief = briefFor(1);
+    const second = JSON.parse(JSON.stringify(brief.traps[0]));
+    second.id = 't2'; second.primary = false; second.wrongPath.action = 'Draw in full'; second.wrongPath.figures = [{ label: 'Second', value: 7, tolerance: 0 }]; second.correctPath.figures = [{ label: 'Second', value: 1, tolerance: 0 }];
+    brief.traps.push(second);
+    brief.controls = [
+      { scenario: 'baseline', action: 'Hold the borrowing', figures: [{ label: 'Usable cash', value: 1250, tolerance: 1 }], changesDecision: false },
+      { scenario: 'primary_wrong', action: 'Proceed with the borrowing', figures: [{ label: 'Usable cash', value: 3050, tolerance: 1 }], changesDecision: true },
+      { scenario: 'secondary_wrong', trap: 't2', action: 'Draw in full', figures: [{ label: 'Usable cash', value: 1250, tolerance: 1 }], changesDecision: true },
+      { scenario: 'combined_wrong', action: 'Draw in full and proceed', figures: [{ label: 'Usable cash', value: 3050, tolerance: 1 }], changesDecision: true },
+    ];
+    if (mutate) mutate(brief);
+    return parseBrief(JSON.stringify(brief), { traps: [{ id: 't1' }, { id: 't2' }], files: BRIEF_FILES });
+  };
+  assert.equal(twoTraps().traps.length, 2);
+  const faultsOf = (mutate, pattern) => assert.throws(() => twoTraps(mutate), error => { assert.ok(error instanceof DesignError); assert.match(error.message + error.detail, pattern); return true; });
+  faultsOf(b => { b.controls = []; }, /controls of the brief are incomplete[\s\S]*baseline/);
+  faultsOf(b => { b.controls = b.controls.filter(control => control.scenario !== 'baseline'); }, /baseline/);
+  faultsOf(b => { b.controls = b.controls.filter(control => control.scenario !== 'primary_wrong'); }, /primary_wrong/);
+  faultsOf(b => { b.controls = b.controls.filter(control => control.scenario !== 'secondary_wrong'); }, /secondary_wrong for trap t2/);
+  faultsOf(b => { b.controls = b.controls.filter(control => control.scenario !== 'combined_wrong'); }, /the combination/);
+  faultsOf(b => { b.controls[2].action = 'Hold the borrowing'; b.controls[2].figures = b.controls[0].figures; }, /does not differ from the baseline/);
+  faultsOf(b => { b.controls[3].changesDecision = false; }, /does not differ from the baseline/);
+  faultsOf(b => { b.controls[1].figures = [{ label: 'Usable cash', value: 1251, tolerance: 1 }]; b.controls[1].action = 'hold the borrowing'; }, /does not differ from the baseline/);
+  faultsOf(b => { b.controls[0].scenario = 'nonsense'; }, /valid scenario/);
+});
+
+test('the brief: the governing clause and the quote that rules the alternative out must be word for word in the packet, and a workflow missing from the references is a warning', () => {
+  const brief = parseOf(() => {});
+  const documents = [{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'Cash_Facts.csv', text: CASH }, { name: 'Meridian_Lender_Summary.txt', text: NEW_SUMMARY(1) }, { name: 'Atlas_Supplement.txt', text: SUPPLEMENT }];
+  assert.deepEqual(verifyBriefSources(brief, documents, 'The prompt.').warnings, []);
+  const fails = (mutate, pattern) => {
+    const copy = JSON.parse(JSON.stringify(brief));
+    mutate(copy);
+    assert.throws(() => verifyBriefSources(copy, documents, 'The prompt.'), error => { assert.ok(error instanceof DesignError); assert.match(error.detail, pattern); assert.equal(error.message.includes(CLAUSE), false, 'the public message quotes nothing'); return true; });
+  };
+  fails(b => { b.traps[0].rule.clause = 'Available credit counts as cash when drawn.'; }, /clause of trap t1.*is not found, word for word/);
+  fails(b => { b.traps[0].rule.file = 'Cash_Facts.csv'; }, /not found, word for word, in Cash_Facts\.csv or in prompt\.txt/);
+  fails(b => { b.traps[0].strongestAlternative.whyRejected = 'A clause that no file states at all.'; }, /whyRejected quote of trap t1/);
+  fails(b => { b.traps[0].rule.clause = 'short'; }, /not found/);
+  /* the quote is whitespace and typography normalised, but case is kept */
+  const spaced = JSON.parse(JSON.stringify(brief));
+  spaced.traps[0].rule.clause = 'Available   credit\nis not cash received.';
+  assert.deepEqual(verifyBriefSources(spaced, documents, 'x').warnings, []);
+  fails(b => { b.traps[0].rule.clause = 'available credit is not cash received.'; }, /not found/);
+  /* a rule stated in the prompt is sourced; whyRejected in a decoy file is not */
+  const inPrompt = JSON.parse(JSON.stringify(brief));
+  inPrompt.traps[0].rule.clause = 'The prompt states this rule plainly.';
+  assert.ok(verifyBriefSources(inPrompt, documents, 'The prompt states this rule plainly.'));
+  const decoyOnly = JSON.parse(JSON.stringify(brief));
+  decoyOnly.traps[0].strongestAlternative.whyRejected = 'The available facility of 3,050 is shown as a cash line.';
+  assert.throws(() => verifyBriefSources(decoyOnly, documents, 'x'), error => /whyRejected quote/.test(error.detail));
+  /* the workflow: a warning only, and only when readable reference text exists */
+  assert.deepEqual(verifyBriefSources(brief, documents, 'x', [{ name: 'a.md', text: 'A note about close checklists.' }]).warnings, ['The workflow named in the brief is not found in the reference documents.']);
+  assert.deepEqual(verifyBriefSources(brief, documents, 'x', [{ name: 'a.md', text: 'The Facility Draw Review workflow.' }]).warnings, []);
+  assert.deepEqual(verifyBriefSources(brief, documents, 'x', [{ name: 'a.pdf', text: null }]).warnings, [], 'an unreadable reference gives no warning');
+});
+
+test('the brief: a design with a bad brief goes through the repair turn and is then rejected; a repair that fixes it is accepted', async t => {
+  const rules = [
+    classifierRule({ answer: { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] } }),
+    /* attempt 1: no brief at all, and the repair turn delivers the same */
+    ...newAttemptRules(1, [0.2], { design: { files: { 'out/brief.json': null } }, repairs: { design: 'clean' } }),
+    /* attempt 2: the clause is not in the files; the repair turn delivers the sound design */
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { brief: { traps: [{ ...briefFor(2).traps[0], rule: { file: 'Facility_Terms.txt', clause: 'A rule that no file states anywhere.' } }] } }, repairs: { design: { ...newAttemptRules(2, [], {})[newAttemptRules(2, [], {}).findIndex(rule => rule.prompt === 'design attempt 2 of')].scenario, costUsd: 0.03 } } }),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].repaired, true);
+  assert.match(view.attempts[0].rejection.reasons[0], /brief\.json was not written/);
+  assert.equal(view.attempts[1].repaired, true, 'the repair turn was used');
+  assert.equal(view.attempts[1].outcome, 'passed');
+  /* the designer of attempt 2 was told the exact reason the first brief failed, in the repair prompt */
+  const repairPrompts = promptRuns(w).filter(run => run.prompt.includes('THE PROBLEM, exactly'));
+  assert.equal(repairPrompts.length, 2);
+  assert.match(repairPrompts[1].prompt, /A rule that no file states anywhere/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /brief\.json/);
+});
+
+/* ---- the reviews: stage 1 (blind), stage 2 (reveal) and the application check (2b) ---- */
+
+const NEW_CLASSIFIER = { prompt: null, guideline: null, goldenAnswer: null, worldFiles: WORLD_NAMES, taskFiles: ['Atlas_Supplement.txt'], other: [] };
+const newRules = (n, scores, opts) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(n, scores, opts)];
+const REVISED_GUIDELINE = (n, marker) => `Revised guideline for the Atlas task, attempt ${n}. DESIGNER-GUIDELINE-MARK ${marker} A correct answer states usable cash of 1,250 and holds the borrowing.\n`;
+/* a repair turn that only revises the guideline */
+const reviseOnly = (n, marker, extra = {}) => ({ writeFiles: [{ path: 'out/guideline.md', content: REVISED_GUIDELINE(n, marker) }, ...(extra.files || [])], resultText: 'repaired', costUsd: 0.02 });
+const reveals = (marker, scenario) => ({ cwd: '/runs/reveal-', prompt: marker, scenario });
+const reviewRuns = (view, kind) => view.ledger.filter(entry => entry.kind === kind);
+
+test('the reveal: an alternative that a clause excludes passes when the harness finds the quote and the application check shows the clause governs, is in force, is not superseded and excludes it', async t => {
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) }) });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const fairness = view.attempts[0].fairness;
+  assert.equal(fairness.status, 'passed');
+  assert.deepEqual([fairness.stage2.disposition, fairness.stage2.objectionClass, fairness.stage2.evaluations, fairness.repairs], ['excluded_by_clause', 'overlooked_dependency', 1, 0]);
+  assert.deepEqual(fairness.stage2.application.checks, { governs: true, inForce: true, notSuperseded: true, excludes: true });
+  assert.deepEqual(fairness.stage2.application.dates, { effective: '2025-03-01', decision: '2025-04-15' });
+  assert.equal(fairness.stage2.application.hits >= 1, true, 'the harness found supersession language near the clause (the clause was amended)');
+  assert.equal(reviewRuns(view, 'application').length, 2, 'the clause of the reveal, and the rule of the trap; the quote against the strongest alternative is the same clause with the same alternative, so it is not checked twice');
+  assert.deepEqual([fairness.stage2.briefApplication.pass, fairness.stage2.briefApplication.count, fairness.stage2.briefApplication.failures], [true, 1, []]);
+  assert.equal(reviewRuns(view, 'blind-review').length, 1);
+  assert.equal(reviewRuns(view, 'reveal').length, 1);
+  /* the details are private: the owner's file next to the attempt */
+  const detail = JSON.parse(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'fairness.json'), 'utf8'));
+  assert.equal(detail.evaluations[0].reveal.disposition, 'excluded_by_clause');
+  assert.equal(detail.evaluations[0].blind.governingDocument, 'Facility_Terms.txt');
+  /* the public message and the state name no file and no clause */
+  assert.equal(JSON.stringify(view.message).includes('Facility_Terms'), false);
+});
+
+test('the reveal: a quote the harness cannot find, or a clause that does not apply, leaves the disposition unresolved; one repair turn, then the review runs again', async t => {
+  const missingQuote = { ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'A clause that the facility terms never state.' } };
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_EXCLUDED))],
+    reveal: jsonScenario(missingQuote),
+    repairs: { missing: reviseOnly(1, 'REVISED-ONE') },
+  });
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.equal(attempt.fairness.repairs, 1);
+  assert.deepEqual([attempt.fairness.stage2.evaluations, attempt.fairness.stage2.disposition], [2, 'excluded_by_clause']);
+  assert.equal(reviewRuns(view, 'reveal').length, 2);
+  assert.equal(reviewRuns(view, 'blind-review').length, 1, 'the packet did not change, so the blind review is not run again');
+  const golden = attempt.answerSet.answers.find(item => item.name === 'golden');
+  assert.deepEqual(golden.runs.map(run => run.why), ['first grading', 'after the guideline was revised']);
+  assert.notEqual(golden.runs[0].guidelineSha256, golden.runs[1].guidelineSha256, 'the same golden answer was graded against both guidelines');
+  assert.equal(golden.runs[0].answerSha256, golden.runs[1].answerSha256);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'designer', 'out', 'guideline.md'), 'utf8'), /REVISED-ONE/);
+  /* the repair prompt says what the review found, with the harness's own words */
+  const repair = promptRuns(w).find(run => run.prompt.includes('Supply what is missing'));
+  assert.match(repair.prompt, /Harness: the quote that rules the alternative out is not in the file it names/);
+});
+
+test('the reveal: a repair that changes the packet runs the blind review again on the new packet, and the packet that is tested is the packet that was reviewed', async t => {
+  const missingQuote = { ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'A clause that the facility terms never state.' } };
+  const clarified = { ...reviseOnly(1, 'REVISED-ONE'), writeFiles: [{ path: 'out/guideline.md', content: REVISED_GUIDELINE(1, 'REVISED-ONE') }, { path: 'out/new/Meridian_Lender_Summary.txt', content: NEW_SUMMARY(1) + 'The lender summary does not change the facility terms.\n' }] };
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_EXCLUDED))], reveal: jsonScenario(missingQuote), repairs: { missing: clarified } });
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.equal(reviewRuns(view, 'blind-review').length, 2, 'the packet changed: a blind reader read the new one');
+  assert.equal(attempt.fairness.stage1.runs, 2);
+  assert.equal(attempt.freeze[0].packetSha256, attempt.fairness.stage1.packetSha256, 'the freeze names the packet the blind reader read last');
+  assert.deepEqual(attempt.answerSet.answers.find(item => item.name === 'golden').runs.map(run => run.why), ['first grading', 'after the packet changed']);
+  assert.match(Object.entries(pilotFiles(w)).find(([name]) => name.endsWith('Meridian_Lender_Summary.txt'))[1], /does not change the facility terms/);
+  assert.equal(fs.existsSync(path.join(w.priv(id), 'attempts', '1', 'out', 'new', 'Meridian_Lender_Summary.txt')), true);
+});
+
+test('the reveal: still unresolved after the repair rejects the attempt as a fairness failure, apart from difficulty; the redesign is told what was found', async t => {
+  const unresolved = { alternative: 'Draw half now', forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'missing_requirement', disposition: 'unresolved', guidelineCovers: false, why: 'Nothing in the files says how much may be drawn.' };
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2], { reveal: jsonScenario(unresolved), repairs: { missing: reviseOnly(1, 'REVISED-ONE') }, extra: [reveals('REVISED-ONE', jsonScenario(unresolved))] }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.rejection.kind, 'review');
+  assert.equal(first.validation, 'failed');
+  assert.equal(first.fairness.status, 'rejected');
+  assert.equal(first.fairness.stage2.disposition, 'unresolved');
+  assert.equal(first.screen, null, 'no pilot ran');
+  assert.deepEqual(first.difficulty, { status: 'pending', screen: null, test: null }, 'fairness failed before difficulty was measured');
+  assert.equal(first.rejection.reasons.some(reason => /could not settle which answer the files support/.test(reason)), true);
+  assert.equal(JSON.stringify(first.rejection.reasons).includes('Draw half'), false, 'the public reason names no figure or clause');
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8');
+  assert.match(feedback, /Draw half now/);
+  assert.match(feedback, /missing_requirement/);
+});
+
+test('the reveal: a permitted alternative is adjudicated, not rejected: one repair adds it and its answer, the fixed answers are regraded, and the review runs once more', async t => {
+  const permitted = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: false, why: 'The terms leave the tranche structure open.' };
+  const withAlternative = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches with cash cover', support: 'The terms leave the tranche structure open', file: 'answers/alt-1.md' }] });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n' }, { path: 'out/brief.json', content: JSON.stringify(withAlternative) }] });
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [
+      reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)),
+      { cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: [{ resultText: gradeJson(0.91), costUsd: 0.02 }, { resultText: gradeJson(0.97), costUsd: 0.02 }] },
+      { cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: [{ resultText: gradeJson(0.9), costUsd: 0.02 }, { resultText: gradeJson(0.88), costUsd: 0.02 }] },
+    ],
+    reveal: jsonScenario(permitted),
+    repairs: { alternative: repair },
+  });
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.deepEqual([attempt.fairness.repairs, attempt.fairness.stage2.evaluations, attempt.fairness.stage2.disposition, attempt.fairness.status], [1, 2, 'no_alternative', 'passed']);
+  const golden = attempt.answerSet.answers.find(item => item.name === 'golden');
+  const alt = attempt.answerSet.answers.find(item => item.name === 'alt-1');
+  assert.deepEqual(golden.runs.map(run => [run.why, run.grades]), [['first grading', [0.95, 0.95]], ['after the permitted alternative was added', [0.91, 0.97]]], 'the old and the new grades of the same golden answer');
+  assert.deepEqual([alt.kind, alt.threshold, alt.runs.length, alt.grades, alt.passed], ['alternative', 0.85, 1, [0.9, 0.88], true]);
+  assert.equal(attempt.freeze[0].answers.length, 2, 'the freeze holds both fixed answers');
+  assert.equal(fs.existsSync(path.join(w.priv(id), 'attempts', '1', 'out', 'answers', 'alt-1.md')), true);
+  assert.deepEqual(view.design.alternatives.map(item => item.file), ['answers/alt-1.md']);
+  assert.equal(view.design.brief.permittedAlternatives.length, 1);
+  /* the answer of the alternative is evaluator material: not in the packet the pilots got */
+  for (const text of Object.values(pilotFiles(w))) assert.equal(text.includes('ALT-1'), false);
+  assert.equal(attempt.answerSet.passed, true);
+});
+
+test('a permitted alternative that the guideline grades below 0.85 rejects the attempt as a grader or gold defect', async t => {
+  const permitted = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: false, why: 'The terms leave the tranche structure open.' };
+  const withAlternative = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches', support: 'The terms leave it open', file: 'answers/alt-1.md' }] });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches.\n' }, { path: 'out/brief.json', content: JSON.stringify(withAlternative) }] });
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2], { reveal: jsonScenario(permitted), repairs: { alternative: repair }, extra: [{ cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: { resultText: gradeJson(0.7), costUsd: 0.02 } }] }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.rejection.kind, 'answer-set');
+  assert.match(first.rejection.reasons[0], /A permitted alternative did not reach 0\.85 against the guideline \(grades 0\.70, 0\.70; both grades decide; the mean is 0\.70\)/);
+  assert.equal(first.screen, null);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /alt-1\.md did not reach 0\.85 against your guideline \(grades 0\.70, 0\.70; both grades decide; the mean is 0\.70\)/);
+});
+
+test('the reveal: an equivalent result is accepted; a line is added to the acceptable variation only when the guideline lacks it', async t => {
+  const equivalent = covers => ({ alternative: 'Hold the borrowing and tell the lender', forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: covers, why: 'The same conclusion in other words.' });
+  const covered = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(equivalent(true)) }) });
+  const done = await covered.runNew();
+  assert.equal(done.view.stage, 'done', done.view.message);
+  assert.deepEqual([done.view.attempts[0].fairness.repairs, done.view.attempts[0].fairness.stage2.disposition], [0, 'equivalent_result']);
+  const lacking = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(equivalent(false)), repairs: { equivalent: reviseOnly(1, 'REVISED-ONE') } }) });
+  const fixed = await lacking.runNew();
+  assert.equal(fixed.view.stage, 'done', fixed.view.message);
+  const attempt = fixed.view.attempts[0];
+  assert.deepEqual([attempt.fairness.repairs, attempt.fairness.stage2.evaluations], [1, 1], 'one repair, and the reveal is not run again');
+  assert.deepEqual(attempt.answerSet.answers[0].runs.map(run => run.why), ['first grading', 'after the equivalent result was added']);
+});
+
+test('the reviews: an answer that cannot be read is asked for once more and then rejects the attempt (fail closed)', async t => {
+  /* the folder of a call ends in its number: the first call is garbage, the second is good */
+  const garbageThenGood = good => [{ resultText: 'not json at all', costUsd: 0.01 }, jsonScenario(good)];
+  const once = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: garbageThenGood(BLIND), reveal: garbageThenGood(REVEAL_NONE) }) });
+  const ran = await once.runNew();
+  assert.equal(ran.view.stage, 'done', ran.view.message);
+  assert.equal(reviewRuns(ran.view, 'blind-review').length, 2);
+  assert.equal(reviewRuns(ran.view, 'reveal').length, 2);
+  assert.equal(ran.view.attempts[0].fairness.stage1.tries, 2);
+  /* twice garbage: rejected, and the next attempt goes on */
+  for (const which of ['blind', 'reveal']) {
+    const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { [which]: { resultText: '{"almost": ', costUsd: 0.01 } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const twice = await newWorld(t, { rules });
+    const result = await twice.runNew();
+    assert.equal(result.view.stage, 'done', result.view.message);
+    assert.equal(result.view.attempts[0].outcome, 'rejected', which);
+    assert.equal(result.view.attempts[0].rejection.kind, 'review');
+    assert.equal(result.view.attempts[0].rejection.reasons[0], which === 'blind' ? 'The blind review gave no usable answer' : 'The second review gave no usable answer');
+    assert.equal(result.view.attempts[0].screen, null);
+  }
+});
+
+test('the reveal: a review that uses a tool is not an answer (the tool-less reviews run with no tools), and "no alternative" with an objection class is unresolved', async t => {
+  const { parseReveal, checkReveal } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const corpus = buildCorpus([{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'prompt.txt', text: PROMPT }]);
+  const check = value => checkReveal(parseReveal(JSON.stringify(value)).value, corpus);
+  assert.equal(check({ ...REVEAL_NONE, objectionClass: 'permitted_discretion' }).disposition, 'unresolved');
+  assert.equal(check(REVEAL_NONE).disposition, 'no_alternative');
+  assert.equal(check(REVEAL_EXCLUDED).disposition, 'excluded_by_clause');
+  assert.equal(check(REVEAL_EXCLUDED).needsApplication, true);
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: null }).disposition, 'unresolved');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'short' } }).disposition, 'unresolved', 'a quote under 12 characters is no evidence');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'available credit is NOT cash received.' } }).disposition, 'unresolved', 'case is kept');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: 'Cash_Facts.csv', quote: CLAUSE } }).disposition, 'unresolved', 'a wrong file name fails the quote: it is not searched for in the whole packet');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: '', quote: CLAUSE } }).disposition, 'unresolved', 'and neither is a quote with no file');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash' } }).disposition, 'unresolved', 'a fragment of a sentence under 40 characters is no evidence of a clause');
+  assert.equal(check({ ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received. Clause 4 was amended on 2025-03-01.' } }).disposition, 'excluded_by_clause', '40 characters or more is enough');
+  assert.equal(check({ ...REVEAL_EXCLUDED, disposition: 'permitted', forAlternative: null }).disposition, 'unresolved');
+  assert.equal(parseReveal(JSON.stringify({ ...REVEAL_EXCLUDED, objectionClass: 'made_up' })).ok, false);
+  assert.equal(parseReveal(JSON.stringify({ ...REVEAL_EXCLUDED, disposition: 'accepted' })).ok, false);
+  assert.equal(parseReveal('no json').ok, false);
+  /* a reviewer that used a tool gives no answer: the run of a tool-less review is discarded */
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: { toolUses: [{ name: 'Bash', input: { command: 'ls' }, result: 'x' }], resultText: JSON.stringify(REVEAL_NONE), costUsd: 0.01 } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].rejection.reasons[0], 'The second review gave no usable answer');
+});
+
+/* ---- the application check: a clause that exists is not yet a clause that applies ---- */
+
+const { parseApplication, checkApplication, supersessionHits } = require('../backend/pipeline/review.cjs');
+const { buildCorpus: corpusOf, inForce, isoTime } = require('../backend/pipeline/quotes.cjs');
+const { effectiveStated } = require('../backend/pipeline/review.cjs');
+
+test('the application check: governs, in force (dates compared by the harness and tied to their quotes), not superseded (hits found by the harness), excludes; each failure fails the check', () => {
+  const documents = [{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'Meridian_Lender_Summary.txt', text: NEW_SUMMARY(1) }, { name: 'Other_Product_Terms.txt', text: 'Other product terms, synthetic. These terms govern every other product facility.\n' }];
+  const corpus = corpusOf(documents);
+  const clause = { file: 'Facility_Terms.txt', quote: CLAUSE };
+  const hits = supersessionHits(documents, clause);
+  assert.ok(hits.length >= 1, 'the terms say a clause was amended, next to their own name');
+  assert.match(hits[0].snippet, /amended/);
+  assert.equal(hits[0].kind, 'passage');
+  const run = (mutate, extra = {}) => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    if (mutate) mutate(value);
+    const parsed = parseApplication(JSON.stringify(value));
+    assert.equal(parsed.ok, true);
+    return checkApplication(parsed.value, { corpus, hits, clause, brief: null, ...extra });
+  };
+  assert.deepEqual(run(), { pass: true, failed: [], checks: { governs: true, inForce: true, notSuperseded: true, excludes: true }, dates: { effective: '2025-03-01', decision: '2025-04-15' }, unscanned: [] });
+  const failsOnly = (mutate, ...which) => { const result = run(mutate); assert.equal(result.pass, false); assert.deepEqual(result.failed, which); };
+  /* governs: the scope sentence is a quote of the clause's own file (a sentence of another file does not count), the hierarchy has a known relation and its quote */
+  failsOnly(v => { v.governs.answer = 'no'; }, 'governs');
+  failsOnly(v => { v.governs.scope.quote = 'These terms govern nothing in particular at all.'; }, 'governs');
+  failsOnly(v => { v.governs.scope = null; }, 'governs');
+  failsOnly(v => { v.governs.scope = { file: 'Other_Product_Terms.txt', quote: 'These terms govern every other product facility.' }; }, 'governs');
+  const HIGHER = 'Other_Product_Terms.txt';
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'varies', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } }; }, 'governs');
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'implements', quote: { file: 'Facility_Terms.txt', quote: 'A hierarchy sentence no file holds.' } }; }, 'governs');
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'implements' }; }, 'governs');
+  for (const relation of ['', 'conflicts', 'overrides']) failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation, quote: { file: 'Facility_Terms.txt', quote: CLAUSE } }; }, 'governs');
+  assert.equal(run(v => { v.governs.hierarchy = { higher: '', relation: 'none' }; }).pass, true);
+  assert.equal(run(v => { v.governs.hierarchy = { higher: '', relation: ' NONE ' }; }).pass, true, 'a known relation is read with case and spaces folded');
+  /* a sentence that does not link the two documents does not show that one implements the other */
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'implements', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } }; }, 'governs');
+  /* the higher document is a file of the packet, and the quote that says so is from the clause's file or the higher file */
+  failsOnly(v => { v.governs.hierarchy = { higher: 'Policy.pdf', relation: 'implements', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } }; }, 'governs');
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'implements', quote: { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' } }; }, 'governs');
+  failsOnly(v => { v.governs.hierarchy = { higher: HIGHER, relation: 'implements', quote: { file: HIGHER, quote: 'These terms govern every other product facility.' } }; }, 'governs');
+  /* a hierarchy that is present and is not an object is not a hierarchy: it fails the check, it is not read as none */
+  for (const value of ['varies', ['implements'], 7, true]) failsOnly(v => { v.governs.hierarchy = value; }, 'governs');
+  /* and a scope sentence of another entity's file does not pass because a hierarchy is added to it */
+  failsOnly(v => { v.governs.scope = { file: HIGHER, quote: 'These terms govern every other product facility.' }; v.governs.hierarchy = { higher: HIGHER, relation: 'implements', quote: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' } }; }, 'governs');
+  /* in force: the harness compares the dates, a missing or unparseable date fails, and each date must stand in its own quote */
+  failsOnly(v => { v.inForce.effectiveDate = '2025-05-01'; }, 'inForce');
+  failsOnly(v => { v.inForce.effectiveDate = ''; }, 'inForce');
+  failsOnly(v => { v.inForce.effectiveDate = '1 March 2025'; }, 'inForce');
+  failsOnly(v => { v.inForce.decisionDate = '2025-02-30'; }, 'inForce');
+  failsOnly(v => { v.inForce.decisionDate = undefined; }, 'inForce');
+  failsOnly(v => { v.inForce.effectiveQuote.quote = 'The document takes effect on a day nobody wrote down.'; }, 'inForce');
+  failsOnly(v => { v.inForce.decisionQuote = null; }, 'inForce');
+  failsOnly(v => { v.inForce.effectiveDate = '2020-01-01'; }, 'inForce');
+  failsOnly(v => { v.inForce.decisionDate = '2026-06-30'; }, 'inForce');
+  failsOnly(v => { v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }; }, 'inForce');
+  failsOnly(v => { v.inForce.decisionQuote = { file: 'Other_Product_Terms.txt', quote: 'Draw decision date 2025-04-15.' }; }, 'inForce');
+  assert.equal(run(v => { v.inForce.effectiveDate = '2025-04-15'; v.inForce.effectiveQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; }).pass, false, 'the sentence that gives the day of the decision, in another file, says nothing about when the clause takes effect');
+  assert.deepEqual([inForce('2025-04-16', '2025-04-15').ok, inForce('2025-04-15', '2025-04-15').ok, inForce('2024-12-31', '2025-01-01').ok], [false, true, true]);
+  assert.equal(isoTime('2025-02-29'), null);
+  assert.notEqual(isoTime('2024-02-29'), null);
+  /* the brief's own decision date: the reviewer's must be the same, and then no date has to stand in a quote of the decision; the brief's effective date of its authority file too */
+  const stated = date => ({ brief: { decision: { decisionDate: date, authorityFile: 'Facility_Terms.txt', effectiveDate: 'in force from 1 March 2025' } } });
+  assert.equal(run(null, stated('2025-04-15')).pass, true);
+  assert.equal(run(null, stated('2025-04-20')).pass, false, 'the reviewer reports another decision date than the brief gives');
+  assert.deepEqual(run(null, stated('2025-04-20')).failed, ['inForce']);
+  assert.equal(run(v => { v.inForce.decisionQuote = null; }, stated('2025-04-15')).pass, false, 'the brief gives the date, and the files still have to hold it: a quote is needed');
+  assert.deepEqual(run(v => { v.inForce.decisionQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' }; }, stated('2025-04-15')).failed, ['inForce'], 'a quote that does not hold the date of the brief');
+  /* a packet that says another day than the brief: the brief's day has no quote, so the in-force check cannot be passed on the designer's word */
+  assert.equal(run(v => { v.inForce.decisionDate = '2025-04-20'; v.inForce.decisionQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; }, stated('2025-04-20')).pass, false);
+  /* an effective date: the quote holds more than one date, and the reported one is the one that takes effect */
+  const two = date => run(v => { v.inForce.effectiveDate = date; v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.' }; });
+  assert.equal(two('2025-03-01').pass, true, 'one date, twice');
+  const dated = { name: 'Dated_Policy.txt', text: 'Policy header. This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01. It was last reviewed on 2024-05-05.\nThe draw decision is taken on 2027-06-30.\n' };
+  const policyCorpus = corpusOf([dated]);
+  const policyRun = (effective, decision = '2027-06-30') => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    Object.assign(value.inForce, { effectiveDate: effective, decisionDate: decision, effectiveQuote: { file: 'Dated_Policy.txt', quote: 'This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.' }, decisionQuote: { file: 'Dated_Policy.txt', quote: 'The draw decision is taken on 2027-06-30.' } });
+    value.governs.scope = { file: 'Dated_Policy.txt', quote: 'Policy header. This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.' };
+    value.excludes.quote = { file: 'Dated_Policy.txt', quote: 'It was last reviewed on 2024-05-05.' };
+    value.supersession = [];
+    return checkApplication(parseApplication(JSON.stringify(value)).value, { corpus: policyCorpus, hits: [], clause: { file: 'Dated_Policy.txt', quote: 'It was last reviewed on 2024-05-05.' }, brief: null });
+  };
+  assert.equal(policyRun('2027-03-01').checks.inForce, true, 'the date the sentence says takes effect');
+  assert.equal(policyRun('2020-01-01').checks.inForce, false, 'the date of the policy it replaces is in the same quote, and is not the day this one takes effect');
+  assert.equal(policyRun('2024-05-05').checks.inForce, false, 'a date that is not in the quote of the effective date');
+  assert.equal(policyRun('2027-03-01', '2024-05-05').checks.inForce, false, 'a decision date that the decision quote does not hold');
+  assert.deepEqual([effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2027-03-01'), effectiveStated('This policy takes effect on 2027-03-01 and replaces the policy dated 2020-01-01.', '2020-01-01'), effectiveStated('Draw decision date 2025-04-15.', '2025-04-15'), effectiveStated('Replaces the policy dated 2020-01-01. In force from 2027-03-01.', '2027-03-01'), effectiveStated('Effective 2027-03-01 (reviewed 2024-05-05)', '2024-05-05')], [true, false, false, true, false]);
+  /* the cue nearest the date: an earlier "effective" date within the window does not take the place of the one that takes effect */
+  assert.deepEqual([effectiveStated('This policy was effective 2020-01-01, now takes effect on 2025-03-01.', '2025-03-01'), effectiveStated('This policy was effective 2020-01-01, now takes effect on 2025-03-01.', '2020-01-01'),
+    effectiveStated('Version 2 (effective 2020-01-01), version 3 (effective 2025-03-01).', '2025-03-01')], [true, true, true]);
+  /* a period that ends there is not a start, "ineffective" is no cue, and a date with a cue after it is the effective date */
+  assert.deepEqual([effectiveStated('The old policy was in force until 2024-12-31 and the new one takes effect on 2025-01-01.', '2024-12-31'), effectiveStated('Effective through 2024-12-31.', '2024-12-31'), effectiveStated('The notice is ineffective after 2025-01-01.', '2025-01-01'),
+    effectiveStated('2025-03-01 (effective date)', '2025-03-01'), effectiveStated('Dated 2025-03-01.', '2025-03-01')], [false, false, false, true, false]);
+  assert.equal(run(v => { v.inForce.effectiveDate = '2025-02-01'; v.inForce.effectiveQuote = { file: 'Facility_Terms.txt', quote: 'Clause 4 was amended on 2025-03-01.' }; }, stated('2025-04-15')).pass, false);
+  /* the effective date stands in the clause's own document, not in whichever file holds a date */
+  failsOnly(v => { v.inForce.effectiveQuote = { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' }; v.inForce.effectiveDate = '2025-04-15'; }, 'inForce');
+  /* not superseded: every hit the harness found must be addressed, and none may change the clause */
+  failsOnly(v => { v.supersession = []; }, 'notSuperseded');
+  failsOnly(v => { v.supersession = [{ hit: 'h99', changesClause: 'no', why: 'not a hit' }]; }, 'notSuperseded');
+  failsOnly(v => { v.supersession[0].changesClause = 'yes'; }, 'notSuperseded');
+  failsOnly(v => { v.supersession[0].changesClause = ''; }, 'notSuperseded');
+  /* excludes */
+  failsOnly(v => { v.excludes.answer = 'no'; }, 'excludes');
+  failsOnly(v => { v.excludes.reasoning = 'Because.'; }, 'excludes');
+  failsOnly(v => { v.excludes.quote.quote = 'A sentence that is nowhere in the packet.'; }, 'excludes');
+  failsOnly(v => { v.excludes.quote.file = 'Meridian_Lender_Summary.txt'; }, 'excludes');
+  /* several fail together */
+  assert.deepEqual(run(v => { v.governs.answer = 'no'; v.excludes.answer = 'no'; }).failed, ['governs', 'excludes']);
+  /* a check with no hit to address passes with an empty list; the shape is strict */
+  assert.equal(checkApplication(parseApplication(JSON.stringify(APPLICATION)).value, { corpus, hits: [], clause }).pass, true);
+  assert.equal(parseApplication(JSON.stringify({ governs: {} })).ok, false);
+  assert.equal(parseApplication('plain words').ok, false);
+});
+
+test('the supersession scan: wording that replaces the clause is found by the name of its file with or without its date, by its section number, and by the words of the clause; files with no text and passages beyond the cap are listed, never dropped', () => {
+  const clause = { file: 'Travel_Policy_2023.md', quote: 'Meals are reimbursed up to the daily limit under Section 4.2.' };
+  const find = documents => supersessionHits(documents, clause);
+  const policy = { name: 'Travel_Policy_2023.md', text: 'Travel policy 2023, synthetic. Meals are reimbursed up to the daily limit under Section 4.2.\n' };
+  /* the common case: a memo says "the Travel Policy", not the file name or its year */
+  assert.equal(find([policy, { name: 'Memo_A.txt', text: 'Memo. This note supersedes the Travel Policy for every trip.\n' }]).length, 1);
+  /* the file name as it is written, underscores and extension */
+  assert.equal(find([policy, { name: 'Memo_B.txt', text: 'Memo. Travel_Policy_2023.md is withdrawn from today.\n' }]).length, 1);
+  /* the section number, with the full stop that ends the sentence of the clause left off */
+  assert.equal(find([policy, { name: 'Memo_C.txt', text: 'Memo. Section 4.2 is rescinded.\n' }]).length, 1);
+  /* the first words of the clause */
+  assert.equal(find([policy, { name: 'Memo_D.txt', text: 'Memo. The rule that meals are reimbursed up to the daily limit no longer applies.\n' }]).length, 1);
+  /* wording that the old list did not have */
+  for (const wording of ['is obsolete', 'is cancelled', 'is repealed', 'is overridden by the new rules', 'is replaced by the new rules', 'takes precedence over the Travel Policy', 'is in place of the Travel Policy']) {
+    assert.ok(find([policy, { name: 'Memo_E.txt', text: `Memo. The Travel Policy ${wording}.\n` }]).length >= 1 || /precedence|in place/.test(wording), wording);
+  }
+  assert.equal(find([policy, { name: 'Memo_F.txt', text: 'Memo. Parking is now paid by card. The weather is fine.\n' }]).length, 0, 'wording about another matter is not a hit');
+  assert.equal(find([policy, { name: 'Memo_G.txt', text: 'Memo. This supersedes the Travel Policy and amends it.\n' }]).length, 1, 'one passage is one hit, however many words it has');
+  /* a file with no readable text cannot be scanned: it is listed as a hit of its own kind, disclosed to the owner and not judged by the reviewer */
+  const unreadable = find([policy, { name: 'Update_Notice.pdf', text: null }]);
+  assert.deepEqual(unreadable.map(hit => [hit.id, hit.kind, hit.document]), [['u1', 'unreadable', 'Update_Notice.pdf']]);
+  assert.match(unreadable[0].snippet, /nobody could read this file/);
+  /* more than the cap: the first ones are listed, and one entry counts the rest */
+  const many = Array.from({ length: 45 }, (_, k) => ({ name: `History_${String(k).padStart(2, '0')}.md`, text: 'History. The Travel Policy was revised in a past year.\n' }));
+  const capped = find([policy, ...many]);
+  assert.equal(capped.filter(hit => hit.kind === 'passage').length, 40);
+  assert.deepEqual(capped.filter(hit => hit.kind === 'summary').map(hit => [hit.id, hit.document]), [['s1', 'History_40.md'], ['s2', 'History_41.md'], ['s3', 'History_42.md'], ['s4', 'History_43.md'], ['s5', 'History_44.md']], 'the passages that do not fit are not dropped: one entry for each file that has some');
+  assert.match(capped.at(-1).snippet, /^1 more passage of supersession wording in this file is not listed one by one \(the weakest wording\); the first of them reads: "History\. The Travel Policy was revised in a past year\."$/);
+  /* a hit in the clause's own file comes before the others, whatever the order of the files */
+  const own = find([...many.slice(0, 3), { name: 'Travel_Policy_2023.md', text: policy.text + 'This policy was amended last year.\n' }]);
+  assert.equal(own[0].document, 'Travel_Policy_2023.md');
+  /* a passage must be answered, and so must a summary of the passages that were not listed one by one (the check does not pass until the reviewer has ruled on the
+     file), and a file nobody could read is disclosed: the result names it, and the reviewer is not asked to rule on it */
+  const docs = [policy, { name: 'Update_Notice.pdf', text: null }];
+  const hits = find(docs);
+  const corpus = corpusOf(docs);
+  const check = (answered, over = {}) => checkApplication(parseApplication(JSON.stringify({ ...APPLICATION, supersession: answered.map(hit => ({ hit, changesClause: 'no', why: 'no change' })) })).value, { corpus, hits, clause, ...over });
+  assert.equal(check([]).failed.includes('notSuperseded'), false, 'nothing is asked about a file nobody could read');
+  assert.deepEqual(check([]).unscanned, ['Update_Notice.pdf'], 'and the result says which files were not scanned');
+  const passages = find([policy, { name: 'Memo_A.txt', text: 'Memo. This note supersedes the Travel Policy for every trip.\n' }]);
+  assert.equal(check([], { hits: passages }).failed.includes('notSuperseded'), true, 'a passage that is not answered fails the check');
+  assert.equal(check(['h1'], { hits: passages }).failed.includes('notSuperseded'), false);
+  const withSummary = [...passages, { id: 's1', kind: 'summary', document: 'Memo_A.txt', snippet: '2 more passages of supersession wording in this file are not listed one by one' }];
+  assert.equal(check(['h1'], { hits: withSummary }).failed.includes('notSuperseded'), true, 'passages left out of the list: the summary of them is to be answered too');
+  assert.equal(check(['h1', 's1'], { hits: withSummary }).failed.includes('notSuperseded'), false, 'and once it is, the check can pass');
+  /* an entry answered "yes" and "no" is not a "no" */
+  const mixed = supersession => checkApplication(parseApplication(JSON.stringify({ ...APPLICATION, supersession })).value, { corpus, hits: passages, clause });
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'no', why: 'x' }]).failed.includes('notSuperseded'), false);
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'yes', why: 'x' }, { hit: 'h1', changesClause: 'no', why: 'x' }]).failed.includes('notSuperseded'), true, 'yes, then no');
+  assert.equal(mixed([{ hit: 'h1', changesClause: 'no', why: 'x' }, { hit: 'h1', changesClause: 'yes', why: 'x' }]).failed.includes('notSuperseded'), true, 'no, then yes');
+  /* a notice that the blind reviewer quoted from a file the harness has no text for is a hit that has to be answered */
+  const withNotice = supersessionHits([policy, { name: 'Update_Notice.pdf', text: null }], clause, { notices: [{ file: 'Update_Notice.pdf', quote: 'The Travel Policy 2023 is withdrawn from 1 July.' }] });
+  assert.deepEqual(withNotice.map(hit => [hit.id, hit.kind, hit.document]), [['u1', 'notice', 'Update_Notice.pdf']]);
+  assert.match(withNotice[0].snippet, /blind reviewer, who could open it, quoted\) "The Travel Policy 2023 is withdrawn from 1 July\."/);
+  assert.equal(check([], { hits: withNotice }).failed.includes('notSuperseded'), true);
+  assert.equal(check(['u1'], { hits: withNotice }).failed.includes('notSuperseded'), false);
+  assert.deepEqual(check(['u1'], { hits: withNotice }).unscanned, ['Update_Notice.pdf']);
+});
+
+test('the application check is mandatory: a clause that does not apply leaves the alternative unresolved and, after the repair, rejects the attempt', async t => {
+  const notGoverning = { ...APPLICATION, governs: { ...APPLICATION.governs, answer: 'no' } };
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2], { reveal: jsonScenario(REVEAL_EXCLUDED), application: jsonScenario(notGoverning), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.fairness.stage2.disposition, 'unresolved');
+  assert.deepEqual(first.fairness.stage2.application.failed, ['governs']);
+  assert.equal(first.fairness.stage2.application.pass, false);
+  assert.equal(reviewRuns(view, 'application').length >= 2, true, 'checked on the first review and on the second');
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /was not shown to apply \(governs\)/);
+  assert.equal(first.rejection.reasons.some(reason => /governs/.test(reason)), false, 'the public reason names neither the clause nor the check');
+});
+
+test('the application check also covers the clause the brief gives against its strongest alternative, when the review found no alternative', async t => {
+  const brokenBrief = { ...APPLICATION, inForce: { ...APPLICATION.inForce, effectiveDate: '2026-01-01' } };
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2], { application: jsonScenario(brokenBrief), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.fairness.stage2.briefApplication.pass, false);
+  assert.deepEqual(first.fairness.stage2.briefApplication.failures, [{ trap: 1, part: 'rule', failed: ['inForce'] }, { trap: 1, part: 'whyRejected', failed: ['inForce'] }], 'every clause of the brief is checked, and a trap is named by its number, not by the id the designer chose');
+  assert.equal(first.fairness.stage2.application, null);
+});
+
+/* ---- the blind reviewer: a copy of the packet and the prompt only, audited like a pilot ---- */
+
+test('the blind reviewer: it runs with the Read, Glob and Grep tools in a copy of the packet with the prompt and nothing else, under the temporary root, and the copy is removed', async t => {
+  const spawned = [];
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/filesystem/Facility_Terms.txt' }, result: FACILITY }, { name: 'Read', input: { file_path: '{{cwd}}/prompt.txt' }, result: 'x' }], resultText: JSON.stringify(BLIND), costUsd: 0.01 } }), onSpawn: record => spawned.push(record) });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const reviewer = spawned.filter(record => /\/runs\/review-1-1-1$/.test(record.cwd || ''));
+  assert.equal(reviewer.length, 1);
+  const [run] = reviewer;
+  assert.equal(run.args[run.args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+  assert.equal(run.args[run.args.indexOf('--allowedTools') + 1], 'Read,Glob,Grep');
+  assert.equal(run.args[run.args.indexOf('--effort') + 1], 'medium', 'effort medium, whatever the pilots use (they use low here)');
+  assert.equal(run.args[run.args.indexOf('--max-budget-usd') + 1], '1.50');
+  assert.equal(run.args.includes('Bash'), false);
+  assert.equal(path.relative(w.workRoot, run.cwd).startsWith('..'), false, 'under the temporary root, in the pipeline workspace');
+  assert.equal(run.cwd.startsWith(w.root), false, 'never under the project');
+  /* what its folder held when it started: the packet copy, the prompt and its own scratch, nothing of the designer */
+  const rels = Object.keys(run.tree).filter(rel => !rel.startsWith('.tmp/')).sort();
+  assert.deepEqual(rels, ['filesystem/Atlas_Supplement.txt', 'filesystem/Cash_Facts.csv', 'filesystem/Facility_Terms.txt', 'filesystem/Meridian_Lender_Summary.txt', 'prompt.txt']);
+  assert.match(run.tree['prompt.txt'], /PV1/);
+  assert.match(run.tree['filesystem/Facility_Terms.txt'], /Clause 4 was amended/, 'the revised packet, as the pilots get it');
+  const prompt = promptRuns(w).find(entry => entry.prompt.startsWith('You are a blind reviewer'));
+  for (const hidden of ['DESIGNER-GUIDELINE-MARK', 'DESIGNER-GOLDEN-MARK', 'MECH-SECRET', 'Whether the borrowing can proceed', 'Treasury sign-off', 'brief']) assert.equal(prompt.prompt.includes(hidden), false, `the blind prompt must not hold ${hidden}`);
+  assert.equal(fs.existsSync(path.join(w.workRoot, id)), false, 'the workspace, with every review copy, is removed when the pipeline ends');
+  assert.equal(view.attempts[0].audit.status, 'CLEAN');
+});
+
+test('the blind reviewer: a read outside its folder discards the run (also /proc/<pid>/fd/0 and /dev/stdin); two discarded runs reject the attempt; reading its own folder is clean', async t => {
+  const outsides = ['/etc/hostname', `/proc/${process.pid}/fd/0`, '/proc/self/fd/0', '/dev/fd/0', '/dev/stdin', path.join(os.tmpdir(), 'somewhere-else.txt')];
+  for (const outside of outsides) {
+    const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { blind: { toolUses: [{ name: 'Read', input: { file_path: outside }, result: 'x' }], resultText: JSON.stringify(BLIND), costUsd: 0.01 } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const w = await newWorld(t, { rules });
+    const { view } = await w.runNew();
+    assert.equal(view.stage, 'done', `${outside}: ${view.message}`);
+    assert.equal(view.attempts[0].outcome, 'rejected', outside);
+    assert.equal(view.attempts[0].fairness.stage1.state, 'unusable', outside);
+    assert.equal(view.attempts[0].fairness.stage1.discarded, 2, `${outside}: both runs were discarded by the audit`);
+    assert.equal(reviewRuns(view, 'blind-review').length >= 2, true);
+  }
+  /* the same reader, discarded once and clean once, is used */
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: [{ toolUses: [{ name: 'Read', input: { file_path: '/etc/hostname' }, result: 'x' }], resultText: JSON.stringify(BLIND), costUsd: 0.01 }, jsonScenario(BLIND)] });
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual([view.attempts[0].fairness.stage1.discarded, view.attempts[0].fairness.stage1.state, view.attempts[0].fairness.stage1.tries], [1, 'ok', 2]);
+});
+
+test('the path audit flags a read of another process\'s open file under /proc, and the stdin of the process itself, for every tool that takes a path', () => {
+  const { auditToolCalls } = require('../backend/agents/path-audit.cjs');
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-audit-'));
+  t_cleanup(folder);
+  const event = (name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `tu-${name}`, name, input }] } });
+  const audit = events => auditToolCalls(events, { folder, claudeConfigDir: path.join(folder, '.tmp', 'claude-config'), projectRoot: path.dirname(folder), env: {}, companionPort: null, runtimeBin: null, secretValues: [] });
+  const bad = ['/proc/4242/fd/0', '/proc/4242/fd/3', '/proc/self/fd/0', '/proc/thread-self/fd/0', '/dev/fd/0', '/dev/stdin', '/proc/4242/environ', '/proc/4242/cmdline'];
+  for (const target of bad) {
+    for (const [tool, key] of [['Read', 'file_path'], ['Glob', 'path'], ['Grep', 'path'], ['Edit', 'file_path'], ['Write', 'file_path']]) {
+      const result = audit([event(tool, { [key]: target, pattern: '*', content: 'x', old_string: 'a', new_string: 'b' })]);
+      assert.equal(result.violations.length >= 1, true, `${tool} of ${target} must be flagged`);
+      if (/\/fd\/|stdin/.test(target)) assert.equal(result.violations[0].kind, 'abs', `${tool} of ${target}`);
+    }
+    const shell = audit([event('Bash', { command: `cat ${target}` })]);
+    assert.equal(shell.violations.length >= 1, true, `a shell that reads ${target} must be flagged`);
+  }
+  assert.equal(audit([event('Read', { file_path: path.join(folder, 'filesystem', 'a.txt') })]).violations.length, 0, 'its own folder is clean');
+  function t_cleanup(dir) { process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true })); }
+});
+
+/* ---- isolation: designer information is excluded from pilots and reviewers (arguments, environment, working folder, prompt, logs) ---- */
+
+const { isolationProblems } = require('../backend/pipeline/isolation.cjs');
+const { buildArgs } = require('../backend/agents/claude-runner.cjs');
+const ISOLATED_ARGS = buildArgs({ prompt: 'x', model: 'claude-opus-5-5', effort: 'low', tools: ['Read'], maxBudgetUsd: 1, promptVia: 'stdin' });
+
+test('isolationProblems: each exclusion is checked on the arguments, the environment and the working folder, and a sound run has no problem', () => {
+  const tmpRoot = '/tmp/work';
+  const cwd = '/tmp/work/finance-studio-pilots/rnd-1';
+  const env = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CONFIG_DIR: `${cwd}/.tmp/claude-config`, TMPDIR: `${cwd}/.tmp`, CLAUDE_CODE_TMPDIR: `${cwd}/.tmp`, PATH: '/usr/bin' };
+  const sound = { args: ISOLATED_ARGS, env, cwd, tmpRoot, projectRoot: '/home/user/project', homeDir: '/home/user', forbiddenText: ['/home/user/project/private'] };
+  assert.deepEqual(isolationProblems(sound), []);
+  const problems = over => isolationProblems({ ...sound, ...over });
+  /* arguments: what brings information in from somewhere else, or leaves the settings of the user and the project in force */
+  for (const option of ['--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) {
+    assert.match(problems({ args: ISOLATED_ARGS.filter(item => item !== option) }).join(';'), new RegExp(`does not carry ${option}`));
+  }
+  const at = ISOLATED_ARGS.indexOf('--setting-sources');
+  assert.match(problems({ args: ISOLATED_ARGS.map((item, k) => (k === at + 1 ? 'user,project' : item)) }).join(';'), /settings from the user, the project or a local file/);
+  assert.match(problems({ args: ISOLATED_ARGS.filter((item, k) => k !== at && k !== at + 1) }).join(';'), /settings from the user/);
+  for (const extra of [['--resume', 'abc'], ['-c'], ['--continue'], ['--add-dir', '/home/user/project'], ['--mcp-config', 'x.json'], ['--plugin-dir', 'p'], ['--settings', 's.json'], ['--agents', '{}'], ['--append-system-prompt', 'secret'], ['--system-prompt=x'], ['--dangerously-skip-permissions'], ['--session-id', 'z']]) {
+    assert.equal(problems({ args: [...ISOLATED_ARGS, ...extra] }).some(problem => problem === `the run is given ${extra[0].split('=')[0]}`), true, extra.join(' '));
+  }
+  /* environment: no memory, no project instruction files, scratch and configuration inside the folder, nothing naming a private folder */
+  assert.match(problems({ env: { ...env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } }).join(';'), /auto-memory is not turned off/);
+  assert.match(problems({ env: { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: undefined } }).join(';'), /project instruction files are not turned off/);
+  assert.match(problems({ env: { ...env, CLAUDE_CONFIG_DIR: '/home/user/.claude' } }).join(';'), /configuration folder is not inside the working folder/);
+  assert.match(problems({ env: { ...env, TMPDIR: '/tmp' } }).join(';'), /TMPDIR is not inside the working folder/);
+  assert.match(problems({ env: { ...env, CLAUDE_CODE_TMPDIR: undefined } }).join(';'), /CLAUDE_CODE_TMPDIR is not inside/);
+  assert.match(problems({ env: { ...env, REF_DIR: '/home/user/project/private/references' } }).join(';'), /REF_DIR names a private folder/);
+  assert.match(problems({ env: { ...env, FINANCE_STUDIO_PILOT_TOKEN: 'sk-x' } }).join(';'), /pilot token source is in the environment/);
+  /* working folder: under the temporary root, never under the project or the home folder */
+  assert.match(problems({ cwd: '/home/user/project/private/pipelines/x/runs/y' , env: { ...env, CLAUDE_CONFIG_DIR: '/home/user/project/private/pipelines/x/runs/y/.tmp/c', TMPDIR: '/home/user/project/private/pipelines/x/runs/y/.tmp', CLAUDE_CODE_TMPDIR: '/home/user/project/private/pipelines/x/runs/y/.tmp' } }).join(';'), /not under the temporary root; |inside the project/);
+  assert.match(problems({ cwd: '/home/user/other', env: { ...env, CLAUDE_CONFIG_DIR: '/home/user/other/.tmp/c', TMPDIR: '/home/user/other/.tmp', CLAUDE_CODE_TMPDIR: '/home/user/other/.tmp' } }).join(';'), /not under the temporary root/);
+  assert.match(problems({ cwd: 'relative/folder' }).join(';'), /not an absolute path/);
+  assert.match(problems({ tmpRoot: '/home/user/tmp', cwd: '/home/user/tmp/x', env: { ...env, CLAUDE_CONFIG_DIR: '/home/user/tmp/x/.tmp/c', TMPDIR: '/home/user/tmp/x/.tmp', CLAUDE_CODE_TMPDIR: '/home/user/tmp/x/.tmp' } }).join(';'), /^$|inside the home folder/, 'a temporary root inside the home folder is the owner\'s choice and is not blamed on the run');
+  assert.match(problems({ tmpRoot: '/home/user', cwd: '/home/user/project/x', env: { ...env, CLAUDE_CONFIG_DIR: '/home/user/project/x/.tmp/c', TMPDIR: '/home/user/project/x/.tmp', CLAUDE_CODE_TMPDIR: '/home/user/project/x/.tmp' } }).join(';'), /inside the project/);
+});
+
+test('isolation in a real run: every pilot and every reviewer of a new design gets the exclusions (arguments, environment, folder, prompt); the classifier, the designer and the graders are not claimed to be isolated', async t => {
+  const spawned = [];
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designerExtra: { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/reference/Draw_Review_Notes.md' }, result: REF_NOTE }] } }),
+  ];
+  const w = await newWorld(t, { rules, onSpawn: record => spawned.push(record) });
+  putRefs(w);
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const kindOf = record => {
+    const cwd = record.cwd || '';
+    if (/finance-studio-pilots\/rnd-/.test(cwd)) return 'pilot';
+    if (/\/runs\/review-/.test(cwd)) return 'blind';
+    if (/\/runs\/reveal-/.test(cwd)) return 'reveal';
+    if (/\/runs\/apply-/.test(cwd)) return 'apply';
+    if (/\/runs\/adjudicate-/.test(cwd)) return 'adjudicate';
+    if (/\/runs\/grade-/.test(cwd)) return 'grader';
+    if (/\/runs\/classify$/.test(cwd)) return 'classifier';
+    if (/\/designer$/.test(cwd)) return 'designer';
+    return 'other';
+  };
+  const byKind = {};
+  for (const record of spawned) (byKind[kindOf(record)] = byKind[kindOf(record)] || []).push(record);
+  assert.equal(byKind.other, undefined, 'no process of an unknown kind');
+  for (const kind of ['pilot', 'blind', 'reveal', 'apply', 'adjudicate', 'grader', 'classifier', 'designer']) assert.ok(byKind[kind] && byKind[kind].length, `${kind} ran`);
+  const home = os.homedir();
+  const problemsOf = record => isolationProblems({ args: record.args, env: record.env, cwd: record.cwd, tmpRoot: w.tmpRoot, projectRoot: w.root, homeDir: home, forbiddenText: [path.join(w.root, 'private')] });
+  /* pilots and the reviewers: no problem at all */
+  for (const kind of ['pilot', 'blind', 'reveal', 'apply', 'adjudicate']) for (const record of byKind[kind]) assert.deepEqual(problemsOf(record), [], `${kind}: ${record.cwd}`);
+  /* the others are held to the options and the environment too; only the place of their folder (inside the project) is not claimed */
+  for (const kind of ['classifier', 'grader', 'designer']) {
+    for (const record of byKind[kind]) {
+      const left = problemsOf(record).filter(problem => !/inside the project|not under the temporary root|names a private folder/.test(problem));
+      assert.deepEqual(left, [], kind);
+    }
+  }
+  /* what each process was given */
+  const HIDDEN = ['DESIGNER-GUIDELINE-MARK', 'DESIGNER-GOLDEN-MARK', 'MECH-SECRET', 'DECOY-SECRET', 'CORRECT-SECRET', 'WRONG-SECRET', 'REF-MARKER', 'Treasury sign-off', 'Draw_Review_Notes'];
+  const pilotText = byKind.pilot.map(record => JSON.stringify(record.tree)).join('\n');
+  for (const hidden of HIDDEN) assert.equal(pilotText.includes(hidden), false, `a pilot folder must not hold ${hidden}`);
+  for (const record of byKind.pilot) {
+    assert.deepEqual(Object.keys(record.tree).filter(rel => !rel.startsWith('.tmp/')).every(rel => rel.startsWith('filesystem/') || rel.startsWith('outputs/')), true, 'a pilot folder holds the packet and its outputs');
+    assert.equal(record.args.includes('--add-dir'), false);
+  }
+  const prompts = promptRuns(w);
+  for (const run of prompts) {
+    if (run.prompt.includes('You are the trap designer for one new finance task')) continue;
+    for (const hidden of ['MECH-SECRET', 'DECOY-SECRET', 'CORRECT-SECRET', 'WRONG-SECRET', 'REF-MARKER']) assert.equal(run.prompt.includes(hidden), false, `a prompt holds ${hidden}`);
+  }
+  const pilotPromptTexts = pilotPrompts(w).map(run => run.prompt);
+  assert.ok(pilotPromptTexts.length >= 6);
+  for (const text of pilotPromptTexts) for (const hidden of [...HIDDEN, 'guideline']) assert.equal(text.toLowerCase().includes(hidden.toLowerCase()), false, `a pilot prompt holds ${hidden}`);
+  for (const text of pilotPromptTexts) assert.match(text, /^The task materials are in \.\/filesystem/, 'the fixed pilot text');
+  /* the reveal-side reviews get their own materials and no pilot text; the blind reviewer gets no guideline, golden answer, brief or reference */
+  const reveal = prompts.find(run => run.prompt.startsWith('You are reviewing a finished task design'));
+  assert.match(reveal.prompt, /<<<GUIDELINE/);
+  assert.equal(reveal.prompt.includes('REF-MARKER'), false);
+  const adjudicate = prompts.find(run => run.prompt.startsWith('You are explaining why one blind pilot'));
+  assert.equal(adjudicate.prompt.includes('REF-MARKER'), false);
+  /* the sign-in token source is never in any environment */
+  for (const record of spawned) assert.equal(Object.prototype.hasOwnProperty.call(record.env, 'FINANCE_STUDIO_PILOT_TOKEN'), false);
+});
+
+test('isolation: a pipeline environment that holds the companion\'s own pilot token source does not hand it to any run', async t => {
+  const spawned = [];
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), onSpawn: record => spawned.push(record) });
+  const secret = 'sk-ant-oat01-' + 'a'.repeat(40);
+  w.env.FINANCE_STUDIO_PILOT_TOKEN = secret;
+  const { view } = await w.runNew();
+  assert.equal(view.stage === 'done' || view.stage === 'failed', true);
+  for (const record of spawned) {
+    assert.equal(Object.prototype.hasOwnProperty.call(record.env, 'FINANCE_STUDIO_PILOT_TOKEN'), false, 'the companion\'s own source variable is never passed on');
+    /* the token is the sign-in of the process, in the one variable the CLI reads, and nowhere else: not an argument, not a file of its folder */
+    assert.deepEqual(Object.entries(record.env).filter(([name, value]) => value === secret && !name.startsWith('FINANCE_STUB_')).map(([name]) => name).filter(name => name !== 'CLAUDE_CODE_OAUTH_TOKEN'), []);
+    assert.equal(JSON.stringify(record.args).includes(secret), false);
+    assert.equal(Object.values(record.tree).some(text => text.includes(secret)), false);
+  }
+});
+
+test('isolation: a review run that would not be isolated is not started, and a Claude Code that lacks an option the exclusions rely on is refused before any model runs', async t => {
+  const spawned = [];
+  const w = await newWorld(t, { onSpawn: record => spawned.push(record) });
+  const { runToolLess } = require('../backend/pipeline/models.cjs');
+  const rt = w.agents.runtime();
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-elsewhere-'));
+  t.after(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+  const before = spawned.length;
+  await assert.rejects(runToolLess({ rt: { ...rt, tmpRoot: path.join(elsewhere, 'other-root') }, folder: elsewhere, prompt: 'x', model: 'claude-opus-5-5', effort: 'low', capUsd: 0.5, isolated: true }), error => error instanceof AgentError && error.status === 409 && /would not be isolated \(the working folder is not under the temporary root/.test(error.message));
+  await assert.rejects(runToolLess({ rt: { ...rt, root: w.tmpRoot }, folder: path.join(w.tmpRoot, 'inside-project-check'), prompt: 'x', model: 'claude-opus-5-5', effort: 'low', capUsd: 0.5, isolated: true }), error => error instanceof AgentError && /would not be isolated \(the working folder is inside the project/.test(error.message));
+  assert.equal(spawned.length, before, 'no process was started');
+  /* a CLI without --strict-mcp-config in its help: the pre-flight refuses, before a classifier is paid for */
+  const old = await newWorld(t, { onSpawn: record => spawned.push(record) });
+  old.env.FINANCE_STUB_HELP_DROP = '--strict-mcp-config';
+  const { view } = await old.runNew();
+  assert.equal(view.stage, 'failed');
+  assert.match(view.error, /does not list --strict-mcp-config in claude --help/);
+  assert.equal(view.spentUsd, 0);
+});
+
+/* ---- the mandatory answer-set test ---- */
+
+const goldenRule = (n, steps) => ({ cwd: GRADE_CWD, prompt: `<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held, attempt ${n}`, scenario: steps.map(step => (typeof step === 'string' ? { resultText: step, costUsd: 0.02 } : { resultText: gradeJson(step), costUsd: 0.02 })) });
+const graderCallsOf = (view, ref) => view.ledger.filter(entry => entry.kind === 'grader' && entry.ref === ref).length;
+
+test('the answer set: the golden answer is graded twice, at least 0.90 passes (0.90 itself passes), both below fails the attempt as a grader or gold defect before any review or pilot', async t => {
+  const exact = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [goldenRule(1, [0.9, 0.9])] }) });
+  const passed = await exact.runNew();
+  assert.equal(passed.view.stage, 'done', passed.view.message);
+  assert.deepEqual(passed.view.attempts[0].answerSet.answers[0].grades, [0.9, 0.9]);
+  assert.equal(graderCallsOf(passed.view, 'as-1-golden'), 2, 'two grades, and no third when both agree');
+  assert.equal(passed.view.attempts[0].answerSet.answers[0].unstable, false);
+  /* below, both times */
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.85, 0.88])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const below = await newWorld(t, { rules });
+  const { id, view } = await below.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.rejection.kind, 'answer-set');
+  assert.equal(first.rejection.reasons[0], 'The golden answer did not reach 0.90 against the guideline (grades 0.85, 0.88; both grades decide; the mean is 0.86)');
+  assert.equal(first.fairness.status, 'not-reached', 'no review was run on a guideline that cannot grade its own golden answer');
+  assert.equal(view.ledger.filter(entry => entry.kind === 'blind-review' && entry.ref === 'attempt 1').length, 0);
+  assert.equal(first.screen, null);
+  assert.deepEqual([first.answerSet.answers[0].passed, first.answerSet.passed], [false, false]);
+  assert.equal(first.calibration.score, 0.865);
+  assert.match(fs.readFileSync(path.join(below.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /Your golden answer did not reach 0\.90 against your guideline \(grades 0\.85, 0\.88; both grades decide; the mean is 0\.86\)/);
+});
+
+test('the answer set: grades that straddle the threshold get a third, the majority decides, and the answer is recorded as unstable with all its grades', async t => {
+  const up = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [goldenRule(1, [0.92, 0.88, 0.93])] }) });
+  const ok = await up.runNew();
+  assert.equal(ok.view.stage, 'done', ok.view.message);
+  const golden = ok.view.attempts[0].answerSet.answers[0];
+  assert.deepEqual([golden.grades, golden.unstable, golden.passed, golden.score], [[0.92, 0.88, 0.93], true, true, 0.91]);
+  assert.equal(graderCallsOf(ok.view, 'as-1-golden'), 3);
+  /* the third below: two of three are below, so it fails */
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.92, 0.88, 0.85])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const down = await newWorld(t, { rules });
+  const { view } = await down.runNew();
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.deepEqual([first.answerSet.answers[0].grades, first.answerSet.answers[0].unstable, first.answerSet.answers[0].passed], [[0.92, 0.88, 0.85], true, false]);
+  assert.match(first.rejection.reasons[0], /did not reach 0\.90 against the guideline \(grades 0\.92, 0\.88, 0\.85; the grades straddled the threshold, so the majority of three decides; the mean is 0\.88\)/);
+  assert.equal(first.answerSet.answers[0].runs[0].rule, 'majority');
+  /* a low grade first and a high one second straddle too */
+  const flip = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [goldenRule(1, [0.8, 0.95, 0.94])] }) });
+  const flipped = await flip.runNew();
+  assert.deepEqual(flipped.view.attempts[0].answerSet.answers[0].grades, [0.8, 0.95, 0.94]);
+  assert.equal(flipped.view.attempts[0].answerSet.answers[0].passed, true);
+});
+
+test('the answer set: a grade that is null or refused gets one more call, and a second one fails the check', async t => {
+  const garbage = 'the grader said nothing useful';
+  const retried = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [goldenRule(1, [garbage, 0.95, 0.95])] }) });
+  const ok = await retried.runNew();
+  assert.equal(ok.view.stage, 'done', ok.view.message);
+  assert.deepEqual(ok.view.attempts[0].answerSet.answers[0].grades, [0.95, 0.95]);
+  assert.equal(graderCallsOf(ok.view, 'as-1-golden'), 3, 'the null grade was asked for again');
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [garbage, garbage, 0.95])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const twice = await newWorld(t, { rules });
+  const { view } = await twice.runNew();
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.rejection.reasons[0], 'The simulated grader gave the golden answer no usable score, so the guideline could not be checked against it');
+  assert.equal(first.answerSet.answers[0].passed, false);
+  assert.equal(graderCallsOf(view, 'as-1-golden'), 2);
+});
+
+test('the answer set: the graders run at the grader model and at least medium effort', async t => {
+  const spawned = [];
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), onSpawn: record => spawned.push(record) });
+  const { view } = await w.runNew({ effort: 'low', graderModel: 'claude-sonnet-5-5' });
+  assert.equal(view.stage, 'done', view.message);
+  const graders = spawned.filter(record => /\/runs\/grade-as-1-golden/.test(record.cwd));
+  assert.equal(graders.length, 2);
+  for (const record of graders) {
+    assert.equal(record.args[record.args.indexOf('--effort') + 1], 'medium');
+    assert.equal(record.args[record.args.indexOf('--model') + 1], 'claude-sonnet-5-5');
+    assert.equal(record.args.includes('--tools'), true);
+    assert.equal(record.args[record.args.indexOf('--tools') + 1], '', 'no tools');
+  }
+  assert.equal(view.attempts[0].freeze[0].grader.effort, 'medium');
+  assert.equal(view.attempts[0].freeze[0].grader.model, 'claude-sonnet-5-5');
+});
+
+test('mandatory checks are reserved before the attempt: a cap that cannot pay for them ends the run as incomplete, never as a pass, and no designer is paid for', async t => {
+  const { attemptReserveUsd } = require('../backend/pipeline/budget.cjs');
+  assert.equal(attemptReserveUsd(1), 19.5);
+  /* 19.50 with the headroom is 22.425, and the classifier has spent 0.01 */
+  const short = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  const stopped = await short.runNew({ capUsd: 22.43, designCapUsd: 1 });
+  assert.equal(stopped.view.stage, 'budget');
+  assert.equal(stopped.view.result.verdict, 'incomplete');
+  assert.equal(stopped.view.result.validation, 'incomplete');
+  assert.match(stopped.view.message, /Stopped before attempt 1: the checks every design must pass .* could cost up to USD 22\.4[23] .* The design was not validated, so nothing here counts as a pass\./);
+  assert.equal(stopped.view.attempts.length, 0, 'the designer was never started');
+  assert.equal(promptRuns(short).some(run => run.prompt.includes('trap designer')), false);
+  assert.equal(stopped.view.spentUsd, 0.01, 'only the classifier was paid for');
+  /* the cap that pays for them is enough to go on, and the run passes */
+  const enough = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  const ran = await enough.runNew({ capUsd: 22.44, designCapUsd: 1 });
+  assert.equal(ran.view.stage, 'done', ran.view.message);
+  assert.equal(ran.view.result.validation, 'complete');
+});
+
+test('a budget stop inside the mandatory checks is incomplete; one inside the pilots, after the checks finished, is a budget stop with a complete validation', async t => {
+  /* the designer reports far more than its cap, so the reviews no longer fit */
+  const inChecks = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { designCost: 20.9 }) });
+  const stopped = await inChecks.runNew({ capUsd: 22.44, designCapUsd: 1 });
+  assert.equal(stopped.view.stage, 'budget');
+  assert.equal(stopped.view.result.verdict, 'incomplete');
+  assert.equal(stopped.view.result.validation, 'incomplete');
+  assert.equal(stopped.view.attempts[0].validation, 'incomplete');
+  assert.equal(stopped.view.attempts[0].fairness.status, 'incomplete');
+  assert.equal(stopped.view.attempts[0].outcome, 'budget');
+  assert.match(stopped.view.message, /The checks of this design had not finished, so nothing here counts as a pass\./);
+  assert.equal(stopped.view.attempts[0].screen, null);
+  /* a cap that pays for the checks and the screen but not for the test: the checks were complete */
+  const inPilots = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  const late = await inPilots.runNew({ capUsd: 22.44, designCapUsd: 1, pilotCapUsd: 3 });
+  assert.equal(late.view.stage, 'budget', late.view.message);
+  assert.equal(late.view.result.verdict, 'budget');
+  assert.equal(late.view.result.validation, 'complete');
+  assert.equal(late.view.attempts[0].validation, 'complete');
+  assert.equal(late.view.attempts[0].screen.passed, true);
+  assert.equal(late.view.attempts[0].test, null);
+});
+
+test('the optional diagnostic suite: off by default and costing nothing; on, six answers are graded into the bands the designer declared, and a miss rejects the attempt', async t => {
+  const diag = (n, bands) => [
+    { path: 'out/answers.json', content: JSON.stringify(bands.map((band, k) => ({ name: `diagnostic ${k + 1}`, file: `answers/diag-${k + 1}.md`, band }))) },
+    ...bands.map((band, k) => ({ path: `out/answers/diag-${k + 1}.md`, content: `DIAG-${n}-${k + 1} diagnostic answer ${k + 1}.\n` })),
+  ];
+  const bands = ['high', 'high', 'low', 'low', 'low', 'high'];
+  const files = n => Object.fromEntries(diag(n, bands).map(file => [file.path, file.content]));
+  const scoresFor = (n, scores) => scores.map((score, k) => ({ cwd: GRADE_CWD, prompt: `<<<ANSWER\\nDIAG-${n}-${k + 1} `, scenario: { resultText: gradeJson(score), costUsd: 0.02 } }));
+  /* off by default: no diagnostic file is read and no grade is paid for */
+  const off = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: files(1) } }) });
+  const plain = await off.runNew();
+  assert.equal(plain.view.stage, 'done', plain.view.message);
+  assert.equal(plain.view.attempts[0].diagnostic, undefined);
+  assert.equal(plain.view.ledger.filter(entry => /^diag-/.test(entry.ref)).length, 0);
+  assert.equal(promptRuns(off).filter(run => /DIAG-1/.test(run.prompt)).length, 0);
+  /* on, all in their bands */
+  const on = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: files(1) }, extra: scoresFor(1, [0.95, 0.9, 0.2, 0.1, 0.3, 0.88]) }) });
+  const checked = await on.runNew({ fairnessSet: true, capUsd: 45 });
+  assert.equal(checked.view.stage, 'done', checked.view.message);
+  assert.equal(checked.view.config.fairnessSet, true);
+  assert.deepEqual(checked.view.attempts[0].diagnostic.results.map(item => [item.band, item.score, item.ok]), [['high', 0.95, true], ['high', 0.9, true], ['low', 0.2, true], ['low', 0.1, true], ['low', 0.3, true], ['high', 0.88, true]]);
+  assert.equal(checked.view.ledger.filter(entry => /^diag-1-/.test(entry.ref)).length, 6);
+  assert.equal(checked.view.ledger.filter(entry => /^diag-1-/.test(entry.ref)).reduce((sum, entry) => sum + entry.costUsd, 0) <= 3, true, 'up to USD 3.00 per attempt');
+  /* a high answer graded low, and a low answer graded high, are both a defect of the guideline */
+  for (const [scores, which] of [[[0.95, 0.6, 0.2, 0.1, 0.3, 0.88], 'diagnostic 2'], [[0.95, 0.9, 0.2, 0.5, 0.3, 0.88], 'diagnostic 4']]) {
+    const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: files(1) }, extra: scoresFor(1, scores) }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: files(2) }, extra: scoresFor(2, [0.95, 0.9, 0.2, 0.1, 0.3, 0.88]) })];
+    const w = await newWorld(t, { rules });
+    const { view } = await w.runNew({ fairnessSet: true, capUsd: 45 });
+    assert.equal(view.stage, 'done', view.message);
+    assert.equal(view.attempts[0].outcome, 'rejected');
+    assert.equal(view.attempts[0].rejection.kind, 'diagnostic');
+    assert.equal(view.attempts[0].rejection.reasons[0], 'The guideline did not grade 1 diagnostic answer as the design says (1 of 6)');
+    assert.equal(view.attempts[0].diagnostic.passed, false);
+    assert.match(fs.readFileSync(path.join(w.priv(view.id), 'attempts', '1', 'feedback.md'), 'utf8'), new RegExp(which));
+  }
+  /* switched on and not delivered: the attempt is rejected */
+  const missing = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2]), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: files(2) }, extra: scoresFor(2, [0.95, 0.9, 0.2, 0.1, 0.3, 0.88]) })] });
+  const { view } = await missing.runNew({ fairnessSet: true, capUsd: 45 });
+  assert.equal(view.attempts[0].rejection.kind, 'diagnostic');
+  assert.equal(view.attempts[0].rejection.reasons[0], 'The diagnostic answers were not delivered as asked');
+  /* the switch costs USD 3.00 in the least cap */
+  const { minCapParts, minCapUsd } = require('../backend/pipeline/budget.cjs');
+  assert.equal(minCapParts(5, 'new', { fairnessSet: true }).fixedUsd - minCapParts(5, 'new').fixedUsd, 3);
+  assert.equal(minCapParts(5, 'harden', { fairnessSet: true }).fixedUsd, minCapParts(5, 'harden').fixedUsd);
+  assert.ok(Math.abs(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3, fairnessSet: true }) - minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }) - 3.45) < 1e-9, '1.15 x 3.00');
+});
+
+/* ---- adjudication: a low score counts toward the pass only when it is explained ---- */
+
+/* stage: 'screen' or 'test' keys the rule on the bar the prompt names (0.40 and 0.45), so one pilot number can be told apart in the two stages */
+const adjudicateOf = (n, pilot, scenario, stage) => ({ cwd: '/runs/adjudicate-', prompt: stage ? `the bar is ${stage === 'screen' ? '0\\.40' : '0\\.45'}\\)[\\s\\S]*ANS-${n}-${pilot} ` : `ANS-${n}-${pilot} `, scenario });
+const adj = (klass, extra) => jsonScenario(adjudication(klass, extra));
+/* a run in which attempt 1 has the given scores and adjudications ({ [pilot]: scenario }) and attempt 2 is sound, so that the run ends */
+function adjudicated(over, scores = [0.2, 0.3], opts = {}) {
+  const extra = Object.entries(over).map(([pilot, scenario]) => adjudicateOf(1, pilot, scenario));
+  return [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, scores, { ...opts, extra: [...extra, ...(opts.extra || [])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+}
+const screenOf = view => view.attempts[0].screen;
+
+test('adjudication: every pilot below its bar gets one call; intended counts, and the adopted action AND the rationale must be word for word in the answer', async t => {
+  const w = await newWorld(t, { rules: adjudicated({}) });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const screen = screenOf(view);
+  assert.deepEqual(screen.pilots.map(pilot => [pilot.score, pilot.adjudication.class, pilot.countsTowardPass]), [[0.2, 'intended', true], [0.3, 'intended', true]]);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'adjudication' && entry.stage === 'grade-screen').length, 2, 'one call for each low score');
+  assert.equal(view.attempts[0].test.pilots.filter(pilot => pilot.adjudication).length >= 4, true);
+  /* the adjudicator was given the answer, the grader's reason, the guideline, the brief, the packet text and the hint; the hint names the fingerprint that matched, and is only a hint */
+  const prompt = promptRuns(w).find(run => run.prompt.startsWith('You are explaining why one blind pilot'));
+  for (const part of ['<<<SCORE 0.', '<<<HINT', 'fp-credit', '<<<GUIDELINE', '<<<BRIEF', '<<<PILOT ANSWER', '<<<FILES', 'Facility_Terms.txt']) assert.equal(prompt.prompt.includes(part), true, part);
+  assert.match(prompt.prompt, /Synthetic grader reason for 0\./);
+  /* the private record of one adjudication holds the claim and what the harness made of it */
+  const dir = path.join(w.priv(id), 'attempts', '1', 'adjudications');
+  const [first] = fs.readdirSync(dir).sort();
+  const record = JSON.parse(fs.readFileSync(path.join(dir, first), 'utf8'));
+  assert.equal(record.claimed.class, 'intended');
+  assert.equal(record.checked.class, 'intended');
+  assert.deepEqual(record.hint.fingerprintHits, ['fp-credit']);
+});
+
+test('adjudication: intended without both quotes in the answer, a figure match with another action, and an adjudicator that cannot be read are unsupported and do not count', async t => {
+  const cases = {
+    'the action is not in the answer': adj('intended', { adoptedAction: { quote: 'a sentence the pilot never wrote down' } }),
+    'the rationale is not in the answer': adj('intended', { rationale: { quote: 'a reason the pilot never gave at all' } }),
+    'a quote under 12 characters is no evidence': adj('intended', { adoptedAction: { quote: 'Proceed.' } }),
+    'no statement of how it matches the brief': adj('intended', { matchesBrief: 'matches' }),
+    'garbage twice': { resultText: 'the adjudicator rambled', costUsd: 0.01 },
+  };
+  for (const [name, scenario] of Object.entries(cases)) {
+    const w = await newWorld(t, { rules: adjudicated({ 1: scenario }) });
+    const { view } = await w.runNew();
+    const screen = screenOf(view);
+    assert.equal(screen.pilots[0].adjudication.class, 'unsupported', name);
+    assert.equal(screen.pilots[0].countsTowardPass, false, name);
+    assert.equal(screen.pilots[0].belowBar, true, 'the score was low; it is not explained');
+    assert.equal(screen.passed, false, name);
+    assert.deepEqual(screen.unexplained.map(item => [item.pilot, item.class]), [['p1', 'unsupported']], name);
+    assert.equal(view.attempts[0].outcome, 'screen-failed', name);
+  }
+});
+
+test('adjudication: other_valid_error counts only when the clause is in the packet and the application check shows it governs, is in force, is not superseded and is violated', async t => {
+  const clause = adj('other_valid_error', { adoptedAction: { quote: 'the available facility counted as cash' } });
+  const ok = await newWorld(t, { rules: adjudicated({ 1: clause, 2: clause }) });
+  const passed = await ok.runNew();
+  assert.equal(passed.view.stage, 'done', passed.view.message);
+  assert.deepEqual(screenOf(passed.view).pilots.map(pilot => [pilot.adjudication.class, pilot.countsTowardPass, pilot.adjudication.application.pass]), [['other_valid_error', true, true], ['other_valid_error', true, true]]);
+  assert.equal(screenOf(passed.view).lows.otherValid, 2);
+  assert.equal(screenOf(passed.view).lows.counted, 2);
+  assert.equal(reviewRuns(passed.view, 'application').filter(entry => entry.stage === 'grade-screen').length, 2);
+  /* the clause is not in the packet */
+  const missing = await newWorld(t, { rules: adjudicated({ 1: adj('other_valid_error', { adoptedAction: { quote: 'the available facility counted as cash' }, clause: { file: 'Facility_Terms.txt', quote: 'A clause the packet does not hold anywhere.' } }) }) });
+  const notFound = await missing.runNew();
+  assert.equal(screenOf(notFound.view).pilots[0].adjudication.class, 'unsupported');
+  assert.match(screenOf(notFound.view).pilots[0].adjudication.note, /clause of the files that the answer violates was not found/);
+  /* the action the adjudicator says the pilot took is not in the pilot's answer: a low score for an action never taken is not explained, and the
+     application check is never asked about it */
+  const invented = await newWorld(t, { rules: adjudicated({ 1: adj('other_valid_error', { adoptedAction: { quote: 'Sweep every dollar to the parent account' } }) }) });
+  const sweep = await invented.runNew();
+  assert.equal(screenOf(sweep.view).pilots[0].adjudication.class, 'unsupported');
+  assert.match(screenOf(sweep.view).pilots[0].adjudication.note, /action the answer is said to have taken was not found in the answer/);
+  assert.equal(screenOf(sweep.view).pilots[0].adjudication.application, null);
+  assert.equal(promptRuns(invented).some(run => run.prompt.includes('Sweep every dollar')), false, 'the invented action reached no later prompt');
+  /* the application check is asked about the words the pilot wrote */
+  const asked = promptRuns(ok).filter(run => run.prompt.startsWith('You are checking whether one quoted clause')).filter(run => /<<<ALTERNATIVE\nthe available facility counted as cash/.test(run.prompt));
+  assert.ok(asked.length >= 2, 'one question for each low score, with the verified action as the alternative');
+  /* a clause named in the wrong file is not found */
+  const wrongFile = await newWorld(t, { rules: adjudicated({ 1: adj('other_valid_error', { adoptedAction: { quote: 'the available facility counted as cash' }, clause: { file: 'Cash_Facts.csv', quote: CLAUSE } }) }) });
+  assert.equal(screenOf((await wrongFile.runNew()).view).pilots[0].adjudication.class, 'unsupported');
+  /* the guideline item is not named */
+  const noItem = await newWorld(t, { rules: adjudicated({ 1: adj('other_valid_error', { adoptedAction: { quote: 'the available facility counted as cash' }, guidelineItem: '' }) }) });
+  assert.equal(screenOf((await noItem.runNew()).view).pilots[0].adjudication.class, 'unsupported');
+  /* the clause is found but does not apply: not in force on the decision date */
+  const notInForce = await newWorld(t, { rules: adjudicated({ 1: clause }, [0.2, 0.3], { extra: [{ cwd: '/runs/apply-1-ANS|/runs/apply-1-p1', scenario: jsonScenario({ ...APPLICATION, inForce: { ...APPLICATION.inForce, effectiveDate: '2026-01-01' } }) }] }) });
+  const late = await notInForce.runNew();
+  const first = screenOf(late.view).pilots[0];
+  assert.equal(first.adjudication.class, 'unsupported');
+  assert.deepEqual(first.adjudication.application.failed, ['inForce']);
+  assert.equal(first.countsTowardPass, false);
+});
+
+test('adjudication: permitted_alternative, grader_defect, ambiguous and unsupported never count; each is listed with its class and counted by class', async t => {
+  for (const klass of ['permitted_alternative', 'grader_defect', 'ambiguous', 'unsupported']) {
+    const w = await newWorld(t, { rules: adjudicated({ 1: adj(klass) }, [0.2, 0.3], { pilotExtra: [{}, { delayMs: 600 }] }) });
+    const { view } = await w.runNew();
+    const screen = screenOf(view);
+    assert.equal(screen.pilots[0].adjudication.class, klass);
+    assert.equal(screen.pilots[0].countsTowardPass, false, klass);
+    assert.equal(screen.passed, false, klass);
+    /* a low score that the evaluator's repair may yet put right does not end the stage early: the other pilot is graded too, so its answer can be graded again */
+    assert.equal(screen.pilots[1].stoppedEarly, !['permitted_alternative', 'grader_defect'].includes(klass), klass);
+    const key = { permitted_alternative: 'permittedAlternative', grader_defect: 'graderDefect', ambiguous: 'ambiguous', unsupported: 'unsupported' }[klass];
+    assert.equal(screen.lows[key], 1, klass);
+    assert.equal(screen.lows.lowScorers >= 1, true);
+    assert.deepEqual(screen.unexplained.slice(0, 1).map(item => [item.pilot, item.class, item.score]), [['p1', klass, 0.2]]);
+  }
+});
+
+/* the pilot's own record of a failed tool call on a file of its packet */
+const READ_FAILED = { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/filesystem/Cash_Facts.csv' }, result: 'This tool cannot read binary files. The file appears to be a binary .csv file.' }] };
+/* The real runtime marks the result of a call that failed with is_error: true. The tool results of the stub carry no such mark, so a pilot's record is given it, as the
+   pipeline reads it, for the results that say a file could not be read. */
+function failedReadsAreErrors(w) {
+  const original = w.pipeline._toolFailureEvidence.bind(w.pipeline);
+  w.pipeline._toolFailureEvidence = (ctl, ref) => {
+    const [roundId, run] = String(ref).split('#');
+    const file = path.join(w.root, 'private', 'agent-rounds', roundId, 'runs', run, 'transcript.jsonl');
+    try {
+      const lines = fs.readFileSync(file, 'utf8').split('\n').map(line => {
+        if (!line.trim()) return line;
+        const event = JSON.parse(line);
+        for (const block of (event.message && Array.isArray(event.message.content) ? event.message.content : [])) if (block.type === 'tool_result' && /cannot read binary|does not exist/.test(String(block.content))) block.is_error = true;
+        return JSON.stringify(event);
+      });
+      fs.writeFileSync(file, lines.join('\n'));
+    } catch { /* no transcript to mark */ }
+    return original(ctl, ref);
+  };
+}
+
+test('adjudication: tool_failure counts only when the pilot\'s own record shows a failed tool call on a file of its packet; the adjudicator\'s word alone makes it an unsupported low', async t => {
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [{}, { delayMs: 500 }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  const first = view.attempts[0];
+  const screen = first.screen;
+  assert.equal(screen.pilots[0].toolFailure, false, 'a normal answer, nothing failed: not a missing pilot');
+  assert.equal(screen.pilots[0].valid, true);
+  assert.deepEqual([screen.pilots[0].adjudication.class, screen.pilots[0].adjudication.claimed, screen.pilots[0].adjudication.counts], ['unsupported', 'tool_failure', false]);
+  assert.match(screen.pilots[0].adjudication.note, /shows no failed tool call on a file of the packet/);
+  assert.equal(screen.replacementRound, false);
+  assert.equal(first.outcome, 'screen-failed', 'an unsupported low is a pilot that did not count');
+  /* the failed call is in the pilot's record, on a file that is in its packet: accepted. A failed call on some other file is not. */
+  const elsewhere = { toolUses: [{ name: 'Read', input: { file_path: '{{cwd}}/filesystem/Missing_File.txt' }, result: 'File does not exist.' }] };
+  const other = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [elsewhere, { delayMs: 500 }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  failedReadsAreErrors(other);
+  assert.equal((await other.runNew()).view.attempts[0].screen.pilots[0].adjudication.class, 'unsupported');
+});
+
+test('adjudication: the failed call that proves a tool_failure is a result marked as an error, of a Read or a Bash on the exact path of a packet file; a mention of a name, a grep with no match or an output that begins with "Error" proves nothing', async t => {
+  const w = await newWorld(t, { rules: newRules(1, [0.2]) });
+  const dir = path.join(w.root, 'private', 'agent-rounds', 'rnd-test', 'runs', '1');
+  const record = events => put(dir, 'transcript.jsonl', events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  const call = (id, name, input, content, isError) => [
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, ...(isError === undefined ? {} : { is_error: isError }) }] } },
+  ];
+  const ctl = { manifest: [{ name: 'a.md' }, { name: 'Cash_Facts.csv' }, { name: 'notes/Ledger.xlsx' }] };
+  const evidence = events => { record(events.flat()); return w.pipeline._toolFailureEvidence(ctl, 'rnd-test#1'); };
+  const cwd = '/tmp/finance-studio-pilots/rnd-test-1';
+  /* a Read of a packet file that failed: proof, by absolute path, by relative path and for a file in a folder */
+  assert.deepEqual(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'This tool cannot read binary files.', true)]), { file: 'Cash_Facts.csv', error: 'This tool cannot read binary files.' });
+  assert.equal(evidence([call('t1', 'Read', { file_path: 'filesystem/notes/Ledger.xlsx' }, [{ type: 'text', text: 'File content exceeds the limit' }], true)]).file, 'notes/Ledger.xlsx', 'the error as a list of parts');
+  /* the same call that did not fail, or a failed call on a file that is not in the packet, or whose name only ends like one: no proof */
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'Label,Value', false)]), null);
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Cash_Facts.csv` }, 'Label,Value')]), null, 'no mark, no failure');
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/Missing.txt` }, 'File does not exist.', true)]), null);
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/hosts.data.md` }, 'File does not exist.', true)]), null, 'hosts.data.md is not a.md');
+  assert.equal(evidence([call('t1', 'Read', { file_path: '/etc/hosts.data.md' }, 'File does not exist.', true)]), null);
+  /* Bash: a command that names the path and whose error says the file could not be opened; a grep that found nothing, or a failure of another kind, is not one */
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/Cash_Facts.csv' }, 'cat: filesystem/Cash_Facts.csv: Permission denied', true)]).file, 'Cash_Facts.csv');
+  assert.equal(evidence([call('t1', 'Bash', { command: 'grep -n "limit" filesystem/Cash_Facts.csv' }, 'Exit code 1', true)]), null, 'a grep with no match');
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat /etc/hosts.data.md' }, 'cat: /etc/hosts.data.md: No such file or directory', true)]), null);
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/a.md.bak' }, 'cat: filesystem/a.md.bak: No such file or directory', true)]), null, 'a path of another file that starts like one');
+  /* an output that happens to begin with "Error" and is no failure */
+  assert.equal(evidence([call('t1', 'Bash', { command: 'cat filesystem/Cash_Facts.csv' }, 'Error: timeout in row 4', false)]), null);
+  /* a call that failed later in the record is found too, and the first proof is the one returned */
+  assert.equal(evidence([call('t1', 'Read', { file_path: `${cwd}/filesystem/a.md` }, 'ok', false), call('t2', 'Read', { file_path: `${cwd}/filesystem/a.md` }, 'Permission denied', true)]).file, 'a.md');
+});
+
+test('adjudication: tool_failure is a missing pilot, not a loss: the stage runs one replacement round', async t => {
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { extra: [{ cwd: '/runs/adjudicate-p1-', scenario: adj('tool_failure') }], pilotExtra: [READ_FAILED, { delayMs: 500 }] })];
+  /* the replacement pilot (run 1 of the second round) has its own answer, ANS-1-1 again: the first call of the new round is intended */
+  const w = await newWorld(t, { rules: [...rules.slice(0, 2), ...rules.slice(2)] });
+  failedReadsAreErrors(w);
+  const { view } = await w.runNew();
+  const screen = screenOf(view);
+  assert.equal(screen.pilots[0].toolFailure, true);
+  assert.equal(screen.pilots[0].valid, false, 'a missing pilot has no usable score');
+  assert.equal(screen.pilots[0].countsTowardPass, false);
+  assert.equal(screen.lows.toolFailure, 1);
+  assert.equal(screen.replacementRound, true);
+  assert.equal(screen.roundIds.length, 2);
+  assert.equal(screen.pilots.length, 3);
+});
+
+test('counting: an unexplained low score is a pilot that did not count; the screen fails as soon as one pilot cannot count, and the other pilot is stopped', async t => {
+  const w = await newWorld(t, { rules: adjudicated({ 1: adj('ambiguous') }, [0.2, 0.3], { pilotExtra: [{}, { delayMs: 1500 }] }) });
+  const { id, view } = await w.runNew();
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'screen-failed');
+  assert.equal(first.screen.stoppedEarly.afterPilot, 1);
+  assert.deepEqual(first.screen.pilots.map(pilot => [pilot.stoppedEarly, pilot.valid]), [[false, true], [true, false]]);
+  assert.equal(first.screen.passed, false);
+  assert.equal(first.screen.explained, 0);
+  assert.equal(first.screen.belowBar, 1);
+  assert.match(first.screen.pilots[1].stoppedReason, /already decided after pilot 1/);
+  assert.equal(first.difficulty.status, 'failed');
+  assert.equal(first.difficulty.screen.passed, false);
+  assert.equal(view.ledger.filter(entry => entry.kind === 'adjudication' || entry.kind === 'grader').some(entry => entry.ref === `${first.screen.roundIds[0]}#2`), false, 'the stopped pilot was neither graded nor adjudicated');
+  /* the redesign is told that these pilots may not be failing because of the traps */
+  const feedback = fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8');
+  assert.match(feedback, /scored below the bar but the low score could not be explained as the error you built the trap for/);
+  assert.match(feedback, /The traps may not be what is making these pilots fail/);
+  assert.match(feedback, /was not explained \(ambiguous\)/);
+  assert.match(feedback, /ANS-1-1 Cash is 3,050 because/, 'the final answer is given back to the designer');
+  assert.match(feedback, /grader reason: Synthetic grader reason for 0\.20/);
+  assert.equal(view.attempts[1].outcome, 'passed');
+});
+
+/* the runs of the counting tests: the pilots finish in a set order (a pilot that is not given a delay finishes first), so that what each stage decided after which pilot is the same under load */
+const countingRun = async (t, scores, over, extra = {}) => {
+  const delays = [{}, { delayMs: 300 }, { delayMs: 600 }, { delayMs: 900 }, { delayMs: 1200 }];
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, scores, { extra: Object.entries(over).map(([pilot, scenario]) => adjudicateOf(1, pilot, scenario, 'test')), pilotExtra: delays, ...extra }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  return { w, ...(await w.runNew()) };
+};
+
+test('counting: two unexplained lows of five end the test at once, and the pilots that had not finished are stopped', async t => {
+  /* two unexplained of five: at most 3 can count, so the test is over after the second */
+  const two = await countingRun(t, [0.2, 0.2, 0.2, 0.2, 0.2], { 1: adj('unsupported'), 2: adj('ambiguous') }, { pilotExtra: [{}, { delayMs: 300 }, { delayMs: 3000 }, { delayMs: 3000 }, { delayMs: 3000 }] });
+  const failed = two.view.attempts[0];
+  assert.equal(failed.screen.passed, true);
+  assert.equal(failed.outcome, 'test-failed');
+  assert.deepEqual([failed.test.passed, failed.test.explained, failed.test.belowBar], [false, 0, 2]);
+  assert.equal(failed.test.stoppedEarly.afterPilot, 2);
+  assert.equal(failed.test.pilots.filter(pilot => pilot.stoppedEarly).length, 3);
+  assert.deepEqual([failed.test.lows.unsupported, failed.test.lows.ambiguous, failed.test.lows.counted], [1, 1, 0]);
+  assert.deepEqual(failed.difficulty.screen.passed, true);
+  assert.equal(failed.difficulty.status, 'failed');
+  assert.match(two.view.attempts[0].test.rule, /at least 4 of the 5 pilots score below 0\.45/);
+});
+
+test('counting: one unexplained low of five does not end the test, and a score at or above the bar does not count', async t => {
+  /* one unexplained of five: 4 can still count, and when they do the test passes (all five finish, so their order does not matter and they need little delay) */
+  const one = await countingRun(t, [0.2, 0.2, 0.2, 0.2, 0.2], { 1: adj('unsupported') }, { pilotExtra: [{}, { delayMs: 100 }, { delayMs: 200 }, { delayMs: 300 }, { delayMs: 400 }] });
+  assert.equal(one.view.stage, 'done', one.view.message);
+  const passed = one.view.attempts[0].test;
+  assert.deepEqual([passed.passed, passed.explained, passed.belowBar, passed.lows.unsupported, passed.lows.intended, passed.lows.counted], [true, 4, 5, 1, 4, 4]);
+  assert.match(one.view.summary, /The test passed: 5 of 5 pilots scored below 0\.45, 4 of them with the low score explained/);
+  assert.equal(one.view.result.validation, 'complete');
+  /* scores at or above the bar are not low: three explained and two high is not enough */
+  const high = await countingRun(t, [0.2, 0.2, 0.2, 0.5, 0.5], {});
+  const short = high.view.attempts[0];
+  assert.equal(short.outcome, 'test-failed');
+  assert.deepEqual([short.test.explained, short.test.belowBar, short.test.passed], [3, 3, false]);
+  assert.equal(short.test.pilots.filter(pilot => pilot.score >= 0.45).every(pilot => pilot.adjudication === null && pilot.countsTowardPass === false), true, 'a high score is not adjudicated and does not count');
+  assert.equal(short.test.pilots.filter(pilot => pilot.adjudication).length, 3, 'only the low scores were adjudicated');
+});
+
+test('counting: the screen needs both pilots to count: one explained low and one high is a failed screen', async t => {
+  /* the high one finishes last, so the low one is graded first */
+  const screen = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.5], { pilotExtra: [{}, { delayMs: 1500 }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const flunked = await screen.runNew();
+  assert.equal(flunked.view.attempts[0].outcome, 'screen-failed');
+  assert.deepEqual([flunked.view.attempts[0].screen.explained, flunked.view.attempts[0].screen.belowBar], [1, 1]);
+});
+
+test('counting: a pass is never counted from unexplained lows, in the summary or in the state', async t => {
+  /* every low of the test is unexplained, but the scores are all below the bar: the harden rule would have passed this design; the new rule does not */
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.2, 0.2, 0.2, 0.2], { adjudication: adj('unsupported'), extra: [adjudicateOf(1, 1, adj('intended'), 'screen'), adjudicateOf(1, 2, adj('intended'), 'screen')] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.attempts[0].outcome, 'test-failed');
+  assert.equal(view.attempts[0].test.belowBar >= 2, true);
+  assert.equal(view.attempts[0].test.explained, 0);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  assert.match(view.summary, /every low score explained/);
+  const harden = await makeWorld(t, { rules: [classifierRule(), ...attemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const same = await harden.run();
+  assert.equal(same.view.stage, 'done', 'the harden rule counts every low score: nothing is adjudicated');
+  assert.equal(same.view.ledger.some(entry => entry.kind === 'adjudication'), false);
+  assert.equal(same.view.config.designMode, 'harden');
+  assert.equal(same.view.attempts[0].mode, undefined);
+  assert.match(same.view.summary, /The test passed: 4 of 5 pilots scored below 0\.45; /.source ? /The test passed: 4 of 5 pilots scored below 0\.45/ : /./);
+});
+
+/* ---- the guideline-only repair: evaluator material at fault, packet untouched, saved answers graded again ---- */
+
+const reviseRule = (n, scenario) => ({ cwd: '/runs/adjudicate-', prompt: `REVISED-ONE[\\s\\S]*ANS-${n}-1 `, scenario });
+const repairPromptsOf = w => promptRuns(w).filter(run => run.prompt.includes('You are the trap designer for one new finance task') && run.prompt.includes('WHAT WAS FOUND, exactly'));
+const pilotRunsOf = view => view.ledger.filter(entry => entry.kind === 'pilot').length;
+
+test('guideline-only repair: a low score that the packet allows is an evaluator fault: one repair of the guideline, the saved answers graded again (no new pilots), the stage counted again, and a second freeze', async t => {
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+      extra: [reviseRule(1, adj('intended')), adjudicateOf(1, 1, adj('permitted_alternative'), 'screen')],
+      repairs: { evaluator: reviseOnly(1, 'REVISED-ONE') },
+    }),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  const repair = attempt.guidelineRepair;
+  assert.deepEqual([repair.stage, repair.outcome, repair.classes, repair.changed], ['screen', 'applied', ['permitted_alternative'], ['guideline.md']]);
+  assert.equal(repair.recounted.passed, true);
+  assert.equal(repairPromptsOf(w).length, 1);
+  assert.match(repairPromptsOf(w)[0].prompt, /Change ONLY out\/guideline\.md and out\/golden-answer\.md/);
+  /* the screen was counted again from the saved answers: its first pilot's low score is now explained, and the pilots did not run again */
+  const screen = attempt.screen;
+  assert.equal(screen.passed, true);
+  assert.equal(screen.recount.changes.length, 2);
+  assert.deepEqual(screen.pilots.map(pilot => [pilot.regraded, pilot.adjudication.class, pilot.countsTowardPass]), [[true, 'intended', true], [true, 'intended', true]]);
+  assert.equal(screen.pilots[0].previous.adjudication.class, 'permitted_alternative', 'what the pilot was judged before is kept');
+  assert.equal(screen.roundIds.length, 1, 'no new round for the screen');
+  assert.equal(view.ledger.filter(entry => entry.kind === 'grader' && entry.ref.endsWith('-regrade')).length, 2);
+  assert.equal(attempt.test.passed, true, 'the test then ran with the revised guideline');
+  const testGrader = promptRuns(w).filter(run => run.prompt.startsWith('You are grading') || /<<<GUIDELINE|Scoring scale/.test(run.prompt)).filter(run => /ANS-1-3/.test(run.prompt));
+  assert.ok(testGrader.length >= 1);
+  for (const run of testGrader) assert.match(run.prompt, /REVISED-ONE/);
+  /* the answer set was graded again against the revised guideline, the old grades kept */
+  const golden = attempt.answerSet.answers[0];
+  assert.deepEqual(golden.runs.map(run => run.why), ['first grading', 'after the guideline repair']);
+  assert.deepEqual(repair.regrade.before.map(item => item.name), ['golden']);
+  assert.equal(repair.regrade.passed, true);
+  /* two freeze records: the packet is the same, the guideline is not */
+  assert.equal(attempt.freeze.length, 2);
+  assert.deepEqual(attempt.freeze.map(item => item.reason), ['before the pilots', 'after the guideline repair']);
+  assert.equal(attempt.freeze[0].packetSha256, attempt.freeze[1].packetSha256);
+  assert.notEqual(attempt.freeze[0].guidelineSha256, attempt.freeze[1].guidelineSha256);
+  assert.equal(attempt.freeze[1].guidelineSha256, sha(REVISED_GUIDELINE(1, 'REVISED-ONE').replace(/\s+$/, '')));
+  assert.equal(fs.existsSync(path.join(w.priv(id), 'attempts', '1', 'freeze-2.json')), true);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'out', 'guideline.md'), 'utf8'), /REVISED-ONE/, 'the design that is kept is the repaired one');
+});
+
+test('guideline-only repair: a repair that changes anything but the guideline and the golden answer, changes nothing, or breaks the answer set is not used, and nothing is run again', async t => {
+  const failing = { extra: [adjudicateOf(1, 1, adj('permitted_alternative'), 'screen')], pilotExtra: [{}, { delayMs: 400 }] };
+  const cases = [
+    ['a new file for the pilots', { ...reviseOnly(1, 'REVISED-ONE'), writeFiles: [{ path: 'out/guideline.md', content: REVISED_GUIDELINE(1, 'REVISED-ONE') }, { path: 'out/new/Extra_Note.txt', content: 'An extra file for the pilots.\n' }] }, /changed more than the guideline and the golden answer/],
+    ['the prompt', { ...reviseOnly(1, 'REVISED-ONE'), writeFiles: [{ path: 'out/prompt.txt', content: 'A different prompt. PV1\n' }] }, /changed more than the guideline and the golden answer/],
+    ['the brief', { ...reviseOnly(1, 'REVISED-ONE'), writeFiles: [{ path: 'out/brief.json', content: JSON.stringify(briefFor(1, { permittedAlternativesReason: 'A changed reason.' })) }] }, /changed more than/],
+    ['nothing', { resultText: 'nothing to do', costUsd: 0.01 }, /changed nothing, so nothing material changed/],
+    ['a guideline that does not read', { writeFiles: [{ path: 'out/guideline.md', content: '' }], resultText: 'x', costUsd: 0.01 }, /did not pass the design checks/],
+  ];
+  for (const [name, repair, pattern] of cases) {
+    const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3], { ...failing, repairs: { evaluator: repair } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const w = await newWorld(t, { rules });
+    const { id, view } = await w.runNew();
+    const attempt = view.attempts[0];
+    assert.equal(attempt.guidelineRepair.outcome, 'failed', name);
+    assert.match(attempt.guidelineRepair.reason, pattern, name);
+    assert.equal(attempt.outcome, 'screen-failed', name);
+    assert.equal(attempt.screen.recount, undefined, `${name}: nothing was graded again`);
+    assert.equal(view.ledger.filter(entry => entry.ref.endsWith('-regrade')).length, 0, name);
+    assert.equal(attempt.freeze.length, 1, name);
+    assert.equal(attempt.screen.pilots[0].regraded, undefined);
+    /* the design that was tested stays what it was: the repair is undone */
+    const kept = fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'out', 'guideline.md'), 'utf8');
+    assert.equal(kept.includes('REVISED-ONE'), false, name);
+    assert.equal(fs.existsSync(path.join(w.priv(id), 'attempts', '1', 'out', 'new', 'Extra_Note.txt')), false, name);
+    assert.equal(view.attempts[1].outcome, 'passed', 'the redesign goes on');
+  }
+});
+
+test('guideline-only repair: a revised guideline that cannot grade the fixed answers is not used (the golden answer is graded again and must still reach 0.90)', async t => {
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2, 0.3], {
+      extra: [{ cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: { resultText: gradeJson(0.5), costUsd: 0.02 } }, adjudicateOf(1, 1, adj('grader_defect'), 'screen')],
+      repairs: { evaluator: reviseOnly(1, 'REVISED-ONE') }, pilotExtra: [{}, { delayMs: 400 }],
+    }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  const repair = view.attempts[0].guidelineRepair;
+  assert.equal(repair.outcome, 'failed');
+  assert.match(repair.reason, /did not grade the fixed answers as required/);
+  assert.equal(repair.regrade.passed, false);
+  assert.deepEqual(repair.regrade.after[0].grades, [0.5, 0.5]);
+  assert.equal(view.attempts[0].outcome, 'screen-failed');
+  assert.equal(view.ledger.filter(entry => entry.ref.endsWith('-regrade')).length, 0, 'the saved answers were not graded again with a guideline that failed its own check');
+  assert.equal(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'out', 'guideline.md'), 'utf8').includes('REVISED-ONE'), false);
+});
+
+test('guideline-only repair: once per attempt, and never for ambiguous or unsupported lows, which go to a redesign with the answers and the graders\' reasons', async t => {
+  /* attempt 1: the screen is repaired and passes; the test then fails on another permitted alternative, and there is no second repair */
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.2, 0.2, 0.2], {
+      extra: [reviseRule(1, adj('intended')), adjudicateOf(1, 1, adj('permitted_alternative'), 'screen'), adjudicateOf(1, 2, adj('permitted_alternative'), 'test'), adjudicateOf(1, 3, adj('grader_defect'), 'test')],
+      repairs: { evaluator: reviseOnly(1, 'REVISED-ONE') },
+    }),
+    ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3]),
+  ];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(repairPromptsOf(w).length, 1, 'one repair for the whole attempt');
+  assert.equal(view.attempts[0].guidelineRepair.stage, 'screen');
+  assert.equal(view.attempts[0].screen.passed, true);
+  assert.equal(view.attempts[0].outcome, 'test-failed');
+  assert.equal(view.attempts[0].test.lows.permittedAlternative + view.attempts[0].test.lows.graderDefect >= 1, true);
+  /* ambiguous and unsupported: no repair, a redesign with the evidence */
+  const other = await newWorld(t, { rules: adjudicated({ 1: adj('unsupported') }, [0.2, 0.3], { pilotExtra: [{}, { delayMs: 600 }] }) });
+  const { id, view: second } = await other.runNew();
+  assert.equal(repairPromptsOf(other).length, 0);
+  assert.equal(second.attempts[0].guidelineRepair, null);
+  const feedback = fs.readFileSync(path.join(other.priv(id), 'attempts', '1', 'feedback.md'), 'utf8');
+  assert.match(feedback, /The traps may not be what is making these pilots fail/);
+  assert.match(feedback, /grader reason: /);
+  assert.match(feedback, /Final answer:/);
+});
+
+/* ---- freeze, export, redaction, configuration ---- */
+
+/* attempt 1 finds a permitted alternative, repairs, and passes; the design then has an alternative answer file */
+function permittedFlowRules() {
+  const permitted = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: false, why: 'The terms leave the tranche structure open.' };
+  const withAlternative = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches with cash cover', support: 'The terms leave the tranche structure open', file: 'answers/alt-1.md' }] });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n' }, { path: 'out/brief.json', content: JSON.stringify(withAlternative) }] });
+  return newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), { cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: { resultText: gradeJson(0.9), costUsd: 0.02 } }],
+    reveal: jsonScenario(permitted), repairs: { alternative: repair },
+  });
+}
+
+test('the freeze record: what was tested, hashed, once before the pilots, in the view and in a private file, and equal to the files on disk and the packet the pilots got', async t => {
+  const w = await newWorld(t, { rules: permittedFlowRules() });
+  const { id, view } = await w.runNew({ effort: 'medium', pilotCapUsd: 2, designCapUsd: 3, capUsd: 60 });
+  assert.equal(view.stage, 'done', view.message);
+  const [freeze] = view.attempts[0].freeze;
+  assert.deepEqual(Object.keys(freeze).sort(), ['answerSetSha256', 'answers', 'at', 'budget', 'goldenSha256', 'grader', 'guidelineSha256', 'n', 'packetFiles', 'packetSha256', 'pilot', 'promptSha256', 'reason']);
+  assert.deepEqual(freeze.pilot, { model: 'claude-opus-5-5', effort: 'medium', capUsd: 2 });
+  assert.deepEqual(freeze.grader, { model: view.config.graderModel, effort: 'medium' });
+  assert.deepEqual(freeze.budget, { totalCapUsd: 60, designCapUsd: 3, pilotCapUsd: 2 });
+  const out = path.join(w.priv(id), 'attempts', '1', 'out');
+  const text = name => fs.readFileSync(path.join(out, name), 'utf8').replace(/\s+$/, '');
+  assert.equal(freeze.promptSha256, sha(text('prompt.txt')));
+  assert.equal(freeze.guidelineSha256, sha(text('guideline.md')));
+  assert.equal(freeze.goldenSha256, sha(text('golden-answer.md')));
+  assert.deepEqual(freeze.answers.map(item => item.name), ['golden', 'alt-1']);
+  assert.equal(freeze.answers[1].sha256, sha(text('answers/alt-1.md')));
+  assert.equal(freeze.answerSetSha256, sha(freeze.answers.map(item => `${item.name}:${item.sha256}`).join('\n')));
+  /* the packet sha is the hash of the manifest, and the manifest is the files the pilots got */
+  const manifest = view.design.packet.files;
+  assert.equal(freeze.packetSha256, sha(manifest.map(file => `${file.name}\t${file.sha256}\t${file.bytes}`).join('\n')));
+  const pilotCopies = Object.entries(pilotFiles(w)).filter(([name]) => name.startsWith(view.attempts[0].screen.roundIds[0]));
+  for (const file of manifest) assert.equal(pilotCopies.some(([name, body]) => name.endsWith(`/${file.name}`) && sha(body) === file.sha256), true, `${file.name} is the file the pilots got`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'freeze-1.json'), 'utf8')), freeze);
+  assert.deepEqual(view.design.freeze, [freeze]);
+  assert.equal(freeze.packetFiles, manifest.length);
+});
+
+test('the export of a new design: brief, alternatives, review record, freeze, the packet manifest and the sha256 of every shipped file; the README says the packet tested is the packet listed', async t => {
+  const w = await newWorld(t, { rules: permittedFlowRules() });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const exported = await w.pipeline.export(id);
+  const zip = await packageEngine.readZip(new Uint8Array(Buffer.from(exported.zipBase64, 'base64')));
+  const names = [...zip.entries.keys()].map(name => name.slice(name.indexOf('/') + 1)).sort();
+  for (const wanted of ['README_PRIVATE.txt', 'prompt.txt', 'guideline.md', 'golden-answer.md', 'traps.json', 'brief.json', 'answers/alt-1.md', 'fairness.json', 'freeze-1.json', 'packet-manifest.json', 'SHA256SUMS.txt', 'scores.csv', 'scores.json', 'new/Meridian_Lender_Summary.txt', 'edited/Facility_Terms.txt']) assert.equal(names.includes(wanted), true, `${wanted} is shipped`);
+  const prefix = [...zip.entries.keys()][0].split('/')[0];
+  const read = async name => zip.text(`${prefix}/${name}`);
+  const readme = await read('README_PRIVATE.txt');
+  assert.match(readme, /FREEZE RECORD \(what was tested, before the pilots ran\)/);
+  const [freeze] = view.attempts[0].freeze;
+  for (const part of [freeze.packetSha256, freeze.promptSha256, freeze.guidelineSha256, freeze.goldenSha256, freeze.answerSetSha256]) assert.equal(readme.includes(part), true, part);
+  assert.match(readme, /pilots: claude-opus-5-5, effort low, cap USD 1\.00 each; grader: /);
+  assert.match(readme, /The packet the pilots were tested on is byte for byte the packet listed in packet-manifest\.json/);
+  assert.match(readme, /SHA256SUMS\.txt lists the sha256 of every file in this export/);
+  /* the list holds the hash of every file that is shipped, and each is right */
+  const sums = (await read('SHA256SUMS.txt')).trim().split('\n').map(line => line.split('  '));
+  assert.deepEqual(sums.map(([, name]) => name).sort(), names.filter(name => name !== 'SHA256SUMS.txt'));
+  for (const [hash, name] of sums) assert.equal(sha(Buffer.from(await zip.get(`${prefix}/${name}`))), hash, name);
+  /* the manifest is the packet, and the files shipped under new/ and edited/ are among its files, byte for byte */
+  const manifest = JSON.parse(await read('packet-manifest.json'));
+  assert.deepEqual(manifest, view.design.packet.files.map(file => ({ name: file.name, bytes: file.bytes, sha256: file.sha256 })));
+  for (const file of manifest.filter(item => ['Meridian_Lender_Summary.txt', 'Facility_Terms.txt'].includes(item.name))) {
+    const shipped = sums.find(([, name]) => name === `new/${file.name}` || name === `edited/${file.name}`);
+    assert.equal(shipped[0], file.sha256, `${file.name} as shipped is the file that was tested`);
+  }
+  assert.equal(freeze.packetSha256, sha(manifest.map(file => `${file.name}\t${file.sha256}\t${file.bytes}`).join('\n')));
+  assert.equal(await read('answers/alt-1.md'), 'ALT-1 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n');
+  const fairness = JSON.parse(await read('fairness.json'));
+  assert.equal(fairness.fairness.stage2.evaluations, 2);
+  const scores = JSON.parse(await read('scores.json'));
+  assert.deepEqual([scores[0].validation, scores[0].fairness.status, scores[0].difficulty.status], ['complete', 'passed', 'passed']);
+  /* a harden export has none of this */
+  const hard = await makeWorld(t);
+  const ran = await hard.run();
+  const old = await hard.pipeline.export(ran.id);
+  const oldZip = await packageEngine.readZip(new Uint8Array(Buffer.from(old.zipBase64, 'base64')));
+  const oldNames = [...oldZip.entries.keys()].map(name => name.slice(name.indexOf('/') + 1));
+  for (const absent of ['brief.json', 'freeze-1.json', 'packet-manifest.json', 'SHA256SUMS.txt']) assert.equal(oldNames.includes(absent), false, absent);
+});
+
+test('redaction: while a round runs, the brief, the task type, the answer set and its grades, the reviews, every adjudication and the counts by class, the guideline repair and the reference names are withheld', async t => {
+  const w = await newWorld(t, { rules: permittedFlowRules() });
+  putRefs(w);
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const plain = JSON.stringify(view);
+  /* the finished view carries the things the page shows once the round has ended */
+  for (const shown of ['Facility draw review', 'Whether the borrowing can proceed', 'Proceed in two tranches', 'Draw_Review_Notes.md', '"intended"']) assert.equal(plain.includes(shown), true, `${shown} is in the view`);
+  const redacted = redactPipelineData(view);
+  const text = JSON.stringify(redacted);
+  for (const hidden of ['Facility draw review', 'Whether the borrowing can proceed', 'Proceed in two tranches', 'Draw_Review_Notes', 'Close_Checklist_Guide', 'REF-MARKER', 'Treasury sign-off', 'Hold the borrowing', 'Proceed with the borrowing', 'DESIGNER-GUIDELINE-MARK', 'MECH-SECRET']) assert.equal(text.includes(hidden), false, `${hidden} must be withheld while a round runs`);
+  assert.deepEqual(redacted.design.brief, { withheld: true });
+  assert.deepEqual(redacted.design.taskType, { withheld: true });
+  assert.deepEqual(redacted.design.answerSet, { withheld: true });
+  assert.deepEqual(redacted.design.alternatives, { withheld: true });
+  const attempt = redacted.attempts[0];
+  assert.deepEqual([attempt.answerSet, attempt.taskType, attempt.guidelineRepair], [{ withheld: true }, { withheld: true }, { withheld: true }]);
+  assert.deepEqual(attempt.fairness, { withheld: true }, 'both review stages are inside the fairness record');
+  assert.deepEqual(attempt.screen.lows, { withheld: true });
+  assert.deepEqual(attempt.screen.unexplained, { withheld: true });
+  assert.deepEqual(attempt.test.lows, { withheld: true });
+  for (const pilot of [...attempt.screen.pilots, ...attempt.test.pilots]) assert.deepEqual(pilot.adjudication, { withheld: true });
+  assert.deepEqual(redacted.references.names, { withheld: true });
+  /* what stays: the numbers the page needs to follow the run */
+  assert.equal(attempt.validation, 'complete');
+  assert.deepEqual(attempt.freeze.length, 1);
+  assert.equal(redacted.references.found, 2);
+  assert.equal(attempt.screen.pilots[0].score, 0.2);
+  assert.equal(redacted.config.designMode, 'new');
+  assert.equal(id.length > 0, true);
+});
+
+test('the configuration of GET /api/pipeline: the caps of the reviews, the thresholds, the modes and the least cap of each mode', async t => {
+  const w = await newWorld(t, { server: true });
+  const { config } = (await w.get('/api/pipeline')).json;
+  assert.deepEqual([config.blindReviewCapUsd, config.revealReviewCapUsd, config.applicationCapUsd, config.adjudicationCapUsd, config.repairCapUsd, config.fairnessSetCapUsd], [1.5, 0.5, 0.5, 0.5, 1, 3]);
+  assert.deepEqual([config.goldenMin, config.alternativeMin, config.answerSetGrades, config.maxAlternatives], [0.9, 0.85, 3, 2]);
+  assert.deepEqual([config.designModes, config.defaultDesignMode], [['new', 'harden'], 'new']);
+  assert.deepEqual(config.minCap, { fixedUsd: 20.5, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 });
+  assert.deepEqual(config.minCapByMode.new, config.minCap);
+  assert.deepEqual(config.minCapByMode.harden, { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 });
+  assert.equal(config.minCapFairnessSetUsd, 3);
+  assert.equal(config.attemptReserveUsd, 23.5);
+  assert.deepEqual(config.references.default, { exists: false, found: 0, names: [], bytes: 0, problems: 0, problemList: [] });
+  assert.equal(config.acknowledgements.length, 4);
+  assert.equal(config.fairnessCapUsd, 0.25, 'the single review of the harden mode keeps its cap');
+  assert.equal(P.MODEL_READS_TASK_TEXT.includes('reference documents'), true);
+  assert.match(P.MODEL_READS_TASK_TEXT, /sent to Anthropic as well/);
+});
+
+test('caps and reservations of the new mode: every step of a worst-case attempt fits under the least cap, and the least cap is the sum of the parts', async t => {
+  const { minCapParts, minCapUsd, attemptReserveUsd, APPLICATION_CHECKS } = require('../backend/pipeline/budget.cjs');
+  const parts = minCapParts();
+  const caps = P.CAPS;
+  assert.equal(APPLICATION_CHECKS, 7, 'the reveal clause, and the rule and the quote against the strongest alternative of each of the three traps');
+  /* the classifier, the designer, its repair turn, the blind and the reveal review and the application checks, two repair turns for what the reviews find, three grades of every fixed answer (the golden answer and two alternatives) */
+  assert.equal(parts.fixedUsd, caps.classifyUsd + caps.designUsd + caps.repairUsd + 2 * (caps.blindReviewUsd + caps.revealReviewUsd) + APPLICATION_CHECKS * caps.applicationUsd + 2 * caps.repairUsd + 3 * 3 * caps.graderUsd);
+  assert.equal(parts.fixedUsd, 20.5);
+  assert.equal(parts.perPilotUsd, 2 * caps.graderUsd + caps.adjudicationUsd, 'per pilot: its grader calls and one adjudication call');
+  assert.equal(attemptReserveUsd(), parts.fixedUsd - caps.classifyUsd + 7 * caps.adjudicationUsd);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }), Math.ceil(Math.round(1.15 * (20.5 + 7 * (3 + 1.5)) * 1e6) / 1e4) / 100);
+  assert.equal(minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }), 59.8);
+  assert.equal(P.DEFAULT_CAP_USD, 60);
+  assert.equal(P.DEFAULT_CAP_USD >= minCapUsd({ designCapUsd: 5, pilotCapUsd: 3 }), true, 'the default total cap pays for a full attempt of the new mode at the default caps (59.80)');
+  assert.equal(P.DEFAULT_CAP_USD >= minCapUsd({ designCapUsd: 5, pilotCapUsd: 3, mode: 'harden' }), true, 'and for the harden mode (41.40)');
+  assert.equal(P.DEFAULT_CAP_USD < minCapUsd({ designCapUsd: 5, pilotCapUsd: 3, fairnessSet: true }), true, 'but not with the optional diagnostic suite, which adds USD 3.45 (the page shows the least)');
+  const w = await makeWorld(t);
+  for (const pilotCapUsd of [0.05, 0.5, 1, 3, 10]) {
+    for (const designCapUsd of [0.5, 2, 5, 20]) {
+      const cap = minCapUsd({ designCapUsd, pilotCapUsd });
+      if (cap > P.MAX_CAP_USD) continue;
+      const p = { spentUsd: 0, config: { capUsd: cap }, attempts: [] };
+      const step = (what, reserve, spend = reserve) => { w.pipeline._reserve(p, what, reserve); p.spentUsd += spend; };
+      step('the classifier', caps.classifyUsd);
+      w.pipeline._reserveAttempt(Object.assign(p, { config: { capUsd: cap, designCapUsd } }), 1);
+      step('the designer', designCapUsd);
+      step('the repair turn', caps.repairUsd);
+      for (let k = 0; k < 9; k++) step('a grade of the answer set', caps.graderUsd);
+      for (let k = 0; k < 2; k++) { step('the blind review', caps.blindReviewUsd); step('the reveal', caps.revealReviewUsd); }
+      for (let k = 0; k < APPLICATION_CHECKS; k++) step('the application check', caps.applicationUsd);
+      for (let k = 0; k < 2; k++) step('the repair turn', caps.repairUsd);
+      step('the screen', P.SCREEN_PILOTS * (pilotCapUsd + 2 * caps.graderUsd + caps.adjudicationUsd));
+      step('the test', P.TEST_PILOTS * (pilotCapUsd + 2 * caps.graderUsd + caps.adjudicationUsd));
+      assert.ok(p.spentUsd <= cap + 1e-9, `pilot cap ${pilotCapUsd}, designer cap ${designCapUsd}: spent ${p.spentUsd} of ${cap}`);
+    }
+  }
+});
+
+/* ---- Stop and shutdown inside the new steps ---- */
+
+test('Stop during the blind review, the reveal, the application check, the answer-set grading, an adjudication and a review repair cancels that process; a stop inside the mandatory checks leaves the attempt incomplete', async t => {
+  const hang = { hang: true };
+  const cases = [
+    ['answer-set grade', { extra: [{ cwd: GRADE_CWD, prompt: '<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: hang }] }, /\/runs\/grade-as-1-golden/, 'incomplete'],
+    ['blind review', { blind: hang }, /\/runs\/review-1-1-1/, 'incomplete'],
+    ['reveal', { reveal: hang }, /\/runs\/reveal-1-1-1/, 'incomplete'],
+    ['application check', { reveal: jsonScenario(REVEAL_EXCLUDED), application: hang }, /\/runs\/apply-1-reveal-1-1/, 'incomplete'],
+    ['adjudication', { adjudication: hang }, /\/runs\/adjudicate-p1-/, 'complete'],
+  ];
+  for (const [label, opts, folder, validation] of cases) {
+    const spawned = [];
+    const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], opts), onSpawn: record => spawned.push(record) });
+    const { id } = await w.pipeline.start(w.body({ designMode: 'new' }));
+    await waitFor(() => spawned.some(record => folder.test(record.cwd || '')), { label: `the ${label} to run` });
+    await sleep(80);
+    const view = await w.pipeline.stop(id);
+    assert.equal(view.stage, 'stopped', label);
+    assert.equal(view.result.verdict, 'stopped', label);
+    assert.equal(view.result.validation, validation, label);
+    assert.equal(view.attempts[0].validation, validation, label);
+    assert.equal(w.pipeline.active, null, label);
+    assert.equal(fs.existsSync(path.join(w.workRoot, id)), false, `${label}: the workspace is removed`);
+  }
+  const repairing = await newWorld(t, { rules: newRules(1, [0.2], { reveal: jsonScenario({ ...REVEAL_NONE, disposition: 'unresolved', objectionClass: 'missing_requirement' }), repairs: { missing: { hang: true } } }) });
+  const { id } = await repairing.pipeline.start(repairing.body({ designMode: 'new' }));
+  await waitFor(() => promptRuns(repairing).some(run => run.prompt.includes('Supply what is missing')), { label: 'the review repair to run' });
+  await sleep(80);
+  assert.equal((await repairing.pipeline.stop(id)).stage, 'stopped');
+});
+
+test('shutdown stops a running new-mode pipeline, and the reviewer and every pilot with it', async t => {
+  const rules = newRules(1, [0.2, 0.3], { pilotExtra: [{ delayMs: 60000 }, { delayMs: 60000 }] });
+  const w = await newWorld(t, { rules });
+  const { id } = await w.pipeline.start(w.body({ designMode: 'new' }));
+  await waitFor(async () => (await w.agents.listRounds()).some(row => row.status === 'running'), { label: 'the round to run' });
+  await w.pipeline.shutdown();
+  assert.equal((await w.pipeline.get(id)).stage, 'stopped');
+  assert.equal((await w.pipeline.get(id)).result.validation, 'complete');
+});
+
+/* ---- a few more rules of the reviews and of the start ---- */
+
+test('the reveal: a review that names a missing requirement, a conflict of documents, evidence the pilots cannot reach or a rubric item the packet lacks does not pass as excluded or as no alternative', () => {
+  const { parseReveal, checkReveal } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const corpus = buildCorpus([{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'prompt.txt', text: PROMPT }]);
+  const check = value => checkReveal(parseReveal(JSON.stringify(value)).value, corpus);
+  for (const objectionClass of ['missing_requirement', 'conflicting_authority', 'inaccessible_evidence', 'rubric_requirement_absent_from_packet']) {
+    const excluded = check({ ...REVEAL_EXCLUDED, objectionClass });
+    assert.equal(excluded.disposition, 'unresolved', objectionClass);
+    assert.equal(excluded.needsApplication, false, 'and the application check is not asked for');
+    assert.match(excluded.notes.join(';'), /named a missing requirement/);
+    assert.equal(check({ ...REVEAL_NONE, objectionClass }).disposition, 'unresolved', `${objectionClass}: with no alternative, a class other than none is a contradiction`);
+  }
+  for (const objectionClass of ['overlooked_dependency', 'permitted_discretion', 'equivalent_result']) assert.equal(check({ ...REVEAL_EXCLUDED, objectionClass }).disposition, 'excluded_by_clause', objectionClass);
+});
+
+test('the newest grade of the golden answer follows a guideline repair, and a rejection after the reviews have run is a rejected fairness result, not "not reached"', async t => {
+  const permitted = { alternative: 'Proceed in two tranches', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: false, why: 'The terms leave the tranche structure open.' };
+  const withAlternative = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches', support: 'The terms leave it open', file: 'answers/alt-1.md' }] });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches.\n' }, { path: 'out/brief.json', content: JSON.stringify(withAlternative) }] });
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(permitted), repairs: { alternative: repair }, extra: [{ cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: { resultText: gradeJson(0.7), costUsd: 0.02 } }] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.attempts[0].rejection.kind, 'answer-set');
+  assert.equal(view.attempts[0].fairness.status, 'rejected', 'the reviews had run when the alternative was found to be ungradable');
+  assert.equal(view.attempts[0].fairness.stage2.disposition, 'permitted');
+  /* after a guideline repair the design the page shows carries the golden answer's newest grade */
+  const fixed = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reviseRule(1, adj('intended')), adjudicateOf(1, 1, adj('permitted_alternative'), 'screen'), { cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: [{ resultText: gradeJson(0.91), costUsd: 0.02 }, { resultText: gradeJson(0.93), costUsd: 0.02 }] }],
+    repairs: { evaluator: reviseOnly(1, 'REVISED-ONE') },
+  })] });
+  const done = await fixed.runNew();
+  assert.equal(done.view.stage, 'done', done.view.message);
+  assert.equal(done.view.attempts[0].calibration.score, 0.92);
+  assert.equal(done.view.design.calibration.score, 0.92);
+  assert.equal(done.view.attempts[0].answerSet.answers[0].score, 0.92, 'the newest run of the golden answer');
+  assert.equal(done.view.attempts[0].answerSet.answers[0].runs[0].score, 0.95, 'and the first run is kept');
+});
+
+test('a default reference folder that breaks the rules refuses the start; false starts without it', async t => {
+  const w = await newWorld(t);
+  for (let k = 0; k < 21; k++) put(refDir(w), `n${String(k).padStart(2, '0')}.txt`, `reference ${k}\n`);
+  await assert.rejects(w.pipeline.start(w.body({ designMode: 'new' })), error => error instanceof AgentError && error.status === 400 && /holds 21 files; the limit is 20/.test(error.message));
+  assert.equal((await w.pipeline.list()).config.references.default.problems, 1, 'and the form can say so');
+  assert.deepEqual((await w.pipeline.list()).config.references.default.names, []);
+  const ran = await w.runNew({ referencesDir: false });
+  assert.equal(ran.view.stage, 'done', ran.view.message);
+  assert.equal(ran.view.references.found, 0);
+});
+
+test('a new-mode pipeline with the default caps, every run spending its whole cap, reaches the 5-pilot test and passes it under the default total cap', async t => {
+  const caps = P.CAPS;
+  const spend = value => ({ costUsd: value });
+  const rules = [
+    classifierRule({ answer: NEW_CLASSIFIER, scenario: spend(caps.classifyUsd) }),
+    ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+      designCost: caps.designUsd, graderCost: caps.graderUsd, pilotCost: C.BUDGET_USD.pilotDefault, pilotExtra: [{}, {}, {}, {}, { delayMs: 800 }],
+      blind: jsonScenario(BLIND, spend(caps.blindReviewUsd)), reveal: jsonScenario(REVEAL_NONE, spend(caps.revealReviewUsd)),
+      application: jsonScenario(APPLICATION, spend(caps.applicationUsd)), adjudication: jsonScenario(adjudication('intended'), spend(caps.adjudicationUsd)),
+    }),
+  ];
+  const w = await newWorld(t, { rules });
+  /* no cap given: the defaults */
+  const { id } = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS });
+  const view = await w.pipeline.whenDone(id);
+  assert.equal(view.config.designMode, 'new');
+  assert.equal(view.config.capUsd, P.DEFAULT_CAP_USD);
+  assert.equal(view.config.pilotCapUsd, C.BUDGET_USD.pilotDefault);
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.result.validation, 'complete');
+  assert.equal(view.attempts[0].test.pilots.length, 5);
+  /* classifier 0.5, designer 5, the golden answer graded twice 1.0, the blind review 1.5, the reveal 0.5, the application checks of the rule and of the quote against the strongest alternative, 2 x 0.5;
+     the screen: 2 pilots at 3, 2 grades, 2 adjudications; the test: 5 pilots at 3 (the 5th is stopped and counted at its cap), 4 grades, 4 adjudications */
+  const expected = 0.5 + 5 + 2 * 0.5 + 1.5 + 0.5 + 2 * 0.5 + (2 * 3 + 2 * 0.5 + 2 * 0.5) + (5 * 3 + 4 * 0.5 + 4 * 0.5);
+  assert.ok(Math.abs(view.spentUsd - expected) < 1e-6, `${view.spentUsd} against ${expected}`);
+  assert.ok(view.spentUsd < P.DEFAULT_CAP_USD);
+  /* and the worst case the reservations allow fits under the same cap */
+  assert.equal(view.config.capUsd >= require('../backend/pipeline/budget.cjs').minCapUsd({ designCapUsd: view.config.designCapUsd, pilotCapUsd: view.config.pilotCapUsd }), true);
+});
+
+
+/* ====================================================================== the review of designer v2 (23 findings) */
+
+/* A word-processing file and a spreadsheet that hold `text`, as the bytes the stub writes (base64). */
+const docxBase64 = text => Buffer.from(packageEngine.writeZip([{ name: 'word/document.xml', bytes: new TextEncoder().encode(`<w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`) }])).toString('base64');
+const xlsxBase64 = text => Buffer.from(packageEngine.writeZip([
+  { name: 'xl/sharedStrings.xml', bytes: new TextEncoder().encode(`<sst><si><t>${text}</t></si></sst>`) },
+  { name: 'xl/worksheets/sheet1.xml', bytes: new TextEncoder().encode('<worksheet><sheetData><row><c t="s"><v>0</v></c></row></sheetData></worksheet>') },
+])).toString('base64');
+const newWorldWith = (t, files, rules) => newWorld(t, { files, rules });
+const classifierFor = names => classifierRule({ answer: { ...NEW_CLASSIFIER, worldFiles: [...WORLD_NAMES, ...names] } });
+const REF_PASSAGE = REF_NOTE.slice(20, 220);
+const MEMO_NEW = { Body_Text: ['out/new/Body_Text.docx', { base64: docxBase64(`Memo body, synthetic. ${REF_PASSAGE}`) }], Table_Body: ['out/new/Table_Body.xlsx', { base64: xlsxBase64(`Table body, synthetic. ${REF_PASSAGE}`) }], Rates_Sheet: ['out/new/Rates_Sheet.rtf', `{\\rtf1 Rates memo, synthetic. ${REF_PASSAGE} }\n`], Plain_Note: ['out/new/Plain_Note', `Plain note, synthetic. ${REF_PASSAGE}\n`] };
+
+test('the reference leak guard reaches every kind of file the pilots get: a passage in a new docx, xlsx, rtf or extension-less file, or in an edited file, fails the attempt through the repair turn', async t => {
+  for (const [label, [file, content]] of Object.entries(MEMO_NEW)) {
+    const name = file.replace('out/new/', '');
+    const rules = [classifierFor([]), ...newAttemptRules(1, [0.2], { design: { files: { [file]: content }, trapsExtra: { newFiles: ['Meridian_Lender_Summary.txt', name] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const w = await newWorldWith(t, {}, rules);
+    putRefs(w);
+    const { id, view } = await w.runNew();
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    const first = view.attempts[0];
+    assert.equal(first.outcome, 'rejected', label);
+    assert.equal(first.repaired, true, `${label}: the repair turn was used`);
+    assert.equal(first.rejection.reasons.some(reason => /long passage of the reference documents/.test(reason)), true, `${label}: ${JSON.stringify(first.rejection.reasons)}`);
+    assert.equal(JSON.stringify(first.rejection.reasons).includes(name), false, `${label}: the public reason names no file`);
+    assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), new RegExp(name.replace('.', '\\.')), `${label}: the designer is told which file`);
+    assert.equal(view.attempts[1].outcome, 'passed', label);
+  }
+  /* an edited file: a world file that is a word-processing file */
+  const bodyOf = text => `Side letter, synthetic. The letter says what the side letter says, and it is a file that a trap edits. ${text}`;
+  const edited = { 'out/edited/Side_Letter.docx': { base64: docxBase64(bodyOf(REF_PASSAGE)) } };
+  const extra = { editedFiles: [{ name: 'Facility_Terms.txt', reason: 'The amendment date must differ from the lender summary.' }, { name: 'Side_Letter.docx', reason: 'The letter must carry the amended date.' }] };
+  const rules = [classifierFor(['Side_Letter.docx']), ...newAttemptRules(1, [0.2], { design: { files: edited, trapsExtra: extra }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorldWith(t, { 'Side_Letter.docx': Buffer.from(docxBase64(bodyOf('')), 'base64') }, rules);
+  putRefs(w);
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].rejection.reasons.some(reason => /long passage of the reference documents/.test(reason)), true);
+  assert.equal(view.attempts[1].outcome, 'passed');
+});
+
+test('a byte for byte copy of a reference document, a PDF that has no text to look for, is refused as a pilot file', async t => {
+  const pdf = Buffer.from('%PDF-1.4 synthetic binary \u0000\u0001\u0002 a reference that has no text the guard could read');
+  const copy = { 'out/new/Vendor_Policy_Pack.pdf': { base64: pdf.toString('base64') } };
+  const rules = [classifierFor([]), ...newAttemptRules(1, [0.2], { design: { files: copy, trapsExtra: { newFiles: ['Meridian_Lender_Summary.txt', 'Vendor_Policy_Pack.pdf'] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorldWith(t, {}, rules);
+  putRefs(w, { 'Scan_Notes.pdf': pdf, 'Draw_Review_Notes.md': REF_NOTE });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].repaired, true);
+  assert.equal(view.attempts[0].rejection.reasons.some(reason => /is a copy of withheld material/.test(reason)), true);
+  assert.equal(JSON.stringify(view.attempts[0].rejection.reasons).includes('Vendor_Policy_Pack'), false);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  /* the hash is in the withheld sets, and a task without references (the harden mode keeps none) has none to add */
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const sets = refs => PipelineService.prototype._withheldSets.call({}, { id: 'p1', import: { files: [] }, classification: { withheld: [] }, attempts: [], references: refs }, { texts: {} });
+  const sha = crypto.createHash('sha256').update(pdf).digest('hex');
+  assert.equal(sets({ files: [{ name: 'Scan_Notes.pdf', sha256: sha, bytes: pdf.length }] }).hashes.has(sha), true);
+  assert.equal(sets(null).hashes.size, 0);
+  assert.equal(sets({ files: null }).hashes.size, 0);
+});
+
+test('the reference guard covers the whole reference folder: text beyond the first three million characters is guarded, and what a cap cuts off is named as unscanned', async t => {
+  const { leakWindowSet, containsLeak } = require('../backend/pipeline/safety.cjs');
+  /* the windows: a text the cap leaves out, and the tail of one it cuts, are reported by index */
+  const cut = leakWindowSet(['a'.repeat(100) + ' first text, a few words more to make windows', 'second text that is long enough to make windows of its own, well over forty characters'], 120);
+  assert.deepEqual(cut.cut.map(item => [item.index, item.scanned > 0, item.scanned < item.of]), [[0, true, true], [1, false, true]]);
+  assert.equal(cut.truncated, true);
+  assert.equal(leakWindowSet(['one text long enough to make a window, more than forty characters'], 10000).cut.length, 0);
+  /* the service: the default holds the whole folder (8 MB of text), so a passage of the second of two large references is guarded */
+  const filler = Buffer.from(Array.from({ length: 3_600_000 }, (_, k) => 'abcdefghijklmnopqrstuvwxyz '[(k * 7 + (k >> 5)) % 27]).join('')).toString('utf8');
+  const tail = REF_GUIDE.slice(15, 215);
+  const leak = { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${tail}\n` };
+  const rules = [classifierFor([]), ...newAttemptRules(1, [0.2], { design: { files: leak }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorldWith(t, {}, rules);
+  putRefs(w, { 'A_Large_Reference.txt': filler, 'B_Guide.txt': REF_GUIDE });
+  const { view } = await w.runNew();
+  assert.equal(view.attempts[0].outcome, 'rejected', 'a passage of the file after three million characters of another one is guarded');
+  assert.equal(view.attempts[0].rejection.reasons.some(reason => /long passage of the reference documents/.test(reason)), true);
+  assert.deepEqual(view.references.unscanned, []);
+  assert.equal(view.references.truncated, false);
+  /* a service with a small cap names what it could not look at */
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const small = await newWorldWith(t, {}, newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]));
+  putRefs(small, { 'A_Reference.txt': REF_NOTE, 'B_Reference.txt': REF_GUIDE, 'C_Scan.pdf': Buffer.from('%PDF binary \u0000\u0001') });
+  const limited = new PipelineService({ root: small.root, agents: small.agents, claudeBin: STUB, env: small.env, tmpRoot: small.tmpRoot, referenceScanChars: REF_NOTE.length + 50, confirmFiles: false });
+  const started = await limited.start(small.body({ designMode: 'new' }));
+  const done = await limited.whenDone(started.id);
+  assert.equal(done.references.truncated, true);
+  assert.deepEqual(done.references.unscanned, ['B_Reference.txt', 'C_Scan.pdf'], 'the text the cap cut short and the file with no text are both named');
+  assert.deepEqual(done.references.partial, ['B_Reference.txt']);
+  assert.equal(containsLeak('x', cut.set), false);
+});
+
+/* ---- item 4: the permitted alternative, verified ---- */
+
+const PERMITTED_REVEAL = covers => ({ alternative: 'Proceed in two tranches', alternativeId: 'alt-1', forAlternative: { file: 'Facility_Terms.txt', quote: 'These terms govern every draw decision dated on or after 2025-03-01.' }, againstAlternative: null, objectionClass: 'permitted_discretion', disposition: 'permitted', guidelineCovers: covers, why: 'The terms leave the tranche structure open.' });
+const WITH_ALT = briefFor(1, { permittedAlternatives: [{ answer: 'Proceed in two tranches with cash cover', support: 'The terms leave the tranche structure open', file: 'answers/alt-1.md' }] });
+const ALT_FILES = [{ path: 'out/answers/alt-1.md', content: 'ALT-1 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n' }, { path: 'out/brief.json', content: JSON.stringify(WITH_ALT) }];
+const altGrade = score => ({ cwd: GRADE_CWD, prompt: '<<<ANSWER\\nALT-1 ', scenario: [{ resultText: gradeJson(score), costUsd: 0.02 }, { resultText: gradeJson(score), costUsd: 0.02 }] });
+const goldenRegrade = { cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: [{ resultText: gradeJson(0.93), costUsd: 0.02 }, { resultText: gradeJson(0.93), costUsd: 0.02 }] };
+const rejectedThenPassed = async (t, rules, reasonPattern) => {
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].rejection.kind, 'review');
+  assert.match(view.attempts[0].rejection.reasons[0], reasonPattern);
+  assert.equal(view.attempts[0].screen, null, 'no pilot ran');
+  assert.equal(view.attempts[1].outcome, 'passed');
+  return { w, id, view };
+};
+
+test('a permitted alternative that the design already has, with a graded answer, and that the guideline already accepts, needs no repair', async t => {
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { extra: [altGrade(0.9)], design: { files: { 'out/answers/alt-1.md': ALT_FILES[0].content }, brief: { permittedAlternatives: WITH_ALT.permittedAlternatives } }, reveal: jsonScenario(PERMITTED_REVEAL(true)) });
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const fair = view.attempts[0].fairness;
+  assert.deepEqual([fair.repairs, fair.stage2.evaluations, fair.stage2.disposition, fair.status], [0, 1, 'permitted', 'passed']);
+  assert.equal(fair.stage2.briefApplication.pass, true, 'the brief\'s own clauses were checked for a settled permitted alternative too');
+  assert.deepEqual(view.attempts[0].answerSet.answers.map(item => [item.name, item.passed]), [['golden', true], ['alt-1', true]]);
+});
+
+test('a permitted alternative is not settled by the word "covered": with no graded answer for it the repair is asked for, and a repair that adds nothing usable rejects the attempt', async t => {
+  /* the review says the guideline covers it, but no answer was written: a repair is still needed, and one that does not write the answer fails */
+  const noAnswer = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(PERMITTED_REVEAL(true)), repairs: { alternative: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const first = await rejectedThenPassed(t, noAnswer, /The repair did not write an answer for the permitted alternative/);
+  assert.equal(first.view.attempts[0].fairness.repairs, 1);
+  assert.match(fs.readFileSync(path.join(first.w.priv(first.id), 'attempts', '1', 'feedback.md'), 'utf8'), /out\/answers\//);
+  /* the guideline does not accept it and the repair writes the answer and the brief line but leaves the guideline alone */
+  const noGuideline = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(PERMITTED_REVEAL(false)), repairs: { alternative: { writeFiles: ALT_FILES, resultText: 'repaired', costUsd: 0.02 } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  await rejectedThenPassed(t, noGuideline, /The repair did not add the permitted alternative to the guideline/);
+  /* a repair that changes no file */
+  const nothing = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(PERMITTED_REVEAL(false)), repairs: { alternative: { writeFiles: [], resultText: 'repaired', costUsd: 0.02 } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  await rejectedThenPassed(t, nothing, /The repair changed nothing, so the permitted alternative was not added/);
+});
+
+test('a permitted alternative reported again after its repair resolves when the revised guideline covers it and the answer scores 0.85 or more, and is rejected when it does not', async t => {
+  const rulesFor = (secondCovers, altScore) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reveals('REVISED-ONE', jsonScenario(PERMITTED_REVEAL(secondCovers))), goldenRegrade, altGrade(altScore)],
+    reveal: jsonScenario(PERMITTED_REVEAL(false)), repairs: { alternative: reviseOnly(1, 'REVISED-ONE', { files: ALT_FILES }) },
+  }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  /* the second review reports the same alternative, which the revised guideline now covers: resolved, not rejected */
+  const w = await newWorld(t, { rules: rulesFor(true, 0.9) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const fair = view.attempts[0].fairness;
+  assert.equal(view.attempts[0].outcome, 'passed');
+  assert.deepEqual([fair.repairs, fair.stage2.evaluations, fair.stage2.disposition, fair.status], [1, 2, 'permitted', 'passed']);
+  assert.equal(view.attempts[0].answerSet.answers.find(item => item.name === 'alt-1').grades.every(grade => grade >= 0.85), true);
+  /* the revised guideline still does not cover it in the second review: rejected with the reason that names the missing acceptance */
+  await rejectedThenPassed(t, rulesFor(false, 0.9), /The reviews found an answer that the packet allows, and the guideline does not yet accept it with a graded answer/);
+});
+
+/* ---- item 5: a file nobody could scan is a hit the reviewer must address ---- */
+
+test('a packet file with no readable text is disclosed as not scanned, not judged: the check passes without the reviewer ruling on it, and the view names the file', async t => {
+  const PDF_NAME = 'Scan_Pages.pdf';
+  const pdf = '%PDF-1.4 synthetic binary \u0000\u0001\u0002 no text layer here';
+  const w = await newWorld(t, { files: { [PDF_NAME]: pdf }, rules: [classifierFor([PDF_NAME]), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.equal(attempt.outcome, 'passed');
+  assert.deepEqual(attempt.fairness.stage2.briefApplication.unscanned, [PDF_NAME]);
+  assert.equal(attempt.fairness.stage2.briefApplication.pass, true);
+  const application = promptRuns(w).find(entry => entry.prompt.includes('You are checking whether one quoted clause'));
+  assert.match(application.prompt, /u1 \(Scan_Pages\.pdf\): \(nobody could read this file here, so it was not scanned/);
+  assert.match(application.prompt, /you are not asked to rule on it/);
+});
+
+/* ---- item 7: missing requirements and a different blind answer settle nothing ---- */
+
+test('the reveal: a permitted or equivalent disposition with a missing requirement, a conflict of documents or inaccessible evidence is unresolved too', () => {
+  const { parseReveal, checkReveal } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const corpus = buildCorpus([{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'prompt.txt', text: PROMPT }]);
+  const check = (value, context) => checkReveal(parseReveal(JSON.stringify(value)).value, corpus, context);
+  const equivalent = objectionClass => ({ alternative: 'Hold the borrowing and tell the lender', forAlternative: { file: 'Facility_Terms.txt', quote: CLAUSE }, againstAlternative: null, objectionClass, disposition: 'equivalent_result', guidelineCovers: false, why: 'The same conclusion in other words.' });
+  assert.equal(check(PERMITTED_REVEAL(false)).disposition, 'permitted', 'the control: the quote is in the file');
+  assert.equal(check(equivalent('equivalent_result')).disposition, 'equivalent_result', 'and so is this one');
+  for (const objectionClass of ['missing_requirement', 'conflicting_authority', 'inaccessible_evidence', 'rubric_requirement_absent_from_packet']) {
+    const permitted = check({ ...PERMITTED_REVEAL(false), objectionClass });
+    assert.equal(permitted.disposition, 'unresolved', `permitted with ${objectionClass}`);
+    assert.match(permitted.notes.join(';'), /named a missing requirement/);
+    assert.equal(check(equivalent(objectionClass)).disposition, 'unresolved', `equivalent with ${objectionClass}`);
+  }
+});
+
+test('the reveal: when the blind reviewer reached a different answer, "no alternative" is a contradiction and "equivalent" needs a quote; only a clause that rules the answer out settles it', () => {
+  const { parseReveal, checkReveal, blindDiffers } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const corpus = buildCorpus([{ name: 'Facility_Terms.txt', text: NEW_TERMS(1) }, { name: 'prompt.txt', text: PROMPT }]);
+  const brief = briefFor(1);
+  const other = { ...BLIND, alternative: { answer: 'Proceed in two tranches', support: 'The terms leave it open.' } };
+  const elsewhere = { ...BLIND, governingDocument: 'Cash_Facts.csv' };
+  const check = (value, blind) => checkReveal(parseReveal(JSON.stringify(value)).value, corpus, { blind, brief });
+  assert.equal(blindDiffers(BLIND, brief), false);
+  assert.equal(blindDiffers({ ...BLIND, governingDocument: 'in/FACILITY terms.TXT' }, brief), false, 'the same file by another spelling');
+  assert.equal(blindDiffers(other, brief), true);
+  assert.equal(blindDiffers(elsewhere, brief), true);
+  assert.equal(blindDiffers(null, brief), false);
+  assert.equal(blindDiffers(elsewhere, null), false, 'with no authority file to compare there is nothing to differ from');
+  for (const blind of [other, elsewhere]) {
+    const none = check(REVEAL_NONE, blind);
+    assert.equal(none.disposition, 'unresolved');
+    assert.match(none.notes.join(';'), /blind reviewer reached another answer and the review quotes no clause/);
+    assert.equal(check(REVEAL_NONE, BLIND).disposition, 'no_alternative', 'the control: the same review with the same answer as the brief');
+    /* a clause that rules the answer out is checked, not trusted: it goes to the application check */
+    const ruled = check({ ...REVEAL_NONE, alternative: 'Proceed in two tranches', againstAlternative: { file: 'Facility_Terms.txt', quote: CLAUSE } }, blind);
+    assert.deepEqual([ruled.disposition, ruled.needsApplication], ['excluded_by_clause', true]);
+    const equivalent = { alternative: 'Hold the borrowing and tell the lender', forAlternative: null, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: true, why: 'The same conclusion.' };
+    assert.equal(check(equivalent, blind).disposition, 'unresolved', 'equivalent with no quote');
+    assert.equal(check({ ...equivalent, forAlternative: { file: 'Facility_Terms.txt', quote: CLAUSE } }, blind).disposition, 'equivalent_result', 'equivalent with its quote');
+  }
+});
+
+test('the reveal: a blind reviewer that reached a different answer keeps "no alternative" from passing: the repair is asked for and the second review has to rule the answer out', async t => {
+  const blindOther = jsonScenario({ ...BLIND, alternative: { answer: 'Proceed in two tranches', support: 'The terms leave it open.' } });
+  const rulesFor = second => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: blindOther, reveal: jsonScenario(REVEAL_NONE), extra: [reveals('REVISED-ONE', jsonScenario(second))], repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules: rulesFor(REVEAL_EXCLUDED) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const fair = view.attempts[0].fairness;
+  assert.deepEqual([view.attempts[0].outcome, fair.repairs, fair.stage2.evaluations, fair.stage2.disposition], ['passed', 1, 2, 'excluded_by_clause']);
+  const repair = promptRuns(w).find(run => run.prompt.includes('Supply what is missing'));
+  assert.match(repair.prompt, /Harness: the blind reviewer reached another answer and the review quotes no clause that rules it out/);
+  /* and a second review that still says "no alternative" rejects the attempt */
+  await rejectedThenPassed(t, rulesFor(REVEAL_NONE), /could not settle which answer the files support/);
+});
+
+test('the reveal: an equivalent result whose repair changes the packet is reviewed again on the new packet; with no review left it rejects the attempt', async t => {
+  const equivalent = { alternative: 'Hold the borrowing and tell the lender', forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: false, why: 'The same conclusion in other words.' };
+  const clarified = { ...reviseOnly(1, 'REVISED-ONE'), writeFiles: [{ path: 'out/guideline.md', content: REVISED_GUIDELINE(1, 'REVISED-ONE') }, { path: 'out/new/Meridian_Lender_Summary.txt', content: NEW_SUMMARY(1) + 'The lender summary does not change the facility terms.\n' }] };
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(equivalent), extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), goldenRegrade], repairs: { equivalent: clarified } }) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.equal(reviewRuns(view, 'blind-review').length, 2, 'the packet changed, so a blind reader read the new one');
+  assert.deepEqual([attempt.fairness.repairs, attempt.fairness.stage2.evaluations, attempt.fairness.stage2.disposition], [1, 2, 'no_alternative']);
+  assert.equal(attempt.freeze[0].packetSha256, attempt.fairness.stage1.packetSha256, 'the packet that was frozen is the packet the blind reader read last');
+  assert.deepEqual(attempt.answerSet.answers.find(item => item.name === 'golden').runs.map(run => run.why), ['first grading', 'after the packet changed']);
+  /* an equivalent result on the second review, with a repair that changes the packet again: there is no review left */
+  const again = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario({ ...equivalent, objectionClass: 'none', disposition: 'unresolved', forAlternative: null }), extra: [reveals('REVISED-ONE', jsonScenario(equivalent)), goldenRegrade], repairs: { missing: reviseOnly(1, 'REVISED-ONE'), equivalent: { ...clarified, writeFiles: [{ path: 'out/guideline.md', content: REVISED_GUIDELINE(1, 'REVISED-TWO') }, { path: 'out/new/Meridian_Lender_Summary.txt', content: NEW_SUMMARY(1) + 'A second note, synthetic.\n' }] } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  await rejectedThenPassed(t, again, /The repair changed the packet and there is no review left/);
+});
+
+/* ---- item 8: the dates of the application check ---- */
+
+test('a brief that gives the decision date: the application check is told it, a reviewer that reports the same date passes, and one that reports another date fails the check', async t => {
+  const decision = { ask: 'Whether the borrowing can proceed', mandate: 'Treasury sign-off', authorityFile: 'Facility_Terms.txt', effectiveDate: '2025-03-01', decisionDate: '2025-04-15' };
+  const design = { brief: { decision } };
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design, reveal: jsonScenario(REVEAL_EXCLUDED) }) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].fairness.stage2.application.pass, true);
+  assert.deepEqual(view.attempts[0].fairness.stage2.application.dates, { effective: '2025-03-01', decision: '2025-04-15' });
+  assert.equal(promptRuns(w).filter(run => /the decision is taken on 2025-04-15/.test(run.prompt)).length >= 1, true, 'the application prompt names the date of the brief');
+  assert.equal(view.design.brief.decision.decisionDate, '2025-04-15');
+  /* the reviewer reports another date, with a quote that holds it: not the date of the brief */
+  const other = { ...APPLICATION, inForce: { ...APPLICATION.inForce, decisionDate: '2025-04-20', decisionQuote: { file: 'Meridian_Lender_Summary.txt', quote: 'Draw decision date 2025-04-15.' } } };
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design, reveal: jsonScenario(REVEAL_EXCLUDED), application: jsonScenario(other), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) })];
+  const checked = await newWorld(t, { rules });
+  const result = await checked.runNew();
+  assert.equal(result.view.stage, 'done', result.view.message);
+  assert.equal(result.view.attempts[0].outcome, 'rejected');
+  assert.deepEqual(result.view.attempts[0].fairness.stage2.application.failed, ['inForce']);
+  assert.equal(result.view.attempts[1].outcome, 'passed');
+});
+
+test('the application check: a hierarchy with an unknown relation or no quote fails the check closed, in the review as in the unit', async t => {
+  const hierarchy = value => ({ ...APPLICATION, governs: { ...APPLICATION.governs, hierarchy: value } });
+  for (const [label, value] of [['unknown relation', { higher: 'Policy.pdf', relation: 'overrides', quote: { file: 'Facility_Terms.txt', quote: CLAUSE } }], ['no quote', { higher: 'Policy.pdf', relation: 'implements' }]]) {
+    const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(REVEAL_EXCLUDED), application: jsonScenario(hierarchy(value)), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) })];
+    const w = await newWorld(t, { rules });
+    const { view } = await w.runNew();
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    assert.equal(view.attempts[0].outcome, 'rejected', label);
+    assert.deepEqual(view.attempts[0].fairness.stage2.application.failed, ['governs'], label);
+  }
+});
+
+/* ---- item 9: the floor of a quote ---- */
+
+test('findQuote: a quote of a clause or a date needs 40 characters or a whole sentence of 20; a wrong file name fails; typography is folded and case is kept', () => {
+  const { buildCorpus, findQuote, datesIn, wholeSentence } = require('../backend/pipeline/quotes.cjs');
+  const corpus = buildCorpus([
+    { name: 'Facility_Terms.txt', text: 'Facility terms, synthetic. Available credit is not cash received. The fee is due monthly; the holder may "waive" it with notice to the lender. Clause 4 was amended on 2025-03-01.\n' },
+    { name: 'Other_Terms.txt', text: 'Other terms, synthetic. Notice must be written and signed by the holder before it counts.\n' },
+  ]);
+  const STRICT = { strict: true };
+  /* the default floor is the old one: 20 characters anywhere */
+  assert.equal(findQuote('the fee is due monthly', corpus, undefined), '', 'case is kept: the file says "The fee"');
+  assert.equal(findQuote('The fee is due monthly', corpus), 'Facility_Terms.txt');
+  assert.equal(findQuote('too short', corpus), '');
+  /* strict: a fragment of 20 to 39 characters that is not a sentence fails, however many files hold it */
+  assert.equal(findQuote('The fee is due monthly', corpus, undefined, STRICT), '', 'a 22 character fragment that runs on in the file');
+  assert.equal(findQuote('Notice must be written', corpus, undefined, STRICT), '');
+  /* a whole sentence of 20 characters or more passes, a fragment at the start or the end of a sentence does not */
+  assert.equal(findQuote('Available credit is not cash received.', corpus, undefined, STRICT), 'Facility_Terms.txt');
+  assert.equal(findQuote('Available credit is not cash received', corpus, undefined, STRICT), '', 'without its full stop it ends inside the sentence');
+  assert.equal(findQuote('credit is not cash received.', corpus, undefined, STRICT), '', 'and a start inside the sentence fails');
+  /* 40 characters or more pass wherever they stand */
+  assert.equal(findQuote('The fee is due monthly; the holder may "waive" it', corpus, undefined, STRICT), 'Facility_Terms.txt');
+  assert.equal(findQuote('The fee is due monthly; the holder may \u201cwaive\u201d it', corpus, undefined, STRICT), 'Facility_Terms.txt', 'typographic quotation marks are folded');
+  assert.equal(findQuote('the holder may "waive" it with notice to the lender', corpus, undefined, STRICT), 'Facility_Terms.txt', 'a long fragment from the middle');
+  /* the file is bound: a quote of another file, or of a file that is not in the corpus, finds nothing */
+  assert.equal(findQuote('Available credit is not cash received.', corpus, 'Facility_Terms.txt', STRICT), 'Facility_Terms.txt');
+  assert.equal(findQuote('Available credit is not cash received.', corpus, 'Other_Terms.txt', STRICT), '');
+  assert.equal(findQuote('Available credit is not cash received.', corpus, 'No_Such_File.txt', STRICT), '', 'no fall back to the whole packet');
+  assert.equal(findQuote('Available credit is not cash received.', corpus, '', STRICT), '', 'an empty name is a name');
+  assert.equal(findQuote('Available credit is not cash received.', corpus), 'Facility_Terms.txt', 'left out, the name searches every document');
+  assert.equal(wholeSentence('One. Two is here.', 5, 12), true);
+  assert.equal(wholeSentence('One. Two is here.', 6, 11), false);
+  /* the dates a text holds, as ISO dates; a date that does not exist is not one */
+  assert.deepEqual(datesIn('Clause 4 was amended on 2025-03-01 and again on 1st April 2025 and on May 3, 2025.').sort(), ['2025-03-01', '2025-04-01', '2025-05-03']);
+  assert.deepEqual(datesIn('Dated 2025-02-30 and 31 February 2025.'), []);
+});
+
+/* ---- item 10: every trap's claims are application-checked ---- */
+
+/* the design of a two-trap task: the second trap has its own rule, wrong path and strongest alternative, and the controls the brief needs */
+function twoTrapDesign() {
+  const T2 = { id: 't2', title: 'Amended clause date', mechanism: 'MECH-SECRET-2 the amendment moves the date', files: ['Facility_Terms.txt'], decoy: 'DECOY-SECRET-2 old date', correctValue: 'CORRECT-SECRET-2', wrongValue: 'WRONG-SECRET-2' };
+  const brief = briefFor(1);
+  const second = JSON.parse(JSON.stringify(brief.traps[0]));
+  Object.assign(second, { id: 't2', primary: false });
+  second.rule = { file: 'Facility_Terms.txt', clause: 'Clause 4 was amended on 2025-03-01.' };
+  second.wrongPath = { reasoning: 'Reads the clause as it stood before the amendment.', action: 'Draw in full', figures: [{ label: 'Second', value: 7, tolerance: 0 }] };
+  second.correctPath = { reasoning: 'Reads the amended clause.', action: 'Hold the borrowing', figures: [{ label: 'Second', value: 1, tolerance: 0 }] };
+  second.strongestAlternative = { answer: 'Draw half now', whyRejected: 'These terms govern every draw decision dated on or after 2025-03-01.' };
+  const control = (scenario, action, value, changes, extra = {}) => ({ scenario, action, figures: [{ label: 'Usable cash', value, tolerance: 1 }], changesDecision: changes, ...extra });
+  const controls = [control('baseline', 'Hold the borrowing', 1250, false), control('primary_wrong', 'Proceed with the borrowing', 3050, true), control('secondary_wrong', 'Draw in full', 1250, true, { trap: 't2' }), control('combined_wrong', 'Draw in full and proceed', 3050, true)];
+  return { brief: { traps: [...brief.traps, second], controls }, trapsExtra: { traps: [NEW_TRAP, T2] } };
+}
+
+test('every trap of the brief has its rule and its strongest alternative application-checked, not only the primary one: two traps are four checks, and a failure names the trap and the part', async t => {
+  const design = twoTrapDesign();
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design }) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual(view.design.brief.traps.map(trap => trap.id), ['t1', 't2']);
+  assert.equal(view.attempts[0].fairness.stage2.briefApplication.count, 4);
+  assert.equal(view.attempts[0].fairness.stage2.briefApplication.pass, true);
+  /* the second trap's whyRejected clause does not govern: the check fails there and nowhere else */
+  const notGoverning = { ...APPLICATION, governs: { ...APPLICATION.governs, answer: 'no' } };
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design, extra: [{ cwd: '/runs/apply-1-', prompt: 'Draw half now', scenario: jsonScenario(notGoverning) }], repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const failing = await newWorld(t, { rules });
+  const result = await failing.runNew();
+  assert.equal(result.view.stage, 'done', result.view.message);
+  const first = result.view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.deepEqual(first.fairness.stage2.briefApplication.failures, [{ trap: 2, part: 'whyRejected', failed: ['governs'] }]);
+  assert.equal(result.view.attempts[1].outcome, 'passed');
+});
+
+test('on start a new-mode attempt that the companion left in its checks is closed as incomplete in all its parts: validation, fairness and the blind review', async t => {
+  const w = await makeWorld(t);
+  const id = 'pln-dddddddddddd';
+  const dir = path.join(w.root, 'private', 'pipelines', id);
+  fs.mkdirSync(dir, { recursive: true });
+  const attempt = n => ({ n, outcome: 'in-progress', validation: 'pending', screen: null, test: null, fairness: { status: 'pending', stage1: { state: 'running', tries: 1, runs: 0 }, stage2: null, repairs: 0 }, difficulty: { status: 'pending', screen: null, test: null }, guidelineRepair: { outcome: 'pending' } });
+  const state = { schema: 'finance-pipeline', schemaVersion: 1, id, label: 'Old new-mode run', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', endedAt: null, stage: 'review', message: 'Reviewing', error: null, waiting: null, source: { kind: 'folder', name: 'task' }, config: { capUsd: 60, designMode: 'new' }, spentUsd: 1, ledger: [], attempts: [attempt(1)], redesigns: 0, attempt: 1, design: null, result: null };
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state));
+  const service = createPipelineService({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot });
+  const view = await service.get(id);
+  assert.equal(view.stage, 'failed');
+  assert.equal(view.result.validation, 'incomplete', 'a run that was cut off in its checks is never a complete one');
+  const [closed] = view.attempts;
+  assert.deepEqual([closed.outcome, closed.validation, closed.fairness.status, closed.fairness.stage1.state], ['failed', 'incomplete', 'incomplete', 'incomplete']);
+  assert.equal(closed.guidelineRepair.outcome, 'failed');
+});
+
+/* ---- item 11: what the reviewers are shown of a long packet ---- */
+
+test('packetView: the files that carry the rules are served first and in full, the others share the rest, every cut is marked and named, and a quote beyond the cut is not found', () => {
+  const { packetView, priorityFiles } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus, findQuote } = require('../backend/pipeline/quotes.cjs');
+  const rule = 'The late fee is waived whenever the holder gives written notice before the due date.';
+  const authority = `Authority terms, synthetic. ${'Filler sentence about nothing in particular. '.repeat(100)}${rule}\n`;
+  const evidence = `Evidence log, synthetic. ${'An entry of the log. '.repeat(100)}Final entry.\n`;
+  const decoy = `Decoy memo, synthetic. ${'Words that mean little. '.repeat(900)}The very last words of the decoy.\n`;
+  const documents = [{ name: 'Decoy_Memo.txt', text: decoy }, { name: 'Authority_Terms.txt', text: authority }, { name: 'Evidence_Log.txt', text: evidence }, { name: 'Scan.pdf', text: '' }];
+  const brief = { decision: { authorityFile: 'Authority_Terms.txt' }, files: [{ name: 'Evidence_Log.txt', role: 'evidence' }, { name: 'Decoy_Memo.txt', role: 'decoy' }], traps: [{ rule: { file: 'Authority_Terms.txt' } }] };
+  assert.deepEqual(priorityFiles(brief), ['Authority_Terms.txt', 'prompt.txt', 'Evidence_Log.txt', 'Authority_Terms.txt'], 'the prompt of the task comes right after the authority file');
+  const cap = 12000;
+  const view = packetView(documents, cap, priorityFiles(brief));
+  const shown = name => view.shown.find(item => item.name === name).text;
+  assert.equal(shown('Authority_Terms.txt'), authority, 'the clause-bearing file is shown in full');
+  assert.equal(shown('Evidence_Log.txt'), evidence);
+  assert.deepEqual(view.cut, ['Decoy_Memo.txt'], 'only the file nobody relies on is cut, and it is named');
+  assert.equal(shown('Decoy_Memo.txt').length < decoy.length, true);
+  assert.match(view.block, /\[file cut here: \d+ more characters are not shown to you\]/);
+  assert.equal((view.block.match(/\[file cut here/g) || []).length, 1, 'one marker for one cut');
+  assert.match(view.block, /--- Scan\.pdf ---\n\(no readable text\)/);
+  assert.equal(view.block.length <= cap + 1500, true, 'the block stays about the size of the cap');
+  /* nothing is cut when everything fits */
+  const small = packetView([{ name: 'A.txt', text: 'A short text, synthetic.\n' }], 5000, []);
+  assert.deepEqual(small.cut, []);
+  assert.doesNotMatch(small.block, /file cut here/);
+  /* a quote is held to what was shown: the last words of the decoy lie beyond the cut and fail, the rule in the authority file is found */
+  const corpus = buildCorpus(view.shown);
+  assert.equal(findQuote(rule, corpus, 'Authority_Terms.txt', { strict: true }), 'Authority_Terms.txt');
+  assert.equal(findQuote('The very last words of the decoy.', corpus, 'Decoy_Memo.txt', { strict: true }), '', 'beyond the cut');
+  assert.equal(findQuote('The very last words of the decoy.', buildCorpus(documents), 'Decoy_Memo.txt', { strict: true }), 'Decoy_Memo.txt', 'the whole file does hold it');
+});
+
+test('a quote that lies in the part of a file the reviewers were not shown does not count, and the view names the file that was cut', async t => {
+  /* a long authority file: the clause sits at its very end, beyond what the reveal reviewer is shown of it */
+  const filler = 'Filler sentence about nothing in particular, synthetic. '.repeat(800);
+  const longTerms = `${NEW_TERMS(1).trim()} ${filler}The final clause is that every draw needs a second signature from the treasurer.\n`;
+  const end = { ...REVEAL_EXCLUDED, againstAlternative: { file: 'Facility_Terms.txt', quote: 'The final clause is that every draw needs a second signature from the treasurer.' } };
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/edited/Facility_Terms.txt': longTerms } }, reveal: jsonScenario(end), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.fairness.stage2.disposition, 'unresolved');
+  assert.deepEqual(first.fairness.stage2.cut, ['Facility_Terms.txt']);
+  const reveal = promptRuns(w).find(run => /\[file cut here: \d+ more characters are not shown to you\]/.test(run.prompt));
+  assert.ok(reveal, 'the reviewer was told where the file was cut');
+});
+
+/* ---- config.references.default.problemList ---- */
+
+test('config.references.default lists its problems as short plain sentences next to the count: the file or folder and the reason, at most 20, never a word of a file', async t => {
+  const w = await newWorld(t, { server: true });
+  const none = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.deepEqual([none.problems, none.problemList], [0, []], 'a folder that is not there has no problems');
+  /* a folder with a good file and files that cannot be used */
+  putRefs(w, { 'Draw_Review_Notes.md': REF_NOTE, 'Odd_Data.bin': 'REF-MARKER-BIN secret words of a file that cannot be used', 'Scratch.xyz': 'REF-MARKER-XYZ more words' });
+  let shown = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.equal(shown.problems, 2, 'the count stays a number');
+  assert.deepEqual(shown.problemList, ['The reference file Odd_Data.bin is not one of .md .txt .pdf .docx .xlsx .csv .json', 'The reference file Scratch.xyz is not one of .md .txt .pdf .docx .xlsx .csv .json']);
+  assert.deepEqual([shown.found, shown.names], [0, []], 'a folder with a problem offers no names, as before');
+  assert.equal(JSON.stringify(shown).includes('REF-MARKER'), false, 'no word of any file is in the summary');
+  /* too many files: a sentence about the folder */
+  fs.rmSync(refDir(w), { recursive: true, force: true });
+  for (let k = 0; k < 21; k++) put(refDir(w), `n${String(k).padStart(2, '0')}.txt`, `reference ${k}\n`);
+  shown = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.deepEqual([shown.problems, shown.problemList], [1, ['The reference folder holds 21 files; the limit is 20']]);
+  /* many more files than the folder may hold: one sentence, as the folder is not walked past the limit */
+  for (let k = 21; k < 25; k++) put(refDir(w), `n${String(k).padStart(2, '0')}.txt`, `reference ${k}\n`);
+  shown = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.deepEqual([shown.problems, shown.problemList], [1, ['The reference folder holds more than 20 files']]);
+  /* many problems: the count is all of them, the list is the first 20, each sentence is cut to 200 characters */
+  fs.rmSync(refDir(w), { recursive: true, force: true });
+  for (let k = 0; k < 21; k++) put(refDir(w), `${'long_name_'.repeat(8)}${String(k).padStart(2, '0')}.bin`, 'x\n');
+  shown = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.equal(shown.problems, 21);
+  assert.equal(shown.problemList.length, 20);
+  assert.equal(shown.problemList.every(line => typeof line === 'string' && line.length <= 200 && /^The reference file /.test(line)), true);
+  /* a good folder: names are shown, the list is empty */
+  fs.rmSync(refDir(w), { recursive: true, force: true });
+  putRefs(w);
+  shown = (await w.get('/api/pipeline')).json.config.references.default;
+  assert.deepEqual([shown.problems, shown.problemList, shown.names.length], [0, [], 2]);
+});
+
+/* ====================================================================== round 2 of the review of designer v2 */
+
+/* ---- the supersession scan lists what it finds in full, and finds more ---- */
+
+test('a revision history that ends with the withdrawal: the passage is listed whole, so the wording the harness found reaches the reviewer', () => {
+  const { supersessionHits, applicationPrompt, packetView } = require('../backend/pipeline/review.cjs');
+  const clause = { file: 'Travel_Policy_2023.md', quote: 'Meals are reimbursed up to the daily limit under Section 4.2.' };
+  const history = Array.from({ length: 8 }, (_, k) => `v${k + 1} (${2016 + k}): Travel Policy 2023 revised by Finance; wording tidied, no change to any limit or approver.`).join('\n');
+  const policy = `Travel Policy 2023, synthetic.\nMeals are reimbursed up to the daily limit under Section 4.2.\n\n## Version history\n${history}\nv9 (2026): Travel Policy 2023 withdrawn from 2026-07-01 and replaced by the Expense Guide; it no longer applies to trips.\n`;
+  const documents = [{ name: 'Travel_Policy_2023.md', text: policy }];
+  const hits = supersessionHits(documents, clause);
+  assert.equal(hits.length >= 1, true);
+  const text = hits.map(hit => hit.snippet).join('\n');
+  assert.match(text, /withdrawn from 2026-07-01/);
+  assert.match(text, /no longer applies to trips/);
+  const prompt = applicationPrompt({ clause, alternative: 'Pay the meal in full', decision: 'Whether to pay', decisionDate: '', hits, documents, view: packetView(documents, 44000, [clause.file]) });
+  assert.match(prompt, /withdrawn from 2026-07-01/, 'and the prompt the reviewer is given holds it');
+  /* far apart passages stay apart; a passage that is listed is listed whole, and the list is capped by number and by size, the rest counted */
+  const far = (count, gap) => Array.from({ length: count }, (_, k) => `The Travel Policy 2023 was superseded by notice ${k}.${' Unrelated filler text, repeated to keep the passages apart.'.repeat(gap)}`).join('\n');
+  const separate = supersessionHits([{ name: 'Travel_Policy_2023.md', text: policy }, { name: 'Notices.txt', text: far(3, 30) }], clause);
+  assert.equal(separate.filter(hit => hit.document === 'Notices.txt').length, 3);
+  const wide = supersessionHits([{ name: 'Travel_Policy_2023.md', text: policy }, { name: 'Notices.txt', text: far(60, 40) }], clause);
+  const listed = wide.filter(hit => hit.kind === 'passage');
+  assert.equal(listed.reduce((sum, hit) => sum + hit.snippet.length, 0) <= 36000, true);
+  const summary = wide.find(hit => hit.kind === 'summary');
+  assert.equal(summary.document, 'Notices.txt', 'what is left over is put to the reviewer as one entry for the file');
+  assert.equal(listed.filter(hit => hit.document === 'Notices.txt').length + Number(/^(\d+) more passages/.exec(summary.snippet)[1]), 60, 'every passage is either listed or counted in the entry');
+  assert.equal(listed.every(hit => hit.snippet.length >= 100), true, 'no listed passage is cut short');
+});
+
+test('the supersession scan reads the headings above the clause, the title of its file, the names of other files, and more wording', () => {
+  const { supersessionHits } = require('../backend/pipeline/review.cjs');
+  const policy = { name: 'POL-014.md', text: '# Travel and Expense Policy\n\n## 4.2 Meals\nMeals are reimbursed up to the daily limit set by Finance for each city.\n' };
+  const clause = { file: 'POL-014.md', quote: 'Meals are reimbursed up to the daily limit set by Finance for each city.' };
+  const find = (...rest) => supersessionHits([policy, ...rest], clause);
+  /* a number in the heading above the clause sentence (the sentence does not carry it) */
+  for (const text of ['Notice to staff. Section 4.2 is rescinded with effect from today.', 'Clause 4.2 is withdrawn.', 'Section 4.2 (Meals) is superseded.']) assert.equal(find({ name: 'Notice.txt', text }).length >= 1, true, text);
+  /* the title of the clause's file */
+  assert.equal(find({ name: 'Notice.txt', text: 'The Travel and Expense Policy is rescinded from today.' }).length, 1);
+  /* wording the first list did not have */
+  for (const wording of ['is revoked', 'is hereby revoked in its entirety', 'withdrew the meal allowance', 'has expired', 'was succeeded by the Expense Guide', 'is annulled', 'has been abolished', 'has been deleted', 'is obsoleted', 'is out of date']) {
+    assert.equal(find({ name: 'Notice.txt', text: `The Travel and Expense Policy ${wording}.` }).length >= 1, true, wording);
+  }
+  assert.equal(find({ name: 'Notice.txt', text: 'Effective 2026-07-01, Section 4.2 is dropped.' }).length >= 1, true);
+  assert.equal(find({ name: 'Notice.txt', text: 'With effect from 1 July 2026 Section 4.2 of the Travel and Expense Policy reads differently.' }).length >= 1, true);
+  assert.equal(find({ name: 'Notice.txt', text: 'The Travel and Expense Policy was super-\nseded last week.' }).length, 1, 'a word split by a hyphen at the end of a line');
+  /* the name of another file that carries the policy's name: its words count without naming the policy again, and a withdrawal in the name itself is a passage */
+  const named = supersessionHits([{ name: 'Travel_Policy_2023.md', text: 'Travel policy 2023, synthetic. Meals are reimbursed up to the daily limit under Section 4.2.\n' }, { name: 'Travel_Policy_Update_2026.txt', text: 'Update notice. The daily meal limit is replaced by 40 per day for all trips from 1 January 2026.\n' }, { name: 'Travel_Policy_2023_superseded.md', text: 'Plain body with nothing in it.\n' }], { file: 'Travel_Policy_2023.md', quote: 'Meals are reimbursed up to the daily limit under Section 4.2.' });
+  assert.deepEqual(named.map(hit => hit.document).sort(), ['Travel_Policy_2023_superseded.md', 'Travel_Policy_Update_2026.txt']);
+  assert.match(named.find(hit => hit.document === 'Travel_Policy_2023_superseded.md').snippet, /the name of the file/);
+  /* wording about something else is no hit */
+  assert.equal(find({ name: 'Other.txt', text: 'The parking policy was revised in 2024.' }).length, 0);
+  /* when there are more passages than the list holds, the wording that ends or replaces the policy is listed first and the weakest is left to the count */
+  const history = Array.from({ length: 45 }, (_, k) => ({ name: `History_${String(k).padStart(2, '0')}.md`, text: 'History. The Travel and Expense Policy was revised in a past year.\n' }));
+  const crowded = find(...history, { name: 'Z_Notice.txt', text: 'Notice. The Travel and Expense Policy is withdrawn from today.\n' });
+  assert.equal(crowded[0].document, 'Z_Notice.txt', 'the withdrawal is the first passage');
+  assert.equal(crowded.filter(hit => hit.kind === 'passage').length, 40);
+  assert.equal(crowded.filter(hit => hit.kind === 'summary').length, 6, 'the six weakest are counted, one entry for each of their files');
+});
+
+test('the text taken from Office files holds the parts where a status is written: sheet names, comments, text boxes, the watermark of a header, notes and properties; a notice with another extension is read as text', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-pipeline-extract-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { extractText, readerKind } = require('../backend/pipeline/extract.cjs');
+  const enc = text => new TextEncoder().encode(text);
+  const zip = (name, parts) => { const file = path.join(dir, name); fs.writeFileSync(file, Buffer.from(packageEngine.writeZip(parts.map(([n, text]) => ({ name: n, bytes: enc(text) }))))); return file; };
+  const sheet = '<worksheet><sheetData><row><c t="s"><v>0</v></c><c><v>60</v></c></row></sheetData></worksheet>';
+  const xlsx = zip('Limits.xlsx', [
+    ['xl/workbook.xml', '<workbook><sheets><sheet name="Travel Policy 2023 (superseded)" sheetId="1"/></sheets></workbook>'],
+    ['xl/sharedStrings.xml', '<sst><si><t>Daily meal limit</t></si></sst>'], ['xl/worksheets/sheet1.xml', sheet],
+    ['xl/comments1.xml', '<comments><commentList><comment ref="B1"><text><r><t>Section 4.2 is withdrawn; use the 2026 sheet.</t></r></text></comment></commentList></comments>'],
+    ['xl/drawings/drawing1.xml', '<xdr:wsDr><xdr:sp><xdr:txBody><a:p><a:r><a:t>This sheet is replaced by the 2026 limits.</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>'],
+  ]);
+  const text = await extractText(xlsx);
+  for (const part of ['Travel Policy 2023 (superseded)', 'Daily meal limit', 'Section 4.2 is withdrawn', 'replaced by the 2026 limits']) assert.match(text, new RegExp(part.replace(/[()]/g, '\\$&')), part);
+  const docx = zip('Policy.docx', [
+    ['word/document.xml', '<w:document><w:body><w:p><w:r><w:t>Travel Policy 2023. Meals are reimbursed up to the daily limit.</w:t></w:r></w:p></w:body></w:document>'],
+    ['word/header1.xml', '<w:hdr><w:p><w:r><w:pict><v:shape><v:textpath string="SUPERSEDED"/></v:shape></w:pict></w:r></w:p></w:hdr>'],
+    ['word/comments.xml', '<w:comments><w:comment><w:p><w:r><w:t>Replaced by the Expense Guide.</w:t></w:r></w:p></w:comment></w:comments>'],
+    ['docProps/core.xml', '<cp:coreProperties><dc:title>Travel Policy 2023</dc:title><cp:contentStatus>Withdrawn</cp:contentStatus></cp:coreProperties>'],
+  ]);
+  const body = await extractText(docx);
+  for (const part of ['SUPERSEDED', 'Replaced by the Expense Guide', 'Withdrawn', 'Meals are reimbursed']) assert.match(body, new RegExp(part), part);
+  const pptx = zip('Deck.pptx', [
+    ['ppt/slides/slide1.xml', '<p:sld><a:p><a:r><a:t>Travel Policy 2023</a:t></a:r></a:p></p:sld>'],
+    ['ppt/notesSlides/notesSlide1.xml', '<p:notes><a:p><a:r><a:t>Speaker note: the policy is withdrawn.</a:t></a:r></a:p></p:notes>'],
+    ['ppt/comments/comment1.xml', '<p:cmLst><p:cm><p:text>Do not use after June.</p:text></p:cm></p:cmLst>'],
+  ]);
+  const deck = await extractText(pptx);
+  assert.match(deck, /the policy is withdrawn/);
+  assert.match(deck, /Do not use after June/);
+  /* notices saved as other kinds of text are read as text; a binary is not */
+  const notice = 'Notice. The Travel Policy 2023 is withdrawn from today.\n';
+  for (const name of ['Notice', 'Notice.eml', 'Notice.text', 'Notice.xhtml', 'Notice.svg', 'Notice.tex']) {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, notice);
+    assert.equal(await extractText(file), notice, name);
+    assert.equal(readerKind(name, notice), 'text', name);
+  }
+  fs.writeFileSync(path.join(dir, 'Notice.rtf'), '{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}Notice. The Travel Policy 2023 is \\b withdrawn\\b0  from today.\\par}\n');
+  assert.equal(await extractText(path.join(dir, 'Notice.rtf')), 'Notice. The Travel Policy 2023 is withdrawn from today.');
+  fs.writeFileSync(path.join(dir, 'Blob.dat2'), Buffer.from([1, 2, 0, 3, 4, 5]));
+  assert.equal(await extractText(path.join(dir, 'Blob.dat2')), null);
+  fs.writeFileSync(path.join(dir, 'Scan.pdf'), '%PDF-1.4 text that looks readable but is a PDF');
+  assert.equal(await extractText(path.join(dir, 'Scan.pdf')), null);
+  /* how a reviewer can read each kind */
+  assert.deepEqual(['a.txt', 'a.csv', 'a.docx', 'a.rtf', 'a.pdf', 'a.png', 'a.xls', 'a.zip', 'Plain'].map(name => readerKind(name, name === 'a.docx' || name === 'a.rtf' || name === 'Plain' || name.endsWith('.txt') || name.endsWith('.csv') ? 'text' : null)), ['text', 'text', 'rendered', 'rendered', 'native', 'native', 'unreadable', 'unreadable', 'text']);
+  assert.equal(readerKind('empty.docx', ''), 'unreadable', 'a Word file with no text is not readable');
+});
+
+test('packetView: a packet that fits is shown whole, the files in priority come first and in full, the rest share what is left, and a file that holds supersession wording can be served after them', () => {
+  const { packetView } = require('../backend/pipeline/review.cjs');
+  /* five lead files of 7,600 characters and a decoy: 38,818 in all, inside the cap of 44,000 */
+  const lead = Array.from({ length: 5 }, (_, k) => ({ name: `Lead_${k + 1}.txt`, text: `Lead ${k + 1}. ${'Sentence of the lead file. '.repeat(280)}End of lead ${k + 1}.\n` }));
+  const decoy = { name: 'Decoy.txt', text: 'Decoy. Short.\n' };
+  const all = [...lead, decoy];
+  const fits = packetView(all, 44000, lead.map(item => item.name));
+  assert.deepEqual(fits.cut, [], 'a packet that fits in the cap is not cut');
+  for (const item of all) assert.equal(fits.shown.find(entry => entry.name === item.name).text, item.text);
+  /* over the cap: the first file in the priority list is served first, and in full; the others get what is left, never less than a floor of 500 */
+  const big = { name: 'Clause_File.txt', text: `Clause file. ${'Filler about nothing in particular. '.repeat(380)}The rule is stated here, at the end of the file.\n` };
+  assert.equal(big.text.length > 12000, true);
+  const crowded = [...lead, big, decoy];
+  const view = packetView(crowded, 44000, [big.name, ...lead.map(item => item.name)]);
+  assert.equal(view.shown.find(entry => entry.name === big.name).text, big.text, 'the clause file comes first and whole');
+  assert.equal(view.cut.includes(big.name), false);
+  assert.equal(view.shown.find(entry => entry.name === 'Decoy.txt').text, decoy.text);
+  assert.equal(view.shown.every(entry => entry.text.length >= Math.min(500, (crowded.find(item => item.name === entry.name) || {}).text.length)), true);
+  assert.equal(view.shown.reduce((sum, entry) => sum + entry.text.length, 0) <= 44000 + 2500, true, 'about the cap, and no more');
+  /* the edge of a packet that fits: a huge priority file followed by small ones, 44,000 characters in all, is shown whole and not cut to make room for floors */
+  const huge = { name: 'Huge.txt', text: `Huge. ${'Word. '.repeat(7300)}\n` };
+  const small = [1, 2, 3].map(k => ({ name: `Small_${k}.txt`, text: `Small ${k}.\n` }));
+  const edge = [huge, ...small];
+  assert.equal(huge.text.length + small.reduce((sum, item) => sum + item.text.length, 0) <= 44000, true);
+  const whole = packetView(edge, 44000, edge.map(item => item.name));
+  assert.deepEqual(whole.cut, []);
+  assert.equal(whole.shown[0].text, huge.text);
+  /* with the clause file not in the priority list it gets only a share: the order is the caller's */
+  const unranked = packetView(crowded, 44000, lead.map(item => item.name));
+  assert.equal(unranked.cut.includes(big.name) || unranked.cut.length > 0, true);
+});
+
+test('headTail shows the start and the end of a long text with a marker for what is between, and says how much that is', () => {
+  const { headTail } = require('../backend/pipeline/review.cjs');
+  assert.deepEqual(headTail('short', 100), { text: 'short', parts: ['short'], hidden: 0 });
+  const text = `START-${'x'.repeat(1000)}-END`;
+  const shown = headTail(text, 200);
+  assert.equal(shown.hidden, text.length - shown.parts[0].length - shown.parts[1].length);
+  assert.match(shown.text, new RegExp(`^START-x+\\n\\[cut here: ${shown.hidden} characters are not shown to you\\]\\nx*-END$`));
+  assert.equal(shown.parts[0].length + shown.parts[1].length, 200);
+});
+
+test('the reveal and the adjudication prompts mark what they cut, and the check holds a quote from a long answer to what was shown of it', () => {
+  const R = require('../backend/pipeline/review.cjs');
+  const report = {};
+  const guideline = `Guideline start. ${'Points. '.repeat(3500)}ACCEPTABLE-VARIATION at the end.`;
+  const prompt = R.revealPrompt({ prompt: 'The task, synthetic.', guideline, goldenAnswer: 'Golden, synthetic.', brief: { decision: { authorityFile: 'A.txt' }, files: [], traps: [] }, blind: { answer: 'x' }, documents: [{ name: 'A.txt', text: 'File, synthetic.' }], report });
+  assert.match(prompt, /\[cut here: \d+ characters are not shown to you\]/);
+  assert.match(prompt, /ACCEPTABLE-VARIATION at the end/, 'the end of a long guideline is shown');
+  assert.deepEqual(report.cut, ['the guideline']);
+  const answer = `Opening of the answer. ${'Working. '.repeat(4000)}FINAL-RECOMMENDATION: proceed with the borrowing in two tranches.`;
+  const adjReport = {};
+  const adjudication = R.adjudicationPrompt({ guideline: 'g', brief: { traps: [] }, documents: [{ name: 'A.txt', text: 'File, synthetic.' }], answer, graderReason: 'r', score: 0.2, hint: {}, bar: 0.45, report: adjReport });
+  assert.match(adjudication, /FINAL-RECOMMENDATION: proceed with the borrowing in two tranches/);
+  assert.deepEqual(adjReport.cut, ['the pilot answer']);
+  const tail = { class: 'intended', adoptedAction: 'FINAL-RECOMMENDATION: proceed with the borrowing in two tranches.', rationale: 'Opening of the answer. Working. Working.', matchesBrief: 'It matches the wrong path of the brief.', guidelineItem: '', clause: null, why: '' };
+  assert.equal(R.checkAdjudication(tail, { answerText: answer, answerParts: adjReport.answerParts, corpus: [] }).class, 'intended');
+  const middle = { ...tail, adoptedAction: `Working. ${'Working. '.repeat(3000)}`.slice(0, 120), rationale: 'Opening of the answer. Working. Working.' };
+  const hidden = `${'Working. '.repeat(2000)}`.slice(0, 60);
+  assert.equal(R.checkAdjudication({ ...tail, adoptedAction: hidden.trim() + ' nothing here' }, { answerText: answer, answerParts: adjReport.answerParts, corpus: [] }).class, 'unsupported');
+  assert.equal(typeof middle.adoptedAction, 'string');
+});
+
+test('findQuote tries every place a quote occurs, and reads a list item, a line under a heading, a table cell and a closing quote as the start and end of a sentence', () => {
+  const { buildCorpus, findQuote, datesAt, datesIn } = require('../backend/pipeline/quotes.cjs');
+  const strict = { strict: true };
+  const corpus = name => buildCorpus([{ name: 'F.md', text: name }]);
+  /* the first place is in the middle of a sentence, the second is a whole sentence */
+  assert.equal(findQuote('Notice is required here.', corpus('Prior Notice is required here. Other words. Notice is required here. End.'), undefined, strict), 'F.md');
+  assert.equal(findQuote('Notice is required here.', corpus('Prior Notice is required here and there.'), undefined, strict), '', 'only the middle of a sentence');
+  const markdown = '## 4.2 Sweeps\nCash sweeps need approval.\n- Notice is required here.\n| Rule | Cash sweeps need approval too. |\n1. Reports are due monthly.\n"He said the fee is waived."\n';
+  for (const quote of ['Cash sweeps need approval.', 'Notice is required here.', 'Cash sweeps need approval too.', 'Reports are due monthly.', 'He said the fee is waived.']) assert.equal(findQuote(quote, corpus(markdown), undefined, strict), 'F.md', quote);
+  assert.equal(findQuote('sweeps need approval too', corpus(markdown), undefined, strict), '', 'a fragment is still not a sentence');
+  /* the dates the harness reads, with their places, and the ones it does not */
+  assert.deepEqual(datesAt('Effective the 3rd day of March, 2025 and again 2026-01-02.').map(item => item.iso), ['2025-03-03', '2026-01-02']);
+  assert.deepEqual(datesIn('03/01/2025, 20250301, March 2025 and 2025-02-30'), []);
+});
+
+test('the figures of a brief are numbers: a blank, a currency sign alone, a list or a European comma is refused, and 1,250.50 and 1 250 are read', () => {
+  const brief = figures => JSON.stringify({ ...briefFor(1), traps: [{ ...briefFor(1).traps[0], correctPath: { reasoning: 'r', action: 'Hold the borrowing', figures: [{ label: 'Usable cash', value: 1250, tolerance: 1 }] }, wrongPath: { reasoning: 'w', action: 'Hold the borrowing', figures }, changesDecision: 'required_calculation' }] });
+  const parse = figures => parseBrief(brief(figures), { traps: [{ id: 't1' }], files: BRIEF_FILES });
+  assert.equal(parse([{ label: 'Usable cash', value: '3,050.50', tolerance: 0 }]).traps[0].wrongPath.figures[0].value, 3050.5);
+  assert.equal(parse([{ label: 'Usable cash', value: ' $3 050 ', tolerance: 0 }]).traps[0].wrongPath.figures[0].value, 3050);
+  assert.equal(parse([{ label: 'Usable cash', value: '-3050', tolerance: 0 }]).traps[0].wrongPath.figures[0].value, -3050);
+  for (const value of ['', '   ', '$', [], [7], '1,5', '1.234,50', 'many', null, true, '(1,250)', '12 34']) {
+    assert.throws(() => parse([{ label: 'Usable cash', value, tolerance: 0 }]), error => error instanceof DesignError && /numeric value/.test(error.message), JSON.stringify(value));
+  }
+  assert.throws(() => parse([{ label: 'Usable cash', value: 3050, tolerance: '1,5' }]), error => error instanceof DesignError && /tolerance/.test(error.message));
+  assert.throws(() => parse([{ label: 'Usable cash', value: 3050, tolerance: [] }]), error => error instanceof DesignError && /tolerance/.test(error.message));
+});
+
+test('blindDiffers: the same file by another spelling is the same file; a different alternative, another governing file or an answer that states the wrong path is a difference', () => {
+  const { blindDiffers, sameAlternative, alternativeProblem, reachesCorrect, answerStatesWrongPath } = require('../backend/pipeline/review.cjs');
+  const brief = briefFor(1);
+  const blind = over => ({ ...BLIND, ...over });
+  for (const name of ['Facility_Terms.txt', 'Facility_Terms', 'in/Facility_Terms.txt', 'Facility Terms.txt', 'Facility_Terms.txt (clause 4)', 'FACILITY_TERMS.TXT, section 4']) assert.equal(blindDiffers(blind({ governingDocument: name }), brief), false, name);
+  assert.equal(blindDiffers(blind({ governingDocument: 'Cash_Facts.csv' }), brief), true);
+  assert.equal(blindDiffers(blind({ alternative: { answer: 'Proceed in two tranches', support: 's' } }), brief), true);
+  /* the answer itself: the wrong path's action or figures, without the right path's */
+  assert.equal(blindDiffers(blind({ answer: 'Proceed with the borrowing; usable cash is 3,050.' }), brief), true);
+  assert.equal(blindDiffers(blind({ answer: 'Hold the borrowing: usable cash is 1,250, not 3,050.' }), brief), false, 'the wrong figure named and rejected beside the right one');
+  assert.equal(answerStatesWrongPath('Usable cash is 3,050.', brief), true);
+  assert.equal(answerStatesWrongPath('Usable cash is 1,250.', brief), false);
+  assert.equal(reachesCorrect('Hold the borrowing and tell the lender', brief), true);
+  assert.equal(reachesCorrect('Usable cash is 1,250.', brief), true);
+  assert.equal(reachesCorrect('Proceed with the borrowing', brief), false);
+  assert.equal(reachesCorrect('Say something else', brief), false);
+  /* the same action */
+  assert.deepEqual([sameAlternative('Proceed in two tranches', 'Proceed in two tranches with cash cover'), sameAlternative('Proceed in two tranches.', 'proceed in two tranches'), sameAlternative('Delay the draw by thirty days', 'Proceed in two tranches'), sameAlternative('', 'x')], [true, true, false, true]);
+  assert.deepEqual([alternativeProblem('Usable cash is 1,250. Hold the borrowing.', 'Usable cash is 1,250.  Hold the borrowing', 'Proceed in two tranches'), alternativeProblem('Take two tranches once cash covers the first.', 'Usable cash is 1,250. Hold the borrowing.', 'Take two tranches')], ['copy', '']);
+});
+
+test('WindowSet: with() adds, without() takes out the windows that a text already holds, and a reference text shared with the packet is left out of the reference windows', () => {
+  const { WindowSet, leakWindows, containsLeak } = require('../backend/pipeline/safety.cjs');
+  const shared = 'The shared sentence of the world files and of an example reference, written out in full so that it makes several windows of eighty characters each and more.';
+  const own = 'A passage that only the reference documents hold, long enough to make windows of its own, and with nothing in common with any world file at all.';
+  const set = new WindowSet([...leakWindows(shared), ...leakWindows(own)]);
+  const left = set.without([`World file. ${shared} The rest of the world file.`]);
+  assert.equal(containsLeak(`A new file. ${shared}`, left), false, 'the shared text is not a leak');
+  assert.equal(containsLeak(`A new file. ${own}`, left), true, 'a passage only the reference holds still is');
+  assert.equal(left.length < set.length, true);
+  assert.equal(set.without(['nothing in common']), set, 'nothing found: the same set');
+  assert.equal(containsLeak(own, set.with([]).with(leakWindows('Another long passage that is added to the set afterwards, and that makes windows too, enough of them.'))), true);
+  assert.deepEqual(set.toArray().length, set.length);
+});
+
+test('a sum of money is shown to the cent with half a cent rounded up: 27.025 is 27.03 in the stop message, the docs and the README', async t => {
+  const { usdText } = require('../backend/pipeline/util.cjs');
+  assert.deepEqual([usdText(27.025), usdText(23.5 * 1.15), usdText(0.5), usdText(22.425), usdText(1.005), usdText(60)], ['27.03', '27.03', '0.50', '22.43', '1.01', '60.00']);
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  const { view } = await w.runNew({ capUsd: 5 });
+  assert.equal(view.stage, 'budget');
+  assert.match(view.message, /could cost up to USD 27\.03 \(with 15% headroom\), USD 0\.01 is spent, USD 27\.04 together, and the cap is USD 5\.00/);
+  const docs = fs.readFileSync(path.join(__dirname, '..', 'docs', 'local-agents.md'), 'utf8') + fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  assert.match(docs, /USD 27\.03/);
+  assert.equal(/58\.08|61\.53|USD 25\.30|USD 22\.00\b/.test(docs), false, 'no figure of an earlier budget is left in the docs');
+});
+
+/* ---- what the reviewers can read ---- */
+
+const OFFICE_NAMES = ['Covenant_Schedule.docx', 'Restricted_Cash.xlsx'];
+const officeFiles = () => ({ 'Covenant_Schedule.docx': Buffer.from(docxBase64('DOCXRULE the covenant schedule, synthetic: the draw needs funded cash.'), 'base64'), 'Restricted_Cash.xlsx': Buffer.from(xlsxBase64('XLSXROW restricted cash of 400, synthetic'), 'base64') });
+
+test('the blind reviewer is given a text rendering of every Word, Excel, slide and RTF file next to the packet copy, told which they are, and the pilots never get them', async t => {
+  const spawned = [];
+  const rules = [classifierFor(OFFICE_NAMES), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { files: officeFiles(), rules, onSpawn: record => spawned.push(record) });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const [reviewer] = spawned.filter(record => /\/runs\/review-1-1-1$/.test(record.cwd || ''));
+  assert.ok(reviewer, 'the blind reviewer ran');
+  const rels = Object.keys(reviewer.tree).filter(rel => !rel.startsWith('.tmp/')).sort();
+  assert.deepEqual(rels, ['filesystem/Atlas_Supplement.txt', 'filesystem/Cash_Facts.csv', 'filesystem/Covenant_Schedule.docx', 'filesystem/Facility_Terms.txt', 'filesystem/Meridian_Lender_Summary.txt', 'filesystem/Restricted_Cash.xlsx', 'prompt.txt', 'text-renderings/Covenant_Schedule.docx.txt', 'text-renderings/Restricted_Cash.xlsx.txt']);
+  assert.match(reviewer.tree['text-renderings/Covenant_Schedule.docx.txt'], /^TEXT RENDERING of filesystem\/Covenant_Schedule\.docx[\s\S]*DOCXRULE the covenant schedule/);
+  assert.match(reviewer.tree['text-renderings/Restricted_Cash.xlsx.txt'], /XLSXROW restricted cash of 400/);
+  const prompt = promptRuns(w).find(entry => entry.prompt.startsWith('You are a blind reviewer')).prompt;
+  assert.match(prompt, /Your Read tool cannot open Word, Excel, slide or RTF files/);
+  assert.match(prompt, /Covenant_Schedule\.docx -> text-renderings\/Covenant_Schedule\.docx\.txt/);
+  assert.match(prompt, /PDF and picture files can be opened directly/);
+  assert.equal(prompt.includes('Nobody could read these files'), false, 'nothing is unreadable here');
+  assert.deepEqual([view.attempts[0].fairness.stage1.state, view.attempts[0].fairness.stage1.rendered, view.attempts[0].fairness.stage1.unreadable], ['ok', OFFICE_NAMES, []]);
+  /* the text-only reviews are given the extracted text of the same files, and the pilots' folders hold no rendering */
+  assert.match(promptRuns(w).find(entry => entry.prompt.startsWith('You are reviewing a finished task design')).prompt, /DOCXRULE the covenant schedule/);
+  const pilotRuns = spawned.filter(record => /finance-studio-pilots\/rnd-/.test(record.cwd || ''));
+  assert.equal(pilotRuns.length > 0, true);
+  assert.equal(pilotRuns.every(record => !Object.keys(record.tree).some(rel => rel.startsWith('text-renderings'))), true);
+  assert.equal(view.attempts[0].freeze[0].packetSha256, view.attempts[0].fairness.stage1.packetSha256, 'the renderings are not part of the packet that was reviewed and tested');
+  assert.equal(fs.existsSync(path.join(w.workRoot, id)), false);
+});
+
+test('a file nobody can read (an old binary Office file, an archive) stops the start before anything is paid for; with acceptMissing the blind review names it and its result is partial, never a silent no objection', async t => {
+  const binary = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0, 0, 0, 1, 2, 3]);
+  const files = { 'Old_Ledger.xls': binary, 'Archive_Pack.zip': Buffer.from([0x50, 0x4b, 3, 4, 0, 0, 0, 0]) };
+  const names = ['Old_Ledger.xls', 'Archive_Pack.zip'];
+  const stopped = await newWorld(t, { files, rules: [classifierFor(names), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const refused = await stopped.runNew();
+  assert.equal(refused.view.stage, 'failed');
+  assert.match(refused.view.message, /^2 files of the pilot packet cannot be read by the reviewers .*: Old_Ledger\.xls, Archive_Pack\.zip\./);
+  assert.deepEqual(refused.view.classification.unreadable.sort(), ['Archive_Pack.zip', 'Old_Ledger.xls']);
+  assert.equal(promptRuns(stopped).some(run => run.prompt.includes('trap designer')), false, 'no designer was paid for');
+  /* accepted by the owner: the review runs, and says what it could not read */
+  const accepted = await newWorld(t, { files, rules: [classifierFor(names), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { view } = await accepted.runNew({ acceptMissing: true });
+  assert.equal(view.stage, 'done', view.message);
+  const stage1 = view.attempts[0].fairness.stage1;
+  assert.deepEqual([stage1.state, stage1.unreadable.slice().sort()], ['partial', ['Archive_Pack.zip', 'Old_Ledger.xls']]);
+  assert.match(promptRuns(accepted).find(entry => entry.prompt.startsWith('You are a blind reviewer')).prompt, /Nobody could read these files in this review, and you cannot either: [^\n]*Old_Ledger\.xls/);
+  assert.match(promptRuns(accepted).find(entry => entry.prompt.startsWith('You are reviewing a finished task design')).prompt, /"unreadable": \[[^\]]*Old_Ledger\.xls/);
+  assert.equal(view.design.notes.some(note => /The blind review could not read these files of the packet in full: .*Old_Ledger\.xls/.test(note)), true, 'and the owner is told');
+});
+
+test('a file the designer adds must be one the reviewers can read: a binary new file is refused through the repair turn', async t => {
+  const binary = { base64: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0, 0, 0, 1, 2, 3]).toString('base64') };
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/new/Ledger_Copy.xls': binary }, trapsExtra: { newFiles: ['Meridian_Lender_Summary.txt', 'Ledger_Copy.xls'] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.equal(view.attempts[0].rejection.reasons[0], 'A new file is of a kind that the reviewers cannot read');
+  assert.equal(view.attempts[0].fairness.status, 'not-reached', 'a design that never read leaves no review pending');
+  assert.equal(view.attempts[1].outcome, 'passed');
+});
+
+test('a PDF or a picture is read by the blind reviewer and not by the text-only reviews: the notices it quotes from them are passages the application check must answer, and the file is listed as not scanned', async t => {
+  const pdf = '%PDF-1.4 synthetic binary \u0000\u0001 a scanned notice';
+  const names = ['Update_Notice.pdf'];
+  const notice = jsonScenario({ ...BLIND, statusNotices: [{ file: 'Update_Notice.pdf', quote: 'The Facility Terms are replaced from 1 July 2026.' }] });
+  const rules = [classifierFor(names), ...newAttemptRules(1, [0.2], { blind: notice }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { files: { 'Update_Notice.pdf': pdf }, rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected', 'the notice was not answered by the reviewer');
+  assert.deepEqual(first.fairness.stage2.briefApplication.unscanned, ['Update_Notice.pdf']);
+  assert.equal(first.fairness.stage2.briefApplication.failures.every(item => item.failed.includes('notSuperseded')), true);
+  const application = promptRuns(w).find(entry => entry.prompt.includes('You are checking whether one quoted clause'));
+  assert.match(application.prompt, /u1 \(Update_Notice\.pdf\): \(the harness has no text for this file; the blind reviewer, who could open it, quoted\) "The Facility Terms are replaced from 1 July 2026\."/);
+  /* a PDF with no notice from the blind reviewer is disclosed, not judged: attempt 2 passes and the result names it */
+  const second = view.attempts[1];
+  assert.equal(second.outcome, 'passed');
+  assert.deepEqual(second.fairness.stage2.briefApplication.unscanned, ['Update_Notice.pdf']);
+});
+
+/* ---- a permitted alternative is the one the review reported ---- */
+
+const ALT_A = { answer: 'Delay the draw by thirty days', support: 'The terms leave the timing open', file: 'answers/alt-1.md' };
+const ALT_B = { answer: 'Proceed in two tranches with cash cover', support: 'The terms leave the tranche structure open', file: 'answers/alt-2.md' };
+const ALT_A_TEXT = 'ALT-1 Delay the draw by thirty days until the funded cash covers it; hold the borrowing meanwhile.\n';
+const ALT_B_TEXT = 'ALT-2 Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.\n';
+const altRule = (marker, score) => ({ cwd: GRADE_CWD, prompt: `<<<ANSWER\\n${marker} `, scenario: [{ resultText: gradeJson(score), costUsd: 0.02 }, { resultText: gradeJson(score), costUsd: 0.02 }] });
+
+test('a permitted alternative is tied to the answer that was graded: a graded answer for another alternative settles nothing, and the repair has to write the alternative the review reported', async t => {
+  const design = { files: { 'out/answers/alt-1.md': ALT_A_TEXT }, brief: { permittedAlternatives: [ALT_A] } };
+  const withB = briefFor(1, { permittedAlternatives: [ALT_A, ALT_B] });
+  const goldenText = 'Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\n';
+  const flow = (repair, second = REVEAL_NONE) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    design, extra: [reveals('REVISED-ONE', jsonScenario(second)), goldenRegrade, altRule('ALT-1', 0.9), altRule('ALT-2', 0.9)], reveal: jsonScenario(PERMITTED_REVEAL(true)), repairs: { alternative: repair },
+  }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  /* the reviewer reports "two tranches" and says the guideline covers it; the declared alternative is another one: a repair is still needed, and it wrote nothing for this one */
+  const idle = await rejectedThenPassed(t, flow(reviseOnly(1, 'REVISED-ONE')), /The repair wrote an answer for another alternative than the one the review reported/);
+  assert.equal(idle.view.attempts[0].fairness.repairs, 1);
+  assert.match(fs.readFileSync(path.join(idle.w.priv(idle.id), 'attempts', '1', 'feedback.md'), 'utf8'), /None of them is the alternative the review reported/);
+  /* the repair writes the answer for the reported alternative: accepted, and both alternatives are graded again */
+  const written = await newWorld(t, { rules: flow(reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-2.md', content: ALT_B_TEXT }, { path: 'out/brief.json', content: JSON.stringify(withB) }] })) });
+  const { view } = await written.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(view.attempts[0].outcome, 'passed');
+  assert.deepEqual([view.attempts[0].fairness.repairs, view.attempts[0].fairness.stage2.evaluations], [1, 2]);
+  assert.deepEqual(view.design.alternatives.map(item => item.file), ['answers/alt-1.md', 'answers/alt-2.md']);
+  assert.deepEqual(view.attempts[0].answerSet.answers.map(item => [item.name, item.passed]), [['golden', true], ['alt-1', true], ['alt-2', true]]);
+  /* the answer written for the alternative is the golden answer under another name */
+  const copy = flow(reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/answers/alt-2.md', content: goldenText }, { path: 'out/brief.json', content: JSON.stringify(withB) }] }));
+  const copied = await newWorld(t, { rules: copy });
+  const { view: copyView } = await copied.runNew();
+  assert.equal(copyView.attempts[0].outcome, 'rejected');
+  assert.deepEqual([copyView.attempts[0].rejection.kind, copyView.attempts[0].rejection.reasons[0]], ['design', 'The answer of a permitted alternative is a copy of the golden answer'], 'the files of the design are read again after the repair, and a copy is refused there');
+  /* the alternative was declared before, the repair left its answer alone and the guideline too */
+  const same = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/answers/alt-1.md': ALT_B_TEXT.replace('ALT-2', 'ALT-1') }, brief: { permittedAlternatives: [{ ...ALT_B, file: 'answers/alt-1.md' }] } }, extra: [altRule('ALT-1', 0.9)], reveal: jsonScenario(PERMITTED_REVEAL(false)), repairs: { alternative: { writeFiles: [{ path: 'out/prompt.txt', content: 'Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1 again\n' }], resultText: 'repaired', costUsd: 0.02 } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  await rejectedThenPassed(t, same, /The repair did not write the answer for the permitted alternative/);
+});
+
+/* ---- the reference guard and the packet ---- */
+
+test('a world or task file that is byte for byte a reference document is withheld with a warning before anything is paid for, unless the owner keeps it by name', async t => {
+  const refs = { 'Supplement_Copy.txt': SUPPLEMENT, 'Draw_Review_Notes.md': REF_NOTE };
+  const stopped = await newWorld(t);
+  putRefs(stopped, refs);
+  const refused = await stopped.runNew();
+  assert.equal(refused.view.stage, 'failed');
+  assert.match(refused.view.message, /^1 file the classifier called world or task files is withheld, so the pilots would not get it: Atlas_Supplement\.txt\./);
+  assert.deepEqual(refused.view.classification.withheld.map(item => [item.name, item.why]), [['Atlas_Supplement.txt', 'it is byte for byte the same as a reference document']]);
+  assert.equal(promptRuns(stopped).some(run => run.prompt.includes('trap designer')), false, 'no designer was paid for');
+  /* the owner accepts that the pilots do without it */
+  const briefFiles = briefFor(1).files.filter(file => file.name !== 'Atlas_Supplement.txt');
+  const accepted = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { brief: { files: briefFiles } } }) });
+  putRefs(accepted, refs);
+  const without = await accepted.runNew({ acceptMissing: true });
+  assert.equal(without.view.stage, 'done', without.view.message);
+  assert.equal(without.view.design.packet.files.some(file => file.name === 'Atlas_Supplement.txt'), false);
+  /* or keeps it by name: it stays a world file, and the run does not stop late on a hash that is its own */
+  const kept = await newWorld(t);
+  putRefs(kept, refs);
+  const still = await kept.runNew({ keepAsWorld: ['Atlas_Supplement.txt'] });
+  assert.equal(still.view.stage, 'done', still.view.message);
+  assert.equal(still.view.design.packet.files.some(file => file.name === 'Atlas_Supplement.txt'), true);
+  /* a copy of the reference that the designer adds is still refused */
+  const copy = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/new/Draw_Copy.txt': SUPPLEMENT }, trapsExtra: { newFiles: ['Meridian_Lender_Summary.txt', 'Draw_Copy.txt'] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  putRefs(copy, { 'Supplement_Copy.txt': SUPPLEMENT });
+  const refusedCopy = await copy.runNew({ acceptMissing: true });
+  assert.equal(refusedCopy.view.attempts[0].outcome, 'rejected');
+  assert.match(refusedCopy.view.attempts[0].rejection.reasons[0], /is a copy of withheld material/);
+});
+
+test('text that a world file and a reference share is not a leak when the designer edits the world file; a passage only the reference holds still is, in the same file', async t => {
+  const shared = 'Draw policy, synthetic. Every draw request is logged by the treasury desk, checked against the funded cash record and approved by the controller before any money moves. A request that lacks the record is returned to the desk with the reason written on it, and the desk logs the return.';
+  const only = 'In a good review the funding record is read before the request, the approver is named in the first line, and the recommendation is stated as a single action with its condition, written long enough to make windows of their own.';
+  const POLICY = `${shared}\n`;
+  const references = { 'Prior_Example.md': `${shared}\n\n${only}\n`, 'Draw_Review_Notes.md': REF_NOTE };
+  const names = ['Draw_Policy.txt'];
+  const edited = { editedFiles: [{ name: 'Facility_Terms.txt', reason: 'The amendment date must differ from the lender summary.' }, { name: 'Draw_Policy.txt', reason: 'The policy must carry the amended limit.' }] };
+  const flow = (content, repairs) => [classifierFor(names), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: { 'out/edited/Draw_Policy.txt': content }, trapsExtra: edited }, repairs })];
+  /* shared text only: the edit keeps it, and passes */
+  const keep = await newWorld(t, { files: { 'Draw_Policy.txt': POLICY }, rules: flow(`${POLICY}An added line about the amended limit, synthetic.\n`) });
+  putRefs(keep, references);
+  const kept = await keep.runNew();
+  assert.equal(kept.view.stage, 'done', kept.view.message);
+  assert.equal(kept.view.attempts[0].outcome, 'passed');
+  /* the same edit with no reference that shares the text passes too (the control) */
+  const alone = await newWorld(t, { files: { 'Draw_Policy.txt': POLICY }, rules: flow(`${POLICY}An added line about the amended limit, synthetic.\n`) });
+  putRefs(alone, { 'Draw_Review_Notes.md': REF_NOTE });
+  assert.equal((await alone.runNew()).view.attempts[0].outcome, 'passed');
+  /* a passage that only the reference holds, put into the same edited file, is a leak */
+  const rules = [...flow(`${POLICY}${only}\n`, { design: 'clean' }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const leak = await newWorld(t, { files: { 'Draw_Policy.txt': POLICY }, rules });
+  putRefs(leak, references);
+  const leaked = await leak.runNew();
+  assert.equal(leaked.view.attempts[0].outcome, 'rejected');
+  assert.match(leaked.view.attempts[0].rejection.reasons[0], /An edited file holds a long passage of the reference documents/);
+  assert.equal(leaked.view.attempts[1].outcome, 'passed');
+});
+
+/* ---- a repair of the brief is checked again ---- */
+
+test('a failed check of a clause of the brief is not kept across a repair: a brief that is fixed in the repair gets its clauses checked again in the second review', async t => {
+  const wrongDate = briefFor(1, { decision: { ask: 'Whether the borrowing can proceed', mandate: 'Treasury sign-off', authorityFile: 'Facility_Terms.txt', effectiveDate: '2025-03-01', decisionDate: '2025-04-20' } });
+  const fixed = briefFor(1, { decision: { ask: 'Whether the borrowing can proceed', mandate: 'Treasury sign-off', authorityFile: 'Facility_Terms.txt', effectiveDate: '2025-03-01', decisionDate: '2025-04-15' } });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/brief.json', content: JSON.stringify(fixed) }] });
+  const rules = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design: { files: { 'out/brief.json': JSON.stringify(wrongDate) } }, extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE))], repairs: { missing: repair } });
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const attempt = view.attempts[0];
+  assert.equal(attempt.outcome, 'passed');
+  assert.deepEqual([attempt.fairness.repairs, attempt.fairness.stage2.evaluations, attempt.fairness.stage2.briefApplication.pass], [1, 2, true]);
+  const applications = view.ledger.filter(entry => entry.kind === 'application' && /^brief-/.test(entry.ref)).map(entry => entry.ref);
+  assert.deepEqual(applications, ['brief-1-1r', 'brief-1-1w', 'brief-2-1r', 'brief-2-1w'], 'the clauses were checked in the first review and again in the second');
+  assert.equal(view.design.brief.decision.decisionDate, '2025-04-15');
+  /* and a pass is not kept either: the first review passes the clauses of the brief, an equivalent-result repair moves the decision date to a day the reviewer does not
+     report, and the second review checks the clauses again and fails them */
+  const moved = briefFor(1, { decision: { ask: 'Whether the borrowing can proceed', mandate: 'Treasury sign-off', authorityFile: 'Facility_Terms.txt', effectiveDate: '2025-03-01', decisionDate: '2025-02-01' } });
+  const equivalent = { alternative: 'Hold the borrowing and tell the lender', forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: false, why: 'The same conclusion in other words.' };
+  const stale = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/brief.json': JSON.stringify(fixed) } }, reveal: jsonScenario(equivalent), extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), goldenRegrade], repairs: { equivalent: reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/brief.json', content: JSON.stringify(moved) }] }) } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const second = await newWorld(t, { rules: stale });
+  const { view: checked } = await second.runNew();
+  assert.equal(checked.attempts[0].outcome, 'rejected');
+  assert.equal(checked.attempts[0].fairness.stage2.evaluations, 2);
+  assert.deepEqual(checked.attempts[0].fairness.stage2.briefApplication.failures.map(item => item.failed), [['inForce'], ['inForce']], 'the pass of the first review was not reused');
+  /* a check that failed once is not failed for good: a reviewer that did not show the clause to govern in the first review, and shows it in the second, passes it */
+  const notGoverning = jsonScenario({ ...APPLICATION, governs: { ...APPLICATION.governs, answer: 'no' } });
+  const flaky = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_NONE), application: notGoverning, extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), { cwd: '/runs/apply-1-brief-2-', scenario: jsonScenario(APPLICATION) }], repairs: { missing: reviseOnly(1, 'REVISED-ONE') } });
+  const again = await newWorld(t, { rules: flaky });
+  const { view: second2 } = await again.runNew();
+  assert.equal(second2.stage, 'done', second2.message);
+  assert.deepEqual([second2.attempts[0].outcome, second2.attempts[0].fairness.stage2.evaluations, second2.attempts[0].fairness.stage2.briefApplication.pass], ['passed', 2, true]);
+});
+
+test('an equivalent result whose repair rewrites the brief is reviewed again: the reveal runs once more and the clauses of the new brief are checked', async t => {
+  const equivalent = { alternative: 'Hold the borrowing and tell the lender', forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: false, why: 'The same conclusion in other words.' };
+  const rewritten = briefFor(1);
+  rewritten.traps[0].wrongPath.action = 'Draw everything now';
+  const notGoverning = jsonScenario({ ...APPLICATION, governs: { ...APPLICATION.governs, answer: 'no' } });
+  const repair = reviseOnly(1, 'REVISED-ONE', { files: [{ path: 'out/brief.json', content: JSON.stringify(rewritten) }] });
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(equivalent), extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), { cwd: '/runs/apply-1-', prompt: 'Draw everything now', scenario: notGoverning }, goldenRegrade], repairs: { equivalent: repair } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.equal(first.outcome, 'rejected');
+  assert.equal(first.fairness.stage2.evaluations, 2, 'the reveal ran again on the rewritten brief');
+  assert.deepEqual(first.fairness.stage2.briefApplication.failures, [{ trap: 1, part: 'rule', failed: ['governs'] }]);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  /* a repair that changes only the guideline is still accepted at once */
+  const plain = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(equivalent), repairs: { equivalent: reviseOnly(1, 'REVISED-ONE') } }) });
+  const { view: accepted } = await plain.runNew();
+  assert.deepEqual([accepted.attempts[0].outcome, accepted.attempts[0].fairness.stage2.evaluations], ['passed', 1]);
+  /* an equivalent repair that leaves the guideline alone does not add the line it was asked for */
+  const idle = await rejectedThenPassed(t, [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(equivalent), repairs: { equivalent: { writeFiles: [{ path: 'out/brief.json', content: JSON.stringify(rewritten) }], resultText: 'repaired', costUsd: 0.02 } } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])], /The repair did not add the equivalent result to the guideline/);
+  assert.equal(idle.view.attempts[0].fairness.repairs, 1);
+});
+
+test('an equivalent result next to a blind answer that differs must state the conclusion of the right path, not only quote a sentence of the file', async t => {
+  const blindOther = jsonScenario({ ...BLIND, answer: 'Proceed in two tranches; the lender summary governs.', alternative: { answer: 'Proceed in two tranches', support: 'The summary shows the facility.' } });
+  const mention = text => ({ alternative: text, forAlternative: { file: 'Facility_Terms.txt', quote: 'Available credit is not cash received.' }, againstAlternative: null, objectionClass: 'equivalent_result', disposition: 'equivalent_result', guidelineCovers: true, why: 'The same conclusion.' });
+  /* an alternative that says nothing of the conclusion is not shown to be equivalent, whatever sentence it quotes */
+  const vague = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { blind: blindOther, reveal: jsonScenario(mention('A tranche structure')), extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE))], repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const first = await rejectedThenPassed(t, vague, /could not settle which answer the files support/);
+  assert.match(promptRuns(first.w).find(run => run.prompt.includes('Supply what is missing')).prompt, /does not state the action or the figures of the right path/);
+  /* an alternative that states the right path's action is equivalent, with the blind answer another one */
+  const states = newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: blindOther, reveal: jsonScenario(mention('Hold the borrowing, in two tranches of funded cash')) });
+  const w = await newWorld(t, { rules: states });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual([view.attempts[0].outcome, view.attempts[0].fairness.stage2.disposition], ['passed', 'equivalent_result']);
+});
+
+test('a policy and a procedure: "implements" is shown by a sentence of the clause\'s file or the higher file that links the two by name, and the higher document is another file of the packet', () => {
+  const documents = [
+    { name: 'Treasury_Policy.txt', text: 'Treasury policy, synthetic. All draw procedures of the treasury are issued under this policy and may only implement it. Other paperwork is subject to this policy.\n' },
+    { name: 'Draw_Procedure.txt', text: 'Draw procedure, synthetic. This procedure implements the Treasury Policy. It also implements the Nope Policy and the Draw Procedure. Available credit is not cash received. These steps govern every draw decision dated on or after 2025-03-01. Effective 2025-03-01. Draw decision date 2025-04-15.\n' },
+    { name: 'Other_Product_Terms.txt', text: 'Other product terms, synthetic. These terms govern every other product facility. These steps implement the Draw Procedure and the Treasury Policy. Available credit is not cash received.\n' },
+  ];
+  const clause = { file: 'Draw_Procedure.txt', quote: 'Available credit is not cash received.' };
+  const corpus = corpusOf(documents);
+  const run = hierarchy => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    value.governs.scope = { file: 'Treasury_Policy.txt', quote: 'All draw procedures of the treasury are issued under this policy and may only implement it.' };
+    value.governs.hierarchy = hierarchy;
+    value.inForce.effectiveDate = '2025-03-01';
+    value.inForce.effectiveQuote = { file: 'Draw_Procedure.txt', quote: 'Effective 2025-03-01.' };
+    value.inForce.decisionQuote = { file: 'Draw_Procedure.txt', quote: 'Draw decision date 2025-04-15.' };
+    value.excludes.quote = { file: 'Draw_Procedure.txt', quote: 'Available credit is not cash received.' };
+    value.supersession = [];
+    return checkApplication(parseApplication(JSON.stringify(value)).value, { corpus, hits: [], clause });
+  };
+  const links = { higher: 'Treasury_Policy.txt', relation: 'implements', quote: { file: 'Draw_Procedure.txt', quote: 'This procedure implements the Treasury Policy.' } };
+  assert.equal(run(links).pass, true, 'the scope sentence of the higher document counts when the procedure implements it');
+  assert.equal(run({ ...links, relation: 'IMPLEMENTS ' }).pass, true, 'a relation is read with case and spaces folded');
+  assert.deepEqual(run({ ...links, relation: 'varies' }).failed, ['governs']);
+  assert.deepEqual(run(null).failed, ['governs'], 'the scope sentence is of another file than the clause\'s, and nothing links the two');
+  assert.deepEqual(run({ ...links, higher: 'Policy.pdf' }).failed, ['governs'], 'the higher document is a file of the packet');
+  assert.deepEqual(run({ ...links, higher: 'Draw_Procedure.txt' }).failed, ['governs'], 'and not the clause\'s own file');
+  assert.deepEqual(run({ ...links, quote: { file: 'Other_Product_Terms.txt', quote: 'These terms govern every other product facility.' } }).failed, ['governs'], 'a quote of some third file');
+  assert.deepEqual(run({ ...links, quote: { file: 'Other_Product_Terms.txt', quote: 'These steps implement the Draw Procedure and the Treasury Policy.' } }).failed, ['governs'], 'even a sentence of a third file that links the two by name is not the clause\'s file or the higher file');
+  /* a higher document that is no file of the packet, or the clause's own file, even with a scope sentence of the clause's own file */
+  const own = hierarchy => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    value.governs.scope = { file: 'Draw_Procedure.txt', quote: 'These steps govern every draw decision dated on or after 2025-03-01.' };
+    value.governs.hierarchy = hierarchy;
+    value.inForce.effectiveDate = '2025-03-01';
+    value.inForce.effectiveQuote = { file: 'Draw_Procedure.txt', quote: 'Effective 2025-03-01.' };
+    value.inForce.decisionQuote = { file: 'Draw_Procedure.txt', quote: 'Draw decision date 2025-04-15.' };
+    value.excludes.quote = { file: 'Draw_Procedure.txt', quote: 'Available credit is not cash received.' };
+    value.supersession = [];
+    return checkApplication(parseApplication(JSON.stringify(value)).value, { corpus, hits: [], clause });
+  };
+  assert.equal(own(links).pass, true, 'the control: a real higher document');
+  assert.deepEqual(own({ higher: 'Nope.pdf', relation: 'implements', quote: { file: 'Draw_Procedure.txt', quote: 'It also implements the Nope Policy and the Draw Procedure.' } }).failed, ['governs'], 'a higher document that is no file of the packet');
+  assert.deepEqual(own({ higher: 'Draw_Procedure.txt', relation: 'implements', quote: { file: 'Draw_Procedure.txt', quote: 'It also implements the Nope Policy and the Draw Procedure.' } }).failed, ['governs'], 'the clause\'s own file as its own higher document');
+  assert.deepEqual(run({ ...links, quote: { file: 'Draw_Procedure.txt', quote: 'These steps govern every draw decision dated on or after 2025-03-01.' } }).failed, ['governs'], 'a sentence that does not link the two by name');
+  assert.deepEqual(run({ ...links, quote: { file: 'Treasury_Policy.txt', quote: 'Other paperwork is subject to this policy.' } }).failed, ['governs'], 'a sentence of the higher file that does not name the procedure');
+  assert.equal(run({ ...links, quote: { file: 'Treasury_Policy.txt', quote: 'All draw procedures of the treasury are issued under this policy and may only implement it.' } }).pass, true, 'one that does');
+  assert.equal(run({ higher: '', relation: 'none' }).pass, false, 'with no hierarchy the scope sentence of the other file does not cover the clause');
+  /* a scope sentence of another entity's file does not pass because a hierarchy is added to it */
+  const other = JSON.parse(JSON.stringify(APPLICATION));
+  other.governs.scope = { file: 'Other_Product_Terms.txt', quote: 'These terms govern every other product facility.' };
+  other.governs.hierarchy = { higher: 'Other_Product_Terms.txt', relation: 'implements', quote: { file: 'Other_Product_Terms.txt', quote: 'Available credit is not cash received.' } };
+  assert.equal(checkApplication(parseApplication(JSON.stringify(other)).value, { corpus, hits: [], clause }).checks.governs, false);
+});
+
+test('the clause that rules out the strongest alternative is looked for in the brief\'s own files first, and the rule of a trap that differs only in a calculation is tested against the calculation', () => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const brief = briefFor(1);
+  brief.files = [{ name: 'Amended_Facility_Terms.txt', role: 'authority' }, { name: 'Facility_Terms.txt', role: 'decoy' }, { name: 'Cash_Facts.csv', role: 'evidence' }];
+  brief.decision.authorityFile = 'Amended_Facility_Terms.txt';
+  const sentence = 'Available credit is not cash received.';
+  const design = { brief, prompt: 'The task, synthetic.', documents: [{ name: 'Facility_Terms.txt', text: `Old terms. ${sentence}\n` }, { name: 'Amended_Facility_Terms.txt', text: `New terms. ${sentence} Clause 4 was amended.\n` }, { name: 'Cash_Facts.csv', text: 'Label,Value\n' }] };
+  const service = Object.create(PipelineService.prototype);
+  assert.equal(service._clauseFile(design, sentence), 'Amended_Facility_Terms.txt', 'the authority file, not the decoy that sorts first');
+  design.documents = [{ name: 'Facility_Terms.txt', text: `Old terms. ${sentence}\n` }, { name: 'Amended_Facility_Terms.txt', text: 'New terms, without the sentence.\n' }, { name: 'Cash_Facts.csv', text: 'Label,Value\n' }];
+  assert.equal(service._clauseFile(design, sentence), '', 'a quote that stands only in a file that is not authority or evidence is nowhere that counts');
+  design.prompt = `The task, synthetic. ${sentence}`;
+  assert.equal(service._clauseFile(design, sentence), 'prompt.txt');
+  /* the rule of a trap: the wrong action, or, when both paths take the same action, the calculation */
+  const trap = JSON.parse(JSON.stringify(brief.traps[0]));
+  assert.equal(service._wrongPathText(trap), 'Proceed with the borrowing');
+  trap.wrongPath.action = trap.correctPath.action;
+  trap.wrongPath.reasoning = 'Counts the available facility as cash.';
+  assert.equal(service._wrongPathText(trap), 'Hold the borrowing (reached by this calculation: Counts the available facility as cash.; figures: Usable cash: 3050)');
+});
+
+test('the designer is told which date forms the checks read, that a decision date must stand in the files, and which new files the reviewers can read', () => {
+  const prompt = require('../backend/pipeline/design.cjs').designerPromptNew({ attempt: 1, attempts: 4, redesign: false });
+  assert.match(prompt, /written in the files as 2025-03-01, 1 March 2025, March 1, 2025 or the 1st day of March, 2025/);
+  assert.match(prompt, /03\/01\/2025, 20250301 and "March 2025" fail the in-force check/);
+  assert.match(prompt, /say which one takes effect/);
+  assert.match(prompt, /when you give it the day must also stand in prompt\.txt or in a file the pilots get/);
+  assert.match(prompt, /A new file is a kind that the reviewers can read: plain text, csv, json, md, docx, xlsx, pptx, rtf, a pdf or a picture/);
+});
+
+test('when a clause is called out of force the designer is told the date forms the checks read', async t => {
+  const outOfForce = jsonScenario({ ...APPLICATION, inForce: { ...APPLICATION.inForce, effectiveDate: '2026-01-01' } });
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { reveal: jsonScenario(REVEAL_EXCLUDED), application: outOfForce, repairs: { missing: reviseOnly(1, 'REVISED-ONE') }, extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_EXCLUDED))] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) })];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  assert.equal(view.attempts[0].outcome, 'rejected');
+  assert.match(promptRuns(w).find(run => run.prompt.includes('Supply what is missing')).prompt, /the dates the checks read are written as 2025-03-01, 1 March 2025, March 1, 2025 or the 1st day of March, 2025/);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /A quote that holds more than one date must say which one takes effect/);
+});
+
+/* ---- how a run ends ---- */
+
+test('a cap reached inside the guideline repair, or after the repair and before the saved answers were counted again, ends the run as incomplete: nothing passes, and no pilot is left without its score', async t => {
+  const flow = (repairCost, regradeCost) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reviseRule(1, adj('intended')), adjudicateOf(1, 1, adj('permitted_alternative'), 'screen'), ...(regradeCost ? [{ cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nUsable cash is 1,250 and the borrowing is held', scenario: [{ resultText: gradeJson(0.93), costUsd: regradeCost }, { resultText: gradeJson(0.93), costUsd: regradeCost }] }] : [])],
+    repairs: { evaluator: { ...reviseOnly(1, 'REVISED-ONE'), costUsd: repairCost } },
+  })];
+  /* the repair itself is paid for and the cap is gone before the first grade of the revised guideline */
+  const inRepair = await newWorld(t, { rules: flow(44.2, 0) });
+  const first = await inRepair.runNew({ capUsd: 45 });
+  assert.equal(first.view.stage, 'budget', first.view.message);
+  assert.deepEqual([first.view.result.verdict, first.view.result.validation], ['incomplete', 'incomplete']);
+  assert.equal(first.view.attempts[0].validation, 'incomplete');
+  assert.deepEqual([first.view.attempts[0].guidelineRepair.outcome, first.view.attempts[0].guidelineRepair.reason], ['failed', 'the run ended during the repair']);
+  assert.equal(first.view.attempts[0].screen.pilots.every(pilot => pilot.valid), true);
+  /* the revised guideline is applied and the saved answers are not yet counted again */
+  const inRecount = await newWorld(t, { rules: flow(0.02, 21) });
+  const second = await inRecount.runNew({ capUsd: 43.5 });
+  assert.equal(second.view.stage, 'budget', second.view.message);
+  assert.match(second.view.message, /Stopped before grading the saved answers again/);
+  assert.deepEqual([second.view.result.verdict, second.view.result.validation], ['incomplete', 'incomplete']);
+  assert.equal(second.view.attempts[0].validation, 'incomplete');
+  assert.deepEqual([second.view.attempts[0].guidelineRepair.outcome, second.view.attempts[0].guidelineRepair.reason], ['failed', 'the run ended before the saved answers were counted again']);
+  assert.equal(second.view.attempts[0].screen.pilots.every(pilot => pilot.valid && pilot.score !== null), true, 'the pilot that was about to be graded again keeps its score');
+  assert.equal(second.view.attempts[0].outcome, 'budget');
+  /* the cap is gone in the middle of one pilot (its grade is paid for, its adjudication is not): that pilot keeps what it had */
+  const middle = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    extra: [reviseRule(1, adj('intended')), adjudicateOf(1, 1, adj('permitted_alternative'), 'screen'), { cwd: GRADE_CWD, prompt: 'REVISED-ONE[\\s\\S]*<<<ANSWER\\nANS-1-1\\b', scenario: { resultText: gradeJson(0.2), costUsd: 42.7 } }],
+    repairs: { evaluator: reviseOnly(1, 'REVISED-ONE') },
+  })] });
+  const third = await middle.runNew({ capUsd: 43.5 });
+  assert.equal(third.view.stage, 'budget', third.view.message);
+  assert.deepEqual([third.view.result.verdict, third.view.result.validation], ['incomplete', 'incomplete']);
+  const [pilot] = third.view.attempts[0].screen.pilots;
+  assert.deepEqual([pilot.valid, pilot.score, pilot.regraded === true, pilot.previous === undefined, pilot.adjudication.class], [true, 0.2, false, true, 'permitted_alternative'], 'the pilot is as it was before the regrade started');
+});
+
+test('a redesign that the cap cannot pay for, after an attempt whose checks finished and that failed the pilots, is a plain budget stop with a complete validation', async t => {
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.5, 0.5], { designCost: 3 }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { view } = await w.runNew({ capUsd: 30 });
+  assert.equal(view.stage, 'budget', view.message);
+  assert.equal(view.attempts[0].outcome, 'screen-failed');
+  assert.equal(view.attempts[0].validation, 'complete');
+  assert.deepEqual([view.result.verdict, view.result.validation], ['budget', 'complete']);
+  assert.match(view.message, /^Stopped before attempt 2: the checks every design must pass .*could cost up to USD 27\.03 .*The earlier attempts had finished their checks and did not pass, so nothing here counts as a pass\.$/);
+  assert.equal(view.message.includes('not validated'), false);
+});
+
+test('on start a run cut off in the pilots, after its checks finished, is not incomplete; one cut off in a guideline repair is, and the repair is closed as failed', async t => {
+  const w = await makeWorld(t);
+  const write = (id, attempt, stage) => {
+    const dir = path.join(w.root, 'private', 'pipelines', id);
+    fs.mkdirSync(dir, { recursive: true });
+    const state = { schema: 'finance-pipeline', schemaVersion: 1, id, label: 'Old new-mode run', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', endedAt: null, stage, message: 'Running', error: null, waiting: null, source: { kind: 'folder', name: 'task' }, config: { capUsd: 60, designMode: 'new' }, spentUsd: 1, ledger: [], attempts: [attempt], redesigns: 0, attempt: 1, design: null, result: null };
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state));
+  };
+  const base = { n: 1, mode: 'new', outcome: 'in-progress', validation: 'complete', screen: null, test: null, fairness: { status: 'passed', stage1: { state: 'ok' }, stage2: null, repairs: 0 }, difficulty: { status: 'pending', screen: null, test: null }, guidelineRepair: null };
+  write('pln-eeeeeeeeeeee', base, 'screen');
+  write('pln-ffffffffffff', { ...base, guidelineRepair: { stage: 'screen', outcome: 'applied', classes: ['permitted_alternative'], changed: ['guideline.md'], regrade: null } }, 'grade-screen');
+  write('pln-111111111111', { ...base, guidelineRepair: { stage: 'screen', outcome: 'applied', recounted: { passed: true, explained: 2 } } }, 'test');
+  const service = createPipelineService({ root: w.root, agents: w.agents, claudeBin: STUB, env: w.env, tmpRoot: w.tmpRoot });
+  const pilots = await service.get('pln-eeeeeeeeeeee');
+  assert.deepEqual([pilots.stage, pilots.result.validation, pilots.attempts[0].validation, pilots.attempts[0].outcome], ['failed', 'complete', 'complete', 'failed']);
+  const repair = await service.get('pln-ffffffffffff');
+  assert.deepEqual([repair.result.validation, repair.attempts[0].validation, repair.attempts[0].guidelineRepair.outcome, repair.attempts[0].guidelineRepair.reason], ['incomplete', 'incomplete', 'failed', 'the run ended before the saved answers were counted again']);
+  const counted = await service.get('pln-111111111111');
+  assert.deepEqual([counted.result.validation, counted.attempts[0].guidelineRepair.outcome], ['complete', 'applied']);
+});
+
+/* ---- redaction of a whole new-mode run ---- */
+
+test('REDACTION: the real redactor over a whole new-mode state withholds the reference names and their problems, the answer names of the freeze records and the references of the reviews in the ledger, and keeps the hashes and the validation', async t => {
+  const { redactPipelineData } = require('../backend/pipeline/redact.cjs');
+  const w = await newWorld(t, { rules: permittedFlowRules() });
+  /* the default folder holds a file that cannot be used; the run names another folder */
+  put(refDir(w), 'Credit_Manual_Notes.pages', 'x');
+  const folder = path.join(w.base, 'my-references');
+  for (const [name, data] of Object.entries({ 'Draw_Review_Notes.md': REF_NOTE, 'Close_Checklist_Guide.txt': REF_GUIDE })) put(folder, name, data);
+  const { view } = await w.runNew({ referencesDir: folder });
+  assert.equal(view.stage, 'done', view.message);
+  const list = await w.pipeline.list();
+  assert.deepEqual(list.config.references.default.problemList, ['The reference file Credit_Manual_Notes.pages is not one of .md .txt .pdf .docx .xlsx .csv .json']);
+  const redacted = redactPipelineData(view);
+  const everything = JSON.stringify(redacted) + JSON.stringify(redactPipelineData(list));
+  for (const hidden of ['Draw_Review_Notes.md', 'Close_Checklist_Guide.txt', 'Credit_Manual_Notes.pages', 'alt-1', 'as-1-alt-1', 'REF-MARKER', 'DESIGNER-GUIDELINE-MARK', 'Proceed in two tranches', 'DESIGNER-GOLDEN-MARK']) assert.equal(everything.includes(hidden), false, `${hidden} must not be in the redacted answer`);
+  /* the fields, by name */
+  assert.deepEqual(redacted.references.names, { withheld: true });
+  assert.deepEqual(redacted.references.files, { withheld: true });
+  assert.deepEqual(redactPipelineData({ references: { names: ['A.txt'], files: [], unscanned: ['B.docx'], partial: ['B.docx'], found: 2 } }).references.partial, { withheld: true });
+  /* a list that is empty has nothing to hide: it stays an empty list (the page does not say that something is withheld) */
+  const none = redactPipelineData({ references: { names: [], files: [], unscanned: [], partial: [], truncated: false }, config: { references: { default: { problemList: [], problems: 0 } } } });
+  assert.deepEqual([none.references.names, none.references.files, none.references.unscanned, none.references.partial, none.config.references.default.problemList], [[], [], [], [], []]);
+  assert.deepEqual(redactPipelineData(list).config.references.default.problemList, { withheld: true });
+  assert.equal(typeof redactPipelineData(list).config.references.default.problems, 'number');
+  assert.deepEqual(redacted.attempts[0].freeze.map(record => record.answers), [{ withheld: true }], 'the freeze record before the pilots');
+  /* the ledger: the calls of the reviews and the repairs (a second reveal, a repair turn, the grades of the answer set) are one entry of kind review-work with their summed cost */
+  const hiddenKinds = ['blind-review', 'reveal', 'application', 'adjudication', 'review-repair', 'guideline-repair'];
+  const isHidden = entry => hiddenKinds.includes(entry.kind) || /^(?:as|diag)-/.test(String(entry.ref));
+  assert.equal(view.ledger.filter(isHidden).length > 3, true, 'the control: the real ledger has many such calls');
+  assert.equal(redacted.ledger.some(isHidden), false);
+  const work = redacted.ledger.filter(entry => entry.kind === 'review-work');
+  assert.equal(work.length, 1);
+  assert.deepEqual([work[0].ref, work[0].stage], [{ withheld: true }, 'design']);
+  assert.equal(Math.abs(work[0].costUsd - view.ledger.filter(isHidden).reduce((sum, entry) => sum + entry.costUsd, 0)) < 1e-9, true, 'with the cost of all of them');
+  assert.equal(redacted.ledger.length, view.ledger.length - view.ledger.filter(isHidden).length + 1);
+  assert.equal(redacted.ledger.filter(entry => entry.kind === 'pilot').every(entry => typeof entry.ref === 'string'), true, 'the references of the pilots stay');
+  /* what stays: the hashes of the freeze records and the validation */
+  assert.deepEqual(redacted.attempts[0].freeze.map(record => [record.packetSha256, record.guidelineSha256, record.goldenSha256, record.answerSetSha256]), view.attempts[0].freeze.map(record => [record.packetSha256, record.guidelineSha256, record.goldenSha256, record.answerSetSha256]));
+  assert.equal(redacted.attempts[0].validation, 'complete');
+  assert.equal(redacted.result.validation, 'complete');
+  for (const field of ['fairness', 'answerSet', 'guidelineRepair']) assert.deepEqual(redacted.attempts[0][field], { withheld: true }, field);
+});
+
+/* ---- the isolation audit, re-read against the spec ---- */
+
+test('isolationProblems: the tools of a run are exactly the ones its kind of review may have, no argument names a private folder, and a link from the folder into the project or out of the temporary root is found', t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-isolation-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const tmpRoot = path.join(base, 'tmp');
+  const project = path.join(base, 'project');
+  const outside = path.join(base, 'elsewhere');
+  for (const dir of [tmpRoot, project, outside]) fs.mkdirSync(dir, { recursive: true });
+  const cwd = path.join(tmpRoot, 'runs', 'review-1');
+  fs.mkdirSync(path.join(cwd, '.tmp'), { recursive: true });
+  const env = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CONFIG_DIR: `${cwd}/.tmp/claude-config`, TMPDIR: `${cwd}/.tmp`, CLAUDE_CODE_TMPDIR: `${cwd}/.tmp` };
+  const args = ['-p', '--model', 'claude-opus-5-5', '--effort', 'medium', '--output-format', 'stream-json', '--verbose', '--tools', '', '--permission-mode', 'acceptEdits', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence'];
+  const sound = { args, env, cwd, tmpRoot, projectRoot: project, homeDir: path.join(base, 'home'), forbiddenText: [path.join(project, 'private')], tools: [] };
+  assert.deepEqual(isolationProblems(sound), []);
+  /* a tool-less review has no tool; a reader has Read, Glob and Grep and no more */
+  const withTools = list => [...args.slice(0, args.indexOf('--tools') + 1), list.join(','), ...args.slice(args.indexOf('--tools') + 2), ...(list.length ? ['--allowedTools', list.join(',')] : [])];
+  assert.match(isolationProblems({ ...sound, args: withTools(['Bash']) }).join(';'), /tools are not exactly the ones this review may use \(none\)/);
+  assert.match(isolationProblems({ ...sound, args: withTools(['Bash']) }).join(';'), /allows tools beyond/);
+  assert.deepEqual(isolationProblems({ ...sound, args: withTools(['Glob', 'Grep', 'Read']), tools: ['Read', 'Glob', 'Grep'] }), []);
+  assert.match(isolationProblems({ ...sound, args: withTools(['Read', 'Glob', 'Grep', 'Write']), tools: ['Read', 'Glob', 'Grep'] }).join(';'), /not exactly the ones/);
+  assert.match(isolationProblems({ ...sound, args: [...withTools(['Read']), '--allowedTools', 'Read,Bash'], tools: ['Read'] }).join(';'), /allows tools beyond/);
+  assert.deepEqual(isolationProblems({ ...sound, tools: undefined, args: withTools(['Bash']) }), [], 'a caller that does not name the tools is not held to a list');
+  /* an argument that names a private folder */
+  assert.match(isolationProblems({ ...sound, args: [...args, '--note', path.join(project, 'private', 'references')] }).join(';'), /an argument of the run names a private folder/);
+  /* a working folder that is a link: into the project, or out of the temporary root */
+  const linkIntoProject = path.join(tmpRoot, 'runs', 'linked-project');
+  fs.symlinkSync(project, linkIntoProject);
+  fs.mkdirSync(path.join(project, '.tmp'), { recursive: true });
+  const viaProject = { ...sound, cwd: linkIntoProject, env: { ...env, CLAUDE_CONFIG_DIR: `${linkIntoProject}/.tmp/claude-config`, TMPDIR: `${linkIntoProject}/.tmp`, CLAUDE_CODE_TMPDIR: `${linkIntoProject}/.tmp` } };
+  assert.match(isolationProblems(viaProject).join(';'), /through a link, inside the project/);
+  const linkOut = path.join(tmpRoot, 'runs', 'linked-outside');
+  fs.symlinkSync(outside, linkOut);
+  fs.mkdirSync(path.join(outside, '.tmp'), { recursive: true });
+  assert.match(isolationProblems({ ...sound, cwd: linkOut, env: { ...env, CLAUDE_CONFIG_DIR: `${linkOut}/.tmp/c`, TMPDIR: `${linkOut}/.tmp`, CLAUDE_CODE_TMPDIR: `${linkOut}/.tmp` } }).join(';'), /through a link, not under the temporary root/);
+});
+
+test('an isolated run with tools never has more than the reader\'s three, whatever its caller asks for; a tool-less one has none; and the blind reviewer\'s folder holds nothing of the designer\'s', async t => {
+  const { runAudited, runToolLess } = require('../backend/pipeline/models.cjs');
+  const { pilotEnv } = require('../backend/agents/claude-runner.cjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-isolation-run-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const folder = path.join(base, 'tmp', 'runs', 'review-1');
+  fs.mkdirSync(folder, { recursive: true });
+  const rt = { tmpRoot: path.join(base, 'tmp'), root: path.join(base, 'project'), detect: async () => ({ found: true, path: '/bin/true' }), preflight: async () => ({ token: null }), preparedEnv: scratch => pilotEnv({}, scratch), limits: {}, runners: new Set(), spawnFn: () => { throw new Error('a run that is not isolated must not be started'); } };
+  const common = { rt, folder, prompt: 'x', model: 'claude-opus-5-5', effort: 'medium', capUsd: 1, isolated: { forbiddenText: [] } };
+  await assert.rejects(runAudited({ ...common, tools: ['Read', 'Bash'] }), error => error.status === 409 && /would not be isolated .*tools are not exactly the ones this review may use/.test(error.message));
+  await assert.rejects(runAudited({ ...common, tools: ['Read', 'Glob', 'Grep', 'Write'] }), error => error.status === 409 && /would not be isolated/.test(error.message));
+  /* a tool-less run is built with no tools, so the check passes and it goes on to start (the spawn function refuses here, which is what the test uses to see that it got that far) */
+  const started = await runToolLess({ ...common });
+  assert.ok(started.summary.spawnError, 'the isolation check passed and the run reached its spawn');
+  /* the folder of the blind reviewer */
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const reviewer = fs.mkdtempSync(path.join(base, 'reviewer-'));
+  fs.mkdirSync(path.join(reviewer, 'filesystem'));
+  fs.writeFileSync(path.join(reviewer, 'prompt.txt'), 'x');
+  fs.writeFileSync(path.join(reviewer, 'filesystem', 'A.txt'), 'File, synthetic.\n');
+  const ready = await service._prepareBlindFolder(reviewer, [{ name: 'A.txt' }], () => false);
+  assert.deepEqual(ready, { renderings: [], unreadable: [], partial: [], native: [] });
+  fs.writeFileSync(path.join(reviewer, 'guideline.md'), 'a leftover of the designer');
+  await assert.rejects(service._prepareBlindFolder(reviewer, [{ name: 'A.txt' }], () => false), error => error.constructor.name === 'SafetyError' && /holds something that is not the packet/.test(error.message) && /guideline\.md/.test(error.detail));
+});
+
+test('the application check shows the clause\'s file first and the files that hold supersession wording whole, and cuts the decoy', async () => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const seen = [];
+  service._reviewCall = async (p, ctl, { prompt }) => { seen.push(prompt); return { usable: true, text: JSON.stringify(APPLICATION) }; };
+  const filler = (label, size) => `${label} filler sentence. `.repeat(Math.ceil(size / (label.length + 18)));
+  const documents = [
+    { name: 'A_Decoy.txt', text: `Decoy start. ${filler('Decoy', 30000)}Decoy end.\n` },
+    { name: 'Facility_Terms.txt', text: NEW_TERMS(1) },
+    { name: 'Authority_Extra.txt', text: `Authority extra. ${filler('Authority', 4000)}Authority end.\n` },
+    { name: 'Z_Notice.txt', text: `Notice. The Facility Terms 1 are withdrawn. ${filler('Notice', 30000)}END-OF-NOTICE\n` },
+  ];
+  const brief = briefFor(1);
+  brief.files = [{ name: 'Facility_Terms.txt', role: 'authority' }, { name: 'Authority_Extra.txt', role: 'evidence' }, { name: 'A_Decoy.txt', role: 'decoy' }, { name: 'Z_Notice.txt', role: 'decoy' }];
+  const result = await service._applicationCheck({}, {}, { n: 1, tag: 'x', clause: { file: 'Facility_Terms.txt', quote: CLAUSE }, alternative: 'Proceed', decision: 'Whether', brief, documents, promptText: '' });
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /END-OF-NOTICE/, 'the file that holds the wording is shown to its end');
+  assert.match(seen[0], /Authority end\./, 'and so is the evidence file');
+  assert.match(seen[0], /Decoy start\.[\s\S]*\[file cut here: \d+ more characters are not shown to you\]/);
+  assert.deepEqual(result.cut, ['A_Decoy.txt']);
+});
+
+test('the windows of the withheld material are one WindowSet: a text is checked in one pass, however much is withheld, and the answers are those of the list', () => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const { WindowSet, leakWindows, containsLeak } = require('../backend/pipeline/safety.cjs');
+  const service = Object.create(PipelineService.prototype);
+  /* a deterministic text of words, so that a long withheld text and a long file have nothing in common but what is planted */
+  const words = (seed, count) => { let x = seed; const out = []; for (let k = 0; k < count; k++) { x = (x * 48271) % 2147483647; out.push(`w${x % 9973}`); } return out.join(' '); };
+  const withheld = words(7, 90000);
+  const ctl = { texts: { guideline: withheld.slice(0, 300000), goldenAnswer: 'Golden answer, synthetic, long enough to make windows of its own with a few more words in it.' }, withheldWindows: leakWindows(withheld.slice(300000)) };
+  const set = service._leakWindowsOf(ctl);
+  assert.equal(set instanceof WindowSet, true);
+  assert.equal(service._leakWindowsOf(ctl), set, 'made once');
+  const file = words(99991, 90000);
+  let started = Date.now();
+  assert.equal(containsLeak(file, set), false);
+  assert.equal(containsLeak(`${file} ${withheld.slice(400000, 400200)}`, set), true, 'a planted passage of the withheld text is found');
+  assert.equal(containsLeak(`${file} Golden answer, synthetic, long enough to make windows of its own with a few more words in it.`, set), true);
+  assert.equal(Date.now() - started < 8000, true, `three scans of half a million characters against ${set.length} windows took ${Date.now() - started} ms`);
+  /* the same answers as the list gives, on a small case */
+  const small = leakWindows('The withheld sentence, long enough to be a window of its own, and then some more words to make a second one.');
+  for (const text of ['A file that says: the withheld sentence, long enough to be a window of its own, and then some more words', 'A file with nothing of it.']) assert.equal(containsLeak(text, new WindowSet(small)), containsLeak(text, small));
+});
+
+/* ====================================================================== round 3: reading the packet */
+
+const utf8Bytes = text => new TextEncoder().encode(text);
+const zipFile = (dir, rel, parts) => put(dir, rel, Buffer.from(packageEngine.writeZip(Object.entries(parts).map(([name, text]) => ({ name, bytes: utf8Bytes(text) })))));
+const scratchDir = t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finance-round3-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+
+test('extract: a text file is read by its byte order mark (UTF-8, UTF-16 in either order) or as Windows-1252 when it is not UTF-8, a colour code is taken out, and bytes that are no text give none and are never called clean', async t => {
+  const { extractText, extractDetailed, textHoldsWindows, scanFile } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const sentence = 'The guideline says that the committee approves every draw above 2,400 before the treasurer signs it.';
+  put(dir, 'le.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(sentence, 'utf16le')]));
+  put(dir, 'be.txt', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(sentence, 'utf16le').swap16()]));
+  put(dir, 'bom8.txt', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(sentence)]));
+  put(dir, 'plain.txt', sentence);
+  put(dir, 'cp1252.text', Buffer.from('Caf\u00e9 notice: the d\u00e9p\u00f4t is closed. '.repeat(30), 'latin1'));
+  put(dir, 'ansi.text', '\u001b[31mRED\u001b[0m notice that the policy is withdrawn\u000b\n');
+  put(dir, 'nul.txt', Buffer.from([0x41, 0, 0x42, 0, 0, 0x43]));
+  put(dir, 'nul', Buffer.from([0x41, 0x00, 0x42]));
+  put(dir, 'utf32.txt', Buffer.from([0xff, 0xfe, 0, 0, 0x41, 0, 0, 0]));
+  for (const name of ['le.txt', 'be.txt', 'bom8.txt']) assert.equal(await extractText(path.join(dir, name)), sentence, name);
+  assert.equal((await extractText(path.join(dir, 'cp1252.text'))).startsWith('Caf\u00e9 notice: the d\u00e9p\u00f4t is closed.'), true, 'an 8-bit file keeps its accents');
+  const ansi = await extractText(path.join(dir, 'ansi.text'));
+  assert.equal(ansi.includes('RED notice that the policy is withdrawn') && !ansi.includes('\u001b'), true, 'a text with colour codes is a text');
+  for (const name of ['nul.txt', 'nul', 'utf32.txt']) assert.equal(await extractText(path.join(dir, name)), null, name);
+  /* the leak scan reads the same way, and a file it cannot read as text is not clean */
+  const windows = leakWindows(sentence);
+  for (const name of ['le.txt', 'be.txt', 'bom8.txt', 'plain.txt']) assert.equal(await textHoldsWindows(path.join(dir, name), windows), true, name);
+  for (const name of ['nul.txt', 'utf32.txt']) assert.equal(await textHoldsWindows(path.join(dir, name), windows), null, `${name}: not text, so neither clean nor leaking`);
+  assert.deepEqual(await scanFile(path.join(dir, 'be.txt'), windows), { leak: true, binary: false });
+  assert.equal((await scanFile(path.join(dir, 'nul.txt'), windows)).binary, true);
+  /* a large UTF-16 file: the passage is found past the first chunk, and the text is cut and said to be partial */
+  const filler = Buffer.from('filler words about nothing in particular. '.repeat(40000), 'utf16le');
+  put(dir, 'big.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), filler, Buffer.from(sentence, 'utf16le'), filler]));
+  assert.equal(await textHoldsWindows(path.join(dir, 'big.txt'), windows), true);
+  const cut = await extractDetailed(path.join(dir, 'big.txt'), { maxChars: 1000 });
+  assert.deepEqual([cut.text.length, cut.partial], [1000, true]);
+  assert.equal((await extractDetailed(path.join(dir, 'plain.txt'))).partial, false);
+});
+
+test('extract: a Word file is shown as the file says it, a tracked deletion as deleted, a comment, a header and a footer labelled and the parts in order; the insertion beside a deletion does not run into it', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'tracked.docx', {
+    'word/comments.xml': '<w:comments><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Do not use this clause; legal says the limit is 50.</w:t></w:r></w:p></w:comment></w:comments>',
+    'word/header2.xml': '<w:hdr><w:p><w:r><w:t>Header two</w:t></w:r></w:p></w:hdr>',
+    'word/header10.xml': '<w:hdr><w:p><w:r><w:t>Header ten</w:t></w:r></w:p></w:hdr>',
+    'word/header1.xml': '<w:hdr><w:p><w:r><w:t>DRAFT - SUPERSEDED</w:t></w:r></w:p></w:hdr>',
+    'word/footer1.xml': '<w:ftr><w:p><w:r><w:t>Page 1</w:t></w:r><w:r><w:instrText> PAGE </w:instrText></w:r></w:p></w:ftr>',
+    'word/document.xml': '<w:document><w:body><w:p><w:r><w:t xml:space="preserve">Policy 7. The daily meal limit is </w:t></w:r><w:del w:id="1"><w:r><w:delText>USD 60</w:delText></w:r></w:del><w:ins w:id="2"><w:r><w:t>USD 75</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> per traveller.</w:t></w:r></w:p><w:p><w:del w:id="3"><w:r><w:delText>Clause 9. Approvals are never required.</w:delText></w:r></w:del></w:p><w:p><w:r><w:t>End of policy.</w:t></w:r><w:r><w:tab/><w:t>Signed</w:t></w:r></w:p><mc:AlternateContent><mc:Choice><w:p><w:r><w:t>Box text</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Box text</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>',
+    'docProps/custom.xml': '<Properties><property name="Status"><vt:lpwstr>Draft</vt:lpwstr></property></Properties>',
+  });
+  const text = await extractText(path.join(dir, 'tracked.docx'));
+  assert.equal(text, [
+    'Policy 7. The daily meal limit is [deleted: USD 60] USD 75 per traveller.',
+    '[deleted: Clause 9. Approvals are never required.]',
+    'End of policy. Signed',
+    'Box text',
+    '',
+    '[header: DRAFT - SUPERSEDED]',
+    '',
+    '[header: Header two]',
+    '',
+    '[header: Header ten]',
+    '',
+    '[footer: Page 1]',
+    '',
+    '[comment: Do not use this clause; legal says the limit is 50.]',
+    '',
+    'Status: Draft',
+  ].join('\n'));
+  assert.equal(text.includes('USD 60USD 75'), false);
+  assert.equal(text.indexOf('Policy 7.') < text.indexOf('[comment:'), true, 'the body first, then the headers and the comments');
+});
+
+test('extract: a workbook shows each sheet under its name, its cells in columns with the empty ones kept, dates as dates and a formula with no stored value as the formula, and says it is only partial then; a sheet name, a hidden sheet and a comment are there', async t => {
+  const { extractText, extractDetailed, readerKind } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'two.xlsx', {
+    'xl/workbook.xml': '<workbook><workbookPr/><sheets><sheet name="2023 limits (SUPERSEDED)" sheetId="1" r:id="rId1"/><sheet name="2026 limits" sheetId="2" r:id="rId2"/><sheet name="Hid" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet10.xml"/><Relationship Id="rId3" Target="/xl/worksheets/sheet2.xml"/></Relationships>',
+    'xl/sharedStrings.xml': '<sst><si><t>Daily meal limit</t></si><si><t>Lodging</t></si></sst>',
+    'xl/styles.xml': '<styleSheet><numFmts><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/></cellXfs></styleSheet>',
+    'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1"><v>60</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c><c r="C2"><v>180</v></c></row></sheetData></worksheet>',
+    'xl/worksheets/sheet10.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>75</v></c><c r="D1" s="1"><v>46204</v></c></row><row r="2"><c r="A2"><f>SUM(B1:B1)</f></c><c r="B2" s="2"><v>45000.5</v></c></row></sheetData></worksheet>',
+    'xl/worksheets/sheet2.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>hidden note</t></is></c></row></sheetData></worksheet>',
+    'xl/comments1.xml': '<comments><commentList><comment ref="B1"><text><r><t>Check with legal before use</t></r></text></comment></commentList></comments>',
+  });
+  const book = await extractDetailed(path.join(dir, 'two.xlsx'));
+  assert.equal(book.text, [
+    'Sheet: 2023 limits (SUPERSEDED)', 'Daily meal limit\t\t60', 'Lodging\t\t180', '',
+    'Sheet: 2026 limits', 'Daily meal limit\t75\t\t2026-07-01', '[formula: SUM(B1:B1)]\t2023-03-15 12:00', '',
+    'Sheet: Hid (hidden)', 'hidden note', '',
+    '[1 formula of this workbook had no stored value and is shown as the formula]', '',
+    '[comment: Check with legal before use]',
+  ].join('\n'));
+  assert.equal(book.partial, true, 'a formula that has no stored value makes the rendering partial');
+  /* only formulas: not blank, not unreadable, but partial */
+  zipFile(dir, 'formulas.xlsx', { 'xl/workbook.xml': '<workbook><sheets><sheet name="Calc" sheetId="1" r:id="rId1"/></sheets></workbook>', 'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>', 'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1"><f>1+2</f></c><c r="B1"><f t="shared" si="0"/></c></row></sheetData></worksheet>' });
+  const formulas = await extractDetailed(path.join(dir, 'formulas.xlsx'));
+  assert.deepEqual([formulas.text.split('\n')[0], formulas.text.split('\n')[1], formulas.partial, readerKind('formulas.xlsx', formulas.text)], ['Sheet: Calc', '[formula: 1+2]\t[formula: shared formula]', true, 'rendered']);
+  assert.equal((await extractDetailed(path.join(dir, 'missing.xlsx'))).text, null);
+  /* a workbook with no names to give shows its rows alone, and a sheet the rows of which have no values shows only its name */
+  assert.equal(await extractText(put(dir, 'plain.xlsx', xlsxFile([['Label', 'Value'], ['Cash', 1250]]))), 'Label\tValue\nCash\t1250');
+});
+
+test('extract: RTF keeps the dashes, quotes, cells and rows a word processor writes for them, the text of a header, a comment and a tracked deletion (labelled), the characters of the code page and of Unicode, and leaves the pictures and the tables of fonts out', () => {
+  const { rtfText } = require('../backend/pipeline/extract.cjs');
+  assert.equal(rtfText('{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}Daily limit USD 60\\endash 75 per traveller.\\par don\\rquote t \\lquote x\\rquote  \\emdash end\\par}'), 'Daily limit USD 60\u201375 per traveller.\ndon\u2019t \u2018x\u2019 \u2014end');
+  assert.equal(rtfText('{\\rtf1 USD\\~60 and\\_ 75 per\\-day.\\par Item\\cell 60\\cell\\row Lodging\\cell 180\\cell\\row}'), 'USD 60 and- 75 perday.\nItem\t60\nLodging\t180');
+  assert.equal(rtfText('{\\rtf1{\\header DRAFT - WITHDRAWN}Body text here.{\\deleted old 60}{ new 75}\\par caf\\\'e9 \\u8364? \\u233? and \\\'93quoted\\\'94\\par}'), '[header: DRAFT - WITHDRAWN] Body text here.[deleted: old 60] new 75\ncaf\u00e9 \u20ac \u00e9 and \u201cquoted\u201d');
+  assert.equal(rtfText('{\\rtf1 {\\*\\annotation {\\*\\atnauthor Z}Do not use}Para one\\\nPara two}'), '[comment: Do not use] Para one\nPara two');
+  assert.equal(rtfText('{\\rtf1 {\\pict\\pngblip 89504e47}{\\*\\generator Word}Policy 7: the daily meal limit is 60 per traveller.\\par}'), 'Policy 7: the daily meal limit is 60 per traveller.');
+  assert.equal(rtfText('{\\rtf1\\uc2 a\\u233?? b\\par}'), 'a\u00e9 b');
+});
+
+test('extract: slides come in order (slide 2 before slide 10) with the notes, comments and a master that says something; OpenDocument files keep their tabs, line breaks, sheet names, tracked deletions without the author and date, and notes', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  zipFile(dir, 'deck.pptx', {
+    'ppt/slides/slide1.xml': '<p:sld><a:p><a:r><a:t>Slide 1</a:t></a:r></a:p></p:sld>',
+    'ppt/slides/slide10.xml': '<p:sld><a:p><a:r><a:t>Slide 10</a:t></a:r></a:p></p:sld>',
+    'ppt/slides/slide2.xml': '<p:sld><a:p><a:r><a:t>Daily meal limit</a:t></a:r><a:br/><a:r><a:t>USD 60</a:t></a:r></a:p></p:sld>',
+    'ppt/notesSlides/notesSlide2.xml': '<p:notes><a:p><a:r><a:t>speaker note</a:t></a:r></a:p></p:notes>',
+    'ppt/slideMasters/slideMaster1.xml': '<p:sldMaster><a:p><a:r><a:t>MASTER: SUPERSEDED by 2026 deck</a:t></a:r></a:p><a:p><a:r><a:t>Click to edit Master title style</a:t></a:r></a:p></p:sldMaster>',
+    'ppt/comments/modernComment_1.xml': '<p188:cmLst><p188:cm><p188:txBody><a:p><a:r><a:t>modern comment text</a:t></a:r></a:p></p188:txBody></p188:cm></p188:cmLst>',
+  });
+  assert.equal(await extractText(path.join(dir, 'deck.pptx')), 'Slide 1\n\nDaily meal limit\nUSD 60\n\nSlide 10\n\n[notes: speaker note]\n\n[comment: modern comment text]\n\n[master: MASTER: SUPERSEDED by 2026 deck]');
+  zipFile(dir, 't.odt', { 'content.xml': '<office:document-content><office:body><office:text><text:tracked-changes><text:changed-region><text:deletion><office:change-info><dc:creator>Alice</dc:creator><dc:date>2026-01-02T10:00:00</dc:date></office:change-info><text:p>Clause 9. Approvals are never required.</text:p></text:deletion></text:changed-region></text:tracked-changes><text:p>Item<text:tab/>60<text:line-break/>Next line<text:s text:c="2"/>end</text:p><text:p>Body<text:note><text:note-body><text:p>A footnote.</text:p></text:note-body></text:note></text:p></office:text></office:body></office:document-content>' });
+  assert.equal(await extractText(path.join(dir, 't.odt')), '[deleted: Clause 9. Approvals are never required.] Item 60\nNext line end\nBody[footnote: A footnote.]');
+  zipFile(dir, 't.ods', { 'content.xml': '<office:document-content><office:body><office:spreadsheet><table:table table:name="Old limits"><table:table-row><table:table-cell office:value-type="string"><text:p>Meal limit</text:p></table:table-cell><table:table-cell/><table:table-cell office:value="60"><text:p>60</text:p></table:table-cell></table:table-row></table:table><table:table table:name="New limits"><table:table-row><table:table-cell><text:p>Meal limit</text:p></table:table-cell><table:table-cell><text:p>75</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>' });
+  assert.equal(await extractText(path.join(dir, 't.ods')), 'Sheet: Old limits\nMeal limit\t\t60\n\nSheet: New limits\nMeal limit\t75');
+});
+
+test('extract: a hostile part cannot hold the process (a long run of "<", of unclosed tags or rows takes about as long as a clean part of its size), and a part is read to a limit', async t => {
+  const { extractText } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const timed = async file => { const started = Date.now(); const text = await extractText(file); return { text, ms: Date.now() - started }; };
+  zipFile(dir, 'lt.docx', { 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>Real text.</w:t></w:r></w:p>${'<'.repeat(400000)}</w:body></w:document>` });
+  zipFile(dir, 'tp.docx', { 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>Real text.</w:t></w:r></w:p>${'<v:textpath '.repeat(100000)}</w:body></w:document>` });
+  zipFile(dir, 'rows.xlsx', { 'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${'<row r="1">'.repeat(100000)}</sheetData></worksheet>` });
+  zipFile(dir, 'deep.docx', { 'word/document.xml': `<w:document>${'<w:p>'.repeat(100000)}<w:t>x</w:t>${'</w:q>'.repeat(100000)}</w:document>` });
+  for (const name of ['lt.docx', 'tp.docx', 'rows.xlsx', 'deep.docx']) {
+    const { ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000, true, `${name}: ${ms} ms`);
+  }
+  assert.equal((await extractText(path.join(dir, 'lt.docx'))).startsWith('Real text.'), true);
+  /* a nest of labelled regions (a tracked deletion in a tracked deletion, a hundred thousand deep) is as cheap as a flat run */
+  zipFile(dir, 'nest.docx', { 'word/document.xml': `<w:document>${'<w:del>'.repeat(100000)}<w:delText>deep</w:delText>${'</w:del>'.repeat(100000)}<w:p><w:r><w:t>After.</w:t></w:r></w:p></w:document>` });
+  put(dir, 'nest.rtf', `{\\rtf1 ${'{\\deleted '.repeat(60000)}deep${'}'.repeat(60000)} After.}`);
+  /* and so is a long run of small ones: a redline with thirty thousand deletions */
+  zipFile(dir, 'many.docx', { 'word/document.xml': `<w:document><w:body>${'<w:p><w:r><w:t>Ordinary text of the policy.</w:t></w:r><w:del><w:r><w:delText>old</w:delText></w:r></w:del></w:p>'.repeat(30000)}</w:body></w:document>` });
+  put(dir, 'many.rtf', `{\\rtf1 ${'Ordinary text of the policy.{\\deleted old}\\par '.repeat(30000)}}`);
+  for (const name of ['many.docx', 'many.rtf']) {
+    const { text, ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000 && text.includes('[deleted: old]'), true, `${name}: ${ms} ms`);
+  }
+  for (const name of ['nest.docx', 'nest.rtf']) {
+    const { text, ms } = await timed(path.join(dir, name));
+    assert.equal(ms < 3000 && text.includes('[deleted: deep]') && text.includes('After.'), true, `${name}: ${ms} ms, ${JSON.stringify(String(text).slice(0, 80))}`);
+  }
+  /* a text file that is not UTF-8 and has accents on more than one character in a hundred is still a text */
+  put(dir, 'accents.eml', Buffer.from('Subject: Avis\nLe d\u00e9p\u00f4t est ferm\u00e9, \u00e0 compter de la date indiqu\u00e9e. Cette notice est annul\u00e9e.\n'.repeat(5), 'latin1'));
+  assert.equal((await extractText(path.join(dir, 'accents.eml'))).includes('annul\u00e9e'), true);
+});
+
+test('quotes: a line break of a hard-wrapped file is not a sentence boundary, a heading, a list item, a table row and a blank line are; a quote that stops at a decimal point or in the middle of a number or a word is not a whole sentence', () => {
+  const { buildCorpus, findQuote } = require('../backend/pipeline/quotes.cjs');
+  const strict = { strict: true };
+  const find = (text, quote, name = 'F.txt') => findQuote(quote, buildCorpus([{ name, text }]), undefined, strict);
+  const wrapped = 'The employee may not\nclaim travel without approval.\nTaxis are not\nreimbursed under any circumstances.\n';
+  assert.equal(find(wrapped, 'claim travel without approval.'), '', 'a tail that drops the negation on the line before');
+  assert.equal(find(wrapped, 'The employee may not claim travel without approval.'), 'F.txt');
+  assert.equal(find(wrapped, 'reimbursed under any circumstances.'), '');
+  assert.equal(find('The employee may claim travel\nunless the trip is personal.\n', 'The employee may claim travel'), '', 'a quote that stops at a wrapped line end');
+  /* a unit that ended: a heading, a list, a row, a paragraph, a CSV line */
+  assert.equal(find('Daily Meal Limit\nThe limit is USD 60 per day.\n', 'The limit is USD 60 per day.'), 'F.txt', 'under a heading');
+  assert.equal(find('Intro words.\n\nNotice is required here\nand also elsewhere.\n', 'Notice is required here'), '', 'the line ends in the middle of a sentence');
+  assert.equal(find('Intro words\n\nNotice is required before use\n\nOther words here.', 'Notice is required before use'), 'F.txt', 'a paragraph of its own');
+  assert.equal(find('Rule,Limit,Notes\nMeals,60,per day per traveller\nLodging,180,per night per traveller\n', 'Meals,60,per day per traveller', 'F.csv'), 'F.csv', 'a line of a CSV file');
+  /* what follows the quote in the file decides */
+  assert.equal(find('The daily meal limit is 60.50 per day.', 'The daily meal limit is 60.'), '', 'a decimal point is no end of sentence');
+  assert.equal(find('Usable cash is 1,250.75 after fees and holds.', 'Usable cash is 1,250.'), '');
+  assert.equal(find('Draws are made in U.S. dollars only, per the schedule.', 'Draws are made in U.S.'), '', 'an abbreviation before a word in lower case');
+  assert.equal(find('Draws are made in dollars. Draws are not made in euros.', 'Draws are made in dollars.'), 'F.txt');
+  assert.equal(find('Notice: "the late fee is waived always." Then he left.', 'the late fee is waived always.'), 'F.txt', 'a closing quote after the full stop');
+  /* a quote of 40 characters or more is not cut in the middle of a word or a number either */
+  assert.equal(find('The minimum cash reserve for the facility is 1,250,000 dollars at all times.', 'The minimum cash reserve for the facility is 1,250'), '');
+  assert.equal(find('The minimum cash reserve for the facility is 1,250,000 dollars at all times.', 'The minimum cash reserve for the facility is 1,250,000 dollars'), 'F.txt');
+  assert.equal(find('The minimum cash reserve for the facility is 1250 dollars at all times.', 'he minimum cash reserve for the facility is 1250 dollars at all'), '', 'it starts inside a word');
+});
+
+test('packetView: with 90 other files in the packet the priority files are still shown whole, the rest share a fifth of the cap, and the block stays about the size of the cap', () => {
+  const { packetView, priorityFiles } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus, findQuote } = require('../backend/pipeline/quotes.cjs');
+  const rule = 'The late fee is waived whenever the holder gives written notice before the due date.';
+  const authority = `Authority terms, synthetic. ${'Filler sentence about nothing in particular. '.repeat(100)}${rule}\n`;
+  const prompt = `Prompt, synthetic. The decision is taken on 2025-04-15. ${'More prompt words. '.repeat(40)}\n`;
+  const brief = { decision: { authorityFile: 'Authority_Terms.txt' }, files: [], traps: [] };
+  for (const count of [10, 40, 90, 140]) {
+    const ledgers = Array.from({ length: count }, (_, k) => ({ name: `Ledger_${String(k).padStart(3, '0')}.txt`, text: `Ledger ${k}. ${'An entry of the ledger. '.repeat(95)}\n` }));
+    for (const [cap, label] of [[24000, 'adjudication'], [36000, 'reveal'], [44000, 'application']]) {
+      const view = packetView([...ledgers, { name: 'Authority_Terms.txt', text: authority }, { name: 'prompt.txt', text: prompt }], cap, priorityFiles(brief));
+      const shown = name => view.shown.find(item => item.name === name).text;
+      assert.equal(shown('Authority_Terms.txt'), authority, `${count} ledgers, ${label}: the authority file whole`);
+      assert.equal(shown('prompt.txt'), prompt, `${count} ledgers, ${label}: the prompt whole`);
+      assert.equal(findQuote(rule, buildCorpus(view.shown), 'Authority_Terms.txt', { strict: true }), 'Authority_Terms.txt');
+      const total = view.shown.reduce((sum, item) => sum + item.text.length, 0);
+      assert.equal(total <= cap + count * 40, true, `${count} ledgers, ${label}: ${total} characters for a cap of ${cap}`);
+      assert.equal(view.cut.includes('Authority_Terms.txt'), false);
+    }
+  }
+});
+
+/* ---- isolation: the environment of the companion ---- */
+
+test('isolationProblems: a folder is named only as a path (it, or a path below it); a folder that merely starts alike, one that ends alike and a value that holds no path do not name it; an argument is held to the same', () => {
+  const { isolationProblems, namesFolder, environmentProblems } = require('../backend/pipeline/isolation.cjs');
+  const priv = '/home/user/moonch/private';
+  const yes = ['/home/user/moonch/private', '/home/user/moonch/private/', '/home/user/moonch/private/references', '--dir=/home/user/moonch/private/references', '/bin:/home/user/moonch/private/bin:/usr/bin', 'see /home/user/moonch/private for it', '"/home/user/moonch/private/x y"'];
+  const no = ['/home/user/moonch/private-notes', '/home/user/moonch/private-notes/references', '/home/user/moonch/private.bak', '/home/user/moonch/private_old/x', '/x/home/user/moonch/private', '/home/user/moonch/privateer', '/home/user/moonch', '', 'private', '1'];
+  for (const text of yes) assert.equal(namesFolder(text, priv), true, text);
+  for (const text of no) assert.equal(namesFolder(text, priv), false, text);
+  assert.deepEqual(environmentProblems({ OLDPWD: `${priv}/references`, PWD: '/home/user/moonch/private-notes', NOTES: '/home/user/moonch/private.bak', LANG: 'C' }, [priv]), ['OLDPWD']);
+  assert.deepEqual(environmentProblems({ REFS: '/home/user/refs-archive/2024', OTHER: '/home/user/refs/2024' }, ['/home/user/refs']), ['OTHER'], 'the owner\'s reference folder is held to the same boundary');
+  /* in a whole check: a sibling folder in the arguments or the environment is no problem, the folder itself is */
+  const tmpRoot = '/tmp/work';
+  const cwd = '/tmp/work/finance-studio-pipelines/x/runs/review-1';
+  const env = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CONFIG_DIR: `${cwd}/.tmp/claude-config`, TMPDIR: `${cwd}/.tmp`, CLAUDE_CODE_TMPDIR: `${cwd}/.tmp`, PATH: '/usr/bin' };
+  const sound = { args: ISOLATED_ARGS, env, cwd, tmpRoot, projectRoot: '/home/user/moonch', homeDir: '/home/user', forbiddenText: [priv, '/home/user/refs'] };
+  assert.deepEqual(isolationProblems({ ...sound, env: { ...env, OLDPWD: '/home/user/moonch/private-notes', INIT_CWD: '/home/user/refs-archive' }, args: [...ISOLATED_ARGS, '--note', '/home/user/moonch/private-notes/a'] }), []);
+  assert.match(isolationProblems({ ...sound, env: { ...env, OLDPWD: `${priv}/references` } }).join(';'), /the environment variable OLDPWD names a private folder/);
+  assert.match(isolationProblems({ ...sound, args: [...ISOLATED_ARGS, `--note=${priv}/references`] }).join(';'), /an argument of the run names a private folder/);
+});
+
+test('isolation: a companion started from inside the private folder (PWD, OLDPWD and INIT_CWD below it) with a folder named private-notes beside it runs: no run of the pipeline is given those variables, none is refused, and a sibling folder in the environment is no problem', async t => {
+  const spawned = [];
+  const w = await newWorld(t, {
+    rules: permittedFlowRules(), onSpawn: record => spawned.push(record),
+    env: ({ root }) => ({ PWD: path.join(root, 'private', 'references'), OLDPWD: path.join(root, 'private'), INIT_CWD: path.join(root, 'private', 'pipelines'), NOTES_DIR: path.join(root, 'private-notes'), SIBLING: `${path.join(root, 'private')}.bak/x` }),
+  });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const own = spawned.filter(record => /\/runs\/(?:review|reveal|apply|adjudicate|grade|classify)|\/designer$/.test(record.cwd || ''));
+  assert.equal(own.length >= 8, true, `the pipeline's own runs: ${own.length}`);
+  for (const record of own) {
+    assert.equal('OLDPWD' in record.env, false, record.cwd);
+    assert.equal('INIT_CWD' in record.env, false, record.cwd);
+    assert.equal(record.env.PWD, record.cwd, 'PWD is the folder of the run, not the folder the companion was started from');
+    assert.equal(record.env.NOTES_DIR, path.join(w.root, 'private-notes'), 'a sibling folder stays in the environment');
+    assert.equal(record.env.SIBLING, `${path.join(w.root, 'private')}.bak/x`);
+    /* the reviews run in the temporary root and are held to every exclusion; the classifier, the designer and the graders run in the private folder itself */
+    if (/\/runs\/(?:review|reveal|apply|adjudicate)-/.test(record.cwd)) assert.deepEqual(isolationProblems({ args: record.args, env: record.env, cwd: record.cwd, tmpRoot: w.tmpRoot, projectRoot: w.root, homeDir: os.homedir(), forbiddenText: [path.join(w.root, 'private')] }), [], record.cwd);
+  }
+  /* a variable that does name the private folder is found at the start, before the classifier is paid for, and the message names the variable and not its value */
+  const named = [];
+  const bad = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), onSpawn: record => named.push(record), env: ({ root }) => ({ MY_REFS: path.join(root, 'private', 'references') }) });
+  const stopped = await bad.runNew();
+  assert.equal(stopped.view.stage, 'failed');
+  assert.match(stopped.view.message, /names a private folder \(MY_REFS\)/);
+  assert.equal(stopped.view.message.includes(bad.root), false, 'no path in the message');
+  assert.deepEqual([stopped.view.spentUsd, named.length, stopped.view.ledger.length], [0, 0, 0], 'nothing was paid for and nothing was started');
+  /* the folder the owner names for the references is held to the same boundary */
+  const refs = path.join(w.base, 'my-references');
+  const sibling = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]), env: ({ base }) => ({ ARCHIVE: path.join(base, 'my-references-old') }) });
+  fs.mkdirSync(path.join(sibling.base, 'my-references'), { recursive: true });
+  put(path.join(sibling.base, 'my-references'), 'Draw_Review_Notes.md', REF_NOTE);
+  assert.equal((await sibling.runNew({ referencesDir: path.join(sibling.base, 'my-references') })).view.stage, 'done');
+  void refs;
+});
+
+/* ---- reading the packet at classification ---- */
+
+test('a world file saved as UTF-16 that holds the old guideline is found like its UTF-8 copy, a file that cannot be read as text is listed as not scanned and never as clean, and an RTF file is read by its text', async t => {
+  const utf16 = text => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+  const notes = `Some notes. ${GUIDELINE} More notes.\n`;
+  const rtf = `{\\rtf1\\ansi Some {\\b notes}. ${GUIDELINE.slice(0, 60)}{\\i ${GUIDELINE.slice(60)}} More notes.\\par}`;
+  const files = { 'Reviewer_Notes_Q3.txt': utf16(notes), 'Reviewer_Notes_Q4.txt': notes, 'Reviewer_Notes_Q5.txt': Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(notes, 'utf16le').swap16()]), 'Reviewer_Notes_Q6.rtf': rtf, 'Binary_Ledger_Q7.txt': Buffer.from([0x41, 0, 0x42, 0, 0xff, 0, 0x01]), 'Clean_Notes_Q8.txt': utf16('Nothing of the guideline here, only an ordinary note about the quarter.\n') };
+  const names = Object.keys(files);
+  const answer = { prompt: { section: 1 }, guideline: { section: 2 }, goldenAnswer: { section: 3 }, worldFiles: [...WORLD_NAMES, ...names], taskFiles: ['Atlas_Supplement.txt'], other: [] };
+  const w = await newWorld(t, { page: pageJson({ fileList: [...pageJson().fileList, ...names.map(name => ({ name, group: 'World files', label: 'Notes' }))] }), files, rules: [classifierRule({ answer }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const withheld = view.classification.withheld.filter(item => item.why === 'it holds a long passage of the guideline or the golden answer').map(item => item.name).sort();
+  assert.deepEqual(withheld, ['Reviewer_Notes_Q3.txt', 'Reviewer_Notes_Q4.txt', 'Reviewer_Notes_Q5.txt', 'Reviewer_Notes_Q6.rtf'], 'UTF-16 in either order, UTF-8 and RTF alike');
+  assert.deepEqual(view.classification.unscanned, ['Binary_Ledger_Q7.txt'], 'a file with a NUL byte that is no UTF-16 text is not scanned, and is not called clean');
+  const inputs = designerInputs(w, id);
+  for (const name of ['Reviewer_Notes_Q3.txt', 'Reviewer_Notes_Q5.txt', 'Reviewer_Notes_Q6.rtf']) assert.equal(`task/${name}` in inputs, false, name);
+  assert.equal(Buffer.from(inputs['task/Clean_Notes_Q8.txt'] || '', 'utf8').length > 0, true, 'a UTF-16 note without a passage of it goes on');
+});
+
+test('the windows of a withheld file are made of its text whatever its kind (an RTF file, a notice saved as .eml), and a new file of the designer that copies a passage of one, or of the designer\'s own golden answer through formatting runs in an RTF file, is refused', async t => {
+  const sentence = 'Parent reconciliation, synthetic: the borrower closes the quarter with usable cash of 900 and the lender confirms it in writing on the closing date.';
+  const parentRtf = `{\\rtf1\\ansi Parent reconciliation, {\\b synthetic}: the borrower closes the quarter with usable cash of {\\i 900} and the lender confirms it in writing on the closing date.\\par}`;
+  const cases = [
+    { label: 'a passage of a withheld RTF file', world: { 'Golden_Parent_Answer.rtf': parentRtf }, files: { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${sentence}\n` } },
+    { label: 'a passage of a withheld notice saved as .eml', world: { 'Golden_Parent_Answer.eml': `Subject: parent\n\n${sentence}\n` }, files: { 'out/new/Meridian_Lender_Summary.txt': `Meridian lender summary. ${sentence}\n` } },
+    { label: 'the golden answer of the designer through bold runs of an RTF file', world: {}, files: { 'out/new/Lender_Letter.rtf': '{\\rtf1 Usable cash is {\\b 1,250} and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK}' }, newFiles: ['Meridian_Lender_Summary.txt', 'Lender_Letter.rtf'] },
+    { label: 'the golden answer of the designer in a UTF-16 text file', world: {}, files: { 'out/new/Lender_Notes.txt': { base64: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\n', 'utf16le')]).toString('base64') } }, newFiles: ['Meridian_Lender_Summary.txt', 'Lender_Notes.txt'] },
+  ];
+  for (const { label, world, files, newFiles } of cases) {
+    const answer = { ...NEW_CLASSIFIER, worldFiles: [...WORLD_NAMES, ...Object.keys(world)] };
+    const rules = [classifierRule({ answer }), ...newAttemptRules(1, [0.2], { design: { files, trapsExtra: newFiles ? { newFiles } : {} }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+    const w = await newWorld(t, { files: world, rules });
+    const { view } = await w.runNew({ acceptMissing: true });
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    assert.equal(view.attempts[0].outcome, 'rejected', label);
+    assert.equal(view.attempts[0].rejection.kind, 'design', label);
+    assert.equal(view.attempts[0].rejection.reasons.some(reason => /holds a long passage of the guideline or the golden answer/.test(reason)), true, `${label}: ${JSON.stringify(view.attempts[0].rejection)}`);
+  }
+});
+
+/* ---- the blind review: what the reader did, and what the harness could write for it ---- */
+
+test('the blind review is "ok" only when the reader\'s own record shows it opened the packet: no Read, Glob or Grep on it makes the review partial, and so does a PDF or a picture that it did not open', async t => {
+  const PDF = 'Scan_Pages.pdf';
+  const files = { [PDF]: '%PDF-1.4 synthetic binary \u0000\u0001\u0002 no text layer here' };
+  const run = async (toolUses, label) => {
+    const w = await newWorld(t, { files, rules: [classifierFor([PDF]), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { toolUses }) })] });
+    const { view } = await w.runNew();
+    assert.equal(view.stage, 'done', `${label}: ${view.message}`);
+    return view;
+  };
+  const read = name => ({ name: 'Read', input: { file_path: `{{cwd}}/filesystem/${name}` }, result: 'x' });
+  const ok = await run([read('Facility_Terms.txt'), read(PDF)], 'both opened');
+  const stage1 = view => view.attempts[0].fairness.stage1;
+  assert.deepEqual([stage1(ok).state, stage1(ok).read, stage1(ok).unopened], ['ok', true, []]);
+  assert.equal(ok.design.notes.some(note => /blind review/.test(note)), false);
+  /* the text was read, the PDF was not: partial, the file is named, and so is the note for the owner */
+  const skipped = await run([read('Facility_Terms.txt')], 'the PDF not opened');
+  assert.deepEqual([stage1(skipped).state, stage1(skipped).read, stage1(skipped).unopened], ['partial', true, [PDF]]);
+  assert.equal(skipped.attempts[0].outcome, 'passed', 'disclosed, not a failure');
+  assert.equal(skipped.design.notes.some(note => /did not open this PDF or picture: Scan_Pages\.pdf/.test(note)), true);
+  /* a reader that opened no file at all */
+  const none = await run([], 'nothing opened');
+  assert.deepEqual([stage1(none).state, stage1(none).read, stage1(none).unopened], ['partial', false, [PDF]]);
+  assert.equal(none.design.notes.some(note => /opened no file of the packet/.test(note)), true);
+  /* nothing to open but text files, and the reader opened none: partial for that alone */
+  const nothing = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { toolUses: [] }) }) });
+  const nothingView = (await nothing.runNew()).view;
+  assert.deepEqual([nothingView.attempts[0].fairness.stage1.state, nothingView.attempts[0].fairness.stage1.read, nothingView.attempts[0].fairness.stage1.unopened], ['partial', false, []]);
+  /* a Grep of the packet is a look at it; a Read of a file outside it is not */
+  const grep = await run([{ name: 'Grep', input: { pattern: 'cash', path: '{{cwd}}/filesystem' }, result: 'x' }, read(PDF)], 'a grep');
+  assert.deepEqual([stage1(grep).state, stage1(grep).read], ['ok', true]);
+  const elsewhere = await run([{ name: 'Read', input: { file_path: '{{cwd}}/prompt.txt' }, result: 'x' }], 'only the prompt');
+  assert.equal(stage1(elsewhere).read, false, 'the prompt is not the packet');
+  /* the reader names a governing document that is no file of the packet */
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario({ ...BLIND, governingDocument: 'The Atlas Facility Agreement, section 4' }) }) });
+  const named = (await w.runNew()).view;
+  assert.deepEqual([named.attempts[0].fairness.stage1.state, named.attempts[0].fairness.stage1.governingFound], ['partial', false]);
+});
+
+test('the renderings of the blind folder: a name too long for a file name, or one that would need a file to be a folder, gets a name of its own; a file that fails is listed as unreadable and a rendering that is not the whole file is partial', async t => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const folder = scratchDir(t);
+  const docx = text => ({ 'word/document.xml': `<w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>` });
+  const longName = `${'a'.repeat(247)}.docx`;
+  zipFile(folder, `filesystem/${longName}`, docx('Long name text.'));
+  zipFile(folder, 'filesystem/x.docx', docx('Plain name text.'));
+  zipFile(folder, 'filesystem/x.docx.txt/inner.docx', docx('Inner text.'));
+  put(folder, 'filesystem/broken.docx', 'not a zip file at all');
+  put(folder, 'filesystem/scan.pdf', '%PDF-1.4');
+  put(folder, 'filesystem/old.xls', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0, 0]));
+  zipFile(folder, 'filesystem/formulas.xlsx', { 'xl/workbook.xml': '<workbook><sheets><sheet name="Calc" sheetId="1" r:id="rId1"/></sheets></workbook>', 'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>', 'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1"><f>1+2</f></c></row></sheetData></worksheet>' });
+  put(folder, 'prompt.txt', 'x');
+  /* a rendering that cannot be written (a folder stands where its file goes): that file is listed, and the others are made */
+  zipFile(folder, 'filesystem/blocked.docx', docx('Blocked text.'));
+  fs.mkdirSync(path.join(folder, 'text-renderings', 'blocked.docx.txt'), { recursive: true });
+  const names = [longName, 'x.docx', 'x.docx.txt/inner.docx', 'broken.docx', 'scan.pdf', 'old.xls', 'formulas.xlsx', 'blocked.docx'];
+  const ready = await service._prepareBlindFolder(folder, names.map(name => ({ name })), () => false);
+  assert.deepEqual(ready.unreadable, ['broken.docx', 'old.xls', 'blocked.docx'], 'a damaged file, an old binary one and one that could not be written: named, and the review goes on');
+  assert.deepEqual(ready.native, ['scan.pdf']);
+  assert.deepEqual(ready.partial, ['formulas.xlsx'], 'only the formulas of the workbook are there');
+  assert.deepEqual(ready.renderings.map(item => item.file), [longName, 'x.docx', 'x.docx.txt/inner.docx', 'formulas.xlsx']);
+  const texts = ready.renderings.map(item => fs.readFileSync(path.join(folder, ...item.rendering.split('/')), 'utf8'));
+  assert.deepEqual(texts.map(text => /Long name text|Plain name text|Inner text|\[formula: 1\+2\]/.exec(text)[0]), ['Long name text', 'Plain name text', 'Inner text', '[formula: 1+2]']);
+  for (const item of ready.renderings) for (const part of item.rendering.split('/')) assert.equal(Buffer.byteLength(part) <= 200, true, `${part.length} characters`);
+  assert.equal(new Set(ready.renderings.map(item => item.rendering.toLowerCase())).size, 4, 'four different paths');
+  assert.equal(ready.renderings[1].rendering, 'text-renderings/x.docx.txt', 'an ordinary name keeps its own');
+  assert.deepEqual(fs.readdirSync(folder).sort(), ['.tmp', 'filesystem', 'prompt.txt', 'text-renderings'].filter(name => fs.existsSync(path.join(folder, name))).sort());
+});
+
+test('a fault of the harness in the blind review or in the reveal is not "an internal error" after the designer was paid: the try is lost once, and then the attempt is rejected as incomplete with a plain reason and the next attempt goes on', async t => {
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2]), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  let calls = 0;
+  const original = w.pipeline._prepareBlindFolder.bind(w.pipeline);
+  w.pipeline._prepareBlindFolder = async (...args) => { calls++; if (calls <= 2) throw new TypeError('boom in the blind folder'); return original(...args); };
+  const { id, view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const first = view.attempts[0];
+  assert.deepEqual([first.outcome, first.validation, first.fairness.status, first.fairness.stage1.state, first.rejection.kind], ['rejected', 'incomplete', 'incomplete', 'incomplete', 'check']);
+  assert.deepEqual(first.rejection.reasons, ['A check of the design could not be carried out (the blind review)']);
+  assert.equal(JSON.stringify(view).includes('boom'), false, 'the fault is in the private log, not in the state');
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'error.log'), 'utf8'), /TypeError: boom in the blind folder/);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  assert.equal(view.result.validation, 'complete');
+  /* the first try lost and the second one fine: the review is made */
+  const once = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3]) });
+  let seen = 0;
+  const keep = once.pipeline._prepareBlindFolder.bind(once.pipeline);
+  once.pipeline._prepareBlindFolder = async (...args) => { seen++; if (seen === 1) throw new RangeError('once'); return keep(...args); };
+  const done = (await once.runNew()).view;
+  assert.deepEqual([done.stage, done.attempts[0].outcome, done.attempts[0].fairness.stage1.tries], ['done', 'passed', 2]);
+  /* a fault anywhere else on the way (here the reveal) is the same */
+  const reveal = await newWorld(t, { rules });
+  let revealed = 0;
+  const realReveal = reveal.pipeline._revealStage.bind(reveal.pipeline);
+  reveal.pipeline._revealStage = async (...args) => { revealed++; if (revealed === 1) throw new TypeError('boom in the reveal'); return realReveal(...args); };
+  const { id: revealId, view: revealView } = await reveal.runNew();
+  assert.equal(revealView.stage, 'done', revealView.message);
+  assert.deepEqual([revealView.attempts[0].outcome, revealView.attempts[0].validation, revealView.attempts[0].rejection.reasons], ['rejected', 'incomplete', ['A check of the design could not be carried out']]);
+  assert.match(fs.readFileSync(path.join(reveal.priv(revealId), 'error.log'), 'utf8'), /boom in the reveal/);
+  /* when every attempt is lost this way, the run ends as failed and its result is incomplete: nothing passed */
+  const lost = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2]), ...newAttemptRules(2, [0.2]), ...newAttemptRules(3, [0.2]), ...newAttemptRules(4, [0.2])] });
+  lost.pipeline._revealStage = async () => { throw new TypeError('always'); };
+  const final = (await lost.runNew()).view;
+  assert.deepEqual([final.stage, final.result.verdict, final.result.validation], ['failed', 'failed', 'incomplete']);
+  assert.equal(final.message.includes('internal error'), false);
+});
+
+/* ---- permitted alternatives: which one is meant, and whether its answer is its own ---- */
+
+test('permitted alternatives: two statements of an action are the same when their figures, units and first verbs agree; a different amount, unit, direction or negation is another alternative, and a paraphrase is the same', () => {
+  const { sameAlternative, tiedAlternative } = require('../backend/pipeline/review.cjs');
+  const same = [
+    ['Release the money in two stages, the second only once funded cash covers it', 'Proceed in two tranches with cash cover'],
+    ['Pay 4,500', 'Pay 4500'], ['Pay $4,500 now', 'Pay USD 4,500 now'],
+    ['Postpone the draw by thirty days', 'Delay the draw by 30 days'],
+    ['Pay 4,500 in two tranches', 'Pay 4,500 in two tranches of 2,250 each'],
+    ['Defer 4.5k of the draw', 'Defer 4,500 of the draw'],
+    ['Reject the full draw now', 'Decline the draw in full'],
+    ['Hold the borrowing and tell the lender', 'Do hold the borrowing'],
+  ];
+  const different = [
+    ['Delay the draw by sixty days', 'Delay the draw by thirty days'],
+    ['Defer 2,400 of the draw', 'Defer 1,200 of the draw'],
+    ['Reject the full draw now', 'Approve the full draw now'],
+    ['Do not proceed in two tranches', 'Proceed in two tranches'],
+    ['Delay by 30 days', 'Delay by 30 weeks'],
+    ['Proceed in two tranches', 'Proceed in one tranche'],
+    ['Delay the draw by two hundred and fifty days', 'Delay the draw by 250 weeks'],
+    ['Delay the draw by thirty days', 'Proceed in two tranches'],
+  ];
+  for (const [a, b] of same) assert.equal(sameAlternative(a, b) && sameAlternative(b, a), true, `${a} / ${b}`);
+  for (const [a, b] of different) assert.equal(sameAlternative(a, b) || sameAlternative(b, a), false, `${a} / ${b}`);
+  assert.equal(sameAlternative('', 'Delay the draw'), true, 'nothing to compare says nothing against it');
+  /* tied: the reviewer names the declared alternative by its id, and the two are held to each other; the first of two similar ones is not taken for the second */
+  const declared = [{ id: 'alt-1', name: 'alt-1', answer: 'Delay the draw by thirty days' }, { id: 'alt-2', name: 'alt-2', answer: 'Delay the draw by sixty days' }];
+  const parsed = (alternative, alternativeId) => ({ alternative, alternativeId });
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', 'alt-1')).name, 'alt-1');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 60 days', 'ALT-2')).name, 'alt-2');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 60 days', 'alt-1')), null, 'the id of the other alternative');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', '')), null, 'no id');
+  assert.equal(tiedAlternative(declared, parsed('Postpone the draw by 30 days', 'alt-9')), null, 'an id that nothing has');
+  assert.equal(tiedAlternative(declared, parsed('', 'alt-1'), { alternative: { answer: 'Delay it thirty days' } }).name, 'alt-1', 'with no words of its own, the blind reviewer\'s alternative stands for them');
+  assert.equal(tiedAlternative(declared, parsed('', 'alt-2'), { alternative: { answer: 'Delay it thirty days' } }), null);
+  assert.equal(tiedAlternative(null, parsed('x', 'alt-1')), null);
+});
+
+test('permitted alternatives: an answer is refused as a copy only when it says what the golden answer says, sentence for sentence, or is mostly its sentences without stating the alternative; one that keeps the facts and the calculation and changes the recommendation is its own', () => {
+  const { alternativeProblem } = require('../backend/pipeline/review.cjs');
+  const lines = [
+    'The facility terms say that available credit is not cash received and the draw needs funded cash.',
+    'Opening usable cash is 100 and a confirmed funded draw of 500 brings the funded cash to 600.',
+    'A further funded receipt of 650 is confirmed on the lender statement, so usable cash is 1,250.',
+    'The lender summary shows an available facility of 3,050 as a cash line, which is not cash received.',
+    'The treasury mandate requires sign-off before any borrowing is made against the facility.',
+    'The decision date is 2025-04-15 and the terms in force on that date are the amended terms.',
+    'The calculation of usable cash therefore excludes the available facility from the total.',
+    'The evidence of the cash facts file and the executed terms agree on every figure used here.',
+    'No clause lets the borrower count unused credit as cash for the purpose of this review.',
+    'The committee note repeats that only funded cash may be counted toward the liquidity test.',
+    'The result is a liquidity position of 1,250 against the minimum reserve required by the terms.',
+  ];
+  const golden = `${lines.join(' ')} Hold the borrowing until further funded cash is confirmed.`;
+  const own = `${lines.join(' ')} Proceed in two tranches once the funded cash of 1,250 covers the first tranche; hold the rest.`;
+  assert.equal(alternativeProblem(golden, golden, 'Proceed in two tranches'), 'copy', 'byte for byte');
+  assert.equal(alternativeProblem(golden.toUpperCase().replace(/\./g, '. '), golden, 'Proceed in two tranches'), 'copy', 'case and spacing');
+  assert.equal(alternativeProblem(own, golden, 'Proceed in two tranches'), '', 'the same facts and calculation, its own recommendation');
+  const nearly = `${lines.join(' ')} Hold the borrowing until all the funds are confirmed.`;
+  assert.equal(alternativeProblem(nearly, golden, 'Proceed in two tranches'), 'copy', 'eleven of twelve sentences the golden answer\'s and the twelfth no alternative');
+  assert.equal(alternativeProblem(own, golden, 'Proceed in two tranches with cash cover of 1,250'), '');
+  /* the first five lines under a header and a trailer, the recommendation still the golden answer's: it does not state the alternative */
+  const dressed = `ALTERNATIVE ANSWER\n${lines.slice(0, 5).join(' ')}\nPrepared for the committee.`;
+  assert.equal(alternativeProblem(dressed, golden, 'Proceed in two tranches'), 'action');
+  assert.equal(alternativeProblem(dressed, golden, 'Defer 2,400 of the draw'), 'action', 'its figures are not in it either');
+  assert.equal(alternativeProblem(`${dressed}\nThe borrower should proceed in two tranches.`, golden, 'Proceed in two tranches'), '', 'once it states the alternative');
+  /* an answer of its own, with other sentences, is not compared further */
+  assert.equal(alternativeProblem('Delay the draw by thirty days until the funded cash covers it; hold the borrowing meanwhile.', golden, 'Delay the draw by thirty days'), '');
+});
+
+test('permitted alternatives, end to end: the reviewer\'s id ties the declared alternative to its answer only when the two agree; a paraphrase is settled without a repair, a different amount is not, and a declared answer that is the golden answer is refused at the first reading', async t => {
+  const reportOf = (alternative, alternativeId, over = {}) => ({ ...PERMITTED_REVEAL(true), alternative, alternativeId, ...over });
+  const design = { files: { 'out/answers/alt-1.md': ALT_A_TEXT }, brief: { permittedAlternatives: [ALT_A] } };
+  const flow = (reveal, repairs = { alternative: reviseOnly(1, 'REVISED-ONE') }) => [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], {
+    design, extra: [reveals('REVISED-ONE', jsonScenario(REVEAL_NONE)), goldenRegrade, altRule('ALT-1', 0.9)], reveal: jsonScenario(reveal), repairs,
+  }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  /* a paraphrase of the declared alternative, named by its id: settled at once */
+  const same = await newWorld(t, { rules: flow(reportOf('Postpone the draw by 30 days', 'alt-1')) });
+  const { view } = await same.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.deepEqual([view.attempts[0].fairness.repairs, view.attempts[0].fairness.stage2.evaluations, view.attempts[0].outcome], [0, 1, 'passed']);
+  /* the alternative has no words of its own in the reveal: the blind reviewer's alternative is compared instead */
+  const blind = jsonScenario({ ...BLIND, alternative: { answer: 'Delay it thirty days', support: 'The timing is open' } });
+  const viaBlind = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { design, blind, extra: [altRule('ALT-1', 0.9)], reveal: jsonScenario(reportOf('', 'alt-1')) })] });
+  assert.equal((await viaBlind.runNew()).view.attempts[0].fairness.repairs, 0);
+  /* a different amount under the declared alternative's id: nothing was written or graded for it, so a repair that writes nothing for it is not enough */
+  await rejectedThenPassed(t, flow(reportOf('Delay the draw by sixty days', 'alt-1')), /The repair wrote an answer for another alternative than the one the review reported/);
+  /* the reviewer names no id: the same words settle nothing by themselves, and the repair is asked for */
+  const noId = await newWorld(t, { rules: flow(reportOf('Postpone the draw by 30 days', '')) });
+  const noIdView = (await noId.runNew()).view;
+  assert.equal(noIdView.attempts[0].fairness.repairs, 1, 'a repair was asked for');
+  /* a declared answer that is the golden answer, word for word, is refused where the design is read: the designer is told, and repairs it */
+  const goldenText = 'Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\n';
+  const copied = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { design: { files: { 'out/answers/alt-1.md': goldenText }, brief: { permittedAlternatives: [ALT_A] } }, repairs: { design: 'clean' } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const copiedView = (await copied.runNew()).view;
+  assert.equal(copiedView.stage, 'done', copiedView.message);
+  assert.deepEqual([copiedView.attempts[0].repaired, copiedView.attempts[0].outcome, copiedView.attempts[0].rejection.kind, copiedView.attempts[0].rejection.reasons[0]], [true, 'rejected', 'design', 'The answer of a permitted alternative is a copy of the golden answer'], 'refused where the design is read, after the repair turn');
+  assert.equal(copiedView.attempts[1].outcome, 'passed');
+  const repairPrompt = promptRuns(copied).find(run => run.prompt.includes('repair turn for design attempt 1'));
+  assert.match(repairPrompt.prompt, /says what the golden answer says, sentence for sentence/);
+  assert.match(promptRuns(same).find(run => run.prompt.startsWith('You are reviewing a finished task design')).prompt, /<<<DECLARED ALTERNATIVES\nalt-1: Delay the draw by thirty days\nDECLARED ALTERNATIVES>>>/);
+});
+
+/* ---- the supersession scan: what the blind reviewer quoted, and what is put to the reviewer ---- */
+
+test('the supersession scan puts to the reviewer a notice that the blind reviewer quoted from a file that has text, unless a passage already holds the words; words that are not in the file, and a file the harness cannot match, are listed as the reviewer said them', () => {
+  const { supersessionHits } = require('../backend/pipeline/review.cjs');
+  const clause = { file: 'Travel_Policy_2023.md', quote: 'Meals are reimbursed up to the daily limit under Section 4.2.' };
+  const policy = { name: 'Travel_Policy_2023.md', text: 'Travel policy 2023, synthetic. Meals are reimbursed up to the daily limit under Section 4.2.\n' };
+  const memo = { name: 'Memo_A.txt', text: 'Memo. The Travel Policy 2023 applies until 31 December 2024 only. Nothing else changes.\n' };
+  assert.deepEqual(supersessionHits([policy, memo], clause), [], 'the scan\'s own wording does not know "applies until"');
+  const notice = { file: 'Memo_A.txt', quote: 'The Travel Policy 2023 applies until 31 December 2024 only.' };
+  const hits = supersessionHits([policy, memo], clause, { notices: [notice] });
+  assert.deepEqual(hits.map(hit => [hit.id, hit.kind, hit.document]), [['n1', 'notice', 'Memo_A.txt']]);
+  assert.match(hits[0].snippet, /applies until 31 December 2024 only\. Nothing else changes\./, 'with the words around it');
+  assert.equal(hits[0].unreadable, undefined, 'the file has text: it is not one that nobody could read');
+  /* the file named by another spelling is the same file */
+  assert.equal(supersessionHits([policy, memo], clause, { notices: [{ ...notice, file: 'Memo_A' }] }).length, 1);
+  /* words a passage already holds are put once */
+  const replaced = { name: 'Memo_B.txt', text: 'Memo. This note supersedes the Travel Policy for every trip.\n' };
+  const once = supersessionHits([policy, replaced], clause, { notices: [{ file: 'Memo_B.txt', quote: 'This note supersedes the Travel Policy for every trip.' }] });
+  assert.deepEqual(once.map(hit => [hit.id, hit.kind]), [['h1', 'passage']]);
+  /* words that are not in the file are listed as the reviewer said them; a file that is none of the packet's is listed under the name given */
+  const odd = supersessionHits([policy, memo], clause, { notices: [{ file: 'Memo_A.txt', quote: 'The policy ends in June.' }, { file: 'Elsewhere.pdf', quote: 'The policy is withdrawn.' }] });
+  assert.deepEqual(odd.map(hit => [hit.id, hit.kind, hit.document]), [['n1', 'notice', 'Elsewhere.pdf'], ['n2', 'notice', 'Memo_A.txt']], 'the one that says "withdrawn" first');
+  assert.match(odd.find(hit => hit.document === 'Memo_A.txt').snippet, /they are not word for word in the text the harness has\) "The policy ends in June\."/);
+  assert.match(odd.find(hit => hit.document === 'Elsewhere.pdf').snippet, /cannot match to a file of the packet\) "The policy is withdrawn\."/);
+});
+
+test('a notice that the blind reviewer quoted from a file with text reaches the application check, and the check does not pass until the reviewer has answered it', async t => {
+  const notice = { file: 'Meridian_Lender_Summary.txt', quote: 'The available facility of 3,050 is shown as a cash line.' };
+  const blind = jsonScenario({ ...BLIND, statusNotices: [notice] });
+  const answered = { ...APPLICATION, supersession: [...hitsAddressed, { hit: 'n1', changesClause: 'no', why: 'The sentence says nothing about the terms being replaced.' }] };
+  const w = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind, reveal: jsonScenario(REVEAL_EXCLUDED), application: jsonScenario(answered) }) });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  const application = promptRuns(w).find(run => run.prompt.includes('You are checking whether one quoted clause'));
+  assert.match(application.prompt, /n1 \(Meridian_Lender_Summary\.txt\): .*The available facility of 3,050 is shown as a cash line\./);
+  assert.deepEqual(view.attempts[0].fairness.stage2.application.hitList.filter(hit => hit.kind === 'notice'), [{ id: 'n1', kind: 'notice', document: 'Meridian_Lender_Summary.txt' }]);
+  assert.equal(view.attempts[0].fairness.stage2.application.pass, true);
+  /* the same reviewer, not answering it */
+  const silent = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { blind, reveal: jsonScenario(REVEAL_EXCLUDED), repairs: { missing: reviseOnly(1, 'REVISED-ONE') } }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const silentView = (await silent.runNew()).view;
+  assert.deepEqual(silentView.attempts[0].fairness.stage2.application.failed, ['notSuperseded']);
+});
+
+test('the view: the design is shown while its checks run (checking: true, the brief and the task type, no packet yet), a stage that is under way has difficulty {status: "running"}, and what the application check was shown is listed by id, kind and file', async t => {
+  let atReview = null;
+  let atPilot = null;
+  const w = await newWorld(t, {
+    rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { reveal: jsonScenario(REVEAL_EXCLUDED) }),
+    onSpawn: record => {
+      const [entry] = [...w.pipeline.pipelines.values()];
+      if (!entry) return;
+      if (/\/runs\/review-/.test(record.cwd || '') && !atReview) atReview = w.pipeline._view(entry.state);
+      if (/finance-studio-pilots\/rnd-/.test(record.cwd || '') && !atPilot) atPilot = w.pipeline._view(entry.state);
+    },
+  });
+  const { view } = await w.runNew();
+  assert.equal(view.stage, 'done', view.message);
+  assert.equal(atReview.design.checking, true);
+  assert.deepEqual([atReview.design.attempt, atReview.design.taskType.workflow, atReview.design.brief.decision.authorityFile, atReview.design.packet, atReview.design.gold, atReview.design.alternatives], [1, 'Facility draw review', 'Facility_Terms.txt', null, null, []]);
+  assert.equal(atReview.design.newFiles.map(file => file.name).includes('Meridian_Lender_Summary.txt'), true);
+  assert.equal('checking' in view.design, false, 'the accepted design is not "checking"');
+  assert.equal(view.design.packet.fileCount > 0, true);
+  assert.deepEqual(atPilot.attempts[0].difficulty.screen, { status: 'running' });
+  assert.equal(atPilot.attempts[0].difficulty.test, null, 'the test has not started');
+  assert.equal(typeof view.attempts[0].difficulty.screen.passed, 'boolean');
+  const application = view.attempts[0].fairness.stage2.application;
+  assert.equal(application.hitList.length, application.hits, 'the number and the list agree');
+  assert.equal(application.hitList.length > 0 && application.hitList.every(hit => /^h\d+$/.test(hit.id) && hit.kind === 'passage' && typeof hit.document === 'string' && Object.keys(hit).sort().join() === 'document,id,kind'), true, 'no words of the files in the list');
+  /* a run that ended with its checks under way keeps the design it was checking, no longer "checking" */
+  const stopped = await newWorld(t, { rules: newRules(1, [0.2, 0.3, 0.1, 0.2, 0.3], { blind: jsonScenario(BLIND, { hang: true }) }) });
+  const { id } = await stopped.pipeline.start(stopped.body({ designMode: 'new' }));
+  await waitFor(() => stopped.pipeline.get(id).then(item => item.attempts[0] && item.attempts[0].fairness.stage1 && item.attempts[0].fairness.stage1.state === 'running' && item.design && item.design.checking));
+  await stopped.pipeline.stop(id);
+  const ended = await stopped.pipeline.whenDone(id);
+  assert.equal(ended.stage, 'stopped');
+  assert.equal(ended.design.checking, false);
+  assert.equal(ended.attempts[0].fairness.stage1.state, 'incomplete');
+  assert.equal(ended.result.validation, 'incomplete');
+});
+
+test('the answer set: two grades on opposite sides of the threshold and no third grade is a grader that gave nothing, said so, and the attempt is incomplete and not a defect of the guideline', async t => {
+  const garbage = 'the grader said nothing useful';
+  const rules = [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.95, 0.5, garbage, garbage])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])];
+  const w = await newWorld(t, { rules });
+  const { id, view } = await w.runNew();
+  const first = view.attempts[0];
+  assert.deepEqual([first.outcome, first.validation, first.fairness.status, first.rejection.kind], ['rejected', 'incomplete', 'incomplete', 'answer-set']);
+  assert.match(first.rejection.reasons[0], /^The simulated grader gave the golden answer two grades on opposite sides of the threshold and no third grade could be obtained, so the guideline could not be checked against it$/);
+  assert.equal(first.rejection.reasons[0].includes('did not reach'), false);
+  assert.match(fs.readFileSync(path.join(w.priv(id), 'attempts', '1', 'feedback.md'), 'utf8'), /no third grade could be obtained\. Nothing in your design was judged by this/);
+  assert.equal(graderCallsOf(view, 'as-1-golden'), 4);
+  assert.equal(view.attempts[1].outcome, 'passed');
+  /* and when no grade at all came, the same: not graded */
+  const none = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [garbage, garbage])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const noneView = (await none.runNew()).view;
+  assert.deepEqual([noneView.attempts[0].validation, noneView.attempts[0].rejection.reasons[0]], ['incomplete', 'The simulated grader gave the golden answer no usable score, so the guideline could not be checked against it']);
+  /* a real shortfall is still a defect of the guideline */
+  const low = await newWorld(t, { rules: [classifierRule({ answer: NEW_CLASSIFIER }), ...newAttemptRules(1, [0.2], { extra: [goldenRule(1, [0.5, 0.5])] }), ...newAttemptRules(2, [0.2, 0.3, 0.1, 0.2, 0.3])] });
+  const lowView = (await low.runNew()).view;
+  assert.deepEqual([lowView.attempts[0].validation, /did not reach 0\.90/.test(lowView.attempts[0].rejection.reasons[0])], ['failed', true]);
+});
+
+test('redaction: a pilot that was graded again after a guideline repair is not marked as one while a round runs', () => {
+  const { redactPipelineData } = require('../backend/pipeline/redact.cjs');
+  const redacted = redactPipelineData({ attempts: [{ screen: { pilots: [{ id: 'p1', score: 0.2, regraded: true, previous: { score: 0.3 } }, { id: 'p2', score: 0.1, regraded: false }] } }] });
+  assert.deepEqual(redacted.attempts[0].screen.pilots.map(pilot => [pilot.id, pilot.regraded, pilot.previous]), [['p1', { withheld: true }, { withheld: true }], ['p2', { withheld: true }, undefined]]);
+});
+
+test('extract: an RTF file is read past a large picture at its start, and its text is partial only when it was cut; a file that is only a picture has no text', async t => {
+  const { extractText, extractDetailed, readerKindOfFile } = require('../backend/pipeline/extract.cjs');
+  const dir = scratchDir(t);
+  const picture = '89504e470d0a1a0a'.repeat(700000); /* 5.6 million characters of hex */
+  put(dir, 'Memo_Pict.rtf', `{\\rtf1 {\\pict\\pngblip ${picture}}\\par Policy 7: the daily meal limit is 60 per traveller.\\par}`);
+  assert.equal(await extractText(path.join(dir, 'Memo_Pict.rtf')), 'Policy 7: the daily meal limit is 60 per traveller.');
+  assert.equal(await readerKindOfFile(path.join(dir, 'Memo_Pict.rtf'), 'Memo_Pict.rtf'), 'rendered', 'a readable RTF file is not called unreadable because a picture comes first');
+  assert.equal((await extractDetailed(path.join(dir, 'Memo_Pict.rtf'))).partial, false);
+  put(dir, 'Long.rtf', `{\\rtf1 ${'Words of the policy that go on and on. '.repeat(500)}}`);
+  const cut = await extractDetailed(path.join(dir, 'Long.rtf'), { maxChars: 1000 });
+  assert.deepEqual([cut.text.length, cut.partial], [1000, true]);
+  put(dir, 'Only_Pict.rtf', `{\\rtf1 {\\pict\\pngblip 89504e47}}`);
+  assert.equal(await extractText(path.join(dir, 'Only_Pict.rtf')), '');
+  assert.equal(await readerKindOfFile(path.join(dir, 'Only_Pict.rtf'), 'Only_Pict.rtf'), 'unreadable');
+});
+
+test('the reader\'s record is read against the real path of its folder too: a runtime that reports /private/var/... for a folder given as /var/... (a link) is not taken for a reader that opened nothing', t => {
+  const { PipelineService } = require('../backend/pipeline/service.cjs');
+  const service = Object.create(PipelineService.prototype);
+  const base = scratchDir(t);
+  const real = path.join(base, 'real', 'runs', 'review-1');
+  fs.mkdirSync(path.join(real, 'filesystem'), { recursive: true });
+  fs.symlinkSync(path.join(base, 'real'), path.join(base, 'link'));
+  const given = path.join(base, 'link', 'runs', 'review-1');
+  const events = calls => calls.map((call, index) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${index}`, ...call }] } }));
+  const seen = service._readEvidence(events([{ name: 'Read', input: { file_path: path.join(real, 'filesystem', 'Scan.pdf') } }, { name: 'Read', input: { file_path: 'filesystem/Facility_Terms.txt' } }]), given);
+  assert.deepEqual([seen.looked, [...seen.opened].sort()], [true, ['Facility_Terms.txt', 'Scan.pdf']]);
+  assert.equal(service._readEvidence(events([{ name: 'Read', input: { file_path: '/etc/hostname' } }, { name: 'Read', input: { file_path: path.join(real, 'prompt.txt') } }, { name: 'Bash', input: { command: 'ls filesystem' } }]), given).looked, false, 'a file outside the packet, the prompt and a program are no look at the packet');
+  assert.equal(service._readEvidence(events([{ name: 'Glob', input: { pattern: '**/*.pdf', path: given } }]), given).looked, true);
+  assert.equal(service._readEvidence(events([{ name: 'Grep', input: { pattern: 'x' } }]), given).looked, true, 'a Grep with no path searches the folder');
+  assert.equal(service._readEvidence(null, given).looked, false, 'no record, no evidence');
+});
+
+test('the application check: the effective date stands in the clause\'s own document (or the higher one of a policy and a procedure), whatever other file holds a sentence that says something takes effect', () => {
+  const { checkApplication, parseApplication } = require('../backend/pipeline/review.cjs');
+  const { buildCorpus } = require('../backend/pipeline/quotes.cjs');
+  const policy = { name: 'Dated_Policy.txt', text: 'Policy header, synthetic. This policy takes effect on 2027-03-01 and covers every draw.\nThe draw decision is taken on 2027-06-30.\nExcess cash is never counted as usable cash.\n' };
+  const memo = { name: 'Other_Memo.txt', text: 'Other note, synthetic. This note takes effect on 2027-03-01 and covers nothing.\n' };
+  const corpus = buildCorpus([policy, memo]);
+  const clause = { file: 'Dated_Policy.txt', quote: 'Excess cash is never counted as usable cash.' };
+  const run = effectiveFile => {
+    const value = JSON.parse(JSON.stringify(APPLICATION));
+    Object.assign(value.inForce, { effectiveDate: '2027-03-01', decisionDate: '2027-06-30', effectiveQuote: { file: effectiveFile, quote: effectiveFile === 'Dated_Policy.txt' ? 'This policy takes effect on 2027-03-01 and covers every draw.' : 'This note takes effect on 2027-03-01 and covers nothing.' }, decisionQuote: { file: 'Dated_Policy.txt', quote: 'The draw decision is taken on 2027-06-30.' } });
+    value.governs.scope = { file: 'Dated_Policy.txt', quote: 'This policy takes effect on 2027-03-01 and covers every draw.' };
+    value.excludes.quote = { file: 'Dated_Policy.txt', quote: 'Excess cash is never counted as usable cash.' };
+    value.supersession = [];
+    return checkApplication(parseApplication(JSON.stringify(value)).value, { corpus, hits: [], clause, brief: null });
+  };
+  assert.deepEqual([run('Dated_Policy.txt').pass, run('Dated_Policy.txt').checks.inForce], [true, true], 'the control: the clause\'s own document says it');
+  assert.deepEqual([run('Other_Memo.txt').pass, run('Other_Memo.txt').failed], [false, ['inForce']], 'the same sentence in another file says nothing about this clause');
 });

@@ -16,7 +16,7 @@ const EXCERPT_CHARS = 600;
 const MAX_PROMPT_BYTES = 100 * 1024; /* the runtime takes one prompt of at most 120 KiB (claude-runner.cjs) */
 
 /* The prompt of the classifier: headings with the first characters of each section, and the file list. Everything between the markers is data. */
-function buildClassifierPrompt({ sections, files }) {
+function buildClassifierPrompt({ sections, files, optionalRefs = false }) {
   const head = [
     PREAMBLE,
     '',
@@ -29,6 +29,7 @@ function buildClassifierPrompt({ sections, files }) {
     '- Name each of the three as {"section": N}, N being the number in brackets before a heading, or as {"file": "<exact file name>"} when it is a file.',
     '- "worldFiles" are files of the shared world the task lives in (reference data, source documents). "taskFiles" are files added for this task. "other" is anything that is neither (screenshots, notes, duplicates).',
     '- Every file in the list must appear exactly once across worldFiles, taskFiles, other and the three single items. Use the exact file names.',
+    ...(optionalRefs ? ['- This page may hold only source documents. "prompt", "guideline" and "goldenAnswer" may each be null when the page has none of them; do not guess.'] : []),
   ];
   const fileLines = files.slice(0, 300).map((file, index) => `[${index + 1}] ${oneLine(file.name, 200)} | ${file.bytes} bytes | group: ${oneLine(file.group, 120) || '(none)'} | label: ${oneLine(file.label, 160) || '(none)'}`);
   let excerpt = EXCERPT_CHARS;
@@ -68,7 +69,7 @@ function resolveRef(value, what, sections, nameSet, optional) {
 
 /* The model's answer -> { ok: true, value } or { ok: false, error }. Strict: names must exist, every file must be placed exactly once,
    a section may be used once. */
-function parseClassifierOutput(output, { sections, files }) {
+function parseClassifierOutput(output, { sections, files, optionalRefs = false }) {
   const raw = String(output || '');
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
@@ -78,7 +79,7 @@ function parseClassifierOutput(output, { sections, files }) {
   if (!isObject(data)) return { ok: false, error: 'the answer is not an object' };
   const nameSet = new Set(files.map(file => file.name));
   const refs = {};
-  for (const [key, optional] of [['prompt', false], ['guideline', false], ['goldenAnswer', true]]) {
+  for (const [key, optional] of [['prompt', optionalRefs], ['guideline', optionalRefs], ['goldenAnswer', true]]) {
     const ref = resolveRef(data[key], key, sections, nameSet, optional);
     if (typeof ref === 'string') return { ok: false, error: ref };
     refs[key] = ref.none ? null : ref;
@@ -174,7 +175,19 @@ function labelFinding(file) {
 }
 
 /* Raw classification (model or heuristic) -> what the pipeline keeps. Throws nothing; `problems` lists what stops the run. */
-function settle(raw, { sections, files }, method, notes = []) {
+function settle(raw, { sections, files }, method, notes = [], options = {}) {
+  const requireAll = options.requireAll !== false;
+  const kept = [];
+  const keepSet = new Set(Array.isArray(options.keepAsWorld) ? options.keepAsWorld : []);
+  if (keepSet.size) {
+    /* The owner's exception: these files are world files, whatever the page or the model called them. */
+    const present = files.map(file => file.name).filter(name => keepSet.has(name));
+    const without = list => list.filter(name => !keepSet.has(name));
+    const refs = {};
+    for (const role of ['prompt', 'guideline', 'goldenAnswer']) refs[role] = raw[role] && raw[role].kind === 'file' && keepSet.has(raw[role].name) ? null : raw[role];
+    raw = { ...raw, ...refs, worldFiles: [...without(raw.worldFiles), ...present], taskFiles: without(raw.taskFiles), other: without(raw.other) };
+    for (const name of keepSet) if (!present.includes(name)) notes.push('keepAsWorld names a file that the task does not have.');
+  }
   const withheld = [];
   const warnings = [];
   const byName = new Map(files.map(file => [file.name, file]));
@@ -188,6 +201,7 @@ function settle(raw, { sections, files }, method, notes = []) {
     const found = rule ? null : labelFinding(byName.get(name));
     const why = rule ? `the shared rule withholds it: ${rule}` : found ? found.why : '';
     if (!why) return true;
+    if (keepSet.has(name)) { kept.push({ name, why }); return true; }
     take(name, why);
     warnings.push({ name, why });
     return false;
@@ -196,10 +210,10 @@ function settle(raw, { sections, files }, method, notes = []) {
   const taskFiles = keep(raw.taskFiles);
   const other = raw.other.slice();
   const problems = [];
-  if (!raw.prompt) problems.push('the business prompt');
-  if (!raw.guideline) problems.push('the grader guideline');
+  if (requireAll && !raw.prompt) problems.push('the business prompt');
+  if (requireAll && !raw.guideline) problems.push('the grader guideline');
   /* Fail closed: when no golden answer was named, any file that looks like one is a reason to stop, not a world file. */
-  const goldenSuspects = raw.goldenAnswer ? [] : files.filter(file => { const found = labelFinding(file); return found && found.kind === 'answer' && !(raw.guideline && raw.guideline.kind === 'file' && raw.guideline.name === file.name); }).map(file => file.name);
+  const goldenSuspects = raw.goldenAnswer ? [] : files.filter(file => { const found = labelFinding(file); return found && found.kind === 'answer' && !keepSet.has(file.name) && !(raw.guideline && raw.guideline.kind === 'file' && raw.guideline.name === file.name); }).map(file => file.name);
   return {
     method,
     prompt: raw.prompt,
@@ -210,6 +224,7 @@ function settle(raw, { sections, files }, method, notes = []) {
     other,
     withheld,
     warnings,
+    keptAsWorld: kept,
     goldenSuspects,
     notes,
     problems,
@@ -217,16 +232,17 @@ function settle(raw, { sections, files }, method, notes = []) {
 }
 
 /* answer: the model's text, or null when the run gave none. Returns the settled classification. */
-function classify({ answer, sections, files }) {
+function classify({ answer, sections, files, optionalRefs = false, keepAsWorld = [] }) {
   const notes = [];
+  const options = { requireAll: !optionalRefs, keepAsWorld };
   if (typeof answer === 'string') {
-    const parsed = parseClassifierOutput(answer, { sections, files });
-    if (parsed.ok) return settle(parsed.value, { sections, files }, 'model', notes);
+    const parsed = parseClassifierOutput(answer, { sections, files, optionalRefs });
+    if (parsed.ok) return settle(parsed.value, { sections, files }, 'model', notes, options);
     notes.push(`The classifier's answer was not usable (${parsed.error}), so names were matched by heuristics.`);
   } else {
     notes.push('The classifier gave no answer, so names were matched by heuristics.');
   }
-  return settle(heuristicClassification({ sections, files }), { sections, files }, 'heuristic', notes);
+  return settle(heuristicClassification({ sections, files }), { sections, files }, 'heuristic', notes, options);
 }
 
 module.exports = { PREAMBLE, buildClassifierPrompt, parseClassifierOutput, heuristicClassification, classify, withheldReason, labelFinding };

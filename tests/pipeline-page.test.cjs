@@ -127,8 +127,8 @@ function makeCompanion(opts = {}) {
 function makeElement(id) {
   return { id, innerHTML: '', textContent: '', className: '', plHtml: null, dataset: {}, disabled: false, contains: () => false, querySelector: () => null, getAttribute: () => null, focus() {} };
 }
-const REGIONS = ['pl-start-form', 'pl-start-foot', 'pl-picker', 'pl-spend', 'pl-actions', 'pl-wait', 'pl-withheld', 'pl-timeline', 'pl-import', 'pl-classify', 'pl-design', 'pl-screen', 'pl-test', 'pl-redesigns', 'pl-verdict'];
-const TEXT_FIELDS = new Set(['url', 'dir', 'cap', 'pilotCap']);
+const REGIONS = ['pl-start-form', 'pl-start-foot', 'pl-picker', 'pl-spend', 'pl-actions', 'pl-wait', 'pl-withheld', 'pl-timeline', 'pl-import', 'pl-classify', 'pl-design', 'pl-brief', 'pl-checks', 'pl-screen', 'pl-test', 'pl-redesigns', 'pl-verdict'];
+const TEXT_FIELDS = new Set(['url', 'dir', 'cap', 'pilotCap', 'keepAsWorld']);
 
 function makePage(t, companion, { location = { protocol: 'http:', hostname: '127.0.0.1' }, noAgents = false, origin: realOrigin = '' } = {}) {
   const elements = new Map(), timers = [], requests = [], listeners = {}, focused = [], downloads = [];
@@ -258,12 +258,12 @@ test('the module registers its document listeners once and only reacts to its ow
 
 /* ====================================================================== the start card */
 
-test('the start card: link or folder, total cap 50, model and effort from the companion, per-pilot cap, four acknowledgements, one yellow button', async t => {
+test('the start card: link or folder, total cap 60, model and effort from the companion, per-pilot cap, four acknowledgements, one yellow button', async t => {
   const { page } = await bootWith(t);
   const form = page.region('start-form');
   assert.match(form, /Task link \(https\)/);
   assert.match(form, /Folder on this computer/);
-  assert.match(form, /id="pl-cap"[^>]*value="50"/, 'the total cap starts at 50');
+  assert.match(form, /id="pl-cap"[^>]*value="60"/, 'the total cap starts at 60');
   assert.match(form, /id="pl-pilot-cap"[^>]*value="3\.00"/);
   for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) assert.ok(form.includes(`<option value="${model}"`), model);
   for (const effort of ['low', 'medium', 'high']) assert.ok(form.includes(`<option value="${effort}"`), effort);
@@ -271,7 +271,7 @@ test('the start card: link or folder, total cap 50, model and effort from the co
   assert.match(form, /<option value="medium" selected>/);
   for (const id of ACK_IDS) assert.ok(page.tagOf('data-id', id), 'a checkbox for ' + id);
   assert.equal((form.match(/data-pl-in="ack"/g) || []).length, 4);
-  assert.equal((form.match(/type="checkbox"/g) || []).length, 5, 'the four acknowledgements and the withheld-files choice');
+  assert.equal((form.match(/type="checkbox"/g) || []).length, 6, 'the four acknowledgements, the withheld-files choice and the diagnostic answers');
   assert.match(page.region('start-foot'), /<button type="button" class="primary" data-pl="start"/);
   assert.equal((page.html().match(/class="primary"/g) || []).length, 1, 'yellow is on exactly one button');
   assert.match(page.region('start-foot'), />Approve and start<\/button>/);
@@ -347,70 +347,72 @@ const whyOf = page => page.region('start-foot').match(/<p id="pl-why" class="pl-
 const capMinInForm = page => (page.region('start-form').match(/<small id="pl-cap-min" class="pl-cap-min">([^<]*)<\/small>/) || [])[1];
 const ready = async page => { await page.fillLink(); await page.ackAll(); };
 
-test('the total cap starts at USD 50, or at the default the companion reports, and a cap the person typed is kept', async t => {
+test('the total cap starts at USD 60, or at the default the companion reports, and a cap the person typed is kept', async t => {
   const { page } = await bootWith(t);
-  assert.match(page.region('start-form'), /id="pl-cap"[^>]*value="50"/);
+  assert.match(page.region('start-form'), /id="pl-cap"[^>]*value="60"/);
   const { page: reported } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
   assert.match(reported.region('start-form'), /id="pl-cap"[^>]*value="40"/, 'the companion\'s default');
   const { page: fraction } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 37.5 } });
   assert.match(fraction.region('start-form'), /id="pl-cap"[^>]*value="37\.5"/);
   for (const junk of [250, 0.5, 'many', null, -1, 12.345, { withheld: true }, [30]]) {
     const { page: odd } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: junk } });
-    assert.match(odd.region('start-form'), /id="pl-cap"[^>]*value="50"/, 'a default of ' + JSON.stringify(junk) + ' is not used');
+    assert.match(odd.region('start-form'), /id="pl-cap"[^>]*value="60"/, 'a default of ' + JSON.stringify(junk) + ' is not used');
   }
   /* the person's own cap stays when the rules are read again (a refused start reads them); a cap nobody typed follows the companion */
   const refuse = async (companion, page) => { companion.fail('POST /api/pipeline/start', 409, 'Another pipeline is running.'); await page.click('start'); assert.equal(page.status(), 'Failed: Another pipeline is running.'); };
   const { companion, page: typed } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
   assert.match(typed.region('start-form'), /id="pl-cap"[^>]*value="40"/);
   await typed.type('cap', { value: '25' });
-  companion.config = { ...CFG, defaultCapUsd: 60 };
+  companion.config = { ...CFG, defaultCapUsd: 70 };
   await ready(typed);
   await refuse(companion, typed);
   assert.match(typed.region('start-form'), /id="pl-cap"[^>]*value="25"/, 'what was typed is kept');
   const { companion: other, page: untouched } = await bootWith(t, [], { config: { ...CFG, defaultCapUsd: 40 } });
-  other.config = { ...CFG, defaultCapUsd: 60 };
+  other.config = { ...CFG, defaultCapUsd: 70 };
   await ready(untouched);
   await refuse(other, untouched);
-  assert.match(untouched.region('start-form'), /id="pl-cap"[^>]*value="60"/, 'a cap nobody typed follows the companion\'s default');
+  assert.match(untouched.region('start-form'), /id="pl-cap"[^>]*value="70"/, 'a cap nobody typed follows the companion\'s default');
   /* a start sends the cap that is in the box */
   const { companion: c2, page: p2 } = await bootWith(t);
   await p2.startFromLink();
-  assert.equal(c2.calls.find(c => c.method === 'POST' && c.url === '/api/pipeline/start').body.capUsd, 50);
+  assert.equal(c2.calls.find(c => c.method === 'POST' && c.url === '/api/pipeline/start').body.capUsd, 60);
 });
 
 test('config.minCap: the least total cap of one full attempt is shown by the cap field and moves with the pilot cap', async t => {
   /* 1.15 x (6.25 + 7 x (3 + 1.5)) = 43.4125, up to the cent */
   const { page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
-  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. The reviews and the adjudication of low scores are part of every attempt.');
   assert.match(page.region('start-form'), /id="pl-cap"[^>]*aria-describedby="pl-cap-hint pl-cap-min"/, 'the cap field is described by the figure');
   await page.type('pilotCap', { value: '5' });   // 1.15 x (6.25 + 7 x 6.5) = 59.5125
-  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.52. With this total cap the run may stop at the cap before the 5-pilot test.', 'the default total cap of 50 is below it, so it warns');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.52. The reviews and the adjudication of low scores are part of every attempt.', 'the default total cap of 60 covers it: no warning');
+  await page.type('cap', { value: '50' });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.52. The reviews and the adjudication of low scores are part of every attempt. With this total cap the run may stop at the cap before the 5-pilot test.', 'the default pilot cap of 3 was raised and the total cap of 50 no longer covers it');
   await page.type('pilotCap', { value: '0.05' });   // 1.15 x (6.25 + 7 x 1.55) = 19.665
-  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 19.67.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 19.67. The reviews and the adjudication of low scores are part of every attempt.');
   await page.type('pilotCap', { value: 'x' });
   assert.equal(page.element('pl-cap-min').textContent, '', 'no figure while the pilot cap is not an amount');
   await page.type('pilotCap', { value: '3' });
-  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. The reviews and the adjudication of low scores are part of every attempt.');
   /* a sum that is exactly on a cent is not rounded up by floating point error: 1.1 x 5 x (0.30 + 0.5) = 4.40 */
   const { page: exact } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 0, perPilotUsd: 0.5, pilots: 5, headroom: 1.1 } } });
   await exact.type('pilotCap', { value: '0.30' });
-  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40.');
+  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40. The reviews and the adjudication of low scores are part of every attempt.');
 });
 
 test('config.minCap: below the least cap Start stays enabled and the cap hint warns that the run may stop before the test', async t => {
   const { companion, page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
   await ready(page);
-  assert.equal(page.enabled('start'), true, 'the default of 50 covers 43.42');
-  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
+  assert.equal(page.enabled('start'), true, 'the default of 60 covers 43.42');
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. The reviews and the adjudication of low scores are part of every attempt.');
   await page.type('cap', { value: '43.41' });
   assert.equal(page.enabled('start'), true, 'a cap below one full attempt is the owner\'s choice');
   assert.equal(whyOf(page), '');
-  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. The reviews and the adjudication of low scores are part of every attempt. With this total cap the run may stop at the cap before the 5-pilot test.');
   await page.type('cap', { value: '43.42' });
-  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.', 'exactly the least cap: no warning');
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. The reviews and the adjudication of low scores are part of every attempt.', 'exactly the least cap: no warning');
   /* a larger pilot cap raises the least cap, and the warning follows it */
   await page.type('pilotCap', { value: '4' });   // 1.15 x (6.25 + 7 x 5.5) = 51.4625
-  assert.match(page.element('pl-cap-min').textContent, /USD 51\.47\. With this total cap the run may stop/);
+  assert.match(page.element('pl-cap-min').textContent, /USD 51\.47\. The reviews and the adjudication of low scores are part of every attempt\. With this total cap the run may stop/);
   await page.type('cap', { value: '20' });
   assert.equal(page.enabled('start'), true);
   await page.click('start');
@@ -422,9 +424,9 @@ test('config.minCap: below the least cap Start stays enabled and the cap hint wa
   await ready(exact);
   await exact.type('pilotCap', { value: '0.30' });
   await exact.type('cap', { value: '4.39' });
-  assert.match(exact.element('pl-cap-min').textContent, /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 4\.40\. With this total cap/);
+  assert.match(exact.element('pl-cap-min').textContent, /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 4\.40\. The reviews and the adjudication of low scores are part of every attempt\. With this total cap/);
   await exact.type('cap', { value: '4.4' });
-  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40.');
+  assert.equal(exact.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 4.40. The reviews and the adjudication of low scores are part of every attempt.');
 });
 
 test('config.minCap: the range checks still block, and a least cap above the largest total cap only warns', async t => {
@@ -445,7 +447,7 @@ test('config.minCap: the range checks still block, and a least cap above the lar
   await heavy.type('cap', { value: '200' });
   await heavy.type('pilotCap', { value: '20' });   // 1.15 x (150 + 7 x 25) = 373.75
   assert.equal(heavy.enabled('start'), true);
-  assert.match(heavy.element('pl-cap-min').textContent, /USD 373\.75\. With this total cap the run may stop at the cap before the 5-pilot test\./);
+  assert.match(heavy.element('pl-cap-min').textContent, /USD 373\.75\. The reviews and the adjudication of low scores are part of every attempt\. With this total cap the run may stop at the cap before the 5-pilot test\./);
 });
 
 test('config.minCap missing or unusable: the page says nothing about it and does not block', async t => {
@@ -481,10 +483,13 @@ test('a click on the disabled button starts nothing', async t => {
   assert.equal(companion.calls.filter(c => c.method === 'POST').length, 0);
 });
 
-test('the line under the button says what will happen, with the bar, the pilot counts, the redesigns and the cap', async t => {
+test('the line under the button says what will happen, with the bar, the pilot counts, the redesigns and the cap, and it follows the design mode', async t => {
   const { page } = await bootWith(t);
-  const line = page.region('start-foot').match(/<p class="pl-happens">([^<]*)<\/p>/)[1];
-  for (const part of ['imported', 'classified', 'designs the hardest traps', 'two blind pilots', 'below 0.45', 'five pilots', 'at least 4 of 5', '3 redesigns', 'total cap', 'Stop']) assert.ok(line.includes(part), part);
+  const line = () => page.region('start-foot').match(/<p class="pl-happens">([^<]*)<\/p>/)[1];
+  for (const part of ['imported', 'classified', 'builds a new task from the world files', 'blind reviewer', 'two blind pilots', 'below 0.40', 'five pilots', 'at least 4 of 5', 'below 0.45', 'Every low score is explained before it counts', '3 redesigns', 'total cap', 'Stop']) assert.ok(line().includes(part), 'new mode: ' + part);
+  await page.type('designMode', { value: 'harden' });
+  for (const part of ['imported', 'classified', 'hardens the task', 'two blind pilots', 'below 0.40', 'five pilots', 'at least 4 of 5', 'below 0.45', '3 redesigns', 'total cap', 'Stop']) assert.ok(line().includes(part), 'harden mode: ' + part);
+  assert.doesNotMatch(line(), /blind reviewer|explained before it counts/, 'the harden mode has neither');
   assert.match(page.region('start-foot'), /Each pilot is capped at USD 3\.00, so a 2-pilot screen can cost up to USD 6\.00 and a 5-pilot test up to USD 15\.00/);
   await page.type('pilotCap', { value: '1.50' });
   assert.match(page.region('start-foot'), /up to USD 3\.00 and a 5-pilot test up to USD 7\.50/, 'the worst case follows the cap');
@@ -501,7 +506,7 @@ test('starting from a task link: one POST with the nonce, the link, the caps, mo
   assert.equal(posts.length, 1);
   assert.equal(posts[0].url, '/api/pipeline/start');
   assert.equal(posts[0].nonce, 'nonce-fake-1', 'the session code travels with the request');
-  assert.deepEqual(posts[0].body, { url: TASK_LINK, capUsd: 25.5, model: 'claude-sonnet-5-5', effort: 'high', pilotCapUsd: 2, acceptMissing: false, acknowledgements: ACK_IDS });
+  assert.deepEqual(posts[0].body, { url: TASK_LINK, capUsd: 25.5, model: 'claude-sonnet-5-5', effort: 'high', pilotCapUsd: 2, acceptMissing: false, designMode: 'new', acknowledgements: ACK_IDS });
   assert.ok(!('sourceDir' in posts[0].body));
   /* the run is shown, the form is folded away and nothing keeps the link */
   assert.match(page.stage(), /^Import:/);
@@ -529,7 +534,7 @@ test('starting from a folder sends sourceDir and no link', async t => {
   assert.equal(page.enabled('start'), true);
   await page.click('start');
   const post = companion.calls.find(c => c.method === 'POST');
-  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 50, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, acknowledgements: ACK_IDS });
+  assert.deepEqual(post.body, { sourceDir: '/Users/you/Downloads/atlas-task', capUsd: 60, model: 'claude-opus-5-5', effort: 'medium', pilotCapUsd: 3, acceptMissing: false, designMode: 'new', acknowledgements: ACK_IDS });
   assert.match(page.stage(), /^Import:/);
 });
 
@@ -1387,7 +1392,7 @@ test('adapt() reads the fairness status, the attempt fields and the config the w
   assert.deepEqual(plain([a.outcome, a.repaired, a.note, a.rejection, a.calibration, a.fairness]), ['rejected', true, 'The companion stopped while this attempt was running.', { kind: 'checks', reasons: ['one', 'two'] }, { score: 0.62, verdict: 'v', reason: 'r' }, { status: 'unfair', unfair: [], count: 2 }]);
   assert.equal(adapt(baseState({ attempts: [attemptOf({ rejection: null })] })).attempts[0].rejection, null);
   const g = adapt(baseState({ classification: { ...classification(), goldenSuspects: ['a'], unscanned: ['b', 'c'], warnings: [{ name: 'n', why: 'w' }] } })).cls;
-  assert.deepEqual(plain([g.goldenSuspects, g.unscanned, g.warnings]), [['a'], ['b', 'c'], [{ name: 'n', why: 'w' }]]);
+  assert.deepEqual(plain([g.goldenSuspects, g.unscanned, g.warnings]), [['a'], ['b', 'c'], [{ name: 'n', why: 'w', soft: false }]]);
   assert.equal(adapt(baseState({ config: { acceptMissing: true } })).acceptMissing, true);
   assert.equal(adapt(baseState({})).acceptMissing, false);
   const p = adapt(baseState({ screen: { ...stageOf('screen', [0.5, 0.2], true, { 0: { regrade: { first: 0.4, second: 0.6, average: 0.5 }, outputs: { count: 2, readable: 1 } } }), replacementRound: true, replacementSkipped: true } })).screen;
@@ -1424,7 +1429,10 @@ test('a repair turn the designer needed is said once in the traps card', async t
 test('the start form has the withheld-files choice: off by default, never needed for the button, sent as acceptMissing, and spent by a start', async t => {
   const { companion, page } = await bootWith(t);
   const form = page.region('start-form');
-  assert.match(form, /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\)<\/strong>/, 'unticked, with the exact label');
+  assert.match(form, /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\), or if the reviewers cannot read a file of the task \(that file goes unchecked\)<\/strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, or when the reviewers cannot read a file of the task, and says which\.<\/span><\/label>/, 'unticked, with the exact label of the new mode, which also covers the files the reviewers cannot read');
+  await page.type('designMode', { value: 'harden' });
+  assert.match(page.region('start-form'), /<label class="check pl-accept"><input type="checkbox" data-pl-in="acceptMissing" data-pl-key="accept-missing" ><span><strong>Start even if a world or task file has to be withheld \(the pilots will not get it\)<\/strong>Off by default: the run stops when the classifier called a file a world or task file and the pilots would not get it, and says which\.<\/span><\/label>/, 'the harden mode has no reviewers of the packet, so its label is the short one');
+  await page.type('designMode', { value: 'new' });
   assert.ok(!ACK_IDS.includes('acceptMissing') && !/acceptMissing/.test(JSON.stringify(page.pipeline.ACKNOWLEDGEMENTS)), 'it is not an acknowledgement');
   await page.fillLink();
   await page.ackAll();
@@ -1462,14 +1470,14 @@ test('when the pipeline stopped because files would be withheld, the result says
 test('the cost line uses the companion\'s caps and says reservations include the headroom; without its rules it says only what the page knows', async t => {
   const { page } = await bootWith(t);
   const limits = () => page.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 50.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
+  assert.equal(limits(), 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The other calls are capped too: the classifier USD 0.50, the designer USD 5.00 and one repair turn USD 1.00, the fairness review USD 0.25, each grader call USD 0.50. The total cap of USD 60.00 covers everything. Before each step the run reserves its worst case with 15% headroom on top, and stops when that would pass the total cap.');
   const { page: custom } = await bootWith(t, [], { config: { classifyCapUsd: 0.75, designCapUsd: 8, repairCapUsd: 2, fairnessCapUsd: 0.4, graderCapUsd: 0.6, goldenMin: 0.9, regradeBand: [0.4, 0.5], headroom: 1.25 } });
   const text = custom.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(text, /the classifier USD 0\.75, the designer USD 8\.00 and one repair turn USD 2\.00, the fairness review USD 0\.40, each grader call USD 0\.60/);
   assert.match(text, /with 25% headroom on top/, 'the headroom is the companion\'s');
   const { page: bare } = await bootWith(t, [], { config: {} });
   const old = bare.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
-  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The classifier, designer and grader runs cost extra. The total cap of USD 50.00 covers everything.');
+  assert.equal(old, 'Each pilot is capped at USD 3.00, so a 2-pilot screen can cost up to USD 6.00 and a 5-pilot test up to USD 15.00. The 5 test pilots run only when both screen pilots score below 0.40, and a round stops as soon as its result is decided. The classifier, designer and grader runs cost extra. The total cap of USD 60.00 covers everything.');
   const { page: partial } = await bootWith(t, [], { config: { fairnessCapUsd: 0.25, headroom: 1 } });
   const some = partial.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
   assert.match(some, /The other calls are capped too: the fairness review USD 0\.25\./);
@@ -2452,9 +2460,9 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
   assert.equal(RULES.testPilots, k.TEST_PILOTS);
   assert.equal(RULES.testNeed, k.TEST_NEED);
   assert.equal(RULES.maxRedesigns, k.MAX_REDESIGNS);
-  /* The default total cap is USD 50. The companion may report its own (GET /api/pipeline config.defaultCapUsd) and the page follows that: see the cap tests. */
-  assert.equal(RULES.defaultCapUsd, 50);
-  if (k.DEFAULT_CAP_USD === 50) assert.equal(RULES.defaultCapUsd, k.DEFAULT_CAP_USD);
+  /* The default total cap is USD 60. The companion may report its own (GET /api/pipeline config.defaultCapUsd) and the page follows that: see the cap tests. */
+  assert.equal(RULES.defaultCapUsd, 60);
+  assert.equal(RULES.defaultCapUsd, k.DEFAULT_CAP_USD, 'the page default is the companion\'s');
   assert.equal(RULES.maxCapUsd, k.MAX_CAP_USD);
   if (k.GOLDEN_MIN !== undefined) assert.equal(makeAdapter().CALIBRATION_MIN, k.GOLDEN_MIN, 'the calibration the page says is needed is the one the companion enforces');
   const { ACKNOWLEDGEMENTS } = makeAdapter();
@@ -2465,7 +2473,7 @@ test('the display constants match backend/pipeline/constants.cjs when the orches
 
 test('the display constants are the spec numbers', () => {
   const { RULES } = makeAdapter();
-  assert.deepEqual(plain(RULES), { screenBar: 0.4, testBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 50, maxCapUsd: 200 });
+  assert.deepEqual(plain(RULES), { screenBar: 0.4, testBar: 0.45, screenPilots: 2, testPilots: 5, testNeed: 4, maxRedesigns: 3, defaultCapUsd: 60, maxCapUsd: 200 });
 });
 
 test('a message that answers the person stays until the stage changes; an error from an action stays until the next action', async t => {
@@ -2520,6 +2528,879 @@ test('a pipeline the companion lists but cannot read is reported in words and th
   assert.equal(page.pending().length, 1, 'and the page tries again');
   await page.tick();
   assert.equal(page.status(), '', 'the next good poll clears the message');
+});
+
+/* ====================================================================== designer v2: the new mode (start form, check files, design, brief, checks, stages, result) */
+
+/* what GET /api/pipeline reports for the new mode (service.cjs _rules): the parts of the least cap of both modes, the diagnostic suite, the review caps and the default reference folder */
+const NEW_MIN = { fixedUsd: 20.5, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 };
+const HARDEN_MIN = { fixedUsd: 8, perPilotUsd: 1, pilots: 7, headroom: 1.15 };
+const REF_NAMES = ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf'];
+const V2 = {
+  ...CFG, defaultCapUsd: 60, designModes: ['new', 'harden'], defaultDesignMode: 'new', alternativeMin: 0.85, fairnessSetCapUsd: 3, minCapFairnessSetUsd: 3,
+  minCap: NEW_MIN, minCapByMode: { new: NEW_MIN, harden: HARDEN_MIN }, blindReviewCapUsd: 1.5, revealReviewCapUsd: 0.5, applicationCapUsd: 0.5, adjudicationCapUsd: 0.5,
+  references: { maxFiles: 20, maxBytes: 8388608, extensions: ['.md', '.txt', '.pdf'], default: { exists: true, found: 2, names: REF_NAMES, bytes: 48211, problems: 0 } },
+};
+const startBody = c => c.calls.find(x => x.method === 'POST' && x.url === '/api/pipeline/start').body;
+const formOf = page => page.region('start-form');
+const NEW_LEGEND = '<legend>For a new task</legend>';
+
+test('the start form offers the design mode: a new task from the world files (the default) or hardening the existing task', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  const f = formOf(page);
+  assert.match(f, /<label class="field pl-mode">What to design<select data-pl-in="designMode" data-pl-key="design-mode" aria-describedby="pl-mode-note">/);
+  assert.match(f, /<option value="new" selected>New task from the world files<\/option><option value="harden" >Harden the existing task<\/option>/);
+  assert.match(f, /<small id="pl-mode-note">The designer starts from the world files alone and writes the prompt, the grader guideline, the golden answer and a brief/);
+  /* the same with a companion that does not say which modes it has */
+  const { page: bare } = await bootWith(t);
+  assert.match(formOf(bare), /<option value="new" selected>New task from the world files<\/option><option value="harden" >Harden the existing task<\/option>/);
+  /* the companion's default, until the person has chosen */
+  const { page: hd } = await bootWith(t, [], { config: { ...V2, defaultDesignMode: 'harden' } });
+  assert.match(formOf(hd), /<option value="harden" selected>/);
+  await hd.type('designMode', { value: 'new' });
+  assert.match(formOf(hd), /<option value="new" selected>/);
+  /* a choice that is not a mode is ignored */
+  await hd.type('designMode', { value: 'surprise' });
+  assert.match(formOf(hd), /<option value="new" selected>/);
+});
+
+test('the fields of the new mode: the reference documents line (names only), keep these files as world files with its warning, and the diagnostic answers with their cost', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  const f = formOf(page);
+  assert.ok(f.includes(NEW_LEGEND));
+  assert.match(f, /<p class="pl-refs" id="pl-refs">Reference documents: 2 files found in the default folder \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\. The designer reads them; their text is sent to Anthropic\. Pilots never see them\.<\/p>/);
+  assert.doesNotMatch(f, /48211|12000/, 'the sizes are not the page\'s business, and never a word of the content');
+  assert.match(f, /<label class="field">Keep these files as world files \(optional\)<input type="text" id="pl-keep" data-pl-in="keepAsWorld" data-pl-key="keep-as-world" value=""/);
+  assert.match(f, /<small id="pl-keep-hint"><strong>Warning:<\/strong> the pilots get these files, and so does the designer, even if the names look like answers or grading material\./);
+  assert.match(f, /<input type="checkbox" data-pl-in="fairnessSet" data-pl-key="fairness-set" ><span><strong>Also run the diagnostic answers \(adds up to USD 3\.00 per attempt\)<\/strong>/);
+  assert.doesNotMatch(f, /no-references/, 'no problem in the folder, so no box to start without it');
+  /* the harden mode hides all three */
+  await page.type('designMode', { value: 'harden' });
+  const h = formOf(page);
+  assert.doesNotMatch(h, /For a new task|pl-refs|data-pl-in="keepAsWorld"|data-pl-in="fairnessSet"|Reference documents/);
+  assert.match(h, /<option value="harden" selected>/);
+  await page.type('designMode', { value: 'new' });
+  assert.ok(formOf(page).includes(NEW_LEGEND), 'and they are back in the new mode');
+  /* what the companion does not say, the page does not say */
+  const { page: none } = await bootWith(t);
+  assert.doesNotMatch(formOf(none), /Reference documents/);
+  assert.match(formOf(none), /Also run the diagnostic answers<\/strong>/, 'no cost to quote');
+  assert.doesNotMatch(formOf(none), /adds up to/);
+});
+
+test('the reference line: none found, many found, and a folder with problems (the reason, a box to start without it, and Start waits for one of the two)', async t => {
+  const none = { ...V2, references: { default: { exists: false, found: 0, names: [], bytes: 0, problems: 0 } } };
+  const { page } = await bootWith(t, [], { config: none });
+  assert.match(formOf(page), /<p class="pl-refs" id="pl-refs">Reference documents: none found in the default folder\. The designer works from the world files and its own list of ideas\.<\/p>/);
+  const bad = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 2 } } };
+  const { companion, page: p2 } = await bootWith(t, [], { config: bad });
+  const f = formOf(p2);
+  assert.match(f, /<p class="pl-refs pl-refs-problem" id="pl-refs">Reference documents: the default folder has 2 problems, so a start is refused\. Fix the folder, or start without it\.<\/p>/);
+  assert.match(f, /<input type="checkbox" data-pl-in="noReferences" data-pl-key="no-references" ><span><strong>Start without the reference folder<\/strong>/);
+  await ready(p2);
+  assert.equal(p2.enabled('start'), false);
+  assert.equal(whyOf(p2), 'The reference folder has problems, so the companion would refuse the start. Fix it, or tick Start without the reference folder.');
+  await p2.type('noReferences', { checked: true });
+  assert.equal(p2.enabled('start'), true);
+  assert.equal(whyOf(p2), '');
+  await p2.click('start');
+  assert.equal(startBody(companion).referencesDir, false, 'start without the reference folder sends referencesDir: false');
+  /* the companion's list of problems (problemList: at most 20 short plain sentences, each naming a file or the folder and the reason), one line each; problems stays the count */
+  const reasons = ['Meridian_Notes.docx is a link, not a file', 'The folder holds more than 8 MB', 'A file is hidden: .draft.md'];
+  const listed = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 3, problemList: reasons } } };
+  const { page: p3 } = await bootWith(t, [], { config: listed });
+  assert.match(formOf(p3), /<p class="pl-refs pl-refs-problem" id="pl-refs">Reference documents: the default folder has 3 problems, so a start is refused\. Fix the folder, or start without it\.<\/p><ul class="pl-names pl-refs-list"><li>Meridian_Notes\.docx is a link, not a file<\/li><li>The folder holds more than 8 MB<\/li><li>A file is hidden: \.draft\.md<\/li><\/ul>/);
+  await ready(p3);
+  assert.equal(p3.enabled('start'), false);
+  await p3.type('designMode', { value: 'harden' });
+  assert.equal(p3.enabled('start'), true, 'the harden mode reads no reference folder');
+  /* the count and the list may differ (the list holds at most 20): the count is what is said */
+  const many = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 31, problemList: Array.from({ length: 20 }, (_, i) => 'File ' + i + ' is not allowed') } } };
+  const { page: p6 } = await bootWith(t, [], { config: many });
+  assert.match(formOf(p6), /has 31 problems, so a start is refused/);
+  assert.equal((formOf(p6).match(/<li>File \d+ is not allowed<\/li>/g) || []).length, 20);
+  /* a problem list that is not text is dropped; the older shape (the list in problems) is still read */
+  const odd = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 2, problemList: ['A', null, 5, { x: 1 }, '', 'B'] } } };
+  const { page: p7 } = await bootWith(t, [], { config: odd });
+  assert.match(formOf(p7), /<ul class="pl-names pl-refs-list"><li>A<\/li><li>5<\/li><li>B<\/li><\/ul>/);
+  const older = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: ['The folder holds a link', 'A file is hidden'] } } };
+  const { page: p8 } = await bootWith(t, [], { config: older });
+  assert.match(formOf(p8), /has 2 problems, so a start is refused\. Fix the folder, or start without it\.<\/p><ul class="pl-names pl-refs-list"><li>The folder holds a link<\/li><li>A file is hidden<\/li><\/ul>/);
+  const none2 = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 0, problemList: ['Stale entry'] } } };
+  const { page: p9 } = await bootWith(t, [], { config: none2 });
+  assert.doesNotMatch(formOf(p9), /Stale entry|pl-refs-problem/, 'no problem is counted, so none is shown');
+  const one = { ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 1 } } };
+  const { page: p4 } = await bootWith(t, [], { config: one });
+  assert.match(formOf(p4), /has 1 problem, so a start is refused/);
+  /* no box is ticked in a folder without problems, and none is sent */
+  const { companion: c5, page: p5 } = await bootWith(t, [], { config: V2 });
+  await p5.startFromLink();
+  assert.equal('referencesDir' in startBody(c5), false);
+});
+
+test('the start body: designMode always; in the new mode the names to keep, the diagnostic switch and the reference choice; in the harden mode none of them', async t => {
+  const { companion, page } = await bootWith(t, [], { config: V2 });
+  await page.startFromLink();
+  const plainBody = startBody(companion);
+  assert.equal(plainBody.designMode, 'new');
+  for (const key of ['keepAsWorld', 'fairnessSet', 'referencesDir']) assert.equal(key in plainBody, false, key + ' is left out when it is not asked for');
+  assert.deepEqual(plainBody.acknowledgements, ACK_IDS);
+  /* every field of the new mode */
+  const { companion: c2, page: p2 } = await bootWith(t, [], { config: V2 });
+  await p2.type('keepAsWorld', { value: ' Atlas_Parent_Answer.xlsx , Meridian_Notes.txt,, Atlas_Parent_Answer.xlsx ' });
+  await p2.type('fairnessSet', { checked: true });
+  await p2.fillLink();
+  await p2.ackAll();
+  await p2.click('start');
+  const full = startBody(c2);
+  assert.deepEqual(full.keepAsWorld, ['Atlas_Parent_Answer.xlsx', 'Meridian_Notes.txt'], 'trimmed, no empty name, none twice');
+  assert.equal(full.fairnessSet, true);
+  assert.equal(full.designMode, 'new');
+  /* the harden mode: what was typed for the new mode is not sent */
+  const { companion: c3, page: p3 } = await bootWith(t, [], { config: V2 });
+  await p3.type('keepAsWorld', { value: 'Atlas_Parent_Answer.xlsx' });
+  await p3.type('fairnessSet', { checked: true });
+  await p3.type('designMode', { value: 'harden' });
+  await p3.startFromLink();
+  const hb = startBody(c3);
+  assert.equal(hb.designMode, 'harden');
+  for (const key of ['keepAsWorld', 'fairnessSet', 'referencesDir']) assert.equal(key in hb, false, 'the harden mode does not send ' + key);
+  assert.deepEqual(plain(Object.keys(hb).sort()), ['acceptMissing', 'acknowledgements', 'capUsd', 'designMode', 'effort', 'model', 'pilotCapUsd', 'url']);
+});
+
+test('keep these files as world files: at most 50 names, plain file names, and Start says why when one is not', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  await ready(page);
+  assert.equal(page.enabled('start'), true);
+  const names = n => Array.from({ length: n }, (_, i) => 'Atlas_File_' + i + '.csv').join(',');
+  await page.type('keepAsWorld', { value: names(50) });
+  assert.equal(page.enabled('start'), true, 'fifty is allowed');
+  await page.type('keepAsWorld', { value: names(51) });
+  assert.equal(page.enabled('start'), false);
+  assert.equal(whyOf(page), 'Keep at most 50 files as world files.');
+  await page.type('keepAsWorld', { value: names(50) + ',' + names(50) });
+  assert.equal(page.enabled('start'), true, 'the same name twice is one name');
+  for (const bad of ['/etc/passwd', '../Secret.txt', 'a/../b.txt', 'x'.repeat(301)]) {
+    await page.type('keepAsWorld', { value: 'Atlas_Ok.csv, ' + bad });
+    assert.equal(whyOf(page), 'Each file to keep as a world file must be a plain file name, without a leading slash or ..', bad.slice(0, 20));
+    assert.equal(page.enabled('start'), false);
+  }
+  await page.type('keepAsWorld', { value: '' });
+  assert.equal(page.enabled('start'), true);
+  /* typing for the harden mode is not checked */
+  await page.type('keepAsWorld', { value: '../bad' });
+  await page.type('designMode', { value: 'harden' });
+  assert.equal(page.enabled('start'), true, 'the harden mode ignores the field');
+});
+
+test('the figure by the cap field follows the design mode and the diagnostic switch; the reviews and the adjudications are part of every attempt; 60 covers the new mode, and the diagnostic answers go over it', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  /* 1.15 x (20.5 + 7 x (3 + 1.5)) = 59.80 */
+  const sent = ' The reviews and the adjudication of low scores are part of every attempt.';
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + sent);
+  assert.doesNotMatch(capMinInForm(page), /may stop at the cap/, 'the default total cap of 60 pays for it');
+  assert.match(formOf(page), /id="pl-cap"[^>]*value="60"/);
+  /* with the diagnostic answers: 1.15 x (20.5 + 3 + 7 x 4.5) = 63.25 */
+  await page.type('fairnessSet', { checked: true });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 63.25.' + sent + ' With this total cap the run may stop at the cap before the 5-pilot test.');
+  await ready(page);
+  assert.equal(page.enabled('start'), true, 'a cap below the figure is a warning, not a block');
+  await page.type('cap', { value: '63.25' });
+  assert.doesNotMatch(page.element('pl-cap-min').textContent, /may stop at the cap/);
+  await page.type('fairnessSet', { checked: false });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + sent);
+  /* the harden mode has its own parts, and the diagnostic switch is not part of it */
+  await page.type('designMode', { value: 'harden' });
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 41.40. The fairness review is part of every attempt.');
+  /* the new mode's figure moves with the pilot cap: 1.15 x (20.5 + 7 x (5 + 1.5)) = 75.90 */
+  await page.type('designMode', { value: 'new' });
+  await page.type('pilotCap', { value: '5' });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 75.90.' + sent + ' With this total cap the run may stop at the cap before the 5-pilot test.');
+});
+
+test('the figure by the cap field without the parts of a mode: the default mode falls back to minCap, a mode the companion does not describe gets no figure, and a withheld or odd part is not used', async t => {
+  const { page } = await bootWith(t, [], { config: { ...CFG, minCap: NEW_MIN } });
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80. The reviews and the adjudication of low scores are part of every attempt.', 'config.minCap is the default mode\'s');
+  await page.type('designMode', { value: 'harden' });
+  assert.equal(capMinInForm(page), '', 'the harden mode is not described: no figure');
+  assert.equal(page.element('pl-cap-min').textContent, '');
+  const { page: odd } = await bootWith(t, [], { config: { ...CFG, minCapByMode: { new: { withheld: true }, harden: 'x' }, minCapFairnessSetUsd: 'three' } });
+  assert.equal(capMinInForm(odd), '');
+  /* a diagnostic suite whose cost the companion does not give: the cap of the suite, else nothing is added */
+  const { page: noExtra } = await bootWith(t, [], { config: { ...V2, minCapFairnessSetUsd: undefined, fairnessSetCapUsd: undefined } });
+  await noExtra.type('fairnessSet', { checked: true });
+  assert.match(noExtra.element('pl-cap-min').textContent, /up to USD 59\.80\./);
+});
+
+test('the cost line says that the five test pilots run only when the screen passes, and names the caps of the checks of a new design', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  const limits = () => page.region('start-foot').match(/<p class="footnote pl-limits">([^<]*)<\/p>/)[1];
+  assert.match(limits(), /The 5 test pilots run only when both screen pilots score below 0\.40, and a round stops as soon as its result is decided\./);
+  assert.match(limits(), /The other calls are capped too: the classifier USD 0\.50, the designer USD 5\.00 and one repair turn USD 1\.00, the blind review USD 1\.50, the second review USD 0\.50, each application check USD 0\.50, each adjudication of a low score USD 0\.50, each grader call USD 0\.50\./);
+  assert.doesNotMatch(limits(), /fairness review/);
+  await page.type('designMode', { value: 'harden' });
+  assert.match(limits(), /the fairness review USD 0\.25, each grader call USD 0\.50/);
+  assert.doesNotMatch(limits(), /blind review|adjudication/);
+});
+
+test('the fourth acknowledgement is the companion\'s sentence and names the reviewers and the reference documents', async t => {
+  const { page } = await bootWith(t);
+  const text = strip(formOf(page));
+  assert.ok(text.includes('The reviewers of a new design are Claude Code runs too: the blind reviewer reads a copy of the packet with the Read, Glob and Grep tools, and the others have no tools. When reference documents are used, the trap designer reads them and they are sent to Anthropic as well.'));
+  const k = require(path.join(REPO, 'backend', 'pipeline', 'constants.cjs'));
+  const { ACKNOWLEDGEMENTS } = makeAdapter();
+  const fourth = ACKNOWLEDGEMENTS[3];
+  assert.equal(fourth.label + ': ' + fourth.text.charAt(0).toLowerCase() + fourth.text.slice(1), k.MODEL_READS_TASK_TEXT, 'word for word');
+});
+
+/* ---- invented new-mode states, in the shape of backend/pipeline (service.cjs _view, new-design.cjs): atlas and meridian, no real names ---- */
+
+const COUNTING = new Set(['intended', 'other_valid_error']);
+const LOW_KEY = { intended: 'intended', other_valid_error: 'otherValid', permitted_alternative: 'permittedAlternative', grader_defect: 'graderDefect', ambiguous: 'ambiguous', tool_failure: 'toolFailure', unsupported: 'unsupported' };
+const adj = (klass, over = {}) => ({ class: klass, claimed: klass, counts: COUNTING.has(klass), note: '', application: null, ...over });
+/* A stage of the new mode: spec is [score, diagnosis class or null] per pilot; the counts, the unexplained list and each pilot's verdict follow from it, as the orchestrator keeps them. */
+function explainedStage(name, spec, passed, over = {}, pilotExtra = {}) {
+  const bar = name === 'test' ? 0.45 : 0.4;
+  const extra = {};
+  spec.forEach(([score, klass], i) => {
+    const low = typeof score === 'number' && score < bar;
+    extra[i] = { ...(low && klass ? { adjudication: adj(klass), countsTowardPass: COUNTING.has(klass) } : { adjudication: null, countsTowardPass: low ? null : false }), ...(pilotExtra[i] || {}) };
+  });
+  const lows = { lowScorers: 0, intended: 0, otherValid: 0, permittedAlternative: 0, graderDefect: 0, ambiguous: 0, toolFailure: 0, unsupported: 0, counted: 0 };
+  const unexplained = [];
+  spec.forEach(([score, klass], i) => {
+    if (typeof score !== 'number' || score >= bar) return;
+    lows.lowScorers++;
+    if (klass) lows[LOW_KEY[klass]]++;
+    if (COUNTING.has(klass)) lows.counted++;
+    else unexplained.push({ pilot: 'p' + (i + 1), class: klass || 'unsupported', score });
+  });
+  return { ...stageOf(name, spec.map(x => x[0]), passed, extra), explained: lows.counted, lows, unexplained, recount: null, ...over };
+}
+const TRAP_RULE = 'Leverage is measured on funded debt net of cash held in the blocked account.';
+const newBrief = (over = {}) => ({
+  taskType: { workflow: 'Quarterly covenant review', why: 'The world files hold a facility agreement, a ledger and an amendment that a covenant review can use.', referenceEntries: ['Covenant walkthrough'] },
+  decision: { ask: 'Does the Atlas borrower meet its leverage covenant at quarter end?', mandate: 'Advise the credit committee whether a waiver is needed.', authorityFile: 'Atlas_Facility_Agreement.txt', effectiveDate: '2025-01-01' },
+  files: [{ name: 'Atlas_Facility_Agreement.txt', role: 'authority' }, { name: 'Atlas_Ledger.csv', role: 'evidence' }, { name: 'Meridian_Old_Schedule.csv', role: 'decoy' }],
+  traps: [{
+    id: 't1', primary: true, rule: { file: 'Atlas_Facility_Agreement.txt', clause: TRAP_RULE },
+    correctPath: { reasoning: 'Net the blocked cash against funded debt before the ratio.', action: 'Report the covenant as met', figures: [{ label: 'Net leverage', value: 3.4, tolerance: 0.05 }] },
+    wrongPath: { reasoning: 'Use gross funded debt, as the ledger line shows it.', action: 'Report the covenant as breached', figures: [{ label: 'Net leverage', value: 4.1, tolerance: 0.05 }] },
+    changesDecision: 'required_conclusion', whyTempting: { kind: 'effort', source: 'The ledger has one gross debt line that is quick to use.' },
+    consequence: { source: 'A breach report triggers the default notice of the amendment.' },
+    strongestAlternative: { answer: 'Report the covenant as met and ask for a waiver', whyRejected: 'No waiver is needed while the ratio is inside the limit.' },
+  }],
+  permittedAlternatives: [{ answer: 'Report the covenant as met and add a monitoring step', support: 'The agreement lets the committee add monitoring.', file: 'answers/alt-1.md' }],
+  permittedAlternativesReason: '', controls: [], primary: 't1', ...over,
+});
+const passedCheck = { pass: true, failed: [], checks: { governs: true, inForce: true, notSuperseded: true, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' }, hits: 0 };
+const newFairness = (over = {}) => ({
+  status: 'passed', repairs: 0,
+  stage1: { state: 'ok', tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0 },
+  stage2: { disposition: 'excluded_by_clause', objectionClass: 'permitted_discretion', evaluations: 1, application: passedCheck, briefApplication: null }, ...over,
+});
+const goldenRun = (grades, why = 'first grading', over = {}) => ({ why, grades, score: grades.reduce((a, b) => a + b, 0) / grades.length, passed: true, unstable: false, ...over });
+const answerSetOf = (over = {}) => ({
+  goldenMin: 0.9, alternativeMin: 0.85, passed: true, answers: [
+    { name: 'golden', kind: 'golden', file: 'golden-answer.md', threshold: 0.9, sha256: 'b'.repeat(64), score: 0.95, grades: [0.96, 0.94], passed: true, unstable: false, runs: [goldenRun([0.96, 0.94])] },
+    { name: 'alt-1', kind: 'alternative', file: 'answers/alt-1.md', threshold: 0.85, sha256: 'c'.repeat(64), score: 0.8767, grades: [0.9, 0.8, 0.8, 0.8], passed: true, unstable: true, runs: [goldenRun([0.9, 0.8, 0.88], 'first grading', { unstable: true, score: 0.8767 })] },
+  ], ...over,
+});
+const freezeRecord = (over = {}) => ({
+  n: 1, at: '2026-10-23T10:20:00.000Z', reason: 'before the pilots', packetSha256: 'd1'.repeat(32), packetFiles: 9, promptSha256: 'e2'.repeat(32), guidelineSha256: 'f3'.repeat(32), goldenSha256: 'a4'.repeat(32), answerSetSha256: 'b5'.repeat(32),
+  answers: [{ name: 'golden', sha256: 'c6'.repeat(32) }], pilot: { model: 'claude-opus-5-5', effort: 'medium', capUsd: 3 }, grader: { model: 'claude-sonnet-5-5', effort: 'medium' }, budget: { totalCapUsd: 60, designCapUsd: 5, pilotCapUsd: 3 }, ...over,
+});
+const newAttempt = (over = {}) => attemptOf({
+  n: 1, mode: 'new', validation: 'complete', outcome: 'passed', traps: ['Gross debt used for the ratio'], fairness: newFairness(), answerSet: answerSetOf(), calibration: { score: 0.95, verdict: 'meets-guidance', reason: 'Matches every rubric line.' },
+  freeze: [freezeRecord()], guidelineRepair: null, diagnostic: null, taskType: newBrief().taskType,
+  difficulty: { status: 'passed', screen: { passed: true, explained: 2, belowBar: 2, of: 2, need: 2, lows: { lowScorers: 2, intended: 1, otherValid: 1, permittedAlternative: 0, graderDefect: 0, ambiguous: 0, toolFailure: 0, unsupported: 0, counted: 2 } }, test: { passed: true, explained: 4, belowBar: 5, of: 5, need: 4, lows: null } },
+  screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true),
+  test: explainedStage('test', [[0.1, 'intended'], [0.2, 'intended'], [0.3, 'other_valid_error'], [0.35, 'intended'], [0.8, null]], true), ...over,
+});
+const newState = (over = {}) => baseState({
+  stage: 'done', running: false, spentUsd: 41.2, redesigns: 0, endedAt: '2026-10-23T11:00:00.000Z', import: importFacts(), classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null },
+  config: { designMode: 'new', fairnessSet: false, keepAsWorld: [], acceptMissing: false, screenBar: 0.4, testBar: 0.45 },
+  references: { source: 'default', found: 2, names: REF_NAMES, bytes: 48211, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf'], scannedChars: 5000, truncated: false },
+  design: designFacts({ attempt: 1, brief: newBrief(), taskType: newBrief().taskType, alternatives: [{ name: 'alt-1', file: 'answers/alt-1.md', answer: 'Report the covenant as met and add a monitoring step' }], answerSet: answerSetOf(), freeze: [freezeRecord()], fairness: newFairness(), calibration: { score: 0.95, verdict: 'meets-guidance', reason: 'Matches every rubric line.' } }),
+  summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 1).', result: { verdict: 'success', message: 'x', validation: 'complete' }, attempts: [newAttempt()], ...over,
+});
+
+test('the files card lists the files kept as world files with the companion\'s warning, and says when a name is not among the fetched files', async t => {
+  const kept = [{ name: 'Atlas_Parent_Answer.xlsx', present: true, warning: 'its name looks like an answer or grading material (a file named like an answer), and it goes to the designer and the pilots as a world file' }, { name: 'Meridian_Notes.txt', present: false, warning: 'the task has no file by this name' }];
+  const { companion, page } = await bootWith(t, [confirmState({}, { keepAsWorld: kept })]);
+  const w = page.region('wait');
+  assert.match(w, /<div class="notice pl-warning pl-kept" role="note"><strong>You asked to keep 2 files as world files<\/strong><p class="pl-warning-lead">The designer and the pilots get these files, even if the name looks like an answer or grading material\.<\/p>/);
+  assert.match(w, /<li><strong>Atlas_Parent_Answer\.xlsx<\/strong> <span class="muted">its name looks like an answer or grading material \(a file named like an answer\), and it goes to the designer and the pilots as a world file<\/span><\/li>/);
+  assert.match(w, /<li><strong>Meridian_Notes\.txt<\/strong> <span class="muted">the task has no file by this name<\/span> <span class="pl-missing">Not among the files that were fetched\.<\/span><\/li>/);
+  assert.ok(w.indexOf('pl-kept') < w.indexOf('pl-files-box'), 'the warning comes before the list of files');
+  assert.ok(w.indexOf('pl-notes') < w.indexOf('pl-kept'), 'after the notes of the loader');
+  /* the import card shows them at any time */
+  const { page: later } = await bootWith(t, [baseState({ stage: 'classify', import: importFacts({ keepAsWorld: kept }) })]);
+  assert.match(later.region('import'), /<strong>You asked to keep 2 files as world files<\/strong>/);
+  assert.match(later.region('import'), /Atlas_Parent_Answer\.xlsx/);
+  /* one file reads in the singular; none shows nothing; a withheld list is said so */
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 40, files: fetched(), keepAsWorld: [kept[0]] }) });
+  await page.tick();
+  assert.match(page.region('wait'), /You asked to keep 1 file as world files<\/strong><p class="pl-warning-lead">The designer and the pilots get this file, even/);
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 40, files: fetched(), keepAsWorld: [] }) });
+  await page.tick();
+  assert.doesNotMatch(page.region('wait'), /pl-kept|You asked/);
+  companion.update('pl-atlas-0001', { redacted: true, import: importFacts({ fileCount: 40, files: fetched(), keepAsWorld: { withheld: true } }) });
+  await page.tick();
+  assert.match(page.region('wait'), /<p class="pl-withheld">Files kept as world files: Withheld while a round runs<\/p>/);
+  /* an entry whose warning or name is odd or withheld */
+  companion.update('pl-atlas-0001', { import: importFacts({ fileCount: 40, files: fetched(), keepAsWorld: [{ name: 'Atlas_Odd.csv', present: true, warning: { withheld: true } }, 'Plain_Name.csv', null, { present: true }] }) });
+  await page.tick();
+  const odd = page.region('wait');
+  assert.match(odd, /<li><strong>Atlas_Odd\.csv<\/strong> <span class="muted"><span class="pl-withheld">Withheld while a round runs<\/span><\/span><\/li>/);
+  assert.match(odd, /<li><strong>Plain_Name\.csv<\/strong><\/li>/);
+  assert.equal((odd.match(/<li><strong>/g) || []).length, 2, 'an entry without a name is not listed');
+  assert.doesNotMatch(odd, /\[object Object\]|undefined|>null</);
+});
+
+test('the classification of a new task: no prompt, guideline or golden answer is needed, and the files kept as world files are named with why', async t => {
+  const cls = { ...classification(), prompt: null, guideline: null, goldenAnswer: null, keptAsWorld: [{ name: 'Atlas_Parent_Answer.xlsx', why: 'the shared rule withholds it: a file named like an answer' }] };
+  const { page } = await bootWith(t, [newState({ stage: 'design', running: true, result: null, classification: cls, attempts: [], design: null })]);
+  const c = page.region('classify');
+  assert.match(c, /<dt>Business prompt<\/dt><dd>Not needed: the designer writes a new one<\/dd><dt>Grader guideline<\/dt><dd>Not needed: the designer writes a new one<\/dd><dt>Golden answer<\/dt><dd>Not needed: the designer writes a new one<\/dd>/);
+  assert.match(c, /<p class="pl-class-note pl-kept-note">Kept as world files because you asked, although the name looks like an answer or grading material: Atlas_Parent_Answer\.xlsx \(the shared rule withholds it: a file named like an answer\)\.<\/p>/);
+  /* a pipeline that hardens still says Not found */
+  const { page: old } = await bootWith(t, [baseState({ stage: 'design', import: importFacts(), classification: { ...classification(), prompt: null } })]);
+  assert.match(old.region('classify'), /<dt>Business prompt<\/dt><dd>Not found<\/dd>/);
+});
+
+/* one row of a table of the page as { th text, then each cell under its data-label }: a value in the wrong column fails the test that reads it */
+const tableRowsOf = html => [...html.matchAll(/<tr><th scope="row">([\s\S]*?)<\/th>([\s\S]*?)<\/tr>/g)].map(m => ({ row: strip(m[1]), ...Object.fromEntries([...m[2].matchAll(/<td data-label="([^"]+)">([\s\S]*?)<\/td>/g)].map(c => [c[1], strip(c[2])])) }));
+
+test('the design card of a new task: the task type with its why, the reference documents used, and no old-mode fairness review', async t => {
+  const { page } = await bootWith(t, [newState()]);
+  const d = page.region('design');
+  assert.match(d, /<p class="pl-task-type"><strong>Task type:<\/strong> Quarterly covenant review\. <span class="muted">Why: The world files hold a facility agreement, a ledger and an amendment that a covenant review can use\.<\/span><span class="muted"> Reference entries it draws on: Covenant walkthrough\.<\/span><\/p>/);
+  assert.match(d, /<p class="pl-refs-summary">Reference documents used: 2 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\. Pilots never see them\. Not checked for leaked passages \(their text could not be read, or the scan cap left them out\): Meridian_Workflow_Catalog\.pdf\.<\/p>/);
+  assert.doesNotMatch(d, /<h3>Fairness review<\/h3>/, 'the fairness of a new design is in the checks card');
+  assert.match(d, /<h3>Calibration<\/h3><p><span class="pill green">Calibration passed<\/span> The golden answer scored <strong>0\.95<\/strong>/);
+  assert.ok(d.indexOf('pl-task-type') < d.indexOf('pl-traps'), 'the task type comes before the traps');
+  assert.doesNotMatch(d + page.region('checks'), /\[object Object\]|undefined|>null</);
+  /* the text of a reference never reaches the page, only names, and a truncated scan is said */
+  const { page: cut } = await bootWith(t, [newState({ references: { source: 'folder', found: 1, names: ['Atlas_Notes.md'], bytes: 10, copied: true, files: [], unscanned: [], scannedChars: 3000000, truncated: true } })]);
+  assert.match(cut.region('design'), /Reference documents used: 1 file \(Atlas_Notes\.md\)\. Pilots never see them\. Only the first part of their text was checked for leaked passages\.<\/p>/);
+  const { page: none } = await bootWith(t, [newState({ references: { source: 'none', found: 0, names: [], bytes: 0, copied: false, files: [], unscanned: [], scannedChars: 0, truncated: false } })]);
+  assert.doesNotMatch(none.region('design'), /Reference documents used/);
+  /* a design of the old mode has neither */
+  const { page: old } = await bootWith(t, [doneState()]);
+  assert.doesNotMatch(old.region('design'), /pl-task-type|pl-refs-summary/);
+  assert.equal(old.region('brief'), '');
+  assert.equal(old.region('checks'), '');
+});
+
+test('the brief: the decision, and one row for each trap with the rule, both paths, why it is tempting and the strongest alternative, each in its own column', async t => {
+  const { page } = await bootWith(t, [newState()]);
+  const b = page.region('brief');
+  assert.match(b, /<div class="eyebrow">Brief<\/div><h2>What the traps rest on<\/h2>/);
+  assert.match(b, /<dt>Task type<\/dt><dd>Quarterly covenant review <span class="muted">The world files hold/);
+  assert.match(b, /<dt>The decision<\/dt><dd>Does the Atlas borrower meet its leverage covenant at quarter end\?<\/dd><dt>The mandate<\/dt><dd>Advise the credit committee whether a waiver is needed\.<\/dd><dt>Governing file<\/dt><dd>Atlas_Facility_Agreement\.txt <span class="muted">in force from 2025-01-01<\/span><\/dd>/);
+  assert.match(b, /Files and their roles: Atlas_Facility_Agreement\.txt \(authority\), Atlas_Ledger\.csv \(evidence\), Meridian_Old_Schedule\.csv \(decoy\)\./);
+  const [row] = tableRowsOf(b.slice(b.indexOf('pl-brief-table')));
+  assert.equal(row.row, 't1 Primary The wrong path changes the required conclusion.');
+  assert.equal(row.Rule, 'Atlas_Facility_Agreement.txt ' + TRAP_RULE);
+  assert.equal(row['Correct path'], 'Report the covenant as met Net the blocked cash against funded debt before the ratio. Net leverage: 3.4 (within 0.05)');
+  assert.equal(row['Wrong path'], 'Report the covenant as breached Use gross funded debt, as the ledger line shows it. Net leverage: 4.1 (within 0.05)');
+  assert.equal(row['Why it is tempting'], 'effort The ledger has one gross debt line that is quick to use. What it costs: A breach report triggers the default notice of the amendment.');
+  assert.equal(row['Strongest alternative'], 'Report the covenant as met and ask for a waiver Ruled out by: No waiver is needed while the ratio is inside the limit.');
+  /* the wrong path is not under the correct one, and the other way round */
+  assert.doesNotMatch(row['Correct path'], /breached|4\.1|gross/);
+  assert.doesNotMatch(row['Wrong path'], /Report the covenant as met|3\.4/);
+  /* permitted alternatives, with the score of their answer */
+  assert.match(b, /<h3>Permitted alternatives<\/h3>\s*<ul class="pl-names pl-alternatives"><li><strong>Report the covenant as met and add a monitoring step<\/strong> <span class="muted">Allowed because: The agreement lets the committee add monitoring\.<\/span> <span class="pl-alt-score">Its answer scored 0\.88 against the guideline \(it needs 0\.85\), and the grades were unstable\.<\/span><\/li>/);
+  /* none permitted, with the reason; controls when there is more than one trap */
+  const second = { id: 't2', primary: false, rule: { file: 'Atlas_Facility_Agreement.txt', clause: 'Cash in the blocked account is released on the first of the month.' }, correctPath: { reasoning: 'r', action: 'Release on the first', figures: [] }, wrongPath: { reasoning: 'w', action: 'Release at once', figures: [] }, changesDecision: 'required_calculation', whyTempting: { kind: 'time', source: 'The notice is dated early.' }, consequence: { source: 'A fee.' }, strongestAlternative: { answer: 'Release at once', whyRejected: 'The first of the month governs.' } };
+  const brief = newBrief({ permittedAlternatives: [], permittedAlternativesReason: 'The agreement allows one method only.', traps: [newBrief().traps[0], second], controls: [{ scenario: 'baseline', trap: '', action: 'Report as met', changesDecision: false, figures: [] }, { scenario: 'secondary_wrong', trap: 't2', action: 'Release at once', changesDecision: true, figures: [{ label: 'Fee', value: 12, tolerance: 0 }] }] });
+  const { page: two } = await bootWith(t, [newState({ design: designFacts({ attempt: 1, brief, taskType: brief.taskType, alternatives: [], answerSet: null }) })]);
+  const rows = tableRowsOf(two.region('brief').slice(two.region('brief').indexOf('pl-brief-table')));
+  assert.deepEqual(rows.map(r => r.row.split(' ')[0]), ['t1', 't2']);
+  assert.equal(rows[1].row, 't2 The wrong path changes a required calculation.');
+  assert.match(two.region('brief'), /<h3>Permitted alternatives<\/h3>\s*<p class="muted">None\. The agreement allows one method only\.<\/p>/);
+  assert.match(two.region('brief'), /<h3>Controls<\/h3><ul class="pl-names"><li><strong>Baseline:<\/strong> Report as met<\/li><li><strong>A secondary wrong path \(t2\):<\/strong> Release at once <span class="muted">Fee: 12<\/span><\/li><\/ul>/);
+});
+
+test('the checks card: fairness and difficulty are two separate results, the answer set shows every grade and marks an unstable one, and the freeze record is listed', async t => {
+  const { page } = await bootWith(t, [newState()]);
+  const c = page.region('checks');
+  assert.match(c, /<div class="eyebrow">Checks<\/div><h2>Fairness and difficulty<\/h2><\/div><span class="pill green">Checks complete<\/span>/);
+  const fair = c.indexOf('<h3>Fairness: could another answer be better supported?</h3>'), diff = c.indexOf('<h3>Difficulty: do the pilots fail for the intended reason?</h3>');
+  assert.ok(fair > 0 && diff > fair, 'fairness first, then difficulty, under their own headings');
+  const fairness = c.slice(fair, diff), difficulty = c.slice(diff, c.indexOf('<h3>Answer set'));
+  assert.match(fairness, /A pilot's score never decides it\./);
+  assert.match(fairness, /<span class="pill green">Passed<\/span> No repair turn used\./);
+  assert.match(fairness, /<li>Blind review: a reader with only the prompt and the files gave an answer \(1 try\)\.<\/li>/);
+  assert.match(fairness, /<li>Second review: the other answer is ruled out by a clause of the files \(objection: permitted discretion\)\.<\/li>/);
+  assert.match(fairness, /<li class="pl-check-pass">Application check of the clause that rules the other answer out: passed\. The clause governs this decision, is in force, is not superseded and rules the other answer out\. In force from 2025-01-01; decision on 2025-03-31\.<\/li>/);
+  assert.doesNotMatch(fairness, /screen|pilots? (scored|count)|0\.40/i, 'no pilot score in the fairness part');
+  assert.match(difficulty, /<span class="pill green">Passed<\/span>/);
+  assert.match(difficulty, /<li>Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\. Low scores: 2; by diagnosis: 1 intended, 1 another valid error, 0 permitted alternative, 0 grader defect, 0 ambiguous, 0 tool failure, 0 not supported\.<\/li>/);
+  assert.match(difficulty, /<li>Test: passed\. 5 of 5 below 0\.45; 4 count toward the pass \(4 needed\)\.<\/li>/);
+  assert.doesNotMatch(difficulty, /Blind review|Application check|golden/i, 'no review in the difficulty part');
+  /* the answer set table, column by column */
+  const rows = tableRowsOf(c.slice(c.indexOf('pl-answers')));
+  assert.equal(rows.length, 2);
+  assert.deepEqual([rows[0].row, rows[0].Needs, rows[0].Grades, rows[0].Score, rows[0].Result], ['Golden answer', '0.90', '0.96, 0.94', '0.95', '\u2713 Passed']);
+  assert.equal(rows[1].row, 'Permitted alternative alt-1');
+  assert.deepEqual([rows[1].Needs, rows[1].Grades, rows[1].Score], ['0.85', '0.90, 0.80, 0.80, 0.80', '0.88']);
+  assert.match(rows[1].Result, /^\u2713 Passed Unstable: the grades fell on both sides of the line, so a third grade decided\. All grades: 0\.90, 0\.80, 0\.80, 0\.80\.$/);
+  assert.doesNotMatch(rows[0].Result, /Unstable/, 'only the unstable answer is marked');
+  assert.match(c, /<small class="pl-unstable"><strong>Unstable:<\/strong>/);
+  assert.match(c, /The golden answer needs 0\.90 or more, and each permitted alternative 0\.85 or more\. Each is graded twice, and a third time when the two grades fall on both sides of the line\./);
+  /* the freeze record */
+  assert.match(c, /<h3>Freeze records<\/h3><p class="muted">What was tested, fixed before the pilots ran\. The export lists the sha256 of every file it ships, so the packet that was tested can be compared with it\.<\/p>/);
+  assert.match(c, /<li><strong>Freeze 1 \(before the pilots\)<\/strong> <span class="muted">[^<]+<\/span>\s*<small class="pl-freeze-hashes">Packet d1d1d1d1d1d1 \(9 files\); prompt e2e2e2e2e2e2; guideline f3f3f3f3f3f3; golden answer a4a4a4a4a4a4; answer set b5b5b5b5b5b5\.<\/small>/);
+  assert.match(c, /<small class="pl-freeze-run">Pilots: claude-opus-5-5 at medium, USD 3\.00 each\. Grader: claude-sonnet-5-5 at medium\. Budget: USD 60\.00 in all, USD 5\.00 for the designer\.<\/small>/);
+  assert.doesNotMatch(c, /\[object Object\]|undefined|>null</);
+  assert.doesNotMatch(c, /Guideline repair|Diagnostic answers|did not finish/, 'nothing that did not happen');
+});
+
+test('a stage of the new mode: each pilot says whether it counts toward the pass and why, a low score that does not count is marked with its diagnosis, and the counts by class are shown', async t => {
+  const failed = explainedStage('screen', [[0.2, 'intended'], [0.3, 'ambiguous']], false);
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [newAttempt({ outcome: 'screen-failed', screen: failed, test: null })] })]);
+  const s = page.region('screen');
+  assert.match(s, /<th scope="col">Below 0\.40<\/th><th scope="col">Counts toward the pass<\/th><th scope="col">Audit<\/th>/);
+  const [one, two] = tableRowsOf(s);
+  assert.deepEqual([one.row, one.Score, one['Below 0.40'], one['Counts toward the pass']], ['Pilot 1', '0.20', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error']);
+  assert.deepEqual([two.row, two.Score, two['Below 0.40'], two['Counts toward the pass']], ['Pilot 2', '0.30', '\u2713 Yes', '! Low score that does not count Diagnosis: ambiguous']);
+  assert.doesNotMatch(two.Score + ' | ' + two['Below 0.40'] + ' | ' + two.Audit, /does not count|ambiguous/, 'the mark is in its own column');
+  assert.doesNotMatch(one['Counts toward the pass'], /not count/, 'and the pilot that counts is not marked');
+  assert.match(s, /<span class="pl-nocount"><span aria-hidden="true">!<\/span> Low score that does not count<\/span>/);
+  assert.match(s, /<p class="pl-tally">2 of 2 below 0\.40; 1 count toward the pass; both needed\.<\/p>/);
+  assert.match(s, /<p class="pl-lows">Low scores: 2\. By diagnosis: 1 intended, 0 another valid error, 0 permitted alternative, 0 grader defect, 1 ambiguous, 0 tool failure, 0 not supported\. Counted toward the pass: 1\.<\/p>/);
+  assert.match(s, /<div class="notice pl-unexplained" role="note"><strong>1 low score did not count toward the pass<\/strong><p class="pl-warning-lead">A low score counts only when the harness can show why the answer is wrong under the supplied files\.<\/p><ul class="pl-names"><li>Pilot 2 scored 0\.30: ambiguous<\/li><\/ul><\/div>/);
+  assert.match(s, /<span class="pill red">Screen failed<\/span>/);
+  assert.match(s, /A low score counts toward the pass only when the harness can explain why the answer is wrong under the supplied files\./);
+  /* the test table has its own column head, with the test bar */
+  const { page: tp } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, attempts: [newAttempt({ outcome: 'test-failed', test: explainedStage('test', [[0.1, 'intended'], [0.2, 'unsupported'], [0.3, 'permitted_alternative'], [0.8, null], [0.9, null]], false) })] })]);
+  const rows = tableRowsOf(tp.region('test'));
+  assert.deepEqual(rows.map(r => r['Counts toward the pass']), ['\u2713 Counts Diagnosis: the intended error', '! Low score that does not count Diagnosis: not supported by the files', '! Low score that does not count Diagnosis: a permitted alternative (the answer is acceptable)', 'Does not count: the score is not below 0.45', 'Does not count: the score is not below 0.45']);
+  assert.deepEqual(rows.map(r => r['Below 0.45']), ['\u2713 Yes', '\u2713 Yes', '\u2713 Yes', '\u2715 No', '\u2715 No']);
+  assert.match(tp.region('test'), /1 count toward the pass; 4 needed\./);
+  assert.match(tp.region('test'), /<strong>2 low scores did not count toward the pass<\/strong>/);
+  /* the harden mode has no such column */
+  const { page: old } = await bootWith(t, [doneState()]);
+  assert.doesNotMatch(old.region('screen') + old.region('test'), /Counts toward the pass|pl-lows|pl-unexplained/);
+});
+
+test('pilots of the new mode that are not low scores: waiting for the diagnosis, a tool failure, a pilot that was not needed, and a diagnosis that is withheld while a round runs', async t => {
+  const W = { withheld: true };
+  const stage = explainedStage('test', [[0.1, 'intended'], [0.2, null], [0.8, null], [null, null], [0.3, 'tool_failure']], null, {}, {
+    3: { state: 'cancelled', valid: false, stoppedEarly: true, stoppedReason: 'Not graded: the test was already decided after pilot 3.', audit: null, adjudication: null, countsTowardPass: null },
+    4: { toolFailure: true, valid: false, adjudication: adj('tool_failure'), countsTowardPass: false },
+  });
+  const { page } = await bootWith(t, [newState({ stage: 'grade-test', running: true, result: null, attempts: [newAttempt({ test: stage, difficulty: { status: 'pending', screen: null, test: null }, outcome: 'in-progress', validation: 'complete' })] })]);
+  const cells = tableRowsOf(page.region('test')).map(r => r['Counts toward the pass']);
+  assert.equal(cells[0], '\u2713 Counts Diagnosis: the intended error');
+  assert.equal(cells[1], 'Waiting for the diagnosis', 'a low score with no diagnosis yet');
+  assert.equal(cells[2], 'Does not count: the score is not below 0.45');
+  assert.equal(cells[3], 'Stopped early: not needed');
+  assert.equal(cells[4], 'Tool failure: another pilot replaces it');
+  const toolRow = tableRowsOf(page.region('test'))[4];
+  assert.equal(toolRow.Score, 'Tool failure: another pilot replaces it', 'a pilot that was graded and diagnosed is not "waiting for the grader"');
+  assert.equal(toolRow['Below 0.45'], 'Tool failure: another pilot replaces it');
+  assert.doesNotMatch(toolRow.Score + ' | ' + toolRow['Below 0.45'], /Waiting|Pending|No usable score|without a score/);
+  assert.doesNotMatch(cells.join(' | '), /undefined|null|\[object/);
+  /* while a round runs the diagnosis, the counts and the list are withheld; whether a pilot counts is still shown */
+  const hidden = explainedStage('test', [[0.1, 'intended'], [0.2, 'ambiguous']], null, { lows: W, unexplained: W, recount: W }, { 0: { adjudication: W }, 1: { adjudication: W, countsTowardPass: false } });
+  const { page: hp } = await bootWith(t, [newState({ stage: 'grade-test', running: true, redacted: true, result: null, attempts: [newAttempt({ test: hidden, outcome: 'in-progress' })] })]);
+  const t2 = hp.region('test');
+  const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
+  const hc = tableRowsOf(t2).map(r => r['Counts toward the pass']);
+  assert.deepEqual(hc, ['\u2713 Counts Withheld while a round runs', '! Low score that does not count Withheld while a round runs']);
+  assert.ok(t2.includes('<small class="pl-diagnosis">' + marker + '</small>'));
+  assert.match(t2, /<p class="pl-withheld pl-lows">Counts by class: Withheld while a round runs<\/p>/);
+  assert.match(t2, /<p class="pl-withheld pl-unexplained-line">Low scores that do not count: Withheld while a round runs<\/p>/);
+  assert.match(t2, /<p class="pl-withheld pl-recount">Counted again: Withheld while a round runs<\/p>/);
+  assert.doesNotMatch(t2, /ambiguous|intended|\[object Object\]|undefined|>null</);
+});
+
+test('a pass that rests on a repair says so: the saved answers are graded again, each pilot shows what it scored before, and the recount is listed', async t => {
+  const recount = { changes: [{ pilot: 'p2', from: 0.62, to: 0.38 }] };
+  const test = explainedStage('test', [[0.1, 'intended'], [0.2, 'intended'], [0.38, 'other_valid_error'], [0.3, 'intended'], [0.35, 'intended']], true, { recount }, { 2: { regraded: true, previous: { score: 0.62, belowBar: false, countsTowardPass: false, class: 'grader_defect' } } });
+  const repair = { stage: 'test', at: '2026-10-23T10:50:00.000Z', outcome: 'applied', classes: ['grader_defect'], changed: ['guideline.md', 'golden-answer.md'], reason: '', regrade: { before: [{ name: 'golden', grades: [0.96, 0.94], score: 0.95 }], after: [{ name: 'golden', grades: [0.95, 0.95], score: 0.95, passed: true, unstable: false }], passed: true }, recounted: { passed: true, explained: 4 } };
+  const { page } = await bootWith(t, [newState({ attempts: [newAttempt({ guidelineRepair: repair, test })] })]);
+  const s = page.region('test');
+  assert.match(s, /<div class="notice pl-leaned" role="note"><strong>This pass rests on a repair\.<\/strong> The guideline was repaired and the saved answers were graded again before the test was counted again\.<\/div>/);
+  assert.match(s, /<p class="pl-recount">Counted again after the guideline repair, with the saved answers graded again: Pilot 2 0\.62 to 0\.38\.<\/p>/);
+  const rows = tableRowsOf(s);
+  assert.match(rows[2].Score, /^0\.38 Graded again after the guideline repair \(it was 0\.62\)$/);
+  assert.doesNotMatch(rows[0].Score + rows[1].Score, /Graded again/, 'only the answer that was graded again says so');
+  const v = page.region('verdict');
+  assert.match(v, /<div class="notice pl-leaned" role="note"><strong>This pass rests on a repair\.<\/strong> The guideline and the golden answer were repaired, and the saved answers were graded again, before the test was counted again\.<\/div>/);
+  const c = page.region('checks');
+  assert.match(c, /<h3>Guideline repair<\/h3><p>The test failed on low scores that were the guideline's fault, not the packet's \(a grader defect\)\. The designer repaired the guideline and the golden answer once: <span class="pill green">applied<\/span> Changed: guideline\.md, golden-answer\.md\.<\/p>/);
+  assert.match(c, /<p class="muted pl-regrade">Fixed answers graded again with the revised guideline\. Before: golden 0\.96, 0\.94\. After: golden 0\.95, 0\.95\.<\/p>/);
+  assert.match(c, /<p class="muted pl-recounted">The test was counted again: passed, 4 count toward the pass\.<\/p>/);
+  /* a pass that did not need a repair says nothing of one */
+  const { page: plainPass } = await bootWith(t, [newState()]);
+  assert.doesNotMatch(plainPass.region('test') + plainPass.region('verdict'), /rests on a repair|Counted again/);
+  /* a repair that was not used is said so, and is not a reason to doubt a pass */
+  const { page: unused } = await bootWith(t, [newState({ attempts: [newAttempt({ guidelineRepair: { ...repair, outcome: 'failed', reason: 'the repair changed nothing, so nothing material changed and nothing was run again', regrade: null, recounted: null, changed: [] } })] })]);
+  assert.match(unused.region('checks'), /<span class="pill amber">not used<\/span>/);
+  assert.match(unused.region('checks'), /the repair changed nothing, so nothing material changed and nothing was run again/);
+  assert.doesNotMatch(unused.region('test') + unused.region('verdict'), /rests on a repair/);
+});
+
+test('the checks did not finish: the cap, a Stop or an error before every check was done says so plainly in the checks card and the result, and nothing counts as a pass', async t => {
+  const attempt = newAttempt({ validation: 'incomplete', outcome: 'budget', fairness: newFairness({ status: 'incomplete', stage2: null }), difficulty: { status: 'pending', screen: null, test: null }, screen: null, test: null, freeze: [], calibration: null });
+  const { page } = await bootWith(t, [newState({ stage: 'budget', capUsd: 30, spentUsd: 24.5, design: null, attempts: [attempt], summary: 'Stopped before the blind review: USD 24.50 spent, and the step could cost up to USD 2.30.', result: { verdict: 'incomplete', message: 'x', validation: 'incomplete' } })]);
+  const v = page.region('verdict');
+  assert.match(v, /<h2>The checks did not finish<\/h2>/);
+  assert.match(v, /<span class="pill amber">Incomplete<\/span>/);
+  assert.match(v, /<div class="notice pl-incomplete" role="note"><strong>The checks did not finish\.<\/strong> Nothing here counts as a pass: a design passes only after every check of it has finished\.<\/div>/);
+  assert.match(v, /Stopped before the blind review: USD 24\.50 spent/);
+  assert.match(v, /Stopped in the Design step with USD 24\.50 of USD 30\.00 spent\./);
+  const c = page.region('checks');
+  assert.match(c, /<span class="pill amber">Checks did not finish<\/span>/);
+  assert.match(c, /<div class="notice pl-incomplete" role="note">/);
+  assert.match(c, /<span class="pill amber">Did not finish<\/span>/, 'the fairness result');
+  assert.match(c, /<li>Second review: not run\.<\/li>/);
+  assert.match(c, /<li>Screen: not run\.<\/li><li>Test: not run\.<\/li>/);
+  assert.doesNotMatch(v + c, /Checks complete|test passed/i);
+  /* a Stop in the middle of the checks: the result is a Stop, and it says the checks did not finish */
+  const { page: stopped } = await bootWith(t, [newState({ id: 'pl-atlas-0002', stage: 'stopped', design: null, summary: 'Stopped by the owner.', attempts: [{ ...attempt, outcome: 'stopped' }], result: { verdict: 'stopped', message: 'Stopped by the owner.', validation: 'incomplete' } })]);
+  assert.match(stopped.region('verdict'), /<h2>Stopped by you<\/h2>/);
+  assert.match(stopped.region('verdict'), /<div class="notice pl-incomplete" role="note">/);
+  /* a cap stop after every check had finished is an ordinary stop at the cap */
+  const { page: ok } = await bootWith(t, [newState({ id: 'pl-atlas-0003', stage: 'budget', attempts: [newAttempt({ outcome: 'budget', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'intended']], true) })], result: { verdict: 'budget', message: 'x', validation: 'complete' } })]);
+  assert.match(ok.region('verdict'), /<h2>Stopped at the cap<\/h2>/);
+  assert.doesNotMatch(ok.region('verdict') + ok.region('checks'), /pl-incomplete|did not finish/);
+  /* a design that a check rejected */
+  const { page: rej } = await bootWith(t, [newState({ id: 'pl-atlas-0004', stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [newAttempt({ validation: 'failed', outcome: 'rejected', fairness: newFairness({ status: 'rejected', stage2: { disposition: 'unresolved', objectionClass: 'missing_requirement', evaluations: 2, application: { ...passedCheck, pass: false, failed: ['inForce', 'notSuperseded'], checks: { governs: true, inForce: false, notSuperseded: false, excludes: true } }, briefApplication: null } }), screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'review', reasons: ['The reviews could not settle which answer the files support'] } })] })]);
+  const rc = rej.region('checks');
+  assert.match(rc, /<span class="pill red">Rejected by a check<\/span>/);
+  assert.match(rc, /<span class="pill red">Rejected<\/span>/);
+  assert.match(rc, /<li>Second review: the files do not settle which answer is right \(objection: a missing requirement\); it ran 2 times\.<\/li>/);
+  assert.match(rc, /<li class="pl-check-fail">Application check of the clause that rules the other answer out: failed\. it is not shown to be in force; it may be superseded\./);
+  assert.doesNotMatch(rc, /pl-incomplete/, 'a rejected design is not an unfinished one');
+});
+
+test('the redesign table of the new mode: the review, the answer set, a repair and an unfinished check are in the design checks column, and the rejection kinds read in words', async t => {
+  const rejected = newAttempt({ n: 1, validation: 'failed', outcome: 'rejected', screen: null, test: null, fairness: newFairness({ status: 'rejected', stage2: { disposition: 'unresolved', objectionClass: 'missing_requirement', evaluations: 2, application: null, briefApplication: null } }), difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'review', reasons: ['The reviews could not settle which answer the files support'] } });
+  const setRejected = newAttempt({ n: 2, validation: 'failed', outcome: 'rejected', screen: null, test: null, fairness: newFairness({ status: 'not-reached', stage1: null, stage2: null }), answerSet: answerSetOf({ passed: false }), difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'answer-set', reasons: ['The golden answer scored 0.62 against the guideline'] } });
+  const passed = newAttempt({ n: 3, guidelineRepair: { stage: 'screen', outcome: 'applied', classes: ['grader_defect'], changed: ['guideline.md'], reason: '', regrade: null, recounted: null } });
+  const { page } = await bootWith(t, [newState({ redesigns: 2, attempts: [rejected, setRejected, passed] })]);
+  const table = page.region('redesigns');
+  const rows = tableRowsOf(table.slice(0, table.indexOf('<h3>Earlier attempts, in detail</h3>')));
+  assert.equal(rows.length, 3);
+  assert.match(rows[0].Outcome, /^Rejected before any pilot The reviews found an answer the files support better, or could not settle which answer they support\. The reviews could not settle which answer the files support$/);
+  assert.match(rows[0]['Design checks'], /Fairness: rejected \(the files do not settle which answer is right\)/);
+  assert.match(rows[0]['Design checks'], /Answer set: graded as required, with an unstable grade/);
+  assert.match(rows[1].Outcome, /^Rejected before any pilot The guideline did not grade the fixed answers \(the golden answer or a permitted alternative\) as required\. The golden answer scored 0\.62 against the guideline$/);
+  assert.match(rows[1]['Design checks'], /Fairness: no review ran/);
+  assert.doesNotMatch(rows[1]['Design checks'], /not reached/, 'a design refused before the reviews is not described as a review that was not reached');
+  assert.match(rows[1]['Design checks'], /Answer set: not graded as required/);
+  assert.match(rows[2]['Design checks'], /Fairness: passed \(the other answer is ruled out by a clause of the files\)/);
+  assert.match(rows[2]['Design checks'], /Guideline repair: applied/);
+  assert.doesNotMatch(rows[0].Screen + rows[0].Test + rows[0].Outcome, /Fairness|Answer set/, 'the checks are in their own column');
+  const diag = newAttempt({ n: 1, validation: 'failed', outcome: 'rejected', screen: null, test: null, diagnostic: { passed: false, results: [{ name: 'Expected action with reasoning', file: 'answers/diag-1.md', band: 'high', score: 0.9, ok: true }, { name: 'Wrong action, right arithmetic', file: 'answers/diag-2.md', band: 'low', score: 0.55, ok: false }] }, rejection: { kind: 'diagnostic', reasons: ['The guideline did not grade 1 diagnostic answer as the design says'] } });
+  const { page: dp } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [diag] })]);
+  assert.match(dp.region('redesigns'), /The guideline did not grade the diagnostic answers as the design says\./);
+  const d = dp.region('checks');
+  assert.match(d, /<h3>Diagnostic answers<\/h3><p><span class="pill red">It did not<\/span><\/p>/);
+  const drows = tableRowsOf(d.slice(d.indexOf('pl-diag')));
+  assert.deepEqual(drows.map(r => [r.row, r['Should score'], r.Score, r['As designed']]), [['Expected action with reasoning', 'high', '0.90', 'Yes'], ['Wrong action, right arithmetic', 'low', '0.55', 'No']]);
+});
+
+test('while a round runs the fields of the new mode are withheld the way the companion withholds them (redact.cjs): each says so, the rest still shows, and nothing breaks', async t => {
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const running = newState({ stage: 'screen', running: true, result: null, summary: '', attempts: [newAttempt({ outcome: 'in-progress', test: null, screen: explainedStage('screen', [[0.2, 'intended'], [null, null]], null, {}, { 1: { state: 'running', valid: false, adjudication: null, countsTowardPass: null } }), difficulty: { status: 'pending', screen: null, test: null } })] });
+  const redacted = redactPipelineData(JSON.parse(JSON.stringify(running)));
+  assert.equal(redacted.redacted, true);
+  const { page } = await bootWith(t, [redacted]);
+  const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
+  const d = page.region('design'), b = page.region('brief'), c = page.region('checks'), s = page.region('screen');
+  assert.match(d, /<p class="pl-task-type pl-withheld">Task type: Withheld while a round runs<\/p>/);
+  assert.match(d, /Reference documents used: 2 files \(<span class="pl-withheld">Withheld while a round runs<\/span>\)\. Pilots never see them\. Some files were not checked whole for leaked passages: <span class="pl-withheld">/, 'how many shows, the names do not');
+  assert.match(b, /<h2>What the traps rest on<\/h2>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.doesNotMatch(b, /Quarterly covenant|Atlas_Facility_Agreement|t1/);
+  assert.match(c, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(c, /<h3>Answer set: can the guideline grade the fixed answers\?<\/h3>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(c, /<span class="pill green">Checks complete<\/span>/, 'the state of the checks is not private');
+  assert.match(c, /<h3>Freeze records<\/h3>/, 'what was fixed before the pilots shows: hashes only');
+  assert.match(s, /<p class="pl-withheld pl-lows">Counts by class: Withheld while a round runs<\/p>/);
+  assert.doesNotMatch(d + b + c + s, /\[object Object\]|undefined|>null</);
+  /* the first pilot's diagnosis is withheld, and whether it counts is not */
+  const [p1] = tableRowsOf(s);
+  assert.match(p1['Counts toward the pass'], /^\u2713 Counts Withheld while a round runs$/);
+  assert.equal(page.statusIsError(), false);
+  /* every field set to the marker, in every place the companion may send it */
+  const W = { withheld: true };
+  const every = newState({
+    stage: 'grade-screen', running: true, result: null, redacted: true,
+    references: { source: 'default', found: 2, names: W, bytes: 1, copied: true, files: W, unscanned: W, scannedChars: 0, truncated: false },
+    import: importFacts({ keepAsWorld: W }), classification: { ...classification(), keptAsWorld: W },
+    design: designFacts({ attempt: 1, taskType: W, brief: W, alternatives: W, answerSet: W, freeze: W, fairness: W, calibration: W }),
+    attempts: [newAttempt({ validation: W, fairness: W, difficulty: W, answerSet: W, freeze: W, guidelineRepair: W, diagnostic: W, taskType: W,
+      screen: { ...explainedStage('screen', [[0.2, 'intended'], [0.3, 'ambiguous']], null, { lows: W, unexplained: W, recount: W }, { 0: { adjudication: W, previous: W }, 1: { adjudication: W, previous: W, regraded: true } }), explained: null }, test: null })],
+  });
+  const { page: all } = await bootWith(t, [every]);
+  for (const region of ['design', 'brief', 'checks', 'screen', 'import', 'classify']) {
+    const html = all.region(region);
+    assert.doesNotMatch(html, /\[object Object\]|undefined|>null<|NaN/, region);
+  }
+  assert.match(all.region('checks'), new RegExp('<h3>Guideline repair</h3><p class="pl-withheld">Withheld while a round runs</p>'));
+  assert.match(all.region('checks'), /<h3>Diagnostic answers<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(all.region('checks'), /<h3>Freeze records<\/h3><p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(all.region('checks'), /<h3>Difficulty: do the pilots fail for the intended reason\?<\/h3>[\s\S]*?<p class="pl-withheld">Withheld while a round runs<\/p>/);
+  assert.match(all.region('import'), /<p class="pl-withheld">Files kept as world files: Withheld while a round runs<\/p>/);
+  assert.ok(all.region('screen').includes('Graded again after the guideline repair: ' + marker));
+  assert.equal(all.statusIsError(), false);
+});
+
+test('every field of the new mode is read defensively: the wrong type gives nothing, never an error', () => {
+  const { adapt } = makeAdapter();
+  const junk = [null, undefined, 5, 'x', [], true, {}, { withheld: true }, [null, 3, 'y', {}], { answers: 'x', runs: 3, grades: 'a' }];
+  for (const value of junk) {
+    const v = adapt(newState({
+      config: value, references: value, import: importFacts({ keepAsWorld: value }), classification: { ...classification(), keptAsWorld: value },
+      design: designFacts({ taskType: value, brief: value, alternatives: value, answerSet: value, freeze: value, fairness: value }),
+      attempts: [newAttempt({ mode: value, validation: value, fairness: value, difficulty: value, answerSet: value, freeze: value, guidelineRepair: value, diagnostic: value, taskType: value,
+        screen: { passed: false, explained: value, lows: value, unexplained: value, recount: value, pilots: [{ n: 1, score: 0.3, id: value, adjudication: value, countsTowardPass: value, toolFailure: value, regraded: value, previous: value }] }, test: value })],
+      result: value,
+    }));
+    assert.ok(v, JSON.stringify(value));
+    assert.ok(['new', 'harden'].includes(v.designMode));
+    assert.ok(Array.isArray(v.keepAsWorld) && Array.isArray(v.attempts));
+    for (const a of v.attempts) assert.ok(['new', 'harden'].includes(a.mode));
+  }
+  const ok = adapt(newState({ attempts: [newAttempt({ answerSet: { answers: [{ name: 'g', kind: 'golden', grades: [0.9, 'x', null, 0.8], runs: [null, { grades: 'no' }, { score: 0.5 }] }, null, 'y'] }, freeze: [null, { n: 'x', pilot: 'p' }, { answers: [null, { name: 'a', sha256: 5 }] }] })] }));
+  const a = ok.attempts[0];
+  assert.deepEqual(plain(a.answerSet.answers[0].grades), [0.9, 0.8]);
+  assert.equal(a.answerSet.answers.length, 1, 'an answer that is not an object is dropped');
+  assert.equal(a.freeze.length, 2, 'a freeze record that is not an object is dropped');
+  assert.deepEqual(plain(a.freeze[1].pilot), { model: '', effort: '', capUsd: null });
+  /* the two shapes of the fairness record are told apart: the old review (ok, unfair, unusable) and the new one (pending, passed, rejected...) */
+  const oldShape = adapt(baseState({ attempts: [attemptOf({ fairness: { status: 'ok', count: 0 } })] })).attempts[0];
+  assert.equal(oldShape.fairness.status, 'ok');
+  assert.equal(oldShape.review, null);
+  const newShape = adapt(baseState({ attempts: [attemptOf({ mode: 'new', fairness: { status: 'passed', stage1: null, stage2: null, repairs: 1 } })] })).attempts[0];
+  assert.equal(newShape.fairness, null);
+  assert.equal(newShape.review.status, 'passed');
+  assert.equal(newShape.review.repairs, 1);
+});
+
+test('a new task that is still being designed: the design card says the designer is working and shows the reference documents it reads, and a diagnosis note shows once the round is over', async t => {
+  const early = newState({ stage: 'design', running: true, result: null, summary: '', design: null, attempts: [], classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } });
+  const { page } = await bootWith(t, [early]);
+  const d = page.region('design');
+  assert.match(d, /<h2>The designer is working<\/h2>/);
+  assert.match(d, /<p class="pl-designer-working">The designer is working\. The traps, the brief and the checks of the design show here once the design has passed every check that comes before the pilots\.<\/p>/);
+  assert.match(d, /Reference documents used: 2 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\./);
+  assert.doesNotMatch(d, /No trap has been recorded yet|The designer added no new file|No existing world file was edited|Not given|<h2>The traps<\/h2>/, 'nothing the designer has not written is asserted');
+  assert.equal(page.region('brief'), '', 'no brief before the designer has delivered one');
+  assert.equal(page.region('checks'), '', 'and no checks before an attempt exists');
+  /* a diagnosis the companion explained is printed under the class, once the round is over */
+  const note = 'The quoted action and the quoted rationale are both in the answer and match the brief.';
+  const stage = explainedStage('screen', [[0.2, 'intended'], [0.3, 'other_valid_error']], true, {}, { 0: { adjudication: adj('intended', { note }) } });
+  const { page: done } = await bootWith(t, [newState({ attempts: [newAttempt({ screen: stage })] })]);
+  assert.match(tableRowsOf(done.region('screen'))[0]['Counts toward the pass'], new RegExp('^\u2713 Counts Diagnosis: the intended error ' + note.replace(/\./g, '\\.') + '$'));
+  assert.equal(tableRowsOf(done.region('screen'))[1]['Counts toward the pass'], '\u2713 Counts Diagnosis: another valid error');
+});
+
+/* ---- the review fixes: the checks of the brief's clauses by trap, the files a check could not read, the files the reviewers saw in part ---- */
+
+const failedApplication = (over = {}) => ({
+  pass: false, failed: ['notSuperseded'], checks: { governs: true, inForce: true, notSuperseded: false, excludes: true }, dates: { effective: '2025-01-01', decision: '2025-03-31' },
+  hits: [
+    { id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt', snippet: 'This amendment replaces the schedule.' },
+    { id: 'h2', kind: 'passage', document: 'Atlas_Amendment_3.txt', snippet: 'The earlier rate is withdrawn.' },
+    { id: 'more', kind: 'more', document: '', snippet: '3 more passages of supersession wording were found near the clause and are not listed here' },
+    { id: 'u1', kind: 'unreadable', document: 'Meridian_Policy_Scan.pdf', snippet: '(the harness could not read this file)' },
+  ],
+  unscanned: ['Meridian_Policy_Scan.pdf', 'Atlas_Appendix.xlsx'], ...over,
+});
+const failedBriefCheck = (over = {}) => ({ pass: false, count: 4, failures: [{ trap: 1, part: 'rule', failed: ['governs', 'inForce'] }, { trap: 2, part: 'whyRejected', failed: ['notSuperseded'] }], unscanned: ['Meridian_Policy_Scan.pdf'], ...over });
+const reviewState = (stage2, over = {}) => newState({ attempts: [newAttempt({ fairness: newFairness({ status: 'rejected', stage2: { disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, application: null, briefApplication: null, cut: [], ...stage2 } }), ...over })] });
+
+test('the check of the brief\'s clauses: how many checks were made, and each failure with its trap number, the part of the brief in plain words, and what failed', async t => {
+  const { page } = await bootWith(t, [reviewState({ briefApplication: failedBriefCheck() })]);
+  const c = page.region('checks');
+  assert.ok(c.includes('<li class="pl-check-fail">Application check of the clauses the brief rests on: failed. 4 checks made.<ul class="pl-hit-list"><li class="pl-brief-failure">Trap 1, the rule clause: it does not govern this decision; it is not shown to be in force.</li><li class="pl-brief-failure">Trap 2, why the alternative is rejected: it may be superseded.</li><li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces a clause: Meridian_Policy_Scan.pdf.</li></ul></li>'));
+  /* the failures are in the failing line and the second review's own line is a separate one */
+  const lines = [...c.matchAll(/<li class="pl-check-(?:pass|fail)">/g)];
+  assert.equal(lines.length, 1, 'one line for the brief, none for a check that did not run');
+  assert.doesNotMatch(c, /Application check of the clause that rules/, 'no check of the reveal clause here');
+  /* a pass says how many checks were made, and nothing else */
+  const { page: ok } = await bootWith(t, [reviewState({ disposition: 'excluded_by_clause', briefApplication: { pass: true, count: 2, failures: [], unscanned: [] } }, { fairness: newFairness({ stage2: { disposition: 'excluded_by_clause', objectionClass: 'permitted_discretion', evaluations: 1, application: null, briefApplication: { pass: true, count: 2, failures: [], unscanned: [] }, cut: [] } }) })]);
+  assert.ok(ok.region('checks').includes('<li class="pl-check-pass">Application check of the clauses the brief rests on: passed. 2 checks made.</li>'));
+  /* one check is singular; no count (an older companion) says no number; an older failed list is read as one failure of an unnamed trap */
+  const one = reviewState({ briefApplication: failedBriefCheck({ count: 1, unscanned: [], failures: [{ trap: 3, part: 'other', failed: [] }, { trap: null, part: '', failed: ['excludes'] }] }) });
+  const { page: p1 } = await bootWith(t, [one]);
+  assert.ok(p1.region('checks').includes('failed. 1 check made.<ul class="pl-hit-list"><li class="pl-brief-failure">Trap 3, other: it did not pass.</li><li class="pl-brief-failure">A trap, a clause: it does not rule the other answer out.</li></ul>'));
+  const { page: p2 } = await bootWith(t, [reviewState({ briefApplication: { pass: false, failed: ['governs'], checks: {}, hits: 0 } })]);
+  assert.ok(p2.region('checks').includes('<li class="pl-check-fail">Application check of the clauses the brief rests on: failed.<ul class="pl-hit-list"><li class="pl-brief-failure">A trap, a clause: it does not govern this decision.</li></ul></li>'));
+  assert.doesNotMatch(p1.region('checks') + p2.region('checks') + c, /\[object Object\]|undefined|>null<|NaN/);
+});
+
+test('the check of the clause that rules the other answer out: a file that could not be read says so by name, more passages than shown say so, and the files not read are listed', async t => {
+  const { page } = await bootWith(t, [reviewState({ application: failedApplication() })]);
+  const c = page.region('checks');
+  assert.ok(c.includes('<li class="pl-check-fail">Application check of the clause that rules the other answer out: failed. it may be superseded. In force from 2025-01-01; decision on 2025-03-31. 2 places in the files mention a change of a document.<ul class="pl-hit-list">'));
+  assert.ok(c.includes('<li class="pl-hit-unreadable"><strong>Meridian_Policy_Scan.pdf</strong>: This file could not be read as text, so it could not be checked for a later document that replaces it.</li>'));
+  assert.ok(c.includes('<li class="pl-hit-more">More passages were found than are shown here (3 more).</li>'));
+  assert.ok(c.includes('<li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces the clause: Atlas_Appendix.xlsx.</li>'), 'only the files that no hit already named');
+  assert.equal((c.match(/Meridian_Policy_Scan\.pdf/g) || []).length, 1, 'a file is named once');
+  const { page: single } = await bootWith(t, [reviewState({ application: failedApplication({ hits: [{ id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt', snippet: 's' }], unscanned: [] }) })]);
+  assert.match(single.region('checks'), /1 place in the files mentions a change of a document\./, 'one place is singular');
+  assert.equal((c.match(/pl-hit-unreadable/g) || []).length, 1);
+  /* a hit of the more kind without a number, a passage hit without a document, and a hit of a kind the page does not know */
+  const hits = [{ id: 'more', kind: 'more', document: '', snippet: 'more passages were found' }, { id: 'h1', kind: 'passage', document: '', snippet: 's' }, { id: 'x', kind: 'surprise', document: 'A.txt' }, 'junk', null];
+  const { page: odd } = await bootWith(t, [reviewState({ application: failedApplication({ hits, unscanned: [] }) })]);
+  assert.ok(odd.region('checks').includes('<li class="pl-hit-more">More passages were found than are shown here.</li>'));
+  assert.match(odd.region('checks'), /2 places in the files mention a change of a document\./, 'a hit of an unknown kind is a passage');
+  /* a count of hits (an older companion), and unscanned names with no hit that names them */
+  const { page: old } = await bootWith(t, [reviewState({ application: failedApplication({ hits: 3, unscanned: ['Atlas_Appendix.xlsx'] }) })]);
+  assert.match(old.region('checks'), /3 places in the files mention a change of a document\.<ul class="pl-hit-list"><li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces the clause: Atlas_Appendix\.xlsx\.<\/li><\/ul>/);
+  assert.doesNotMatch(old.region('checks'), /pl-hit-unreadable|pl-hit-more/);
+  /* a passed check with files it could not read still says so */
+  const { page: pass } = await bootWith(t, [reviewState({ disposition: 'excluded_by_clause', application: failedApplication({ pass: true, failed: [], hits: [{ id: 'u1', kind: 'unreadable', document: 'Meridian_Policy_Scan.pdf', snippet: 'x' }], unscanned: ['Meridian_Policy_Scan.pdf'] }) })]);
+  assert.match(pass.region('checks'), /<li class="pl-check-pass">Application check of the clause that rules the other answer out: passed\./);
+  assert.match(pass.region('checks'), /<strong>Meridian_Policy_Scan\.pdf<\/strong>: This file could not be read as text/);
+  /* nothing that was not found: no list at all */
+  const { page: plainOk } = await bootWith(t, [newState()]);
+  assert.doesNotMatch(plainOk.region('checks'), /pl-hit-list|pl-cut/);
+});
+
+test('the files the reviewers saw only in part are named in the checks card, and a withheld list says so', async t => {
+  const { page } = await bootWith(t, [reviewState({ cut: ['Atlas_Facility_Agreement.txt', 'Meridian_Long_Ledger.csv'], application: null })]);
+  const c = page.region('checks');
+  assert.match(c, /<p class="pl-cut">The reviewers saw these files only in part: Atlas_Facility_Agreement\.txt, Meridian_Long_Ledger\.csv\.<\/p>/);
+  assert.ok(c.indexOf('pl-review') < c.indexOf('pl-cut') && c.indexOf('pl-cut') < c.indexOf('<h3>Difficulty'), 'under the fairness result, before the difficulty result');
+  const { page: none } = await bootWith(t, [reviewState({ cut: [] })]);
+  assert.doesNotMatch(none.region('checks'), /pl-cut|only in part/);
+  const { page: w } = await bootWith(t, [reviewState({ cut: { withheld: true } })]);
+  assert.match(w.region('checks'), /<p class="pl-cut">The reviewers saw these files only in part: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+  const { page: junk } = await bootWith(t, [reviewState({ cut: 'x' })]);
+  assert.doesNotMatch(junk.region('checks'), /pl-cut/, 'a list that is not a list is none');
+  /* while a round runs the whole second review is withheld with it */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const running = redactPipelineData(JSON.parse(JSON.stringify(reviewState({ cut: ['Atlas_Facility_Agreement.txt'] }))));
+  const { page: hidden } = await bootWith(t, [{ ...running, stage: 'screen', running: true }]);
+  assert.doesNotMatch(hidden.region('checks'), /Atlas_Facility_Agreement|only in part/);
+});
+
+test('the reference summary says which files the leak scan read only in part, and which its cap left out; the decision date of the brief shows when there is one', async t => {
+  const refs = { source: 'default', found: 3, names: ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf', 'Borealis_Big_Catalog.md'], bytes: 10, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf', 'Borealis_Big_Catalog.md'], partial: ['Atlas_Review_Handbook.md'], scannedChars: 3000000, truncated: true };
+  const { page } = await bootWith(t, [newState({ references: refs })]);
+  const d = page.region('design');
+  assert.match(d, /<p class="pl-refs-summary">Reference documents used: 3 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf, Borealis_Big_Catalog\.md\)\. Pilots never see them\. Checked for leaked passages only in part: Atlas_Review_Handbook\.md\. Not checked for leaked passages \(their text could not be read, or the scan cap left them out\): Meridian_Workflow_Catalog\.pdf, Borealis_Big_Catalog\.md\.<\/p>/);
+  assert.doesNotMatch(d, /Only the first part of their text/, 'a list of the files in part replaces the general sentence');
+  /* truncated with no file named keeps the general sentence; neither partial nor truncated says nothing of it */
+  const { page: cut } = await bootWith(t, [newState({ references: { ...refs, partial: [], unscanned: [] } })]);
+  assert.match(cut.region('design'), /Pilots never see them\. Only the first part of their text was checked for leaked passages\.<\/p>/);
+  const { page: whole } = await bootWith(t, [newState({ references: { ...refs, partial: [], unscanned: [], truncated: false } })]);
+  assert.doesNotMatch(whole.region('design'), /only in part|Only the first part|Not checked for leaked/);
+  const { page: w } = await bootWith(t, [newState({ references: { ...refs, partial: { withheld: true }, unscanned: { withheld: true }, names: { withheld: true } } })]);
+  assert.match(w.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+  /* the decision date of the brief */
+  const dated = newBrief(); dated.decision = { ...dated.decision, decisionDate: '2025-03-31' };
+  const { page: b } = await bootWith(t, [newState({ design: designFacts({ attempt: 1, brief: dated, taskType: dated.taskType, alternatives: [], answerSet: null }) })]);
+  assert.match(b.region('brief'), /<dt>Governing file<\/dt><dd>Atlas_Facility_Agreement\.txt <span class="muted">in force from 2025-01-01<\/span><\/dd><dt>Decision date<\/dt><dd>2025-03-31<\/dd><\/dl>/);
+  const { page: none } = await bootWith(t, [newState()]);
+  assert.doesNotMatch(none.region('brief'), /Decision date/);
+  const { page: wd } = await bootWith(t, [newState({ design: designFacts({ attempt: 1, brief: { ...dated, decision: { ...dated.decision, decisionDate: { withheld: true } } }, taskType: dated.taskType, alternatives: [], answerSet: null }) })]);
+  assert.doesNotMatch(wd.region('brief'), /Decision date|\[object Object\]/, 'a date that is not text is none');
+});
+
+test('each new field of the review may be withheld or null while a round runs: the checks, the files not read, the files seen in part, the reference scan and the date', async t => {
+  const W = { withheld: true };
+  const marker = '<span class="pl-withheld">Withheld while a round runs</span>';
+  const { page } = await bootWith(t, [reviewState({ application: W, briefApplication: W, cut: W })]);
+  const c = page.region('checks');
+  assert.ok(c.includes('<li>Application check of the clause that rules the other answer out: ' + marker + '</li>'));
+  assert.ok(c.includes('<li>Application check of the clauses the brief rests on: ' + marker + '</li>'));
+  assert.ok(c.includes('<p class="pl-cut">The reviewers saw these files only in part: ' + marker + '</p>'));
+  /* parts of a check withheld one by one: the hits, the dates, the unscanned names, the document of a hit, the failures' trap */
+  const part = failedApplication({ hits: [{ id: 'u1', kind: 'unreadable', document: W, snippet: W }, W], unscanned: W, dates: { effective: W, decision: W } });
+  const { page: p2 } = await bootWith(t, [reviewState({ application: part, briefApplication: { pass: false, count: W, failures: [{ trap: W, part: W, failed: [] }, W], unscanned: W } })]);
+  const c2 = p2.region('checks');
+  assert.ok(c2.includes('<li class="pl-hit-unreadable"><strong>' + marker + '</strong>: This file could not be read as text'));
+  assert.ok(c2.includes('<li class="pl-hit-unscanned">Files that could not be read as text: ' + marker + '</li>'));
+  assert.doesNotMatch(c2, /\[object Object\]|undefined|>null<|NaN/);
+  /* null parts */
+  const { page: p3 } = await bootWith(t, [reviewState({ application: { pass: false, failed: [], checks: null, dates: null, hits: null, unscanned: null }, briefApplication: { pass: true, count: null, failures: null, unscanned: null }, cut: null })]);
+  assert.doesNotMatch(p3.region('checks'), /\[object Object\]|undefined|>null<|NaN|pl-cut/);
+  assert.equal(p3.statusIsError(), false);
+  /* the real redaction over a state that has all of them: nothing of the second review remains, and the page still draws */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const full = reviewState({ application: failedApplication(), briefApplication: failedBriefCheck(), cut: ['Atlas_Facility_Agreement.txt'] });
+  full.stage = 'screen'; full.running = true; full.result = null;
+  const { page: red } = await bootWith(t, [redactPipelineData(JSON.parse(JSON.stringify(full)))]);
+  const rc = red.region('checks');
+  assert.doesNotMatch(rc, /Meridian_Policy_Scan|Atlas_Appendix|Trap 1|Atlas_Facility_Agreement|reviewers saw/);
+  assert.match(rc, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*<p class="pl-withheld">Withheld while a round runs<\/p>/);
+  /* the whole view with every new field of this round set to the marker, and the reference scan names */
+  const every = newState({ stage: 'grade-screen', running: true, result: null, redacted: true, references: { source: 'default', found: 2, names: W, bytes: 1, copied: true, files: W, unscanned: W, partial: W, scannedChars: 0, truncated: true },
+    design: designFacts({ attempt: 1, brief: { ...newBrief(), decision: { ...newBrief().decision, decisionDate: W } }, taskType: newBrief().taskType, alternatives: [], answerSet: null }) });
+  const { page: all } = await bootWith(t, [every]);
+  for (const region of ['design', 'brief', 'checks']) assert.doesNotMatch(all.region(region), /\[object Object\]|undefined|>null<|NaN/, region);
+  assert.match(all.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span><\/p>/);
+});
+
+test('the new fields of the review are read defensively: any wrong type gives nothing, never an error', () => {
+  const { adapt } = makeAdapter();
+  const junk = [null, undefined, 5, 'x', [], true, {}, { withheld: true }, [null, 3, 'y', {}], { failures: 'x', hits: 'y', unscanned: 4, cut: {} }];
+  for (const value of junk) {
+    const v = adapt(newState({
+      references: { source: 'default', found: 1, names: [], partial: value, unscanned: value, truncated: value },
+      design: designFacts({ brief: { ...newBrief(), decision: { ...newBrief().decision, decisionDate: value } }, taskType: newBrief().taskType }),
+      attempts: [newAttempt({ fairness: { status: 'passed', repairs: 0, stage1: null, stage2: { disposition: 'x', objectionClass: 'y', evaluations: 1, application: value, briefApplication: value, cut: value } } })],
+    }));
+    assert.ok(v, JSON.stringify(value));
+    const st = v.attempts[0].review.stage2;
+    assert.ok(Array.isArray(st.cut) || st.cut.withheld, 'cut');
+    assert.ok(st.application === null || typeof st.application === 'object');
+    assert.ok(st.briefApplication === null || typeof st.briefApplication === 'object');
+    assert.ok(Array.isArray(v.references.partial) || v.references.partial.withheld);
+    assert.equal(typeof v.design.brief.decision.decisionDate, 'string');
+  }
+  const ok = adapt(newState({ attempts: [newAttempt({ fairness: { status: 'rejected', repairs: 1, stage1: null, stage2: { disposition: 'unresolved', objectionClass: 'none', evaluations: 2, cut: ['a.txt', 3, null, ''],
+    application: { pass: false, failed: ['governs'], checks: {}, dates: null, hits: [{ id: 'h1', kind: 'passage', document: 'b.txt', snippet: 's' }, { id: 'more', kind: 'more', snippet: '7 more passages of supersession wording were found' }, { id: 'u1', kind: 'unreadable', document: 'c.pdf' }], unscanned: ['c.pdf'] },
+    briefApplication: { pass: false, count: 3, failures: [{ trap: 2, part: 'rule', failed: ['governs'] }, null, 'x'], unscanned: [] } } } })] }));
+  const st = ok.attempts[0].review.stage2;
+  assert.deepEqual(plain(st.cut), ['a.txt', '3']);
+  assert.deepEqual(plain(st.application.hits), { count: 1, list: [{ kind: 'passage', document: 'b.txt', count: null }, { kind: 'more', document: '', count: 7 }, { kind: 'unreadable', document: 'c.pdf', count: null }] });
+  assert.deepEqual(plain(st.briefApplication), { pass: false, count: 3, failures: [{ trap: 2, part: 'rule', failed: ['governs'] }], unscanned: [], cut: [] });
+});
+
+test('the reasons a review rejected a design are plain sentences, each shown in the outcome column of its attempt', async t => {
+  const reasons = [
+    'The reviews found an answer that the packet allows, and the guideline does not yet accept it with a graded answer',
+    'The repair did not write an answer for the permitted alternative',
+    'The repair did not add the permitted alternative to the guideline',
+    'The repair changed nothing, so the permitted alternative was not added',
+    'The repair changed the packet and there is no review left',
+  ];
+  for (const reason of reasons) {
+    const rejected = newAttempt({ n: 1, validation: 'failed', outcome: 'rejected', screen: null, test: null, fairness: newFairness({ status: 'rejected', stage2: { disposition: 'permitted', objectionClass: 'permitted_discretion', evaluations: 2, application: null, briefApplication: null, cut: [] } }), difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'review', reasons: [reason] } });
+    const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [rejected] })]);
+    const [row] = tableRowsOf(page.region('redesigns'));
+    assert.equal(row.Outcome, 'Rejected before any pilot The reviews found an answer the files support better, or could not settle which answer they support. ' + reason, reason);
+    assert.doesNotMatch(row.Screen + row.Test + row['Design checks'], new RegExp(reason.slice(0, 30)), 'the reason is in the outcome column only');
+    assert.match(row['Design checks'], /Fairness: rejected \(the files allow the other answer, so it was added to the guideline\)/);
+  }
+});
+
+test('the figure by the cap field is exact at the cent: the default total cap of 60 pays for the new mode (USD 59.80 with 0.20 to spare), one cent less warns, and the diagnostic answers go over', async t => {
+  const { page } = await bootWith(t, [], { config: V2 });
+  const sent = ' The reviews and the adjudication of low scores are part of every attempt.';
+  assert.equal(capMinInForm(page), 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + sent, 'the default total cap of 60 covers it');
+  await page.type('cap', { value: '59.79' });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + sent + ' With this total cap the run may stop at the cap before the 5-pilot test.');
+  await page.type('cap', { value: '59.80' });
+  assert.equal(page.element('pl-cap-min').textContent, 'If the screen passes, one full attempt (screen and test) can cost up to USD 59.80.' + sent);
+  await page.type('fairnessSet', { checked: true });
+  assert.match(page.element('pl-cap-min').textContent, /USD 63\.25\.[\s\S]*With this total cap the run may stop/);
+  await page.type('cap', { value: '63.25' });
+  assert.doesNotMatch(page.element('pl-cap-min').textContent, /may stop/);
+  /* the harden mode is unchanged: USD 41.40 */
+  await page.type('designMode', { value: 'harden' });
+  assert.match(capMinInForm(page), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 41\.40\./);
 });
 
 /* ====================================================================== against the real companion and orchestrator (the model is the stub) */
@@ -2587,6 +3468,877 @@ async function makeRealWorld(t, { hang = false, unclassifiable = false } = {}) {
   return { source, port, origin: `http://127.0.0.1:${port}`, pipeline, agents };
 }
 
+/* ---- backend round 2: a design refused before the reviews, the files turned into text for the blind reviewer, files nobody can read, the rule that decided the grades,
+        a tool failure that was not confirmed, and the fields that are withheld while a round runs ---- */
+
+const ALL_REGIONS = REGIONS.map(name => name.slice(3));
+const MARKER = '<span class="pl-withheld">Withheld while a round runs</span>';
+const HID = { withheld: true };
+const ACCEPT_QUOTED = '\u201CStart even if a world or task file has to be withheld\u201D';
+
+test('a design refused before any review ran says "No review ran", in the checks card and in its own column of the redesign table; no other status says it', async t => {
+  const refused = newAttempt({ validation: 'failed', outcome: 'rejected', screen: null, test: null, fairness: newFairness({ status: 'not-reached', stage1: null, stage2: null }), answerSet: answerSetOf({ passed: false }), difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'answer-set', reasons: ['The golden answer scored 0.62 against the guideline'] } });
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [refused] })]);
+  const c = page.region('checks');
+  assert.match(c, /Not reached<\/span> <\/p><p class="pl-review-none">No review ran: the design was refused before the reviews\.<\/p>/);
+  assert.doesNotMatch(c, /Blind review|Second review|repair turn/, 'no review ran, so there is nothing to list');
+  const row = tableRowsOf(page.region('redesigns'))[0];
+  assert.match(row['Design checks'], /Fairness: no review ran/);
+  assert.doesNotMatch(row.Screen + ' | ' + row.Test + ' | ' + row.Outcome, /no review ran|Fairness/, 'in its own column');
+  assert.doesNotMatch(page.region('redesigns'), /Fairness: not reached/);
+  /* the five statuses, each with its own word and colour; only this one says that no review ran */
+  const expected = { pending: ['violet', 'In progress'], passed: ['green', 'Passed'], rejected: ['red', 'Rejected'], incomplete: ['amber', 'Did not finish'], 'not-reached': ['', 'Not reached'] };
+  for (const [status, [kind, label]] of Object.entries(expected)) {
+    const { page: p } = await bootWith(t, [newState({ attempts: [newAttempt({ fairness: newFairness({ status }) })] })]);
+    const m = p.region('checks').match(/Fairness: could another answer be better supported\?<\/h3><p class="muted">[^<]*<\/p><p><span class="pill ([a-z]*)">([^<]*)<\/span>/);
+    assert.deepEqual([m[1], m[2]], [kind, label], status);
+    assert.equal(/No review ran/.test(p.region('checks')), status === 'not-reached', status);
+  }
+  /* withheld while a round runs: the status is inside the fairness record, which is withheld as a whole */
+  const { page: w } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ fairness: HID })] })]);
+  assert.doesNotMatch(w.region('checks'), /No review ran|Not reached/);
+  assert.match(w.region('checks'), /Withheld while a round runs/);
+});
+
+test('the blind review says which files were turned into text for it and which nobody could read, and that it is partial; a withheld list says so', async t => {
+  const stage1 = (over = {}) => ({ state: 'partial', tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0, rendered: ['Atlas_Ledger.xlsx', 'Meridian_Schedule.docx'], unreadable: ['Borealis_Scan.bin'], ...over });
+  const stateOf = over => newState({ attempts: [newAttempt({ fairness: newFairness({ stage1: stage1(over) }) })] });
+  const { page } = await bootWith(t, [stateOf({})]);
+  const c = page.region('checks');
+  assert.ok(c.includes('<li>Blind review: a reader with only the prompt and the files gave an answer, but not every file could be read (1 try).</li><li class="pl-rendered">These files were turned into text for the blind reviewer: Atlas_Ledger.xlsx, Meridian_Schedule.docx.</li><li class="pl-unreadable-files">Nobody could read these files, so the blind review is partial for them: Borealis_Scan.bin.</li><li>Second review:'), 'the two lines sit under the blind review, before the second review');
+  /* a whole review: only the files that were turned into text */
+  const { page: ok } = await bootWith(t, [stateOf({ state: 'ok', unreadable: [] })]);
+  assert.ok(ok.region('checks').includes('<li>Blind review: a reader with only the prompt and the files gave an answer (1 try).</li><li class="pl-rendered">These files were turned into text for the blind reviewer: Atlas_Ledger.xlsx, Meridian_Schedule.docx.</li><li>Second review:'));
+  assert.doesNotMatch(ok.region('checks'), /Nobody could read/);
+  /* nothing was turned into text and nothing was unreadable: neither line */
+  const { page: none } = await bootWith(t, [stateOf({ state: 'ok', rendered: [], unreadable: [] })]);
+  assert.doesNotMatch(none.region('checks'), /pl-rendered|pl-unreadable-files|turned into text|Nobody could read/);
+  /* an older companion sent neither list */
+  const { page: old } = await bootWith(t, [newState()]);
+  assert.doesNotMatch(old.region('checks'), /pl-rendered|pl-unreadable-files/);
+  /* withheld, as a list and as a whole */
+  const { page: w } = await bootWith(t, [stateOf({ rendered: HID, unreadable: HID })]);
+  assert.ok(w.region('checks').includes('<li class="pl-rendered">These files were turned into text for the blind reviewer: ' + MARKER + '</li><li class="pl-unreadable-files">Nobody could read these files, so the blind review is partial for them: ' + MARKER + '</li>'));
+  const { page: all } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ fairness: newFairness({ stage1: HID }) })] })]);
+  assert.ok(all.region('checks').includes('<li>Blind review: ' + MARKER + '</li>'));
+  /* lists that are not lists are none */
+  for (const junk of [null, 'x', 5, {}]) {
+    const { page: j } = await bootWith(t, [stateOf({ rendered: junk, unreadable: junk })]);
+    assert.doesNotMatch(j.region('checks'), /pl-rendered|pl-unreadable-files|\[object Object\]|undefined/, JSON.stringify(junk));
+  }
+});
+
+test('files the reviewers cannot read: named in the Check the files card and in the classification card with the plain reason; the box that accepts it is the one the form already has; a start that was refused points at it', async t => {
+  const names = ['Borealis_Old_Report.xls', 'Atlas_Archive.bin'];
+  const { page } = await bootWith(t, [confirmState({ classification: { ...classification(), unreadable: names } })]);
+  const w = page.region('wait');
+  assert.ok(w.includes('<div class="notice pl-warning pl-unreadable" role="note"><strong>The reviewers cannot read these files</strong><p class="pl-warning-lead">The reviewers cannot read these files, so a start is refused unless you accept that they go unchecked. To accept it, tick ' + ACCEPT_QUOTED + ' in the start form.</p><ul class="pl-names"><li>Borealis_Old_Report.xls</li><li>Atlas_Archive.bin</li></ul></div>'));
+  assert.match(w, /Every file is there: continue/, 'it is the Check the files card');
+  /* the classification card: one file is singular */
+  const one = { ...classification(), prompt: null, guideline: null, goldenAnswer: null, unreadable: ['Borealis_Old_Report.xls'] };
+  const design = { stage: 'design', running: true, result: null, classification: one, attempts: [], design: null };
+  const { page: c1 } = await bootWith(t, [newState(design)]);
+  assert.ok(c1.region('classify').includes('<strong>The reviewers cannot read this file</strong><p class="pl-warning-lead">The reviewers cannot read this file, so a start is refused unless you accept that it goes unchecked. To accept it, tick ' + ACCEPT_QUOTED + ' in the start form.</p><ul class="pl-names"><li>Borealis_Old_Report.xls</li></ul>'));
+  assert.doesNotMatch(c1.region('import') + c1.region('design') + c1.region('verdict') + c1.region('checks'), /cannot read/, 'only in the cards of the files');
+  /* the box was ticked: the run went on, and the page does not tell the owner to tick it */
+  const { page: accepted } = await bootWith(t, [newState({ ...design, config: { designMode: 'new', fairnessSet: false, keepAsWorld: [], acceptMissing: true, screenBar: 0.4, testBar: 0.45 } })]);
+  assert.match(accepted.region('classify'), /so a start is refused unless you accept that it goes unchecked\. You started with that accepted, so the run went on\.<\/p>/);
+  assert.doesNotMatch(accepted.region('classify'), /To accept it/);
+  /* nothing unreadable: no notice anywhere */
+  const { page: clean } = await bootWith(t, [newState({ ...design, classification: { ...one, unreadable: [] } })]);
+  assert.doesNotMatch(clean.region('classify'), /cannot read|pl-unreadable/);
+  /* withheld (the companion does not do it, but the page copes) */
+  const { page: hid } = await bootWith(t, [newState({ ...design, classification: { ...one, unreadable: HID } })]);
+  assert.ok(hid.region('classify').includes('<ul class="pl-names"><li>' + MARKER + '</li></ul>'));
+  /* the start that stopped for it: the result points at the box the form already has, and the button opens the form */
+  const message = '2 files of the pilot packet cannot be read by the reviewers (no text can be taken from them): Borealis_Old_Report.xls, Atlas_Archive.bin. Convert them to text, CSV, Word, Excel, slides, RTF, PDF or a picture, or take them out of the task, then start again; or start with "Start even if a world or task file has to be withheld" ticked, and the blind review will say which files it could not read.';
+  const failed = over => newState({ ...design, stage: 'failed', running: false, summary: message, error: message, classification: { ...one, unreadable: names }, ...over });
+  const { page: f } = await bootWith(t, [failed({})]);
+  const v = f.region('verdict');
+  assert.match(v, /<div class="notice pl-accept-note pl-unreadable-note" role="note"><strong>The reviewers cannot read some files of this task\.<\/strong> To go on with them unchecked, tick \u201CStart even if a world or task file has to be withheld\u201D in the start form, then start again\. <button type="button" class="small" data-pl="accept-form" data-pl-key="accept-form">Open the start form<\/button><\/div>/);
+  await f.click('accept-form');
+  assert.match(f.region('start-form'), /data-pl-in="acceptMissing"/, 'the start form is open');
+  assert.deepEqual(f.focused.slice(-1), ['accept-missing'], 'and the keyboard is on the box the form already has');
+  const { page: tick } = await bootWith(t, [failed({ config: { designMode: 'new', fairnessSet: false, keepAsWorld: [], acceptMissing: true, screenBar: 0.4, testBar: 0.45 } })]);
+  assert.doesNotMatch(tick.region('verdict'), /pl-unreadable-note|Open the start form/, 'it was ticked');
+  const { page: other } = await bootWith(t, [failed({ classification: { ...one, unreadable: [] } })]);
+  assert.doesNotMatch(other.region('verdict'), /pl-unreadable-note|Open the start form/, 'nothing was unreadable');
+  const { page: running } = await bootWith(t, [failed({ stage: 'design', running: true, summary: '', error: '' })]);
+  assert.doesNotMatch(running.region('verdict'), /pl-unreadable-note/, 'only a start that failed');
+  /* the box sends the field it always sent */
+  const { companion, page: form } = await bootWith(t);
+  await form.fillLink();
+  await form.ackAll();
+  await form.type('acceptMissing', { checked: true });
+  await form.click('start');
+  assert.equal(startBody(companion).acceptMissing, true);
+  assert.match((await bootWith(t)).page.region('start-form'), /or if the reviewers cannot read a file of the task \(that file goes unchecked\)<\/strong>Off by default: .* or when the reviewers cannot read a file of the task, and says which\./);
+});
+
+test('a file that is byte for byte a reference document is listed as withheld with the companion\'s reason, in the reason column of the file list', async t => {
+  const cls = { ...classification(), prompt: null, guideline: null, goldenAnswer: null, withheld: [{ name: 'Atlas_Handbook_Copy.md', why: 'it is byte for byte the same as a reference document' }, { name: 'Atlas_Grader_Guide.docx', why: 'it is the grader guideline' }] };
+  const { page } = await bootWith(t, [newState({ stage: 'design', running: true, result: null, classification: cls, attempts: [], design: null })]);
+  assert.match(page.region('classify'), /<h3>Withheld from the pilots \(2\)<\/h3><ul class="pl-names"><li>Atlas_Handbook_Copy\.md <span class="muted">it is byte for byte the same as a reference document<\/span><\/li><li>Atlas_Grader_Guide\.docx <span class="muted">it is the grader guideline<\/span><\/li><\/ul>/);
+});
+
+test('a hit of the notice kind is listed by its document, without the quote; a file named by a hit is not named again; the files a check saw only in part are named in that check', async t => {
+  const hits = [
+    { id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt', snippet: 'This amendment replaces the schedule.' },
+    { id: 'u1', kind: 'notice', document: 'Meridian_Notice.pdf', unreadable: true, snippet: '(the harness has no text for this file; the blind reviewer, who could open it, quoted) "The schedule is withdrawn."' },
+    { id: 'u2', kind: 'unreadable', document: 'Borealis_Scan.pdf', snippet: '(nobody could read this file here)' },
+  ];
+  const app = failedApplication({ hits, unscanned: ['Meridian_Notice.pdf', 'Borealis_Scan.pdf', 'Atlas_Appendix.xlsx'], cut: ['Atlas_Facility_Agreement.txt'] });
+  const { page } = await bootWith(t, [reviewState({ application: app, briefApplication: failedBriefCheck({ cut: ['Meridian_Long_Ledger.csv'], unscanned: [] }), cut: ['Atlas_Facility_Agreement.txt', 'Meridian_Long_Ledger.csv'] })]);
+  const c = page.region('checks');
+  const split = c.indexOf('Application check of the clauses the brief rests on');
+  const first = c.slice(0, split), second = c.slice(split);
+  assert.ok(first.includes('<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>Meridian_Notice.pdf</strong> (the quote itself is not shown here).</li>'));
+  assert.ok(first.includes('<li class="pl-hit-unreadable"><strong>Borealis_Scan.pdf</strong>: This file could not be read as text, so it could not be checked for a later document that replaces it.</li>'));
+  assert.ok(first.includes('<li class="pl-hit-unscanned">These files could not be read as text, so they could not be checked for a later document that replaces the clause: Atlas_Appendix.xlsx.</li>'), 'only the files that no hit already named');
+  assert.match(first, /1 place in the files mentions a change of a document\./, 'a notice is not a passage');
+  assert.equal((c.match(/Meridian_Notice\.pdf/g) || []).length, 1);
+  assert.equal((c.match(/Borealis_Scan\.pdf/g) || []).length, 1);
+  assert.doesNotMatch(c, /The schedule is withdrawn|harness has no text|nobody could read this file here|replaces the schedule/, 'neither the quote nor the snippet is shown');
+  /* each check names its own files, and the second review names all of them once */
+  assert.ok(first.includes('<li class="pl-hit-cut">The check saw these files only in part: Atlas_Facility_Agreement.txt.</li>'));
+  assert.doesNotMatch(first, /Meridian_Long_Ledger/);
+  assert.ok(second.includes('<li class="pl-hit-cut">The check saw these files only in part: Meridian_Long_Ledger.csv.</li>'));
+  assert.ok(second.includes('<p class="pl-cut">The reviewers saw these files only in part: Atlas_Facility_Agreement.txt, Meridian_Long_Ledger.csv.</p>'));
+  /* the stored form: hits is a number */
+  const { page: num } = await bootWith(t, [reviewState({ application: failedApplication({ hits: 2, unscanned: [], cut: [] }) })]);
+  assert.match(num.region('checks'), /2 places in the files mention a change of a document\./);
+  assert.doesNotMatch(num.region('checks'), /pl-hit-notice|pl-hit-cut/);
+  /* withheld and null */
+  const { page: w } = await bootWith(t, [reviewState({ application: failedApplication({ hits: [{ id: 'u1', kind: 'notice', document: HID, snippet: HID }], unscanned: [], cut: HID }), briefApplication: failedBriefCheck({ cut: HID }) })]);
+  assert.ok(w.region('checks').includes('<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>' + MARKER + '</strong>'));
+  assert.equal((w.region('checks').match(new RegExp('<li class="pl-hit-cut">The check saw these files only in part: ' + MARKER.replace(/[/]/g, '\\/'), 'g')) || []).length, 2);
+  const { page: n } = await bootWith(t, [reviewState({ application: failedApplication({ cut: null }), briefApplication: failedBriefCheck({ cut: null }) })]);
+  assert.doesNotMatch(n.region('checks'), /pl-hit-cut|\[object Object\]|undefined|>null<|NaN/);
+});
+
+test('the answer set says which rule decided the grades of each fixed answer: both grades, or the majority of three', async t => {
+  const set = answerSetOf();
+  set.answers[0].runs = [goldenRun([0.96, 0.94], 'first grading', { rule: 'both' })];
+  set.answers[1].grades = [0.9, 0.8, 0.88];
+  set.answers[1].runs = [goldenRun([0.9, 0.8], 'first grading', { rule: 'both', unstable: true, score: 0.85 }), goldenRun([0.9, 0.8, 0.88], 'the first two grades fell on both sides of the line', { rule: 'majority', unstable: true, score: 0.8933 })];
+  const { page } = await bootWith(t, [newState({ attempts: [newAttempt({ answerSet: set })] })]);
+  const c = page.region('checks');
+  const rows = tableRowsOf(c.slice(c.indexOf('pl-answers'))).slice(0, 2);
+  assert.equal(rows[0].Grades, '0.96, 0.94 Decided by: both grades must pass');
+  assert.equal(rows[1].Grades, '0.90, 0.80, 0.88 Decided by: the majority of the grades');
+  assert.match(rows[1].Result, /Grading 1 \(first grading\): 0\.85 \(unstable; decided by: both grades must pass\); Grading 2 \(the first two grades fell on both sides of the line\): 0\.89 \(unstable; decided by: the majority of the grades\)\./);
+  assert.doesNotMatch(rows[0].Needs + rows[0].Score + rows[0].Result + rows[1].Needs + rows[1].Score, /[Dd]ecided by: /, 'in the grades column, and in the run list of the result column, nowhere else');
+  assert.doesNotMatch(rows[0].Result, /[Dd]ecided by: /, 'one run has no list of runs');
+  /* older answers carry no rule, and a rule the page does not know is none */
+  const { page: old } = await bootWith(t, [newState()]);
+  const oc = old.region('checks');
+  assert.deepEqual(tableRowsOf(oc.slice(oc.indexOf('pl-answers'))).slice(0, 2).map(r => r.Grades), ['0.96, 0.94', '0.90, 0.80, 0.80, 0.80']);
+  assert.doesNotMatch(oc, /[Dd]ecided by: /);
+  set.answers[0].runs[0].rule = 'surprise';
+  const { page: odd } = await bootWith(t, [newState({ attempts: [newAttempt({ answerSet: set })] })]);
+  const dc = odd.region('checks');
+  assert.equal(tableRowsOf(dc.slice(dc.indexOf('pl-answers')))[0].Grades, '0.96, 0.94');
+  /* while a round runs the whole answer set is withheld, the rules with it */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const running = redactPipelineData(JSON.parse(JSON.stringify(newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ answerSet: answerSetOf({ answers: [{ ...set.answers[1], runs: [goldenRun([0.9, 0.8, 0.88], 'x', { rule: 'majority' })] }] }) })] }))));
+  const { page: hid } = await bootWith(t, [running]);
+  assert.doesNotMatch(hid.region('checks'), /[Dd]ecided by: |majority/);
+});
+
+test('a low score for which a tool failure was claimed but not confirmed says so, in the column of the pilot, and a confirmed tool failure is still a replaced pilot', async t => {
+  const claim = adj('unsupported', { claimed: 'tool_failure', counts: false, note: 'the pilot record shows no failed tool call on a file of the packet' });
+  const stage = explainedStage('screen', [[0.2, 'unsupported'], [0.3, 'intended']], false, {}, { 0: { adjudication: claim, countsTowardPass: false } });
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [newAttempt({ outcome: 'screen-failed', screen: stage, test: null })] })]);
+  const s = page.region('screen');
+  const [one, two] = tableRowsOf(s);
+  assert.equal(one['Counts toward the pass'], '! Low score that does not count: the claim of a tool failure was not confirmed Diagnosis: not supported by the files the pilot record shows no failed tool call on a file of the packet');
+  assert.equal(two['Counts toward the pass'], '\u2713 Counts Diagnosis: the intended error');
+  assert.doesNotMatch(one.Score + ' | ' + one['Below 0.40'] + ' | ' + one.Audit + ' | ' + two['Counts toward the pass'], /claim|tool failure/, 'in the column of the pilot whose claim it was');
+  assert.match(s, /<span class="pl-nocount"><span aria-hidden="true">!<\/span> Low score that does not count: the claim of a tool failure was not confirmed<\/span>/);
+  /* an unsupported low score with no such claim, and a claim of another kind, say only that it does not count */
+  const plain1 = explainedStage('screen', [[0.2, 'unsupported'], [0.3, 'unsupported']], false, {}, { 0: { adjudication: adj('unsupported', { claimed: 'unsupported' }), countsTowardPass: false }, 1: { adjudication: adj('unsupported', { claimed: 'intended' }), countsTowardPass: false } });
+  const { page: p1 } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, attempts: [newAttempt({ outcome: 'screen-failed', screen: plain1, test: null })] })]);
+  assert.deepEqual(tableRowsOf(p1.region('screen')).map(r => r['Counts toward the pass']), ['! Low score that does not count Diagnosis: not supported by the files', '! Low score that does not count Diagnosis: not supported by the files']);
+  /* a confirmed tool failure: the pilot is replaced, and no claim is said to be unconfirmed */
+  const confirmed = explainedStage('screen', [[null, null], [0.3, 'intended']], false, {}, { 0: { adjudication: adj('tool_failure'), toolFailure: true, countsTowardPass: false, valid: false } });
+  const { page: p2 } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, attempts: [newAttempt({ outcome: 'screen-failed', screen: confirmed, test: null })] })]);
+  assert.equal(tableRowsOf(p2.region('screen'))[0]['Counts toward the pass'], 'Tool failure: another pilot replaces it');
+  assert.doesNotMatch(p2.region('screen'), /not confirmed/);
+  /* withheld while a round runs: the diagnosis is, so the claim is not guessed */
+  const { page: hid } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ screen: explainedStage('screen', [[0.2, 'unsupported'], [0.3, 'intended']], false, {}, { 0: { adjudication: HID, countsTowardPass: false } }), test: null })] })]);
+  assert.equal(tableRowsOf(hid.region('screen'))[0]['Counts toward the pass'], '! Low score that does not count Withheld while a round runs');
+  /* a pilot graded again after the repair keeps what it scored before, and the new shape of that record is read */
+  const again = explainedStage('screen', [[0.2, 'intended'], [0.3, 'intended']], true, {}, { 0: { regraded: true, previous: { score: 0.55, belowBar: false, countsTowardPass: false, adjudication: null, valid: true } } });
+  const { page: p3 } = await bootWith(t, [newState({ attempts: [newAttempt({ screen: again })] })]);
+  assert.match(tableRowsOf(p3.region('screen'))[0].Score, /Graded again after the guideline repair \(it was 0\.55\)/);
+  assert.doesNotMatch(tableRowsOf(p3.region('screen'))[1].Score, /Graded again/);
+});
+
+test('a guideline repair that was not used says why in plain words; the words "the checks did not finish" show only when the checks did not finish', async t => {
+  const base = { stage: 'screen', at: '2026-10-23T10:50:00.000Z', outcome: 'failed', classes: ['grader_defect'], changed: [], regrade: null, recounted: null };
+  for (const reason of ['the run ended during the repair', 'the run ended before the saved answers were counted again']) {
+    const { page } = await bootWith(t, [newState({ attempts: [newAttempt({ guidelineRepair: { ...base, reason } })] })]);
+    assert.ok(page.region('checks').includes('<span class="pill amber">not used</span> Reason: ' + reason + '.</p>'), reason);
+  }
+  const { page: hid } = await bootWith(t, [newState({ attempts: [newAttempt({ guidelineRepair: { ...base, reason: HID } })] })]);
+  assert.ok(hid.region('checks').includes('<span class="pill amber">not used</span> Reason: ' + MARKER + '</p>'));
+  const { page: none } = await bootWith(t, [newState({ attempts: [newAttempt({ guidelineRepair: { ...base, reason: '' } })] })]);
+  assert.doesNotMatch(none.region('checks'), /Reason:/);
+  /* a stop at the cap in the pilots, after the checks finished: complete, with the verdict budget */
+  const stopped = (verdict, validation, over = {}) => newState({ stage: 'budget', capUsd: 60, spentUsd: 57.9, attempts: [newAttempt({ outcome: 'budget', test: null, validation, ...over })], result: { verdict, message: 'x', validation } });
+  const { page: complete } = await bootWith(t, [stopped('budget', 'complete')]);
+  assert.match(complete.region('verdict'), /<h2>Stopped at the cap<\/h2>/);
+  assert.match(complete.region('checks'), /<span class="pill green">Checks complete<\/span>/);
+  assert.doesNotMatch(complete.region('verdict') + complete.region('checks'), /did not finish|Nothing here counts as a pass|pl-incomplete/);
+  /* the same stop before the checks finished */
+  const unfinished = { fairness: newFairness({ status: 'incomplete', stage2: null }), difficulty: { status: 'pending', screen: null, test: null }, screen: null, freeze: [], calibration: null };
+  const { page: incomplete } = await bootWith(t, [stopped('budget', 'incomplete', unfinished)]);
+  assert.match(incomplete.region('verdict'), /<div class="notice pl-incomplete" role="note"><strong>The checks did not finish\.<\/strong> Nothing here counts as a pass/);
+  assert.match(incomplete.region('checks'), /<span class="pill amber">Checks did not finish<\/span>/);
+  assert.match(incomplete.region('checks'), /<div class="notice pl-incomplete" role="note">/);
+  /* a pass whose checks are complete never shows it */
+  const { page: pass } = await bootWith(t, [newState()]);
+  assert.doesNotMatch(pass.region('verdict') + pass.region('checks'), /did not finish|pl-incomplete/);
+});
+
+test('the reference line while a round runs: the count of problems stays, their details and the file names are withheld, and nothing breaks; the scan lists the PDFs it could not read', async t => {
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const bad = redactPipelineData({ ...V2, references: { default: { exists: true, found: 0, names: [], bytes: 0, problems: 2, problemList: ['Borealis_Memo.docx is a link, not a file', 'A file is hidden: .draft.md'] } } });
+  assert.deepEqual(plain(bad.references.default.problemList), { withheld: true });
+  assert.equal(bad.references.default.problems, 2, 'the count stays');
+  const { page } = await bootWith(t, [], { config: bad });
+  assert.match(formOf(page), /<p class="pl-refs pl-refs-problem" id="pl-refs">Reference documents: the default folder has 2 problems, so a start is refused\. Fix the folder, or start without it\.<\/p><p class="pl-withheld pl-refs-details">Details withheld while a round runs\.<\/p>/);
+  assert.doesNotMatch(formOf(page), /Borealis_Memo|pl-refs-list|\[object Object\]/);
+  await ready(page);
+  assert.equal(page.enabled('start'), false, 'the problems still stop a start');
+  assert.equal(whyOf(page), 'The reference folder has problems, so the companion would refuse the start. Fix it, or tick Start without the reference folder.');
+  /* the names of the files found are withheld the same way */
+  const found = redactPipelineData({ ...V2, references: { default: { exists: true, found: 2, names: REF_NAMES, bytes: 48211, problems: 0, problemList: [] } } });
+  const { page: p2 } = await bootWith(t, [], { config: found });
+  assert.ok(formOf(p2).includes('Reference documents: 2 files found in the default folder (' + MARKER + '). The designer reads them; their text is sent to Anthropic'));
+  assert.doesNotMatch(formOf(p2), /Atlas_Review_Handbook|Meridian_Workflow_Catalog/);
+  /* a marker for the list while the count is none, and values that are not what they should be */
+  for (const odd of [HID, null, 'x', 5, {}, [null, 3, 'y']]) {
+    const cfg = { ...V2, references: { default: { exists: true, found: 1, names: odd, bytes: 0, problems: 1, problemList: odd } } };
+    const { page: p } = await bootWith(t, [], { config: cfg });
+    assert.doesNotMatch(formOf(p), /\[object Object\]|undefined|>null<|NaN/, JSON.stringify(odd));
+    assert.match(formOf(p), /has 1 problem, so a start is refused/, JSON.stringify(odd));
+  }
+  /* the scan lists the files whose text could not be read, PDFs among them */
+  const refs = { source: 'default', found: 3, names: ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf', 'Borealis_Guide.pdf'], bytes: 10, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf', 'Borealis_Guide.pdf'], partial: [], scannedChars: 5000, truncated: false };
+  const { page: scan } = await bootWith(t, [newState({ references: refs })]);
+  assert.match(scan.region('design'), /Pilots never see them\. Not checked for leaked passages \(their text could not be read, or the scan cap left them out\): Meridian_Workflow_Catalog\.pdf, Borealis_Guide\.pdf\.<\/p>/);
+  assert.doesNotMatch(scan.region('design'), /only in part/);
+});
+
+test('the real redaction over a full new-mode state that has every field of this round: what is private is withheld, what stays shows, and every region draws without an error', async t => {
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const set = answerSetOf();
+  set.answers[0].runs = [goldenRun([0.96, 0.94], 'first grading', { rule: 'both' })];
+  const stage1 = { state: 'partial', tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0, rendered: ['Atlas_Rendered_Ledger.xlsx'], unreadable: ['Meridian_Hidden_Scan.bin'] };
+  const screen = explainedStage('screen', [[0.2, 'unsupported'], [0.3, 'intended']], false, {}, { 0: { adjudication: adj('unsupported', { claimed: 'tool_failure' }), countsTowardPass: false, regraded: true, previous: { score: 0.5, belowBar: false, countsTowardPass: false, adjudication: { class: 'unsupported' }, valid: true } } });
+  const attempt = newAttempt({
+    fairness: newFairness({ status: 'rejected', stage1, stage2: { disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, application: failedApplication({ cut: ['Atlas_Cut_Application.txt'] }), briefApplication: failedBriefCheck({ cut: ['Atlas_Cut_Brief.txt'] }), cut: ['Atlas_Cut_Stage.txt'] } }),
+    answerSet: set, screen, test: null, freeze: [freezeRecord({ answers: [{ name: 'alt-1', sha256: 'c6'.repeat(32) }] })],
+    guidelineRepair: { stage: 'screen', at: '2026-10-23T10:50:00.000Z', outcome: 'failed', classes: ['grader_defect'], changed: [], reason: 'the run ended during the repair', regrade: null, recounted: null },
+  });
+  const entry = (kind, ref, stage = 'design') => ({ at: '2026-10-23T10:20:00.000Z', stage, kind, ref, costUsd: 0.3, estimated: false });
+  const ledger = [entry('blind-review', 'attempt 1'), entry('reveal', 'alt-1'), entry('application', 't1'), entry('adjudication', 'p1'), entry('review-repair', 'attempt 1'), entry('guideline-repair', 'attempt 1'), entry('grader', 'as-golden'), entry('grader', 'diag-1'), entry('pilot', 'round-1#1', 'screen'), entry('classify', 'classifier', 'classify')];
+  const full = newState({
+    stage: 'grade-screen', running: true, result: null, ledger, attempts: [attempt],
+    classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null, unreadable: ['Borealis_Archive.bin'] },
+    references: { source: 'default', found: 2, names: REF_NAMES, bytes: 1, copied: true, files: [], unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: ['Atlas_Partial_Reference.md'], scannedChars: 5000, truncated: true },
+  });
+  const red = redactPipelineData(JSON.parse(JSON.stringify(full)));
+  assert.deepEqual(plain(red.ledger.map(e => [e.kind, e.stage, e.ref])), [['review-work', 'design', HID], ['pilot', 'screen', 'round-1#1'], ['classify', 'classify', 'classifier']], 'the calls of the reviews and the repairs are one entry with a withheld reference, the others stay');
+  assert.equal(red.ledger[0].costUsd, 2.4, 'the one entry carries the cost of all of them');
+  assert.deepEqual(plain(red.attempts[0].freeze[0].answers), HID);
+  assert.equal(red.attempts[0].freeze[0].packetSha256, 'd1'.repeat(32), 'the freeze hashes stay');
+  assert.equal(red.attempts[0].validation, 'complete', 'the validation stays');
+  assert.deepEqual(plain(red.references.partial), HID);
+  assert.deepEqual(plain(red.references.unscanned), HID);
+  assert.deepEqual(plain(red.attempts[0].fairness), HID, 'the fairness record, stage1 and stage2 with it');
+  assert.deepEqual(plain(red.attempts[0].answerSet), HID);
+  const { page } = await bootWith(t, [red]);
+  const everything = ALL_REGIONS.map(name => page.region(name)).join('\n');
+  for (const name of ALL_REGIONS) assert.doesNotMatch(page.region(name), /\[object Object\]|undefined|>null<|NaN/, name);
+  assert.doesNotMatch(everything, /Atlas_Rendered_Ledger|Meridian_Hidden_Scan|Atlas_Cut_|Atlas_Partial_Reference|Meridian_Workflow_Catalog|Atlas_Review_Handbook|Meridian_Policy_Scan|Atlas_Appendix|tool failure was not confirmed|Decided by: /, 'nothing private reaches the page');
+  assert.equal(page.statusIsError(), false);
+  const c = page.region('checks');
+  assert.match(c, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*?<p class="pl-withheld">Withheld while a round runs<\/p>/, 'the whole fairness record is withheld');
+  assert.match(c, /Packet d1d1d1d1d1d1 \(9 files\); prompt e2e2e2e2e2e2/, 'the freeze hashes show');
+  assert.match(c, /<span class="pill green">Checks complete<\/span>/, 'the validation shows');
+  assert.match(page.region('classify'), /<li>Borealis_Archive\.bin<\/li>/, 'the files the reviewers cannot read are not private');
+  assert.match(page.region('design'), /Some files were not checked whole for leaked passages: <span class="pl-withheld">Withheld while a round runs<\/span>/);
+});
+
+test('the fields of this round are read defensively: any wrong type gives nothing, never an error', () => {
+  const { adapt } = makeAdapter();
+  const junk = [null, undefined, 5, 'x', [], true, {}, { withheld: true }, [null, 3, 'y', {}]];
+  for (const value of junk) {
+    const v = adapt(newState({
+      classification: { ...classification(), unreadable: value },
+      attempts: [newAttempt({
+        fairness: { status: 'not-reached', repairs: 0, stage1: { state: 'partial', rendered: value, unreadable: value }, stage2: { disposition: 'x', application: { pass: false, cut: value, hits: value, unscanned: value }, briefApplication: { pass: false, failures: [], cut: value }, cut: value } },
+        answerSet: { answers: [{ name: 'g', kind: 'golden', grades: [], runs: [{ rule: value, grades: [] }] }] }, freeze: [{ answers: value }],
+        screen: { ...explainedStage('screen', [[0.2, 'intended']], false), pilots: [{ n: 1, score: 0.2, regraded: true, previous: { score: 0.5, valid: value, belowBar: value, countsTowardPass: value, adjudication: value } }] },
+      })],
+    }));
+    assert.ok(v, JSON.stringify(value));
+    const a = v.attempts[0], names = x => Array.isArray(x) || x.withheld === true;
+    assert.ok(names(v.cls.unreadable), 'unreadable');
+    assert.ok(names(a.review.stage1.rendered) && names(a.review.stage1.unreadable), 'stage1 lists');
+    assert.ok(names(a.review.stage2.application.cut) && names(a.review.stage2.briefApplication.cut), 'cut lists');
+    assert.ok(['', 'both', 'majority'].includes(a.answerSet.answers[0].runs[0].rule), 'rule');
+    assert.ok(names(a.freeze), 'freeze');
+    const prev = a.screen.pilots[0].previous;
+    assert.ok(prev === null || prev.withheld === true || prev.valid === null || typeof prev.valid === 'boolean', 'previous.valid');
+  }
+  const ok = adapt(newState({ attempts: [newAttempt({
+    fairness: { status: 'passed', repairs: 0, stage1: { state: 'partial', rendered: ['a.xlsx', 3, null, ''], unreadable: ['b.bin'] }, stage2: { disposition: 'x', application: { pass: true, hits: [{ id: 'u', kind: 'notice', document: 'c.pdf' }], cut: ['d.txt'] }, briefApplication: { pass: true, failures: [], cut: ['e.txt'] } } },
+    answerSet: { answers: [{ name: 'g', kind: 'golden', runs: [{ rule: 'majority', grades: [0.9, 0.8, 0.9] }, { rule: 'both', grades: [0.9, 0.9] }, { rule: 'other' }] }] },
+    screen: { ...explainedStage('screen', [[0.2, 'intended']], false), pilots: [{ n: 1, score: 0.2, regraded: true, previous: { score: 0.5, valid: false, belowBar: false, countsTowardPass: false, adjudication: { class: 'unsupported' } } }] },
+  })] }));
+  const a = ok.attempts[0];
+  assert.deepEqual(plain(a.review.stage1.rendered), ['a.xlsx', '3']);
+  assert.deepEqual(plain(a.review.stage1.unreadable), ['b.bin']);
+  assert.deepEqual(plain(a.review.stage2.application.hits.list), [{ kind: 'notice', document: 'c.pdf', count: null }]);
+  assert.equal(a.review.stage2.application.hits.count, 0, 'a notice is not a passage');
+  assert.deepEqual(plain([a.review.stage2.application.cut, a.review.stage2.briefApplication.cut]), [['d.txt'], ['e.txt']]);
+  assert.deepEqual(plain(a.answerSet.answers[0].runs.map(r => r.rule)), ['majority', 'both', '']);
+  assert.deepEqual(plain(a.screen.pilots[0].previous), { score: 0.5, belowBar: false, countsTowardPass: false, valid: false, class: 'unsupported' });
+});
+
+/* ---- backend round 3: what the real backend emits, against what the page says ---- */
+
+test('the blind review has words for every state: did not finish, running only while the run is running, and any other state as it is', async t => {
+  const stage1 = (state, over = {}) => ({ state, tries: 1, runs: 1, packetSha256: 'a'.repeat(64), discarded: 0, rendered: [], unreadable: [], ...over });
+  const stateOf = (state, over = {}) => newState({ attempts: [newAttempt({ fairness: newFairness({ stage1: stage1(state) }) })], ...over });
+  const stopped = { stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' } };
+  const live = { stage: 'grade-screen', running: true, result: null };
+  const { page } = await bootWith(t, [stateOf('incomplete', stopped)]);
+  assert.ok(page.region('checks').includes('<li class="pl-blind-incomplete">The blind review did not finish (1 try).</li><li>Second review:'));
+  assert.doesNotMatch(page.region('checks'), /Blind review: running/, 'a review that was cut off is not running');
+  /* a review still marked running on a run that ended was never closed: it did not finish */
+  const { page: ended } = await bootWith(t, [stateOf('running', { stage: 'budget', running: false, result: { verdict: 'budget', message: 'x', validation: 'incomplete' } })]);
+  assert.ok(ended.region('checks').includes('<li class="pl-blind-incomplete">The blind review did not finish (1 try).</li>'));
+  /* while the run is running, running is true */
+  const { page: running } = await bootWith(t, [stateOf('running', live)]);
+  assert.ok(running.region('checks').includes('<li>Blind review: running (1 try).</li>'));
+  assert.doesNotMatch(running.region('checks'), /pl-blind-incomplete|did not finish/);
+  /* the states that gave an answer, or none */
+  for (const [state, words] of [['ok', 'a reader with only the prompt and the files gave an answer'], ['partial', 'a reader with only the prompt and the files gave an answer, but not every file could be read'], ['unusable', 'no usable answer']]) {
+    const { page: p } = await bootWith(t, [stateOf(state)]);
+    assert.ok(p.region('checks').includes('<li>Blind review: ' + words + ' (1 try).</li>'), state);
+  }
+  /* a state the page does not know is shown as the word it is, never as running; none at all says so */
+  const { page: odd } = await bootWith(t, [stateOf('stalled')]);
+  assert.ok(odd.region('checks').includes('<li>Blind review: stalled (1 try).</li>'));
+  const { page: none } = await bootWith(t, [stateOf('')]);
+  assert.ok(none.region('checks').includes('<li>Blind review: no state was reported (1 try).</li>'));
+  assert.doesNotMatch(odd.region('checks') + none.region('checks'), /Blind review: running/);
+  const { page: junk } = await bootWith(t, [stateOf(5), stateOf(null), stateOf({ x: 1 })]);
+  assert.doesNotMatch(junk.region('checks'), /\[object Object\]|undefined|>null<|Blind review: running/);
+});
+
+test('the reference summary says once that some files were not checked whole when a list is withheld, and nothing for an empty or missing list', async t => {
+  const refs = over => newState({ stage: 'grade-screen', running: true, result: null, redacted: true, references: { source: 'default', found: 2, names: HID, bytes: 1, copied: true, files: HID, unscanned: [], partial: [], scannedChars: 5000, truncated: false, ...over } });
+  const summary = page => page.region('design').match(/<p class="pl-refs-summary">[\s\S]*?<\/p>/)[0];
+  const head = 'Reference documents used: 2 files (' + MARKER + '). Pilots never see them.';
+  const once = ' Some files were not checked whole for leaked passages: ' + MARKER;
+  const { page: both } = await bootWith(t, [refs({ unscanned: HID, partial: HID })]);
+  assert.equal(summary(both), '<p class="pl-refs-summary">' + head + once + '</p>');
+  assert.equal((summary(both).match(/not checked whole/g) || []).length, 1, 'once, not once for each list');
+  const { page: one } = await bootWith(t, [refs({ unscanned: HID })]);
+  assert.equal(summary(one), '<p class="pl-refs-summary">' + head + once + '</p>');
+  /* a list that is empty, or not there, says nothing at all */
+  for (const empty of [[], null, undefined]) {
+    const { page: p } = await bootWith(t, [refs({ unscanned: empty, partial: empty })]);
+    assert.equal(summary(p), '<p class="pl-refs-summary">' + head + '</p>', JSON.stringify(empty));
+  }
+  /* a real list and a withheld one: the real one is named, the withheld one says so once */
+  const { page: mixed } = await bootWith(t, [refs({ unscanned: ['Meridian_Workflow_Catalog.pdf'], partial: HID })]);
+  assert.equal(summary(mixed), '<p class="pl-refs-summary">' + head + ' Not checked for leaked passages (their text could not be read, or the scan cap left them out): Meridian_Workflow_Catalog.pdf.' + once + '</p>');
+  /* the general sentence about the scan cap does not repeat a withheld list */
+  const { page: cut } = await bootWith(t, [refs({ truncated: true })]);
+  assert.equal(summary(cut), '<p class="pl-refs-summary">' + head + ' Only the first part of their text was checked for leaked passages.</p>');
+  const { page: cutHid } = await bootWith(t, [refs({ truncated: true, partial: HID })]);
+  assert.doesNotMatch(summary(cutHid), /Only the first part/);
+  /* the real redaction: a list with nothing in it stays an empty list, so a redacted poll of an ordinary run does not warn about the scan */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const plainRefs = newState({ stage: 'grade-screen', running: true, result: null, references: { source: 'default', found: 2, names: REF_NAMES, bytes: 1, copied: true, files: [], unscanned: [], partial: [], scannedChars: 5000, truncated: false } });
+  const red = redactPipelineData(JSON.parse(JSON.stringify(plainRefs)));
+  assert.deepEqual(plain([red.references.unscanned, red.references.partial, red.references.files]), [[], [], []]);
+  assert.deepEqual(plain(red.references.names), HID, 'the names are withheld');
+  const { page: real } = await bootWith(t, [red]);
+  assert.equal(summary(real), '<p class="pl-refs-summary">' + head + '</p>', 'nothing about the scan in an ordinary run');
+  const withList = redactPipelineData(JSON.parse(JSON.stringify({ ...plainRefs, references: { ...plainRefs.references, unscanned: ['Meridian_Workflow_Catalog.pdf'] } })));
+  assert.deepEqual(plain(withList.references.unscanned), HID, 'a list with something in it is withheld');
+  const { page: some } = await bootWith(t, [withList]);
+  assert.equal(summary(some), '<p class="pl-refs-summary">' + head + once + '</p>');
+});
+
+test('an earlier attempt is explained: why it ended, what its pilots counted and did not, and what its checks found, in a section that opens; the latest attempt is not repeated', async t => {
+  const lows = explainedStage('screen', [[0.2, 'permitted_alternative'], [0.3, 'ambiguous']], false);
+  const first = newAttempt({ n: 1, outcome: 'screen-failed', fairness: newFairness({ status: 'passed' }), screen: lows, test: null, difficulty: { status: 'failed', screen: { passed: false, explained: 0, belowBar: 2, of: 2, need: 2, lows: { lowScorers: 2, intended: 0, otherValid: 0, permittedAlternative: 1, graderDefect: 0, ambiguous: 1, toolFailure: 0, unsupported: 0, counted: 0 } }, test: null } });
+  const second = newAttempt({ n: 2, outcome: 'rejected', screen: null, test: null, validation: 'failed', difficulty: { status: 'pending', screen: null, test: null }, rejection: { kind: 'review', reasons: ['The reviews could not settle which answer the files support', 'The clause that rules the other answer out is superseded'] },
+    fairness: newFairness({ status: 'rejected', stage2: { disposition: 'unresolved', objectionClass: 'conflicting_authority', evaluations: 1, application: null, briefApplication: null, cut: [] } }) });
+  const third = newAttempt({ n: 3, outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null } });
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 2, attempts: [first, second, third] })]);
+  const r = page.region('redesigns');
+  const table = r.slice(0, r.indexOf('<h3>Earlier attempts, in detail</h3>'));
+  assert.equal(tableRowsOf(table).length, 3, 'the table still has one row for each attempt');
+  assert.equal((r.match(/<details class="pl-attempt"/g) || []).length, 2, 'a section for each earlier attempt, none for the latest');
+  assert.doesNotMatch(r, /id="pl-attempt-3"/);
+  assert.doesNotMatch(r, /<details class="pl-attempt"[^>]* open/, 'closed until the owner opens one');
+  const at = n => { const i = r.indexOf('<details class="pl-attempt" id="pl-attempt-' + n + '"'); return r.slice(i, r.indexOf('</details>', i)); };
+  const a1 = at(1), a2 = at(2);
+  assert.ok(a1.startsWith('<details class="pl-attempt" id="pl-attempt-1"><summary>Attempt 1: Screen failed</summary>'));
+  assert.ok(a2.startsWith('<details class="pl-attempt" id="pl-attempt-2"><summary>Attempt 2: Rejected before any pilot</summary>'));
+  /* the first: the counts, and the low scores that did not count, with the diagnosis of each */
+  assert.ok(a1.includes('<p class="pl-attempt-counts">Screen: 2 of 2 below 0.40; 0 count toward the pass; failed.</p>'));
+  assert.match(a1, /Low scores: 2\. By diagnosis: 0 intended, 0 another valid error, 1 permitted alternative, 0 grader defect, 1 ambiguous, 0 tool failure, 0 not supported\. Counted toward the pass: 0\./);
+  assert.match(a1, /<strong>2 low scores did not count toward the pass<\/strong>[\s\S]*<li>Pilot 1 scored 0\.20: a permitted alternative \(the answer is acceptable\)<\/li><li>Pilot 2 scored 0\.30: ambiguous<\/li>/);
+  assert.match(a1, /<h3>Fairness: could another answer be better supported\?<\/h3>[\s\S]*Passed/);
+  assert.match(a1, /<h3>Difficulty: do the pilots fail for the intended reason\?<\/h3>[\s\S]*Screen: failed\./);
+  assert.doesNotMatch(a1, /The reviews could not settle which answer the files support|clause that rules the other answer out is superseded/, 'the reasons of the second attempt are not under the first');
+  /* the second: the kind of rejection and each reason, the fairness result, and no stage that never ran */
+  assert.ok(a2.includes('<p class="pl-attempt-why">The reviews found an answer the files support better, or could not settle which answer they support.</p>'));
+  assert.ok(a2.includes('<ul class="pl-names pl-attempt-reasons"><li>The reviews could not settle which answer the files support</li><li>The clause that rules the other answer out is superseded</li></ul>'));
+  assert.match(a2, /<span class="pill red">Rejected<\/span>/);
+  assert.match(a2, /Screen: not run\./, 'an earlier attempt that never ran its screen says not run');
+  assert.doesNotMatch(a2, /pl-attempt-counts|Pilot 1 scored/);
+  /* the older shapes, an attempt of the harden mode, and the table's own columns stay as they were */
+  assert.doesNotMatch(table, /pl-attempt|Pilot 1 scored/, 'the table keeps its columns; the detail is in the sections below it');
+  assert.match(tableRowsOf(table)[1].Outcome, /could not settle which answer the files support$|could not settle which answer the files support The clause/, 'the outcome column still carries the reasons');
+  const { page: old } = await bootWith(t, [doneState()]);
+  assert.doesNotMatch(old.region('redesigns'), /pl-attempt|Earlier attempts/, 'no section for attempts of the harden mode');
+  /* an opened section stays open when the card is painted again: the markup is the same, so it is not repainted */
+  const { page: same } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 2, attempts: [first, second, third] })]);
+  assert.equal(same.region('redesigns'), r);
+  /* while a round runs the checks, the lows and the reasons of an earlier attempt are withheld, and the section says so */
+  const { redactPipelineData } = require(path.join(REPO, 'backend', 'pipeline', 'redact.cjs'));
+  const running = redactPipelineData(JSON.parse(JSON.stringify(newState({ stage: 'grade-screen', running: true, result: null, redesigns: 2, attempts: [first, second, third] }))));
+  const { page: hid } = await bootWith(t, [running]);
+  const h = hid.region('redesigns');
+  assert.equal((h.match(/<details class="pl-attempt"/g) || []).length, 2);
+  assert.doesNotMatch(h, /could not settle which answer the files support<\/li>|clause that rules the other answer out is superseded|Pilot 1 scored|permitted alternative \(the answer/);
+  assert.match(h, /Withheld while a round runs/);
+  assert.doesNotMatch(h, /\[object Object\]|undefined|>null<|NaN/);
+});
+
+test('a pilot that will never get a score says why, in the cells that used to say waiting or pending', async t => {
+  const stageWith = (passed, extra, spec = [[0.31, 'tool_failure'], [0.2, 'intended']]) => explainedStage('screen', spec, passed, {}, extra);
+  const tool = { 0: { toolFailure: true, valid: false, adjudication: adj('tool_failure'), countsTowardPass: false } };
+  /* graded, diagnosed as a tool failure, and not yet decided: the score is not hidden behind "waiting for the grader" */
+  const { page } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ screen: stageWith(null, tool), test: null })] })]);
+  const row = tableRowsOf(page.region('screen'))[0];
+  assert.deepEqual([row.Score, row['Below 0.40'], row['Counts toward the pass']], ['Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it']);
+  assert.doesNotMatch(row.Score + row['Below 0.40'] + row['Counts toward the pass'], /Waiting|Pending|No usable score|without a score/);
+  /* after the stage passed, nothing counts against the design for it */
+  const { page: passed } = await bootWith(t, [newState({ attempts: [newAttempt({ screen: stageWith(true, tool, [[0.31, 'tool_failure'], [0.2, 'intended'], [0.25, 'intended']]) })] })]);
+  assert.equal(tableRowsOf(passed.region('screen'))[0]['Below 0.40'], 'Tool failure: another pilot replaces it');
+  assert.doesNotMatch(passed.region('screen'), /counts against the design/);
+  /* an audit that discarded the pilot */
+  const discarded = explainedStage('screen', [[null, null], [0.2, 'intended']], null, {}, { 0: { state: 'completed', valid: false, audit: { status: 'DISCARDED' }, adjudication: null, countsTowardPass: null } });
+  const { page: d } = await bootWith(t, [newState({ stage: 'grade-screen', running: true, result: null, attempts: [newAttempt({ screen: discarded, test: null })] })]);
+  const dr = tableRowsOf(d.region('screen'))[0];
+  assert.deepEqual([dr.Score, dr['Counts toward the pass'], dr.Audit], ['No score (discarded)', 'No score: the audit discarded this pilot', 'DISCARDED']);
+  /* a stage that was cut off: Stop, a restart or the cap */
+  const cutStage = explainedStage('screen', [[null, null], [null, null], [0.2, 'intended']], null, {}, { 0: { state: 'running', valid: false, audit: null, adjudication: null, countsTowardPass: null }, 1: { state: 'cancelled', valid: false, audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: c } = await bootWith(t, [newState({ stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' }, attempts: [newAttempt({ outcome: 'stopped', screen: cutStage, test: null })] })]);
+  const cr = tableRowsOf(c.region('screen'));
+  assert.deepEqual(cr.map(r => r['Counts toward the pass']), ['Stopped before it finished', 'Stopped before it finished', '\u2713 Counts Diagnosis: the intended error']);
+  assert.deepEqual(cr.map(r => r.Audit), ['Stopped before it finished', 'Not audited', 'CLEAN']);
+  assert.doesNotMatch(c.region('screen'), /Waiting for a score|Pending/, 'nothing of an ended run is waiting');
+  /* a pilot stopped because it was not needed */
+  const early = explainedStage('screen', [[0.7, null], [null, null]], false, {}, { 1: { state: 'cancelled', valid: false, stoppedEarly: true, stoppedReason: 'Not needed.', audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: e } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, attempts: [newAttempt({ screen: early, test: null })] })]);
+  const er = tableRowsOf(e.region('screen'))[1];
+  assert.deepEqual([er['Below 0.40'], er['Counts toward the pass'], er.Audit], ['Not needed', 'Stopped early: not needed', 'Not needed']);
+  /* a pilot that is working still waits, and is pending */
+  const working = explainedStage('screen', [[null, null], [null, null]], null, {}, { 0: { state: 'running', valid: false, audit: null, adjudication: null, countsTowardPass: null }, 1: { state: 'queued', valid: false, audit: null, adjudication: null, countsTowardPass: null } });
+  const { page: w } = await bootWith(t, [newState({ stage: 'screen', running: true, result: null, attempts: [newAttempt({ screen: working, test: null })] })]);
+  assert.deepEqual(tableRowsOf(w.region('screen')).map(r => [r['Counts toward the pass'], r.Audit]), [['Waiting for a score', 'Pending'], ['Waiting for a score', 'Pending']]);
+});
+
+test('while the trap designer repairs the guideline the stage line and the timeline say so, not that pilots are working', async t => {
+  const repair = (stage, over = {}) => ({ stage, at: '2026-10-23T10:50:00.000Z', outcome: 'pending', classes: ['grader_defect'], changed: [], reason: '', regrade: null, recounted: null, ...over });
+  const screenFailed = explainedStage('screen', [[0.2, 'grader_defect'], [0.3, 'grader_defect']], false);
+  const state = (stage, rep, over = {}) => newState({ stage, running: true, result: null, message: 'Asking the trap designer to repair the guideline (attempt 1 of 4)', attempts: [newAttempt({ outcome: 'in-progress', screen: screenFailed, test: null, guidelineRepair: rep })], ...over });
+  const { page } = await bootWith(t, [state('screen', repair('screen'))]);
+  assert.equal(page.stage(), 'Screen: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+  assert.equal(stepsOf(page.region('timeline')).find(s => s.label === 'Screen').caption, 'Repairing the guideline');
+  assert.doesNotMatch(page.stage(), /pilots are working/);
+  const { page: test } = await bootWith(t, [state('test', repair('test'), { attempts: [newAttempt({ screen: explainedStage('screen', [[0.2, 'intended'], [0.3, 'intended']], true), test: explainedStage('test', [[0.1, 'grader_defect']], false), guidelineRepair: repair('test') })] })]);
+  assert.equal(test.stage(), 'Test: Asking the trap designer to repair the guideline (attempt 1 of 4).');
+  assert.equal(stepsOf(test.region('timeline')).find(s => s.label === 'Test').caption, 'Repairing the guideline');
+  /* no message: the page says it in its own words; a redesign count still follows */
+  const { page: bare } = await bootWith(t, [state('screen', repair('screen'), { message: '', redesigns: 1 })]);
+  assert.equal(bare.stage(), 'Screen: the trap designer is repairing the guideline. Redesign 1 of 3.');
+  /* once the repair is done (or was not used) the pilots are the news again, and an ended run is not repairing */
+  for (const outcome of ['applied', 'failed']) {
+    const { page: p } = await bootWith(t, [state('screen', repair('screen', { outcome, reason: outcome === 'failed' ? 'the repair changed nothing' : '' }))]);
+    assert.equal(p.stage(), 'Screen: two blind pilots are working (both must score below 0.40).', outcome);
+    assert.equal(stepsOf(p.region('timeline')).find(s => s.label === 'Screen').caption, 'In progress', outcome);
+  }
+  const { page: ended } = await bootWith(t, [state('stopped', repair('screen'), { running: false })]);
+  assert.doesNotMatch(ended.stage(), /repair/);
+  /* a repair that is withheld cannot be told: the pilots line stands */
+  const { page: hid } = await bootWith(t, [state('screen', { withheld: true })]);
+  assert.equal(hid.stage(), 'Screen: two blind pilots are working (both must score below 0.40).');
+});
+
+test('money is rounded half up to the cent, as the companion rounds it in its own sentences: 0.145 is 0.15, 27.025 is 27.03, 59.795 is 59.80', async t => {
+  for (const [amount, text] of [[0.145, '0.15'], [27.025, '27.03'], [59.795, '59.80'], [1.005, '1.01'], [0.285, '0.29'], [36.285, '36.29'], [0.14, '0.14'], [0.1449, '0.14'], [12, '12.00'], [0, '0.00'], [41.2, '41.20']]) {
+    const { page } = await bootWith(t, [newState({ stage: 'screen', running: true, result: null, spentUsd: amount, capUsd: 59.795 })]);
+    assert.match(page.region('spend'), new RegExp('<strong>Spent</strong> USD ' + text.replace('.', '\\.') + ' of USD 59\\.80</p>'), String(amount));
+  }
+  /* the cap the run stopped at and the amount spent, in the result */
+  const { page: stopped } = await bootWith(t, [newState({ stage: 'budget', running: false, capUsd: 27.025, spentUsd: 0.145, result: { verdict: 'budget', message: 'x', validation: 'complete' } })]);
+  assert.match(stopped.region('verdict'), /Stopped in the .* step with USD 0\.15 of USD 27\.03 spent\./);
+});
+
+test('the owner is told in the words of the form: the keep field by its label, never as keepAsWorld', async t => {
+  const message = '1 file the classifier called world or task files is withheld, so the pilots would not get it: golden_parent_answer.txt. If the pilots can do without it, start again with acceptMissing. If a file is real evidence although its name looks like an answer, list it in keepAsWorld.';
+  const { page } = await bootWith(t, [newState({ stage: 'failed', running: false, summary: message, error: message, result: { verdict: 'failed', message, validation: 'incomplete' }, attempts: [], design: null, classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } })]);
+  const v = page.region('verdict');
+  assert.doesNotMatch(v, /keepAsWorld|acceptMissing/, 'no field of the API is shown');
+  assert.match(v, /If a file is real evidence although its name looks like an answer, name it in the field \u201CKeep these files as world files\u201D\./);
+  assert.match(v, /start again with the box \u201CStart even if a world or task file has to be withheld\u201D ticked\./);
+});
+
+test('the difficulty of a stage says running while it runs and not reached yet before it, and "not run" only when the attempt ended without it', async t => {
+  const difficulty = (screen, test) => ({ status: 'pending', screen, test });
+  const passedScreen = { passed: true, explained: 2, belowBar: 2, of: 2, need: 2, lows: null };
+  const lines = page => [...page.region('checks').matchAll(/<li>(Screen|Test): ([^<]*)<\/li>/g)].map(m => m[1] + ': ' + m[2]).filter(x => /running|not reached yet|not run|did not finish/.test(x));
+  const live = (stage, d, over = {}) => newState({ stage, running: true, result: null, attempts: [newAttempt({ outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: d, ...over })] });
+  const { page: screen } = await bootWith(t, [live('screen', difficulty(null, null))]);
+  assert.deepEqual(lines(screen), ['Screen: running.', 'Test: not reached yet.']);
+  const { page: test } = await bootWith(t, [live('test', difficulty(passedScreen, null))]);
+  assert.deepEqual(lines(test), ['Test: running.']);
+  const { page: checks } = await bootWith(t, [live('design', difficulty(null, null))]);
+  assert.deepEqual(lines(checks), ['Screen: not reached yet.', 'Test: not reached yet.']);
+  /* the shape the companion sends while a stage runs */
+  const { page: status } = await bootWith(t, [live('screen', difficulty({ status: 'running' }, null))]);
+  assert.deepEqual(lines(status), ['Screen: running.', 'Test: not reached yet.']);
+  const { page: queued } = await bootWith(t, [live('design', difficulty({ status: 'queued' }, { status: 'waiting' }))]);
+  assert.deepEqual(lines(queued), ['Screen: not reached yet.', 'Test: not reached yet.']);
+  /* a run that ended: a stage that never ran is not run, and one that was running did not finish */
+  const ended = (d, over = {}) => newState({ stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' }, attempts: [newAttempt({ outcome: 'stopped', validation: 'incomplete', screen: null, test: null, difficulty: d, ...over })] });
+  const { page: stopped } = await bootWith(t, [ended(difficulty(null, null))]);
+  assert.deepEqual(lines(stopped), ['Screen: not run.', 'Test: not run.']);
+  const { page: cut } = await bootWith(t, [ended(difficulty({ status: 'running' }, null))]);
+  assert.deepEqual(lines(cut), ['Screen: did not finish.', 'Test: not run.']);
+  /* a stage that has a result keeps its words */
+  const { page: decided } = await bootWith(t, [live('test', difficulty(passedScreen, null))]);
+  assert.match(decided.region('checks'), /<li>Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\.<\/li>/);
+  /* shapes the page does not know are not an error */
+  for (const odd of [5, 'x', [], true, {}, { status: 5 }, { status: {} }, [null]]) {
+    const { page: p } = await bootWith(t, [live('screen', difficulty(odd, odd))]);
+    assert.doesNotMatch(p.region('checks'), /\[object Object\]|undefined|>null<|NaN/, JSON.stringify(odd));
+    assert.equal(p.statusIsError(), false);
+  }
+});
+
+test('the design card is drawn when the design exists: until then the designer is working, and a run that ended before it says no design was accepted', async t => {
+  const attempt = newAttempt({ outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null }, fairness: newFairness({ status: 'pending', stage2: null }) });
+  const phase = (over = {}) => newState({ stage: 'design', running: true, result: null, design: null, attempts: [attempt], ...over });
+  const { page } = await bootWith(t, [phase()]);
+  const d = page.region('design');
+  assert.match(d, /<h2>The designer is working<\/h2><\/div><span class="pill violet">Attempt 1<\/span>/);
+  assert.match(d, /<p class="pl-designer-working">The designer is working\./);
+  assert.match(d, /Reference documents used: 2 files/, 'what the designer reads is known');
+  assert.doesNotMatch(d, /The designer added no new file|No existing world file was edited|Edited world files|Not given|No trap has been recorded|Line changes|<h2>The traps<\/h2>/, 'nothing the designer has not written is stated');
+  /* a design the companion has sent: the card is the usual one */
+  const { page: has } = await bootWith(t, [newState()]);
+  assert.match(has.region('design'), /<h2>The traps<\/h2>/);
+  assert.doesNotMatch(has.region('design'), /The designer is working|pl-designer-working/);
+  /* the run ended with attempts and no design */
+  const { page: ended } = await bootWith(t, [phase({ stage: 'failed', running: false, summary: 'x', result: { verdict: 'failed', message: 'x', validation: 'incomplete' } })]);
+  assert.match(ended.region('design'), /<h2>No design was accepted<\/h2>/);
+  assert.match(ended.region('design'), /The run ended before a design had passed the checks that come before the pilots\./);
+  assert.doesNotMatch(ended.region('design'), /The designer is working/);
+  /* a run that ended with no attempt at all has no design card */
+  const { page: none } = await bootWith(t, [phase({ stage: 'failed', running: false, attempts: [], summary: 'x' })]);
+  assert.equal(none.region('design'), '');
+  /* not yet at the design: no card */
+  const { page: early } = await bootWith(t, [phase({ stage: 'classify', attempts: [], classification: { ...classification(), prompt: null, guideline: null, goldenAnswer: null } })]);
+  assert.equal(early.region('design'), '');
+  /* between designs of a redesign the earlier design stays: its card is not replaced by the shell */
+  const { page: redesign } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [newAttempt({ n: 1, outcome: 'screen-failed', screen: explainedStage('screen', [[0.7, null], [0.3, null]], false), test: null })] })]);
+  assert.match(redesign.region('design'), /<h2>The traps<\/h2>/);
+});
+
+test('the reference files and their sizes are read under whichever name the companion uses: names or files, bytes or size', async t => {
+  const { adapt } = makeAdapter();
+  const files = [{ name: 'Atlas_Review_Handbook.md', bytes: 12, sha256: 'a'.repeat(64) }, { name: 'Meridian_Workflow_Catalog.pdf', size: 20, hash: 'b'.repeat(64) }];
+  const fromFiles = adapt(newState({ references: { source: 'default', found: 2, files, size: 32, unscanned: [], partial: [], truncated: false } }));
+  assert.deepEqual(plain(fromFiles.references.names), ['Atlas_Review_Handbook.md', 'Meridian_Workflow_Catalog.pdf']);
+  assert.equal(fromFiles.references.bytes, 32, 'size when there is no bytes');
+  const fromNames = adapt(newState({ references: { source: 'default', found: 2, names: ['A.md', 'B.pdf'], files, bytes: 7, unscanned: [], partial: [], truncated: false } }));
+  assert.deepEqual(plain(fromNames.references.names), ['A.md', 'B.pdf'], 'names first');
+  assert.equal(fromNames.references.bytes, 7);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, names: HID, files: HID } })).references.names), HID);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, files: HID } })).references.names), HID);
+  assert.deepEqual(plain(adapt(newState({ references: { source: 'default', found: 2, names: 'x', files: 5 } })).references.names), []);
+  const { page } = await bootWith(t, [newState({ references: { source: 'default', found: 2, files, size: 32, unscanned: [], partial: [], truncated: false } })]);
+  assert.match(page.region('design'), /Reference documents used: 2 files \(Atlas_Review_Handbook\.md, Meridian_Workflow_Catalog\.pdf\)\./);
+  /* the default folder in the start form */
+  const cfg = { ...V2, references: { default: { exists: true, found: 2, files, size: 32, problems: 0 } } };
+  const { page: form } = await bootWith(t, [], { config: cfg });
+  assert.ok(formOf(form).includes('Reference documents: 2 files found in the default folder (Atlas_Review_Handbook.md, Meridian_Workflow_Catalog.pdf).'));
+  const hid = { ...V2, references: { default: { exists: true, found: 2, files: HID, problems: 0 } } };
+  const { page: w } = await bootWith(t, [], { config: hid });
+  assert.ok(formOf(w).includes('found in the default folder (' + MARKER + ').'));
+});
+
+test('the list of hits of an application check (hitList, after the round) gives the lines; the count (hits) is used only when there is no list', async t => {
+  const list = [{ id: 'h1', kind: 'passage', document: 'Atlas_Amendment_2.txt' }, { id: 'u1', kind: 'unreadable', document: 'Old_Ledger.xls' }, { id: 'u2', kind: 'notice', document: 'Meridian_Notice.pdf' }, { id: 'more', kind: 'more', document: '' }];
+  const app = over => failedApplication({ hits: 4, unscanned: ['Old_Ledger.xls'], cut: [], ...over });
+  const { page } = await bootWith(t, [reviewState({ application: app({ hitList: list }) })]);
+  const c = page.region('checks');
+  assert.match(c, /1 place in the files mentions a change of a document\./, 'one passage, not the four hits of every kind');
+  assert.doesNotMatch(c, /4 places/);
+  assert.ok(c.includes('<li class="pl-hit-unreadable"><strong>Old_Ledger.xls</strong>: This file could not be read as text'));
+  assert.ok(c.includes('<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>Meridian_Notice.pdf</strong>'));
+  assert.ok(c.includes('<li class="pl-hit-more">More passages were found than are shown here.</li>'));
+  /* no list: the count, as before */
+  const { page: count } = await bootWith(t, [reviewState({ application: app({}) })]);
+  assert.match(count.region('checks'), /4 places in the files mention a change of a document\./);
+  assert.doesNotMatch(count.region('checks'), /pl-hit-notice|pl-hit-more|pl-hit-unreadable/);
+  /* a list that is withheld, or is not a list, is no list */
+  for (const odd of [{ withheld: true }, 'x', 5, null, {}]) {
+    const { page: p } = await bootWith(t, [reviewState({ application: app({ hitList: odd }) })]);
+    assert.match(p.region('checks'), /4 places in the files mention a change of a document\./, JSON.stringify(odd));
+    assert.doesNotMatch(p.region('checks'), /\[object Object\]|undefined|>null<|NaN/);
+  }
+  /* an entry that is not an object is dropped, and a kind the page does not know is a passage */
+  const { page: odd } = await bootWith(t, [reviewState({ application: app({ hitList: [null, 'x', { id: 'q', kind: 'surprise', document: 'A.txt' }], hits: 3 }) })]);
+  assert.match(odd.region('checks'), /1 place in the files mentions a change of a document\./);
+});
+
+/* ---- the contract against the REAL backend. These states were captured from the real PipelineService (the stub model, the scenarios of tests/pipeline.test.cjs, redact.cjs
+        where a round runs) through GET /api/pipeline/:id, and the config GET /api/pipeline sends. Nothing in them is written by hand; the page has to draw them as they are.
+          preview        new-full, while the reviews of the first design run (design.checking true, no packet, no gold)
+          stoppedChecks  a run stopped in the blind review (design.checking false, stage1 and fairness incomplete)
+          checkKind      attempt 1 lost to a fault of the harness in the blind review (rejection.kind check), attempt 2 accepted and passed
+          redactedScreen new-full, while the screen runs, as redact.cjs sends it
+          toolFailure    a pilot whose Read failed, diagnosed as a tool failure and replaced ---- */
+const realJson = text => JSON.parse(text);
+const REAL_CONFIG = realJson("{\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3,\"defaultCapUsd\":60,\"maxCapUsd\":200,\"defaultPilotCapUsd\":3,\"minPilotCapUsd\":0.05,\"maxPilotCapUsd\":20,\"designCapUsd\":5,\"classifyCapUsd\":0.5,\"graderCapUsd\":0.5,\"repairCapUsd\":1,\"fairnessCapUsd\":0.25,\"goldenMin\":0.9,\"regradeBand\":[0.4,0.5],\"screenRegradeBand\":[0.35,0.45],\"testRegradeBand\":[0.4,0.5],\"headroom\":1.15,\"minCap\":{\"fixedUsd\":20.5,\"perPilotUsd\":1.5,\"pilots\":7,\"headroom\":1.15},\"minCapByMode\":{\"new\":{\"fixedUsd\":20.5,\"perPilotUsd\":1.5,\"pilots\":7,\"headroom\":1.15},\"harden\":{\"fixedUsd\":8,\"perPilotUsd\":1,\"pilots\":7,\"headroom\":1.15}},\"minCapFairnessSetUsd\":3,\"attemptReserveUsd\":23.5,\"designModes\":[\"new\",\"harden\"],\"defaultDesignMode\":\"new\",\"alternativeMin\":0.85,\"answerSetGrades\":3,\"maxAlternatives\":2,\"blindReviewCapUsd\":1.5,\"revealReviewCapUsd\":0.5,\"applicationCapUsd\":0.5,\"adjudicationCapUsd\":0.5,\"fairnessSetCapUsd\":3,\"references\":{\"maxFiles\":20,\"maxBytes\":8388608,\"extensions\":[\".md\",\".txt\",\".pdf\",\".docx\",\".xlsx\",\".csv\",\".json\"],\"default\":{\"exists\":true,\"found\":2,\"names\":[\"Close_Checklist_Guide.txt\",\"Draw_Review_Notes.md\"],\"bytes\":582,\"problems\":0,\"problemList\":[]}},\"stages\":[\"import\",\"classify\",\"design\",\"screen\",\"grade-screen\",\"redesign\",\"test\",\"grade-test\",\"done\",\"failed\",\"stopped\",\"budget\"],\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"linksAvailable\":false,\"models\":[\"claude-opus-5-5\",\"claude-sonnet-5-5\",\"claude-fable-5-1\",\"claude-haiku-5-5\",\"claude-opus-4-8\"],\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"],\"defaultModel\":\"claude-opus-5-5\",\"defaultEffort\":\"medium\",\"graderModel\":\"claude-opus-4-8\"}");
+const REAL = {
+  preview: realJson("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-0660441b46a7\",\"label\":\"Pipeline 066044\",\"createdAt\":\"2026-10-24T21:43:00.628Z\",\"updatedAt\":\"2026-10-24T21:43:01.501Z\",\"endedAt\":null,\"stage\":\"design\",\"running\":true,\"message\":\"Reviewing the design of attempt 1 (review 1 of at most 2)\",\"quotesRejection\":false,\"summary\":\"\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":0.1,\"remainingUsd\":59.9,\"ledger\":[{\"at\":\"2026-10-24T21:43:00.884Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.134Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.349Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.499Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"Task files\":1,\"World files\":2},\"sections\":[{\"heading\":\"Business prompt\",\"chars\":111},{\"heading\":\"Grader guideline\",\"chars\":223},{\"heading\":\"Golden answer\",\"chars\":60},{\"heading\":\"Delivery notes\",\"chars\":29}],\"toggle\":null,\"page\":{\"origin\":\"https://tasks.example\",\"path\":\"/review/atlas-4821\"},\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"Task files\",\"label\":\"Supplement\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"World files\",\"label\":\"Cash facts\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"World files\",\"label\":\"Facility terms\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":{\"kind\":\"section\",\"section\":\"Business prompt\",\"number\":1},\"guideline\":{\"kind\":\"section\",\"section\":\"Grader guideline\",\"number\":2},\"goldenAnswer\":{\"kind\":\"section\",\"section\":\"Golden answer\",\"number\":3},\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":1,\"redesigns\":0,\"design\":{\"attempt\":1,\"checking\":true,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":null,\"fingerprints\":[],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 1. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":null,\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"pending\",\"stage1\":{\"state\":\"running\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"guidelineDiff\":null,\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:43:01.500Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1\",\"guideline\":\"Revised guideline for the Atlas task, attempt 1. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:43:00.932Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"in-progress\",\"repaired\":false,\"rejection\":null,\"validation\":\"pending\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:43:01.500Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"pending\",\"stage1\":{\"state\":\"running\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":null,\"references\":{\"source\":\"default\",\"found\":2,\"names\":[\"Close_Checklist_Guide.txt\",\"Draw_Review_Notes.md\"],\"bytes\":582,\"copied\":true,\"files\":[{\"name\":\"Close_Checklist_Guide.txt\",\"bytes\":257,\"sha256\":\"3d7120da29afa31cd2c26c16b3adfcbfd43547e20cfec585f680dafe0a1003bd\"},{\"name\":\"Draw_Review_Notes.md\",\"bytes\":325,\"sha256\":\"17850defa5fbdc33db5c9acc1746933a7ddb5b5beab96ad945ed968749f06010\"}],\"unscanned\":[],\"partial\":[],\"scannedChars\":582,\"truncated\":false}}"),
+  stoppedChecks: realJson("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-2487a805edd3\",\"label\":\"Pipeline 2487a8\",\"createdAt\":\"2026-10-24T21:44:40.731Z\",\"updatedAt\":\"2026-10-24T21:44:42.434Z\",\"endedAt\":\"2026-10-24T21:44:42.433Z\",\"stage\":\"stopped\",\"running\":false,\"message\":\"Stopped by the owner.\",\"quotesRejection\":false,\"summary\":\"Stopped by the owner.\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":1.6,\"remainingUsd\":58.4,\"ledger\":[{\"at\":\"2026-10-24T21:44:40.979Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:44:41.184Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:44:41.428Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:44:41.617Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:44:42.429Z\",\"stage\":\"design\",\"kind\":\"blind-review\",\"ref\":\"attempt 1\",\"costUsd\":1.5,\"estimated\":true}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"(none)\":3},\"sections\":[],\"toggle\":null,\"page\":null,\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"\",\"label\":\"\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":null,\"guideline\":null,\"goldenAnswer\":null,\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":1,\"redesigns\":0,\"design\":{\"attempt\":1,\"checking\":false,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":null,\"fingerprints\":[],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 1. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":null,\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"incomplete\",\"stage1\":{\"state\":\"incomplete\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"guidelineDiff\":null,\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:44:41.618Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1\",\"guideline\":\"Revised guideline for the Atlas task, attempt 1. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:44:40.994Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"stopped\",\"repaired\":false,\"rejection\":null,\"validation\":\"incomplete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:44:41.618Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"incomplete\",\"stage1\":{\"state\":\"incomplete\",\"tries\":1,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":{\"verdict\":\"stopped\",\"message\":\"Stopped by the owner.\",\"validation\":\"incomplete\"},\"references\":{\"source\":\"none\",\"found\":0,\"names\":[],\"bytes\":0,\"copied\":false,\"files\":[],\"unscanned\":[],\"partial\":[],\"scannedChars\":0,\"truncated\":false}}"),
+  checkKind: realJson("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-c0510b4508c5\",\"label\":\"Pipeline c0510b\",\"createdAt\":\"2026-10-24T21:51:46.759Z\",\"updatedAt\":\"2026-10-24T21:51:52.294Z\",\"endedAt\":\"2026-10-24T21:51:52.292Z\",\"stage\":\"done\",\"running\":false,\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"quotesRejection\":false,\"summary\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":1.11,\"remainingUsd\":58.89,\"ledger\":[{\"at\":\"2026-10-24T21:51:47.014Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.247Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.498Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.697Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:47.932Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 2\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.138Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-2-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.321Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-2-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.500Z\",\"stage\":\"design\",\"kind\":\"blind-review\",\"ref\":\"attempt 2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.698Z\",\"stage\":\"design\",\"kind\":\"reveal\",\"ref\":\"attempt 2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:48.887Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1r\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.096Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1w\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.571Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.755Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.953Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-1e1e700eaf0e#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:49.957Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.154Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.366Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-1e1e700eaf0e#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:50.845Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.028Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.219Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.222Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.420Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.582Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.584Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.736Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.908Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#3\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:51.912Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.102Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.285Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-5288ac9d637c#4\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:52.289Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-5288ac9d637c#5\",\"costUsd\":0.1,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"(none)\":3},\"sections\":[],\"toggle\":null,\"page\":null,\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"\",\"label\":\"\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":null,\"guideline\":null,\"goldenAnswer\":null,\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":2,\"redesigns\":1,\"design\":{\"attempt\":2,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":{\"decision\":\"hold\",\"figures\":[{\"label\":\"Usable cash\",\"value\":\"1,250\",\"tolerance\":1}]},\"fingerprints\":[{\"id\":\"fp-credit\",\"label\":\"Counts available credit as cash\",\"tokens\":[\"available facility counted\"],\"figures\":[{\"label\":\"Wrong cash\",\"value\":3050,\"tolerance\":1}]}],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 2. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":{\"fileCount\":4,\"bytes\":487,\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":227,\"sha256\":\"4128772feab1ba5cd6fbaaca2c17486e7fd4346be5d8c2468945f927a56ff091\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135,\"sha256\":\"e30de5f29b58ece6bb4c1384959511a655ef0095ff78f1b687b0cbdec02aefe7\"}]},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"guidelineDiff\":{\"available\":false,\"added\":0,\"removed\":0,\"lines\":[],\"truncated\":false},\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:48.322Z\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"answerSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:49.113Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"packetFiles\":4,\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"goldenSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"answerSetSha256\":\"a8e0cd6dfe5c355fa3a56b869522f97d728cca512947302b1bb433cb8b161314\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV2\",\"guideline\":\"Revised guideline for the Atlas task, attempt 2. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 2. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:51:47.025Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"rejected\",\"repaired\":false,\"rejection\":{\"kind\":\"check\",\"reasons\":[\"A check of the design could not be carried out (the blind review)\"]},\"validation\":\"incomplete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:47.699Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"incomplete\",\"stage1\":{\"state\":\"incomplete\",\"tries\":2,\"runs\":1,\"packetSha256\":null,\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":null},\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}},{\"n\":2,\"startedAt\":\"2026-10-24T21:51:47.742Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":{\"name\":\"screen\",\"rule\":\"both of the 2 pilots score below 0.40\",\"bar\":0.4,\"need\":2,\"of\":2,\"roundIds\":[\"rnd-1e1e700eaf0e\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-1e1e700eaf0e\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-1e1e700eaf0e\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false}],\"counted\":2,\"belowBar\":2,\"explained\":2,\"passed\":true,\"stoppedEarly\":null,\"replacementRound\":false,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:51:49.118Z\",\"endedAt\":\"2026-10-24T21:51:50.370Z\",\"lows\":{\"lowScorers\":2,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":2},\"unexplained\":[]},\"test\":{\"name\":\"test\",\"rule\":\"at least 4 of the 5 pilots score below 0.45\",\"bar\":0.45,\"need\":4,\"of\":5,\"roundIds\":[\"rnd-5288ac9d637c\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-5288ac9d637c\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-5288ac9d637c\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":3,\"id\":\"p3\",\"round\":\"rnd-5288ac9d637c\",\"run\":3,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.1,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.10\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":4,\"id\":\"p4\",\"round\":\"rnd-5288ac9d637c\",\"run\":4,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":5,\"id\":\"p5\",\"round\":\"rnd-5288ac9d637c\",\"run\":5,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":null,\"regrade\":null,\"verdict\":null,\"reason\":\"\",\"valid\":false,\"belowBar\":null,\"stoppedEarly\":true,\"stoppedReason\":\"Not graded: the test was already decided after pilot 4.\",\"adjudication\":null,\"countsTowardPass\":null,\"toolFailure\":false}],\"counted\":4,\"belowBar\":4,\"explained\":4,\"passed\":true,\"stoppedEarly\":{\"afterPilot\":4,\"score\":0.2},\"replacementRound\":false,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:51:50.373Z\",\"endedAt\":\"2026-10-24T21:51:52.292Z\",\"lows\":{\"lowScorers\":4,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":4},\"unexplained\":[]},\"outcome\":\"passed\",\"repaired\":false,\"rejection\":null,\"validation\":\"complete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:48.322Z\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"answerSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:49.113Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"packetFiles\":4,\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"guidelineSha256\":\"8f1d54944c2a598dfa3d238f331c087843319b499ec654514c6d7dbcfb968200\",\"goldenSha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\",\"answerSetSha256\":\"a8e0cd6dfe5c355fa3a56b869522f97d728cca512947302b1bb433cb8b161314\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"fac4209025d5e1819379327d6edd87ad8a29474459da141349dcb0d5bc5f7a9e\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"guidelineRepair\":null,\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"80239788471e10bb47a8158482bf44db3b22ba900e48d3d68f8b3c6f5b52fca0\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"difficulty\":{\"status\":\"passed\",\"screen\":{\"passed\":true,\"explained\":2,\"belowBar\":2,\"of\":2,\"need\":2,\"lows\":{\"lowScorers\":2,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":2}},\"test\":{\"passed\":true,\"explained\":4,\"belowBar\":4,\"of\":5,\"need\":4,\"lows\":{\"lowScorers\":4,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":4}}},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"6a3e81ab67a1d9dc0b8b452091d626d02f878ee7a26458aaea7d7c23682578a6\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":{\"verdict\":\"success\",\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained; 1 pilot was stopped early because the result was decided after pilot 4 scored 0.20 (design attempt 2). Export the private zip to take the design away.\",\"validation\":\"complete\"},\"references\":{\"source\":\"none\",\"found\":0,\"names\":[],\"bytes\":0,\"copied\":false,\"files\":[],\"unscanned\":[],\"partial\":[],\"scannedChars\":0,\"truncated\":false}}"),
+  redactedScreen: realJson("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-0660441b46a7\",\"label\":\"Pipeline 066044\",\"createdAt\":\"2026-10-24T21:43:00.628Z\",\"updatedAt\":\"2026-10-24T21:43:02.472Z\",\"endedAt\":null,\"stage\":\"screen\",\"running\":true,\"message\":\"Running 2 pilots for the screen\",\"quotesRejection\":false,\"summary\":\"\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":0.14,\"remainingUsd\":59.86,\"ledger\":[{\"at\":\"2026-10-24T21:43:00.884Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.134Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:43:01.349Z\",\"stage\":\"design\",\"kind\":\"review-work\",\"ref\":{\"withheld\":true},\"costUsd\":0.08,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"Task files\":1,\"World files\":2},\"sections\":[{\"heading\":\"Business prompt\",\"chars\":111},{\"heading\":\"Grader guideline\",\"chars\":223},{\"heading\":\"Golden answer\",\"chars\":60},{\"heading\":\"Delivery notes\",\"chars\":29}],\"toggle\":null,\"page\":{\"origin\":\"https://tasks.example\",\"path\":\"/review/atlas-4821\"},\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true},\"group\":\"Task files\",\"label\":\"Supplement\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true},\"group\":\"World files\",\"label\":\"Cash facts\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true},\"group\":\"World files\",\"label\":\"Facility terms\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":{\"kind\":\"section\",\"section\":\"Business prompt\",\"number\":1},\"guideline\":{\"kind\":\"section\",\"section\":\"Grader guideline\",\"number\":2},\"goldenAnswer\":{\"kind\":\"section\",\"section\":\"Golden answer\",\"number\":3},\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":1,\"redesigns\":0,\"design\":{\"attempt\":1,\"traps\":[{\"id\":\"t1\",\"title\":{\"withheld\":true},\"mechanism\":{\"withheld\":true},\"files\":{\"withheld\":true},\"decoy\":{\"withheld\":true},\"correctValue\":{\"withheld\":true},\"wrongValue\":{\"withheld\":true}}],\"gold\":{\"withheld\":true},\"fingerprints\":{\"withheld\":true},\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":{\"withheld\":true},\"reason\":{\"withheld\":true},\"bytes\":{\"withheld\":true},\"beforeBytes\":{\"withheld\":true},\"diff\":{\"withheld\":true}}],\"packet\":{\"fileCount\":4,\"bytes\":487,\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true}},{\"name\":\"Cash_Facts.csv\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true}},{\"name\":\"Facility_Terms.txt\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true}},{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":{\"withheld\":true},\"sha256\":{\"withheld\":true}}]},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":{\"withheld\":true},\"repaired\":false,\"calibration\":{\"withheld\":true},\"fairness\":{\"withheld\":true},\"guidelineDiff\":{\"withheld\":true},\"rubricChanges\":{\"withheld\":true},\"unscanned\":{\"withheld\":true},\"taskType\":{\"withheld\":true},\"brief\":{\"withheld\":true},\"alternatives\":{\"withheld\":true},\"answerSet\":{\"withheld\":true},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:43:02.342Z\",\"reason\":{\"withheld\":true},\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"packetFiles\":4,\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"goldenSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"answerSetSha256\":\"4596391eab83fa4a8263ae8c8ecba1871da6be544d16e0ad829c9a687301d06b\",\"answers\":{\"withheld\":true},\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"prompt\":{\"withheld\":true},\"guideline\":{\"withheld\":true},\"goldenAnswer\":{\"withheld\":true}},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:43:00.932Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":{\"withheld\":true}}],\"newFiles\":1,\"editedFiles\":1,\"screen\":{\"name\":\"screen\",\"rule\":\"both of the 2 pilots score below 0.40\",\"bar\":0.4,\"need\":2,\"of\":2,\"roundIds\":[\"rnd-3f826841e059\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-3f826841e059\",\"run\":1,\"replacement\":false,\"state\":\"running\",\"audit\":null,\"costUsd\":0,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":null,\"regrade\":null,\"verdict\":null,\"reason\":{\"withheld\":true},\"valid\":false,\"belowBar\":null,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"withheld\":true},\"countsTowardPass\":null,\"toolFailure\":false},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-3f826841e059\",\"run\":2,\"replacement\":false,\"state\":\"running\",\"audit\":null,\"costUsd\":0,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":null,\"regrade\":null,\"verdict\":null,\"reason\":{\"withheld\":true},\"valid\":false,\"belowBar\":null,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"withheld\":true},\"countsTowardPass\":null,\"toolFailure\":false}],\"counted\":0,\"belowBar\":0,\"explained\":0,\"passed\":null,\"stoppedEarly\":null,\"replacementRound\":false,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:43:02.345Z\",\"endedAt\":null},\"test\":null,\"outcome\":\"in-progress\",\"repaired\":false,\"rejection\":null,\"validation\":\"complete\",\"answerSet\":{\"withheld\":true},\"calibration\":{\"withheld\":true},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:43:02.342Z\",\"reason\":{\"withheld\":true},\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"packetFiles\":4,\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"goldenSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"answerSetSha256\":\"4596391eab83fa4a8263ae8c8ecba1871da6be544d16e0ad829c9a687301d06b\",\"answers\":{\"withheld\":true},\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"guidelineRepair\":{\"withheld\":true},\"fairness\":{\"withheld\":true},\"difficulty\":{\"status\":\"pending\",\"screen\":{\"status\":\"running\"},\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"withheld\":true}}],\"result\":null,\"references\":{\"source\":\"default\",\"found\":2,\"names\":{\"withheld\":true},\"bytes\":582,\"copied\":true,\"files\":{\"withheld\":true},\"unscanned\":[],\"partial\":[],\"scannedChars\":582,\"truncated\":false},\"redacted\":true}"),
+  toolFailure: realJson("{\"schema\":\"finance-pipeline\",\"schemaVersion\":1,\"id\":\"pln-e775b4e0009d\",\"label\":\"Pipeline e775b4\",\"createdAt\":\"2026-10-24T21:51:33.452Z\",\"updatedAt\":\"2026-10-24T21:51:38.949Z\",\"endedAt\":\"2026-10-24T21:51:38.947Z\",\"stage\":\"done\",\"running\":false,\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained (design attempt 1). Export the private zip to take the design away.\",\"quotesRejection\":false,\"summary\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained (design attempt 1). Export the private zip to take the design away.\",\"error\":null,\"waiting\":null,\"source\":{\"kind\":\"folder\",\"name\":\"source\"},\"config\":{\"capUsd\":60,\"pilotCapUsd\":3,\"designCapUsd\":5,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"graderModel\":\"claude-opus-4-8\",\"graderEffort\":\"medium\",\"acceptMissing\":false,\"designMode\":\"new\",\"keepAsWorld\":[],\"fairnessSet\":false,\"passBar\":0.45,\"screenBar\":0.4,\"testBar\":0.45,\"screenPilots\":2,\"testPilots\":5,\"testNeed\":4,\"maxRedesigns\":3},\"capUsd\":60,\"pilotCapUsd\":3,\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"acknowledgements\":[\"shell-access\",\"network\",\"isolation-by-audit\",\"model-reads-task\"],\"spentUsd\":1.18,\"remainingUsd\":58.82,\"ledger\":[{\"at\":\"2026-10-24T21:51:33.712Z\",\"stage\":\"classify\",\"kind\":\"classify\",\"ref\":\"classifier\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:33.963Z\",\"stage\":\"design\",\"kind\":\"design\",\"ref\":\"attempt 1\",\"costUsd\":0.05,\"estimated\":false},{\"at\":\"2026-10-24T21:51:34.174Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:34.351Z\",\"stage\":\"design\",\"kind\":\"grader\",\"ref\":\"as-1-golden\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:34.570Z\",\"stage\":\"design\",\"kind\":\"blind-review\",\"ref\":\"attempt 1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:34.782Z\",\"stage\":\"design\",\"kind\":\"reveal\",\"ref\":\"attempt 1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.025Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1r\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.229Z\",\"stage\":\"design\",\"kind\":\"application\",\"ref\":\"brief-1-1w\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.445Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-55a37d260df7#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.653Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-55a37d260df7#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.835Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-55a37d260df7#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:35.959Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-55a37d260df7#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:36.171Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-55a37d260df7#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:36.343Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-55a37d260df7#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:36.533Z\",\"stage\":\"screen\",\"kind\":\"pilot\",\"ref\":\"rnd-28aa4c82e396#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:36.715Z\",\"stage\":\"grade-screen\",\"kind\":\"grader\",\"ref\":\"rnd-28aa4c82e396#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:36.889Z\",\"stage\":\"grade-screen\",\"kind\":\"adjudication\",\"ref\":\"rnd-28aa4c82e396#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.098Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-50aac9cc22b9#1\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.272Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-50aac9cc22b9#1\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.450Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-50aac9cc22b9#1\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.457Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-50aac9cc22b9#3\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.646Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-50aac9cc22b9#3\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.817Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-50aac9cc22b9#3\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:37.820Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-50aac9cc22b9#5\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.008Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-50aac9cc22b9#5\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.190Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-50aac9cc22b9#5\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.194Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-50aac9cc22b9#2\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.387Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-50aac9cc22b9#2\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.579Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-50aac9cc22b9#2\",\"costUsd\":0.01,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.582Z\",\"stage\":\"test\",\"kind\":\"pilot\",\"ref\":\"rnd-50aac9cc22b9#4\",\"costUsd\":0.1,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.771Z\",\"stage\":\"grade-test\",\"kind\":\"grader\",\"ref\":\"rnd-50aac9cc22b9#4\",\"costUsd\":0.02,\"estimated\":false},{\"at\":\"2026-10-24T21:51:38.943Z\",\"stage\":\"grade-test\",\"kind\":\"adjudication\",\"ref\":\"rnd-50aac9cc22b9#4\",\"costUsd\":0.01,\"estimated\":false}],\"loader\":null,\"import\":{\"fileCount\":3,\"totalBytes\":197,\"groups\":{\"(none)\":3},\"sections\":[],\"toggle\":null,\"page\":null,\"skipped\":[],\"notes\":[],\"keepAsWorld\":[],\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\",\"group\":\"\",\"label\":\"\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":72,\"sha256\":\"befaad7a67ce03eacca974314243ba922192b6fc24edd0e4f937992c23142067\",\"group\":\"\",\"label\":\"\"}],\"facts\":{\"world\":2,\"task\":1,\"withheld\":0,\"other\":0}},\"classification\":{\"method\":\"model\",\"prompt\":null,\"guideline\":null,\"goldenAnswer\":null,\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[],\"warnings\":[],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]},\"attempt\":1,\"redesigns\":0,\"design\":{\"attempt\":1,\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\",\"mechanism\":\"MECH-SECRET-1 the summary shows the available facility as cash\",\"files\":[\"Meridian_Lender_Summary.txt\",\"Cash_Facts.csv\"],\"decoy\":\"DECOY-SECRET-1 available facility\",\"correctValue\":\"CORRECT-SECRET-1,250\",\"wrongValue\":\"WRONG-SECRET-3,050\"}],\"gold\":{\"decision\":\"hold\",\"figures\":[{\"label\":\"Usable cash\",\"value\":\"1,250\",\"tolerance\":1}]},\"fingerprints\":[{\"id\":\"fp-credit\",\"label\":\"Counts available credit as cash\",\"tokens\":[\"available facility counted\"],\"figures\":[{\"label\":\"Wrong cash\",\"value\":3050,\"tolerance\":1}]}],\"newFiles\":[{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135}],\"editedFiles\":[{\"name\":\"Facility_Terms.txt\",\"reason\":\"The amendment date must differ from the lender summary.\",\"bytes\":227,\"beforeBytes\":72,\"diff\":{\"kind\":\"text\",\"before\":72,\"after\":227,\"added\":1,\"removed\":1,\"lines\":[{\"op\":\"-\",\"text\":\"Atlas facility terms, synthetic. Available credit is not cash received.\"},{\"op\":\"+\",\"text\":\"Atlas facility terms, synthetic, attempt 1. Available credit is not cash received. Clause 4 was amended on 2025-03-01. These terms govern every draw decision dated on or after 2025-03-01. These terms take effect on 2025-03-01.\"},{\"op\":\" \",\"text\":\"\"}],\"truncated\":false}}],\"packet\":{\"fileCount\":4,\"bytes\":487,\"files\":[{\"name\":\"Atlas_Supplement.txt\",\"bytes\":63,\"sha256\":\"2504ea1e685aae4d72299e4b347c46402e629158132d38a81f56ceacd2f11a42\"},{\"name\":\"Cash_Facts.csv\",\"bytes\":62,\"sha256\":\"d0f685a7eb6ac7c9ef5904a11e95d0703045d2047f871c405623ad7a6de78d29\"},{\"name\":\"Facility_Terms.txt\",\"bytes\":227,\"sha256\":\"03775675bbb4ab07cf3f12933bfe1925578819b0579d1be83f88214feffe1995\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"bytes\":135,\"sha256\":\"4ffe41981ab3646db3996b6a4b0855bb16c823a72c2714b4eac952586f1d4eb7\"}]},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"notes\":[],\"repaired\":false,\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"guidelineDiff\":{\"available\":false,\"added\":0,\"removed\":0,\"lines\":[],\"truncated\":false},\"rubricChanges\":[],\"unscanned\":[],\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"brief\":{\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]},\"decision\":{\"ask\":\"Whether the borrowing can proceed\",\"mandate\":\"Treasury sign-off\",\"authorityFile\":\"Facility_Terms.txt\",\"effectiveDate\":\"2025-03-01\"},\"files\":[{\"name\":\"Facility_Terms.txt\",\"role\":\"authority\"},{\"name\":\"Cash_Facts.csv\",\"role\":\"evidence\"},{\"name\":\"Meridian_Lender_Summary.txt\",\"role\":\"decoy\"},{\"name\":\"Atlas_Supplement.txt\",\"role\":\"baseline\"}],\"traps\":[{\"id\":\"t1\",\"primary\":true,\"rule\":{\"file\":\"Facility_Terms.txt\",\"clause\":\"Available credit is not cash received.\"},\"correctPath\":{\"reasoning\":\"Only funded cash is usable.\",\"action\":\"Hold the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":1250,\"tolerance\":1}]},\"wrongPath\":{\"reasoning\":\"Counts the available facility as cash.\",\"action\":\"Proceed with the borrowing\",\"figures\":[{\"label\":\"Usable cash\",\"value\":3050,\"tolerance\":1}]},\"changesDecision\":\"required_conclusion\",\"whyTempting\":{\"kind\":\"money\",\"source\":\"The lender summary shows the available facility on a cash line.\"},\"consequence\":{\"source\":\"The borrowing would be drawn against cash that is not there.\"},\"strongestAlternative\":{\"answer\":\"Proceed in two tranches\",\"whyRejected\":\"Available credit is not cash received.\"}}],\"permittedAlternatives\":[],\"permittedAlternativesReason\":\"The facility terms leave no discretion.\",\"controls\":[],\"primary\":\"t1\"},\"alternatives\":[],\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:34.353Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:35.250Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"packetFiles\":4,\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"goldenSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"answerSetSha256\":\"4596391eab83fa4a8263ae8c8ecba1871da6be544d16e0ad829c9a687301d06b\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"prompt\":\"Assess the Atlas liquidity position using the supplied records, including the Meridian lender summary, and recommend whether the borrowing can proceed. PV1\",\"guideline\":\"Revised guideline for the Atlas task, attempt 1. DESIGNER-GUIDELINE-MARK A correct answer states usable cash of 1,250 and holds the borrowing.\",\"goldenAnswer\":\"Usable cash is 1,250 and the borrowing is held, attempt 1. DESIGNER-GOLDEN-MARK\"},\"attempts\":[{\"n\":1,\"startedAt\":\"2026-10-24T21:51:33.742Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":{\"name\":\"screen\",\"rule\":\"both of the 2 pilots score below 0.40\",\"bar\":0.4,\"need\":2,\"of\":2,\"roundIds\":[\"rnd-55a37d260df7\",\"rnd-28aa4c82e396\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-55a37d260df7\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":false,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"tool_failure\",\"claimed\":\"tool_failure\",\"counts\":false,\"note\":\"\",\"application\":null},\"countsTowardPass\":false,\"toolFailure\":true},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-55a37d260df7\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":3,\"id\":\"p3\",\"round\":\"rnd-28aa4c82e396\",\"run\":1,\"replacement\":true,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false}],\"counted\":2,\"belowBar\":2,\"explained\":2,\"passed\":true,\"stoppedEarly\":null,\"replacementRound\":true,\"replacementSkipped\":false,\"startedAt\":\"2026-10-24T21:51:35.252Z\",\"endedAt\":\"2026-10-24T21:51:36.892Z\",\"lows\":{\"lowScorers\":3,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":1,\"unsupported\":0,\"counted\":2},\"unexplained\":[]},\"test\":{\"name\":\"test\",\"rule\":\"at least 4 of the 5 pilots score below 0.45\",\"bar\":0.45,\"need\":4,\"of\":5,\"roundIds\":[\"rnd-50aac9cc22b9\"],\"pilots\":[{\"n\":1,\"id\":\"p1\",\"round\":\"rnd-50aac9cc22b9\",\"run\":1,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":false,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"tool_failure\",\"claimed\":\"tool_failure\",\"counts\":false,\"note\":\"\",\"application\":null},\"countsTowardPass\":false,\"toolFailure\":true},{\"n\":2,\"id\":\"p2\",\"round\":\"rnd-50aac9cc22b9\",\"run\":2,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":3,\"id\":\"p3\",\"round\":\"rnd-50aac9cc22b9\",\"run\":3,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":4,\"id\":\"p4\",\"round\":\"rnd-50aac9cc22b9\",\"run\":4,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.3,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.30\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false},{\"n\":5,\"id\":\"p5\",\"round\":\"rnd-50aac9cc22b9\",\"run\":5,\"replacement\":false,\"state\":\"completed\",\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"costUsd\":0.1,\"estimated\":false,\"outputs\":{\"count\":0,\"readable\":0},\"score\":0.2,\"regrade\":null,\"verdict\":\"does-not-meet-guidance\",\"reason\":\"Synthetic grader reason for 0.20\",\"valid\":true,\"belowBar\":true,\"stoppedEarly\":false,\"stoppedReason\":\"\",\"adjudication\":{\"class\":\"intended\",\"claimed\":\"intended\",\"counts\":true,\"note\":\"\",\"application\":null},\"countsTowardPass\":true,\"toolFailure\":false}],\"counted\":4,\"belowBar\":4,\"explained\":4,\"passed\":true,\"stoppedEarly\":null,\"replacementRound\":false,\"replacementSkipped\":true,\"startedAt\":\"2026-10-24T21:51:36.893Z\",\"endedAt\":\"2026-10-24T21:51:38.946Z\",\"lows\":{\"lowScorers\":5,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":1,\"unsupported\":0,\"counted\":4},\"unexplained\":[]},\"outcome\":\"passed\",\"repaired\":false,\"rejection\":null,\"validation\":\"complete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:34.353Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.95],\"score\":0.95,\"rule\":\"both\",\"passed\":true,\"unstable\":false,\"noGrade\":false}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.95,\"passed\":true,\"unstable\":false,\"grades\":[0.95,0.95]}],\"passed\":true},\"calibration\":{\"score\":0.95,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.95\"},\"freeze\":[{\"n\":1,\"at\":\"2026-10-24T21:51:35.250Z\",\"reason\":\"before the pilots\",\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"packetFiles\":4,\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"goldenSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"answerSetSha256\":\"4596391eab83fa4a8263ae8c8ecba1871da6be544d16e0ad829c9a687301d06b\",\"answers\":[{\"name\":\"golden\",\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\"}],\"pilot\":{\"model\":\"claude-opus-5-5\",\"effort\":\"medium\",\"capUsd\":3},\"grader\":{\"model\":\"claude-opus-4-8\",\"effort\":\"medium\"},\"budget\":{\"totalCapUsd\":60,\"designCapUsd\":5,\"pilotCapUsd\":3}}],\"guidelineRepair\":null,\"fairness\":{\"status\":\"passed\",\"stage1\":{\"state\":\"ok\",\"tries\":1,\"runs\":1,\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":true},\"stage2\":{\"disposition\":\"no_alternative\",\"objectionClass\":\"none\",\"evaluations\":1,\"application\":null,\"briefApplication\":{\"pass\":true,\"count\":2,\"failures\":[],\"unscanned\":[]},\"cut\":[]},\"repairs\":0},\"difficulty\":{\"status\":\"passed\",\"screen\":{\"passed\":true,\"explained\":2,\"belowBar\":2,\"of\":2,\"need\":2,\"lows\":{\"lowScorers\":3,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":1,\"unsupported\":0,\"counted\":2}},\"test\":{\"passed\":true,\"explained\":4,\"belowBar\":4,\"of\":5,\"need\":4,\"lows\":{\"lowScorers\":5,\"intended\":4,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":1,\"unsupported\":0,\"counted\":4}}},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}],\"result\":{\"verdict\":\"success\",\"message\":\"The test passed: 4 of 5 pilots scored below 0.45, every low score explained (design attempt 1). Export the private zip to take the design away.\",\"validation\":\"complete\"},\"references\":{\"source\":\"none\",\"found\":0,\"names\":[],\"bytes\":0,\"copied\":false,\"files\":[],\"unscanned\":[],\"partial\":[],\"scannedChars\":0,\"truncated\":false}}"),
+};
+const real = name => JSON.parse(JSON.stringify(REAL[name]));
+const noBadText = (t, html, label) => assert.doesNotMatch(html, /\[object Object\]|undefined|>null<|NaN|could not be drawn/, label);
+
+test('real backend: a design whose reviews are running is drawn as a design being checked, with nothing asserted about what does not exist yet', async t => {
+  const state = real('preview');
+  assert.deepEqual([state.design.checking, state.design.packet, state.design.gold, state.design.guidelineDiff, state.stage, state.running], [true, null, null, null, 'design', true], 'the shape the backend sends');
+  const { page } = await bootWith(t, [state], { config: REAL_CONFIG });
+  const d = page.region('design');
+  assert.match(d, /<h2>The design being checked<\/h2><\/div><span class="pill violet">Attempt 1<\/span>/);
+  assert.ok(d.includes('<div class="notice pl-preview" role="note"><strong>Checking this design: the reviews are running.</strong> This is what the designer wrote. It is not accepted until every check has passed.</div>'));
+  assert.match(d, /<p class="pl-task-type"><strong>Task type:<\/strong> Facility draw review\./);
+  assert.match(d, /<h3>New files \(1\)<\/h3><ul class="pl-names"><li>Meridian_Lender_Summary\.txt<\/li><\/ul>/);
+  assert.match(d, /<h3>Edited world files \(1\)<\/h3>/);
+  assert.doesNotMatch(d, /Gold and fingerprints|What the designer changed in the grader guideline|Rubric changes|Line changes|Not given|The original is not available/, 'no gold, no packet and no guideline comparison exist yet');
+  assert.match(page.region('brief'), /<span class="pill violet">Attempt 1<\/span><span class="pill violet">Being checked<\/span>/);
+  assert.equal(tableRowsOf(page.region('brief'))[0].row, 't1 Primary The wrong path changes the required conclusion.');
+  const c = page.region('checks');
+  assert.match(c, /<span class="pill violet">Checks in progress<\/span>/);
+  assert.ok(c.includes('<li>Blind review: running (1 try).</li>'));
+  assert.ok(c.includes('<li>Screen: not reached yet.</li><li>Test: not reached yet.</li>'));
+  assert.equal(page.stage(), 'Design: checking the design before any pilot runs.');
+  const steps = stepsOf(page.region('timeline'));
+  assert.deepEqual(steps.map(s => [s.label, s.s]), [['Import', 'done'], ['Classify', 'done'], ['Design', 'active'], ['Screen', 'todo'], ['Test', 'todo'], ['Done', 'todo']]);
+  assert.match(page.region('actions'), /Stop/);
+  assert.doesNotMatch(page.region('actions'), /Export/);
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+test('real backend: a run stopped while its design was being checked keeps the design as "not accepted", says the checks did not finish, and offers no export', async t => {
+  const state = real('stoppedChecks');
+  assert.deepEqual([state.stage, state.design.checking, state.attempts[0].fairness.stage1.state, state.result.validation], ['stopped', false, 'incomplete', 'incomplete']);
+  const { page } = await bootWith(t, [state], { config: REAL_CONFIG });
+  assert.ok(page.region('design').includes('<div class="notice pl-preview pl-preview-stopped" role="note"><strong>These checks did not finish.</strong> This is what the designer wrote. It was not accepted.</div>'));
+  assert.match(page.region('design'), /<h2>The design being checked<\/h2>/);
+  assert.match(page.region('brief'), /<span class="pill amber">Not accepted<\/span>/);
+  const c = page.region('checks');
+  assert.ok(c.includes('<li class="pl-blind-incomplete">The blind review did not finish (1 try).</li><li>Second review: not run.</li>'));
+  assert.match(c, /<span class="pill amber">Checks did not finish<\/span>/);
+  assert.match(c, /<div class="notice pl-incomplete" role="note">/);
+  assert.ok(c.includes('<li>Screen: not run.</li><li>Test: not run.</li>'), 'an ended run: not run, not "running"');
+  assert.doesNotMatch(c, /Blind review: running/);
+  assert.equal(page.region('actions').includes('Export'), false, 'the companion refuses an export with no accepted design');
+  assert.deepEqual(stepsOf(page.region('timeline')).map(s => s.s), ['done', 'done', 'stopped', 'todo', 'todo', 'todo'], 'stopped in the design step, not in the screen');
+  assert.match(page.region('verdict'), /<h2>Stopped by you<\/h2>/);
+  assert.match(page.region('verdict'), /<div class="notice pl-incomplete" role="note">/);
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+test('real backend: an attempt lost to a check that could not be carried out is not called rejected; the next attempt passes, and each is drawn from what the companion sent', async t => {
+  const state = real('checkKind');
+  const [first, second] = state.attempts;
+  assert.deepEqual([first.outcome, first.validation, first.rejection.kind, first.fairness.status, first.fairness.stage1.state, second.outcome], ['rejected', 'incomplete', 'check', 'incomplete', 'incomplete', 'passed'], 'the shape the backend sends');
+  const { page } = await bootWith(t, [state], { config: REAL_CONFIG });
+  const r = page.region('redesigns');
+  const table = r.slice(0, r.indexOf('<h3>Earlier attempts, in detail</h3>'));
+  const rows = tableRowsOf(table);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].Outcome, 'A check could not be carried out The design was not judged: a check of it could not be carried out. A check of the design could not be carried out (the blind review)');
+  assert.equal(rows[0]['Design checks'], 'Calibration: 0.95, passed Fairness: did not finish Answer set: graded as required The checks did not finish');
+  assert.deepEqual([rows[0].Screen, rows[0].Test], ['Not run', 'Not run']);
+  assert.deepEqual([rows[1].row, rows[1].Screen, rows[1].Test, rows[1].Outcome], ['Attempt 2 (latest)', 'Passed (0.20, 0.30)', 'Passed (0.20, 0.30, 0.10, 0.20, not needed)', 'Passed']);
+  assert.doesNotMatch(rows[0].Outcome, /Rejected/);
+  /* the section of the earlier attempt */
+  assert.ok(r.includes('<details class="pl-attempt" id="pl-attempt-1"><summary>Attempt 1: A check could not be carried out</summary>'));
+  assert.ok(r.includes('<p class="pl-attempt-why">The design was not judged: a check of it could not be carried out.</p><ul class="pl-names pl-attempt-reasons"><li>A check of the design could not be carried out (the blind review)</li></ul>'));
+  assert.ok(r.includes('<li class="pl-blind-incomplete">The blind review did not finish (2 tries).</li>'));
+  assert.equal((r.match(/<details class="pl-attempt"/g) || []).length, 1);
+  /* the latest attempt in its own cards */
+  const screen = tableRowsOf(page.region('screen')), test = tableRowsOf(page.region('test'));
+  assert.deepEqual(screen.map(x => [x.row, x.Score, x['Below 0.40'], x['Counts toward the pass'], x.Audit]), [['Pilot 1', '0.20', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error', 'CLEAN'], ['Pilot 2', '0.30', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error', 'CLEAN']]);
+  assert.deepEqual(test.map(x => [x.row, x.Score, x['Below 0.45'], x['Counts toward the pass'], x.Audit]).slice(3), [['Pilot 4', '0.20', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error', 'CLEAN'], ['Pilot 5', 'Stopped: not needed Not graded: the test was already decided after pilot 4.', 'Not needed', 'Stopped early: not needed', 'CLEAN']]);
+  const c = page.region('checks');
+  assert.match(c, /<span class="pill green">Checks complete<\/span>/);
+  assert.ok(c.includes('<li>Blind review: a reader with only the prompt and the files gave an answer (1 try).</li><li>Second review: no other answer was found.</li>'), 'no "(objection: none)"');
+  assert.match(c, /Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\./);
+  assert.match(c, /Test: passed\. 4 of 5 below 0\.45; 4 count toward the pass \(4 needed\)\./);
+  const answers = tableRowsOf(c.slice(c.indexOf('pl-answers')))[0];
+  assert.deepEqual([answers.Needs, answers.Grades, answers.Score], ['0.90', '0.95, 0.95 Decided by: both grades must pass', '0.95']);
+  assert.match(c, /Packet [0-9a-f]{12} \(4 files\); prompt/);
+  assert.doesNotMatch(page.region('design') + page.region('brief'), /The design being checked|Being checked|pl-preview/, 'an accepted design is not a preview');
+  assert.match(page.region('design'), /<h2>The traps<\/h2>/);
+  assert.doesNotMatch(page.region('design'), /What the designer changed in the grader guideline|The original is not available/, 'a new task has no original guideline to compare with');
+  assert.match(page.region('verdict'), /<h2>The test passed<\/h2>/);
+  assert.match(page.region('actions'), /Export private zip/);
+  assert.deepEqual(stepsOf(page.region('timeline')).map(s => s.s), ['done', 'done', 'done', 'done', 'done', 'done']);
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+test('real backend: a round that is running as redact.cjs sends it: the private fields read as withheld, the freeze hashes and the counts of files show, and nothing private is on the page', async t => {
+  const state = real('redactedScreen');
+  assert.deepEqual([state.redacted, state.design.brief, state.attempts[0].fairness, state.references.unscanned, state.references.partial, state.references.names], [true, { withheld: true }, { withheld: true }, [], [], { withheld: true }], 'the shape redact.cjs sends');
+  const { page } = await bootWith(t, [state], { config: REAL_CONFIG });
+  const everything = ALL_REGIONS.map(name => page.region(name)).join('\n');
+  assert.doesNotMatch(everything, /MECH-SECRET|DECOY-SECRET|CORRECT-SECRET|WRONG-SECRET|GUIDELINE-MARK|GOLDEN-MARK|GOLDEN-MARKER|Synthetic grader reason/, 'nothing private reaches the page');
+  assert.ok(page.region('design').includes('<p class="pl-refs-summary">Reference documents used: 2 files (' + MARKER + '). Pilots never see them.</p>'), 'empty lists of the reference scan stay empty: no warning about the scan');
+  assert.ok(page.region('design').includes('<p class="pl-task-type pl-withheld">Task type: Withheld while a round runs</p>'));
+  assert.doesNotMatch(page.region('design'), /The design being checked|Checking this design/, 'the design of a round that runs is the accepted one');
+  const c = page.region('checks');
+  assert.match(c, /<span class="pill green">Checks complete<\/span>/, 'that the checks finished is not private');
+  assert.ok(c.includes('<li>Screen: running.</li><li>Test: not reached yet.</li>'));
+  assert.match(c, /Packet [0-9a-f]{12} \(4 files\); prompt [0-9a-f]{12}; guideline/, 'the freeze hashes show');
+  const rows = tableRowsOf(page.region('screen'));
+  assert.deepEqual(rows.map(x => [x.row, x.Score, x['Below 0.40'], x['Counts toward the pass'], x.Audit]), [['Pilot 1', 'Running', 'Pending', 'Waiting for a score', 'Pending'], ['Pilot 2', 'Running', 'Pending', 'Waiting for a score', 'Pending']]);
+  assert.equal(page.stage(), 'Screen: two blind pilots are working (both must score below 0.40).');
+  assert.match(page.region('withheld'), /A round is running/);
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+test('real backend: a pilot diagnosed as a tool failure has a score the page does not count, says so in each of its cells, and another pilot takes its place', async t => {
+  const state = real('toolFailure');
+  const screen = state.attempts[0].screen;
+  assert.deepEqual([screen.pilots[0].toolFailure, screen.pilots[0].valid, typeof screen.pilots[0].score, screen.pilots[0].adjudication.class, screen.pilots[2].replacement, screen.replacementRound], [true, false, 'number', 'tool_failure', true, true], 'the shape the backend sends');
+  const { page } = await bootWith(t, [state], { config: REAL_CONFIG });
+  const rows = tableRowsOf(page.region('screen'));
+  assert.deepEqual(rows.map(x => [x.row, x.Score, x['Below 0.40'], x['Counts toward the pass'], x.Audit]), [
+    ['Pilot 1', 'Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it', 'Tool failure: another pilot replaces it', 'CLEAN'],
+    ['Pilot 2', '0.30', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error', 'CLEAN'],
+    ['Pilot 3 (replacement)', '0.20', '\u2713 Yes', '\u2713 Counts Diagnosis: the intended error', 'CLEAN']]);
+  assert.match(page.region('screen'), /<p class="pl-tally">2 of 2 below 0\.40; 2 count toward the pass; both needed\.<\/p>/);
+  assert.match(page.region('screen'), /Low scores: 3\. By diagnosis: 2 intended, 0 another valid error, 0 permitted alternative, 0 grader defect, 0 ambiguous, 1 tool failure, 0 not supported\. Counted toward the pass: 2\./);
+  assert.match(page.region('screen'), /A replacement round ran for the pilots without a usable score\./);
+  assert.match(page.region('screen'), /<span class="pill green">Screen passed<\/span>/);
+  assert.doesNotMatch(page.region('screen'), /counts against the design|Waiting|Pending/);
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+/* excerpts of other real states, each taken verbatim from the object the companion sent */
+const REAL_PARTS = {
+  application: realJson("{\"pass\":false,\"failed\":[\"notSuperseded\"],\"checks\":{\"governs\":true,\"inForce\":true,\"notSuperseded\":false,\"excludes\":true},\"dates\":{\"effective\":\"2025-03-01\",\"decision\":\"2025-04-15\"},\"hits\":46,\"hitList\":[{\"id\":\"h1\",\"kind\":\"passage\",\"document\":\"Facility_Terms.txt\"},{\"id\":\"h2\",\"kind\":\"passage\",\"document\":\"History_00.md\"},{\"id\":\"h3\",\"kind\":\"passage\",\"document\":\"History_01.md\"},{\"id\":\"h4\",\"kind\":\"passage\",\"document\":\"History_02.md\"},{\"id\":\"h5\",\"kind\":\"passage\",\"document\":\"History_03.md\"},{\"id\":\"h6\",\"kind\":\"passage\",\"document\":\"History_04.md\"},{\"id\":\"h7\",\"kind\":\"passage\",\"document\":\"History_05.md\"},{\"id\":\"h8\",\"kind\":\"passage\",\"document\":\"History_06.md\"},{\"id\":\"h9\",\"kind\":\"passage\",\"document\":\"History_07.md\"},{\"id\":\"h10\",\"kind\":\"passage\",\"document\":\"History_08.md\"},{\"id\":\"h11\",\"kind\":\"passage\",\"document\":\"History_09.md\"},{\"id\":\"h12\",\"kind\":\"passage\",\"document\":\"History_10.md\"},{\"id\":\"h13\",\"kind\":\"passage\",\"document\":\"History_11.md\"},{\"id\":\"h14\",\"kind\":\"passage\",\"document\":\"History_12.md\"},{\"id\":\"h15\",\"kind\":\"passage\",\"document\":\"History_13.md\"},{\"id\":\"h16\",\"kind\":\"passage\",\"document\":\"History_14.md\"},{\"id\":\"h17\",\"kind\":\"passage\",\"document\":\"History_15.md\"},{\"id\":\"h18\",\"kind\":\"passage\",\"document\":\"History_16.md\"},{\"id\":\"h19\",\"kind\":\"passage\",\"document\":\"History_17.md\"},{\"id\":\"h20\",\"kind\":\"passage\",\"document\":\"History_18.md\"},{\"id\":\"h21\",\"kind\":\"passage\",\"document\":\"History_19.md\"},{\"id\":\"h22\",\"kind\":\"passage\",\"document\":\"History_20.md\"},{\"id\":\"h23\",\"kind\":\"passage\",\"document\":\"History_21.md\"},{\"id\":\"h24\",\"kind\":\"passage\",\"document\":\"History_22.md\"},{\"id\":\"h25\",\"kind\":\"passage\",\"document\":\"History_23.md\"},{\"id\":\"h26\",\"kind\":\"passage\",\"document\":\"History_24.md\"},{\"id\":\"h27\",\"kind\":\"passage\",\"document\":\"History_25.md\"},{\"id\":\"h28\",\"kind\":\"passage\",\"document\":\"History_26.md\"},{\"id\":\"h29\",\"kind\":\"passage\",\"document\":\"History_27.md\"},{\"id\":\"h30\",\"kind\":\"passage\",\"document\":\"History_28.md\"},{\"id\":\"h31\",\"kind\":\"passage\",\"document\":\"History_29.md\"},{\"id\":\"h32\",\"kind\":\"passage\",\"document\":\"History_30.md\"},{\"id\":\"h33\",\"kind\":\"passage\",\"document\":\"History_31.md\"},{\"id\":\"h34\",\"kind\":\"passage\",\"document\":\"History_32.md\"},{\"id\":\"h35\",\"kind\":\"passage\",\"document\":\"History_33.md\"},{\"id\":\"h36\",\"kind\":\"passage\",\"document\":\"History_34.md\"},{\"id\":\"h37\",\"kind\":\"passage\",\"document\":\"History_35.md\"},{\"id\":\"h38\",\"kind\":\"passage\",\"document\":\"History_36.md\"},{\"id\":\"h39\",\"kind\":\"passage\",\"document\":\"History_37.md\"},{\"id\":\"h40\",\"kind\":\"passage\",\"document\":\"History_38.md\"},{\"id\":\"s1\",\"kind\":\"summary\",\"document\":\"History_39.md\"},{\"id\":\"s2\",\"kind\":\"summary\",\"document\":\"History_40.md\"},{\"id\":\"s3\",\"kind\":\"summary\",\"document\":\"History_41.md\"},{\"id\":\"s4\",\"kind\":\"summary\",\"document\":\"History_42.md\"},{\"id\":\"s5\",\"kind\":\"summary\",\"document\":\"History_43.md\"},{\"id\":\"s6\",\"kind\":\"summary\",\"document\":\"History_44.md\"}],\"unscanned\":[]}"),
+  stage1Unopened: realJson("{\"state\":\"partial\",\"tries\":1,\"runs\":1,\"packetSha256\":\"bc047fafe07bc88e40637e389275ad09c982ffc89f0773c3ddc1211153c42301\",\"rendered\":[],\"unreadable\":[],\"unopened\":[\"Scan_Pages.pdf\"],\"read\":false,\"governingFound\":true}"),
+  stage1Governing: realJson("{\"state\":\"partial\",\"tries\":1,\"runs\":1,\"packetSha256\":\"5cf6ca3e267d3cdd99d7e3f8c16a245145ce8d6d53de1c57f11c75a9d9894d98\",\"rendered\":[],\"unreadable\":[],\"unopened\":[],\"read\":true,\"governingFound\":false}"),
+  difficultyScreenCut: realJson("{\"status\":\"pending\",\"screen\":{\"status\":\"incomplete\"},\"test\":null}"),
+  difficultyTestCut: realJson("{\"status\":\"pending\",\"screen\":{\"passed\":true,\"explained\":2,\"belowBar\":2,\"of\":2,\"need\":2,\"lows\":{\"lowScorers\":2,\"intended\":2,\"otherValid\":0,\"permittedAlternative\":0,\"graderDefect\":0,\"ambiguous\":0,\"toolFailure\":0,\"unsupported\":0,\"counted\":2}},\"test\":{\"status\":\"incomplete\"}}"),
+  softClassification: realJson("{\"method\":\"model\",\"prompt\":{\"kind\":\"section\",\"section\":\"Business prompt\",\"number\":1},\"guideline\":{\"kind\":\"section\",\"section\":\"Grader guideline\",\"number\":2},\"goldenAnswer\":{\"kind\":\"section\",\"section\":\"Golden answer\",\"number\":3},\"worldFiles\":[\"Facility_Terms.txt\",\"Cash_Facts.csv\"],\"taskFiles\":[\"Atlas_Supplement.txt\"],\"other\":[],\"withheld\":[{\"name\":\"Copy_Of_Notes.txt\",\"why\":\"it holds a long passage of the guideline or the golden answer\"}],\"warnings\":[{\"name\":\"Copy_Of_Notes.txt\",\"why\":\"it holds a long passage of the guideline or the golden answer\",\"soft\":true}],\"keptAsWorld\":[],\"goldenSuspects\":[],\"notes\":[],\"unscanned\":[],\"unreadable\":[]}"),
+};
+const realPart = name => JSON.parse(JSON.stringify(REAL_PARTS[name]));
+
+test('real backend: the review fields as they come: the list of hits with the summary of a file that has more passages, the blind review that opened nothing or named a file that is not in the packet, a stage that was cut off, and a file withheld with a note', async t => {
+  /* the hits: 40 passages and one summary for each file beyond them (hits is 46, the number of all of them) */
+  const application = realPart('application');
+  assert.deepEqual([application.hits, application.hitList.length, application.hitList.filter(h => h.kind === 'passage').length, application.hitList.filter(h => h.kind === 'summary').map(h => h.document)], [46, 46, 40, ['History_39.md', 'History_40.md', 'History_41.md', 'History_42.md', 'History_43.md', 'History_44.md']], 'the shape the backend sends');
+  const { page } = await bootWith(t, [reviewState({ application })], { config: REAL_CONFIG });
+  const c = page.region('checks');
+  assert.match(c, /<li class="pl-check-fail">Application check of the clause that rules the other answer out: failed\. it may be superseded\. In force from 2025-03-01; decision on 2025-04-15\. 40 places in the files mention a change of a document\./, 'the passages are the places; the number of all hits is not');
+  const summaries = [...c.matchAll(/<li class="pl-hit-summary">More passages of supersession wording were found in <strong>([^<]*)<\/strong> than are listed\.<\/li>/g)].map(m => m[1]);
+  assert.deepEqual(summaries, ['History_39.md', 'History_40.md', 'History_41.md', 'History_42.md', 'History_43.md', 'History_44.md'], 'one line for each file, with its name and no count that was not sent');
+  assert.doesNotMatch(c, /pl-hit-more|More passages were found than are shown|\[object Object\]|undefined/);
+  /* the blind review that opened no file, and the one that named a document that is not in the packet */
+  const withStage1 = name => newState({ attempts: [newAttempt({ fairness: newFairness({ stage1: realPart(name) }) })] });
+  const { page: nothing } = await bootWith(t, [withStage1('stage1Unopened')], { config: REAL_CONFIG });
+  assert.ok(nothing.region('checks').includes('<li>Blind review: a reader with only the prompt and the files gave an answer, but not every file could be read (1 try).</li><li class="pl-unopened">The blind reviewer did not open these files: Scan_Pages.pdf.</li><li class="pl-blind-unread">The blind reviewer did not open any file of the packet, so its answer is not counted as a complete review.</li><li>Second review:'));
+  assert.doesNotMatch(nothing.region('checks'), /named is not a file of the packet/);
+  const { page: governing } = await bootWith(t, [withStage1('stage1Governing')], { config: REAL_CONFIG });
+  assert.ok(governing.region('checks').includes('<li class="pl-blind-governing">The document the blind reviewer named is not a file of the packet.</li>'));
+  assert.doesNotMatch(governing.region('checks'), /did not open|pl-unopened/, 'it did open files, and none was left unopened');
+  /* a stage the run ended in is {status: "incomplete"}: it did not finish */
+  const cut = (name, over = {}) => newState({ stage: 'stopped', running: false, result: { verdict: 'stopped', message: 'x', validation: 'incomplete' }, attempts: [newAttempt({ outcome: 'stopped', difficulty: realPart(name), screen: null, test: null, ...over })] });
+  const { page: screenCut } = await bootWith(t, [cut('difficultyScreenCut')], { config: REAL_CONFIG });
+  assert.ok(screenCut.region('checks').includes('<li>Screen: did not finish.</li><li>Test: not run.</li>'));
+  const { page: testCut } = await bootWith(t, [cut('difficultyTestCut')], { config: REAL_CONFIG });
+  assert.match(testCut.region('checks'), /<li>Screen: passed\. 2 of 2 below 0\.40; 2 count toward the pass \(2 needed\)\. Low scores: 2; by diagnosis: 2 intended, 0 another valid error, 0 permitted alternative, 0 grader defect, 0 ambiguous, 0 tool failure, 0 not supported\.<\/li><li>Test: did not finish\.<\/li>/);
+  /* a file withheld with a note is not an error: the start went on */
+  const classification = realPart('softClassification');
+  assert.deepEqual(classification.warnings, [{ name: 'Copy_Of_Notes.txt', why: 'it holds a long passage of the guideline or the golden answer', soft: true }], 'the shape the backend sends');
+  const { page: soft } = await bootWith(t, [newState({ stage: 'design', running: true, result: null, classification, attempts: [], design: null })], { config: REAL_CONFIG });
+  const k = soft.region('classify');
+  assert.ok(k.includes('<div class="notice neutral pl-soft-warning" role="note"><strong>Withheld with a note: the start goes on</strong><p class="pl-warning-lead">This file shares text with the grader guideline or the golden answer of the old task, so the pilots will not get it. Nothing stops the start.</p><ul class="pl-names"><li>Copy_Of_Notes.txt: it holds a long passage of the guideline or the golden answer</li></ul></div>'));
+  assert.doesNotMatch(k, /Warning: check this before you trust the classification|pill amber|1 warning/, 'not a warning that counts');
+  assert.match(k, /<h3>Withheld from the pilots \(1\)<\/h3><ul class="pl-names"><li>Copy_Of_Notes\.txt <span class="muted">it holds a long passage/);
+  /* a hard warning next to it is still a warning, and counts alone */
+  const both = { ...classification, warnings: [{ name: 'Atlas_Rubric.txt', why: 'it holds a long passage of the guideline or the golden answer' }, ...classification.warnings] };
+  const { page: mixed } = await bootWith(t, [newState({ stage: 'design', running: true, result: null, classification: both, attempts: [], design: null })], { config: REAL_CONFIG });
+  assert.match(mixed.region('classify'), /<span class="pill amber">1 warning<\/span>/);
+  assert.equal((mixed.region('classify').match(/pl-soft-warning/g) || []).length, 1);
+  assert.match(mixed.region('classify'), /<div class="notice pl-warning" role="note"><strong>Warning[^]*?Atlas_Rubric\.txt: it holds a long passage[^]*?<\/ul><\/div>/);
+  for (const [name, p] of [['hits', page], ['nothing', nothing], ['governing', governing], ['screenCut', screenCut], ['testCut', testCut], ['soft', soft], ['mixed', mixed]]) for (const region of ALL_REGIONS) noBadText(t, p.region(region), name + ' ' + region);
+});
+
+
+test('real backend: an answer set the grader could not settle (no third grade) is not a failed guideline: the attempt is marked as a check that could not be carried out', async t => {
+  const first = realJson("{\"n\":1,\"startedAt\":\"2026-10-24T21:51:52.711Z\",\"mode\":\"new\",\"traps\":[{\"id\":\"t1\",\"title\":\"Lender summary overstates cash\"}],\"newFiles\":1,\"editedFiles\":1,\"screen\":null,\"test\":null,\"outcome\":\"rejected\",\"repaired\":false,\"rejection\":{\"kind\":\"answer-set\",\"reasons\":[\"The simulated grader gave the golden answer two grades on opposite sides of the threshold and no third grade could be obtained, so the guideline could not be checked against it\"]},\"validation\":\"incomplete\",\"answerSet\":{\"goldenMin\":0.9,\"alternativeMin\":0.85,\"answers\":[{\"name\":\"golden\",\"kind\":\"golden\",\"file\":\"golden-answer.md\",\"threshold\":0.9,\"runs\":[{\"why\":\"first grading\",\"at\":\"2026-10-24T21:51:53.656Z\",\"guidelineSha256\":\"c92aff159fb89f7367c84eb426978e2b7759d505912af6ab6c6b0ffe08fa1a54\",\"answerSha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"grades\":[0.95,0.5],\"score\":0.725,\"rule\":\"both\",\"passed\":false,\"unstable\":true,\"noGrade\":true}],\"sha256\":\"93e20161f04a59272f230b3e1c9069bb16b7d6a8bb3df81242886b339cb5e4e0\",\"score\":0.725,\"passed\":false,\"unstable\":true,\"grades\":[0.95,0.5]}],\"passed\":false},\"calibration\":{\"score\":0.725,\"verdict\":\"meets-guidance\",\"reason\":\"Synthetic grader reason for 0.50\"},\"freeze\":[],\"guidelineRepair\":null,\"fairness\":{\"status\":\"incomplete\",\"stage1\":null,\"stage2\":null,\"repairs\":0},\"difficulty\":{\"status\":\"pending\",\"screen\":null,\"test\":null},\"audit\":{\"status\":\"CLEAN\",\"violationCount\":0},\"promptSha256\":\"19a26529b3c54d880aa546824bb75da415c67f2dff840eb91ea28cb450cb67a0\",\"taskType\":{\"workflow\":\"Facility draw review\",\"why\":\"The world files hold facility terms and cash facts.\",\"referenceEntries\":[\"entry one\"]}}");
+  assert.deepEqual([first.outcome, first.validation, first.rejection.kind, first.fairness.status], ['rejected', 'incomplete', 'answer-set', 'incomplete'], 'the shape the backend sends');
+  const { page } = await bootWith(t, [newState({ stage: 'redesign', running: true, result: null, redesigns: 1, attempts: [first, newAttempt({ n: 2, outcome: 'in-progress', validation: 'pending', screen: null, test: null, difficulty: { status: 'pending', screen: null, test: null } })] })], { config: REAL_CONFIG });
+  const r = page.region('redesigns');
+  const row = tableRowsOf(r.slice(0, r.indexOf('<h3>Earlier attempts, in detail</h3>')))[0];
+  assert.equal(row.Outcome, 'A check could not be carried out The design was not judged: a check of it could not be carried out. The simulated grader gave the golden answer two grades on opposite sides of the threshold and no third grade could be obtained, so the guideline could not be checked against it');
+  assert.doesNotMatch(row.Outcome, /Rejected|did not grade the fixed answers/, 'the guideline was not found wanting: it could not be tested');
+  assert.match(row['Design checks'], /Fairness: did not finish[^]*Answer set: not graded as required, with an unstable grade[^]*The checks did not finish/);
+  assert.ok(r.includes('<summary>Attempt 1: A check could not be carried out</summary>'));
+  for (const name of ALL_REGIONS) noBadText(t, page.region(name), name);
+});
+
+test('real backend: the config GET /api/pipeline sends gives the start form its figures: the least cap, the reference folder as the designer reads it, and the label of the box', async t => {
+  assert.deepEqual([REAL_CONFIG.minCapByMode.new.fixedUsd, REAL_CONFIG.defaultCapUsd, REAL_CONFIG.references.default.problems, REAL_CONFIG.references.default.problemList], [20.5, 60, 0, []], 'the shape the backend sends');
+  const { page } = await bootWith(t, [], { config: REAL_CONFIG });
+  const form = page.region('start-form');
+  assert.match(form, /value="60"/);
+  assert.match(form, /one full attempt \(screen and test\) can cost up to USD 59\.80\./);
+  assert.ok(form.includes('Reference documents: 2 files found in the default folder (Close_Checklist_Guide.txt, Draw_Review_Notes.md). The designer reads them; their text is sent to Anthropic. Pilots never see them.'));
+  assert.match(form, /<strong>Start even if a world or task file has to be withheld \(the pilots will not get it\), or if the reviewers cannot read a file of the task \(that file goes unchecked\)<\/strong>/);
+  assert.equal(whyOf(page), 'Enter the task link, or choose a folder.');
+  noBadText(t, form + page.region('start-foot'), 'start');
+});
+
+
 test('the page against the real companion: a folder is imported, classified, designed, screened and tested, and the page shows what the orchestrator really reports', { skip: HAS_BACKEND ? false : 'backend/pipeline is not there yet' }, async t => {
   const { source, origin } = await makeRealWorld(t);
   const page = makePage(t, null, { origin });
@@ -2594,6 +4346,7 @@ test('the page against the real companion: a folder is imported, classified, des
   assert.match(page.region('start-form'), /<option value="claude-opus-5-5"/, 'the model list is the real companion\'s');
   /* an offline task: a folder, as an owner who downloaded by hand would give it */
   await page.type('source', { value: 'dir' });
+  await page.type('designMode', { value: 'harden' });   /* the stub's task has harden-style files: a prompt, a guideline and a golden answer */
   await page.type('dir', { value: source });
   await page.type('cap', { value: '30' });
   await page.type('pilotCap', { value: '1' });
@@ -2671,6 +4424,7 @@ test('the page against the real companion: Stop ends a pipeline that is working,
   const page = makePage(t, null, { origin });
   await page.boot();
   await page.type('source', { value: 'dir' });
+  await page.type('designMode', { value: 'harden' });   /* the stub's task has harden-style files: a prompt, a guideline and a golden answer */
   await page.type('dir', { value: source });
   await page.ackAll();
   await page.click('start');
@@ -2691,6 +4445,7 @@ test('the page against the real companion: a classification that fails marks the
   const page = makePage(t, null, { origin });
   await page.boot();
   await page.type('source', { value: 'dir' });
+  await page.type('designMode', { value: 'harden' });   /* the stub's task has harden-style files: a prompt, a guideline and a golden answer */
   await page.type('dir', { value: source });
   await page.type('cap', { value: '30' });
   await page.type('pilotCap', { value: '1' });

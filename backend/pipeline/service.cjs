@@ -21,45 +21,57 @@ const C = require('../agents/constants.cjs');
 const { budgetText } = require('../agents/claude-runner.cjs');
 const { checkPilotsRoot, resolveSourceDir } = require('../agents/pilot-folder.cjs');
 const P = require('./constants.cjs');
-const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, TEXT_EXTENSIONS } = require('./util.cjs');
+const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, nameProblem, TEXT_EXTENSIONS, usdText } = require('./util.cjs');
 const { IntakeError, intakeFromLoader, intakeFromFolder } = require('./intake.cjs');
-const { buildClassifierPrompt, classify } = require('./classify.cjs');
-const { DesignError, catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, scanDesignFiles, buildWork, numbersIn, canonNumber } = require('./design.cjs');
-const { minCapParts, minCapUsd } = require('./budget.cjs');
-const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak } = require('./safety.cjs');
-const { extractText, textHoldsWindows, ZIP_EXTENSIONS } = require('./extract.cjs');
-const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand } = require('./gates.cjs');
-const { runtimeOf, runToolLess, runDesigner, NOT_FOUND } = require('./models.cjs');
+const { buildClassifierPrompt, classify, withheldReason, labelFinding } = require('./classify.cjs');
+const { DesignError, StopSignal, BudgetStop, Failure, AttemptRejected } = require('./errors.cjs');
+const { catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, scanDesignFiles, buildWork, numbersIn, canonNumber } = require('./design.cjs');
+const { minCapParts, minCapUsd, attemptReserveUsd } = require('./budget.cjs');
+const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak, WindowSet } = require('./safety.cjs');
+const { scanReferences, referenceSummary } = require('./references.cjs');
+const { extractText, textHoldsWindows, readerKindOfFile } = require('./extract.cjs');
+const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, GRADER_FOOTER, MAX_ANSWER_FOR_GRADER } = require('./gates.cjs');
+const { runtimeOf, runToolLess, runDesigner, NOT_FOUND, startEnvironmentProblems } = require('./models.cjs');
 const { buildExport } = require('./export.cjs');
+const { stageStanding } = require('./gates.cjs');
 
 const SCHEMA = 'finance-pipeline';
 const SCHEMA_VERSION = 1;
 const MAX_LABEL = 60;
-const GRADER_FOOTER = '\n\nScoring scale for this rehearsal: report "score" as a number from 0 to 1, the share of the points the guidance names that the answer earns (1 means every point is met, 0 means none), and list each point in "items".';
-const MAX_ANSWER_FOR_GRADER = 59000;
 const MAX_REASON = 1500;
 const MAX_OUTPUT_FILES = 50;
 const MAX_CORPUS_CHARS = 24 * 1024 * 1024;
 const UNREADABLE_FINAL_CHARS = 600; /* a final message shorter than this, with files written and none readable, is not gradable */
 
-class StopSignal extends Error {}
-class BudgetStop extends Error {}
-/* A failure whose message is safe to show the owner as it is. */
-class Failure extends Error {}
-/* A design that failed a check before any pilot ran. reasons are safe to show; details go to the designer's feedback only. */
-class AttemptRejected extends Error {
-  constructor(kind, reasons, details) {
-    super(reasons[0]);
-    this.kind = kind;
-    this.reasons = reasons;
-    this.details = details || reasons;
-  }
-}
-
 const bad = message => new AgentError(400, message);
 const round6 = value => Math.round(value * 1e6) / 1e6;
-const money = value => `USD ${value.toFixed(2)}`;
+const money = value => `USD ${usdText(value)}`;
 const isTerminal = stage => P.TERMINAL.includes(stage);
+
+/* Is a guideline repair of this attempt under way, or applied and not yet counted? Then the evaluator material has changed and nothing has judged the result. */
+const repairOpen = attempt => Boolean(attempt && isObject(attempt.guidelineRepair) && (attempt.guidelineRepair.outcome === 'pending' || (attempt.guidelineRepair.outcome === 'applied' && !attempt.guidelineRepair.recounted)));
+
+/* Closes what an ended run leaves open in an attempt of the 'new' mode: nothing is left 'pending', 'running' or under repair. Resolves true when the attempt's
+   mandatory checks did not finish (they were still under way, or a repair of the guideline had changed the evaluator material and its result had not been
+   counted): the attempt is then 'incomplete' in its validation, and nothing that follows counts as a pass. An attempt whose checks finished, or that was
+   rejected by them, keeps its validation. */
+function closeAttempt(attempt) {
+  if (!isObject(attempt)) return false;
+  const open = repairOpen(attempt);
+  const unfinished = attempt.validation === 'pending' || attempt.validation === 'incomplete' || open;
+  if (unfinished) {
+    attempt.validation = 'incomplete';
+    if (isObject(attempt.fairness) && attempt.fairness.status === 'pending') attempt.fairness.status = 'incomplete';
+  }
+  if (isObject(attempt.fairness) && isObject(attempt.fairness.stage1) && attempt.fairness.stage1.state === 'running') attempt.fairness.stage1.state = 'incomplete';
+  /* a stage that was under way when the run ended has no result */
+  if (isObject(attempt.difficulty)) for (const kind of ['screen', 'test']) if (isObject(attempt.difficulty[kind]) && attempt.difficulty[kind].status === 'running') attempt.difficulty[kind] = { status: 'incomplete' };
+  if (isObject(attempt.guidelineRepair)) {
+    if (attempt.guidelineRepair.outcome === 'pending') { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended during the repair'; }
+    else if (open) { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended before the saved answers were counted again'; }
+  }
+  return unfinished;
+}
 const LOADER_MESSAGE_CHARS = 1000;
 const CONFIRM_FILES_MESSAGE = 'Check the file list against the task page. Press Continue if every file is there, or Stop and use Import from folder.';
 const HEADROOM_TEXT = `${Math.round((P.HEADROOM - 1) * 100)}% headroom`;
@@ -124,6 +136,8 @@ class PipelineService {
     if ('fallback' in bands) bandOptions.fallback = bands.fallback;
     this.bands = { screen: regradeBand('screen', bandOptions), test: regradeBand('test', bandOptions) };
     this.bandFallback = ('fallback' in bands ? bands.fallback : P.REGRADE_BAND).slice();
+    /* How many characters of reference text the leak guard holds windows for (tests make it small to see what is named as unscanned). */
+    this.referenceScanChars = Number.isFinite(options.referenceScanChars) && options.referenceScanChars > 0 ? options.referenceScanChars : 12 * 1024 * 1024;
     this.onStage = typeof options.onStage === 'function' ? options.onStage : null; /* an observer for tests; errors are ignored */
     this.options = options;
     this._rt = null;
@@ -163,8 +177,12 @@ class PipelineService {
       try {
         const state = readJson(this._stateFile(name));
         if (!isObject(state) || state.id !== name || state.schema !== SCHEMA || !isObject(state.config) || !Array.isArray(state.attempts)) continue;
+        const unfinished = [];
         for (const attempt of state.attempts) {
           if (isObject(attempt) && attempt.outcome === 'in-progress') { attempt.outcome = 'failed'; attempt.note = 'The companion stopped while this attempt was running.'; }
+          /* the mandatory checks of an attempt that did not finish: nothing in them is left pending */
+          unfinished.push(isObject(attempt) && (attempt.mode === 'new' || attempt.validation !== undefined) ? closeAttempt(attempt) : false);
+          if (isObject(attempt) && isObject(attempt.guidelineRepair) && attempt.guidelineRepair.outcome === 'pending') { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the companion stopped during the repair'; }
         }
         if (!isTerminal(state.stage)) {
           state.stage = 'failed';
@@ -173,7 +191,8 @@ class PipelineService {
           state.error = 'interrupted';
           state.endedAt = this.now();
           state.updatedAt = state.endedAt;
-          state.result = { verdict: 'failed', message: state.message };
+          /* a run cut off while its checks were under way is incomplete; one cut off in the pilots, after the checks finished, is not */
+          state.result = { verdict: 'failed', message: state.message, ...(state.config.designMode === 'new' ? { validation: !state.attempts.length || unfinished[unfinished.length - 1] ? 'incomplete' : 'complete' } : {}) };
         }
         writeJsonAtomic(this._stateFile(name), state);
         this._removeWorkspace(name); /* a working folder left by an earlier start (or by a version that kept more there) */
@@ -219,8 +238,15 @@ class PipelineService {
   _reserve(p, what, usd) {
     const need = round6(usd * P.HEADROOM);
     if (round6(p.spentUsd + need) > p.config.capUsd + 1e-9) {
-      throw new BudgetStop(`Stopped before ${what}: ${money(p.spentUsd)} spent, the step could cost up to ${money(need)} (with ${HEADROOM_TEXT}), and the cap is ${money(p.config.capUsd)}.`);
+      const incomplete = this._validating(p);
+      throw new BudgetStop(`Stopped before ${what}: ${money(p.spentUsd)} spent, the step could cost up to ${money(need)} (with ${HEADROOM_TEXT}), and the cap is ${money(p.config.capUsd)}.${incomplete ? ' The checks of this design had not finished, so nothing here counts as a pass.' : ''}`, { incomplete });
     }
+  }
+
+  /* Is the newest attempt still in its mandatory checks (designer v2)? A budget stop then ends the run as incomplete, never as a pass or a fail. */
+  _validating(p) {
+    const attempt = p.attempts[p.attempts.length - 1];
+    return Boolean(attempt && (attempt.validation === 'pending' || repairOpen(attempt)));
   }
 
   /* cost: the number the run reported, or null. A run that started and reported none is counted at its cap (estimated). */
@@ -275,11 +301,29 @@ class PipelineService {
       defaultCapUsd: P.DEFAULT_CAP_USD, maxCapUsd: P.MAX_CAP_USD, defaultPilotCapUsd: C.BUDGET_USD.pilotDefault,
       minPilotCapUsd: C.BUDGET_USD.minUsd, maxPilotCapUsd: C.BUDGET_USD.maxUsd, designCapUsd: P.CAPS.designUsd, classifyCapUsd: P.CAPS.classifyUsd, graderCapUsd: P.CAPS.graderUsd,
       repairCapUsd: P.CAPS.repairUsd, fairnessCapUsd: P.CAPS.fairnessUsd, goldenMin: P.GOLDEN_MIN, regradeBand: this.bandFallback.slice(), screenRegradeBand: this.bands.screen.slice(), testRegradeBand: this.bands.test.slice(), headroom: P.HEADROOM,
-      /* The total cap must be at least ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)); fixedUsd is at the default designer cap. */
+      /* The total cap must be at least ceil to the cent of headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)); fixedUsd is at the default designer cap.
+         minCap is for the default design mode ('new'); minCapByMode has both, and minCapFairnessSetUsd is what the optional diagnostic suite adds to fixedUsd. */
       minCap: minCapParts(),
+      minCapByMode: { new: minCapParts(P.CAPS.designUsd, 'new'), harden: minCapParts(P.CAPS.designUsd, 'harden') },
+      minCapFairnessSetUsd: P.FAIRNESS_SET_USD,
+      attemptReserveUsd: attemptReserveUsd(),
+      designModes: P.DESIGN_MODES.slice(), defaultDesignMode: P.DEFAULT_DESIGN_MODE,
+      alternativeMin: P.ALTERNATIVE_MIN, answerSetGrades: P.ANSWER_SET_GRADES, maxAlternatives: P.MAX_ALTERNATIVES,
+      blindReviewCapUsd: P.CAPS.blindReviewUsd, revealReviewCapUsd: P.CAPS.revealReviewUsd, applicationCapUsd: P.CAPS.applicationUsd, adjudicationCapUsd: P.CAPS.adjudicationUsd,
+      fairnessSetCapUsd: P.FAIRNESS_SET_USD,
+      references: { maxFiles: P.REFERENCES.files, maxBytes: P.REFERENCES.bytes, extensions: P.REFERENCES.extensions.slice(), default: this._defaultReferences() },
       stages: P.STAGES.slice(), acknowledgements: P.ACKNOWLEDGEMENTS.slice(), linksAvailable: Boolean(this.links),
       models: C.MODELS.slice(), efforts: C.EFFORTS.slice(), defaultModel: C.DEFAULT_MODEL, defaultEffort: C.DEFAULT_EFFORT, graderModel: C.GRADER_MODEL,
     };
+  }
+
+  /* How many reference files the default folder (<root>/private/references) holds and their names, never a word of them. */
+  _defaultReferences() {
+    const dir = path.join(this.root, 'private', 'references');
+    let exists = false;
+    try { exists = fs.lstatSync(dir).isDirectory(); } catch { exists = false; }
+    if (!exists) return { exists: false, found: 0, names: [], bytes: 0, problems: 0, problemList: [] };
+    return { exists: true, ...referenceSummary(dir) };
   }
 
   _row(p) {
@@ -322,9 +366,16 @@ class PipelineService {
     /* The designer's cap, when none is given: USD 5.00 (the minimum total cap is worked out from it, so it does not move with the total). */
     const designCapUsd = body.designCapUsd === undefined || body.designCapUsd === null ? P.CAPS.designUsd : body.designCapUsd;
     if (budgetText(designCapUsd) === null) throw bad(`The spending cap for the designer must be a number of US dollars from ${C.BUDGET_USD.minUsd.toFixed(2)} to ${C.BUDGET_USD.maxUsd.toFixed(2)}, in whole cents`);
+    const designMode = body.designMode === undefined || body.designMode === null ? P.DEFAULT_DESIGN_MODE : body.designMode;
+    if (typeof designMode !== 'string' || !P.DESIGN_MODES.includes(designMode)) throw bad(`designMode must be one of: ${P.DESIGN_MODES.join(', ')}`);
+    const keepAsWorld = this._checkKeepAsWorld(body.keepAsWorld, designMode);
+    if (body.fairnessSet !== undefined && body.fairnessSet !== null && typeof body.fairnessSet !== 'boolean') throw bad('fairnessSet must be true or false');
+    const fairnessSet = body.fairnessSet === true;
+    if (fairnessSet && designMode !== 'new') throw bad('fairnessSet is for designMode new');
+    const references = this._checkReferences(body.referencesDir, designMode);
     /* A total cap that cannot pay for one full attempt would stop at the cap before the 5-pilot test: refuse it now, and say what it needs. */
     if (this.minCapCheck) {
-      const least = minCapUsd({ designCapUsd, pilotCapUsd });
+      const least = minCapUsd({ designCapUsd, pilotCapUsd, mode: designMode, fairnessSet });
       if (capUsd + 1e-9 < least) {
         throw bad(`A full attempt (design, the ${P.SCREEN_PILOTS}-pilot screen and the ${P.TEST_PILOTS}-pilot test) can cost up to ${money(least)} with these caps; set the total cap to at least ${money(least)}`);
       }
@@ -366,13 +417,14 @@ class PipelineService {
       const state = {
         schema: SCHEMA, schemaVersion: SCHEMA_VERSION, id, label, createdAt, updatedAt: createdAt, endedAt: null,
         stage: 'import', message: 'Starting', error: null, waiting: null, source,
-        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, graderEffort: graderEffort(effort), acceptMissing: body.acceptMissing === true, passBar: P.PASS_BAR, screenBar: P.SCREEN_BAR, testBar: P.TEST_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
+        config: { capUsd, pilotCapUsd, designCapUsd, model, effort, graderModel, graderEffort: graderEffort(effort), acceptMissing: body.acceptMissing === true, designMode, keepAsWorld, fairnessSet, passBar: P.PASS_BAR, screenBar: P.SCREEN_BAR, testBar: P.TEST_BAR, screenPilots: P.SCREEN_PILOTS, testPilots: P.TEST_PILOTS, testNeed: P.TEST_NEED, maxRedesigns: P.MAX_REDESIGNS },
         acknowledgements: P.ACKNOWLEDGEMENTS.slice(),
+        references: references.state,
         loader: null, spentUsd: 0, ledger: [], import: null, classification: null, attempt: 0, redesigns: 0, design: null, attempts: [], result: null,
       };
       this._makeWorkspace(id);
       this._save(state);
-      const ctl = { stop: false, url, realDir, linkId: null, runner: null, roundId: null, answers: new Map(), done: null, texts: null, packet: null, manifest: null, feedback: '', sections: [] };
+      const ctl = { stop: false, url, realDir, referencesDir: references.dir, linkId: null, runner: null, roundId: null, answers: new Map(), finals: new Map(), done: null, texts: null, packet: null, manifest: null, feedback: '', sections: [] };
       entry = { state, ctl };
       this.pipelines.set(id, entry);
       ctl.done = this._run(state, ctl).catch(() => {});
@@ -381,6 +433,56 @@ class PipelineService {
       throw error;
     }
     return { id };
+  }
+
+  /* keepAsWorld: the owner's list of file names to treat as world files although their names look like answers. Only for designMode 'new'. */
+  _checkKeepAsWorld(value, designMode) {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value) || value.length > 50) throw bad('keepAsWorld must be a list of at most 50 file names');
+    const names = [];
+    for (const item of value) {
+      if (typeof item !== 'string' || nameProblem(item, 6)) throw bad('keepAsWorld holds a name that is not a plain relative file name');
+      if (!names.includes(item)) names.push(item);
+    }
+    if (names.length && designMode !== 'new') throw bad('keepAsWorld is for designMode new');
+    return names;
+  }
+
+  /* referencesDir: the folder of the reference documents (designer v2). Not given: <root>/private/references when it exists. false: none. The
+     folder is checked now (references.cjs: at most 20 files and 8 MB, regular files only, no links, only the extensions the designer can read), so a
+     bad folder refuses the start. Resolves { dir, state }: state is what the view shows (names and sizes, never a word of content). */
+  _checkReferences(value, designMode) {
+    const none = { dir: null, state: { source: 'none', found: 0, names: [], bytes: 0, copied: false, files: [], unscanned: [], partial: [], scannedChars: 0, truncated: false } };
+    if (designMode !== 'new') {
+      if (value !== undefined && value !== null && value !== '' && value !== false) throw bad('referencesDir is for designMode new');
+      return none;
+    }
+    if (value === false) return none;
+    let dir;
+    let source;
+    if (value === undefined || value === null || value === '') {
+      dir = path.join(this.root, 'private', 'references');
+      let exists = false;
+      try { exists = fs.lstatSync(dir).isDirectory(); } catch { exists = false; }
+      if (!exists) return none;
+      source = 'default';
+    } else {
+      if (typeof value !== 'string' || value.includes('\0') || !value.trim()) throw bad('referencesDir must be the path of a folder');
+      dir = path.resolve(this.root, value.trim());
+      source = 'folder';
+      for (const own of [path.join(this.tmpRoot, 'finance-studio-pilots'), this.workRoot]) {
+        let ownReal = own;
+        try { ownReal = fs.realpathSync(own); } catch { /* not created yet */ }
+        if (within(dir, ownReal) || within(ownReal, dir)) throw bad('That folder holds working folders of the Studio. Choose the folder the reference documents are in');
+      }
+    }
+    const scan = scanReferences(dir);
+    if (scan.problems.length) throw bad(`${scan.problems[0]}${scan.problems.length > 1 ? ` (and ${scan.problems.length - 1} more problem${scan.problems.length === 2 ? '' : 's'})` : ''}. Nothing was started`);
+    if (!scan.files.length) {
+      if (source === 'default') return none;
+      throw bad('The reference folder holds no usable files. Nothing was started');
+    }
+    return { dir, state: { source, found: scan.files.length, names: scan.files.map(file => file.name), bytes: scan.bytes, copied: false, files: [], unscanned: [], partial: [], scannedChars: 0, truncated: false } };
   }
 
   _newId() {
@@ -507,7 +609,7 @@ class PipelineService {
   }
 
   _exportState(p) {
-    return { label: p.label, stage: p.stage, message: p.message, attempts: p.attempts, redesigns: p.redesigns, spentUsd: p.spentUsd, config: p.config, designAttempt: p.design ? p.design.attempt : null };
+    return { label: p.label, stage: p.stage, message: p.message, attempts: p.attempts, redesigns: p.redesigns, spentUsd: p.spentUsd, config: p.config, designAttempt: p.design ? p.design.attempt : null, manifest: p.design && p.design.packet ? p.design.packet.files : [] };
   }
 
   /* What became of the design that is exported (p.design.attempt, which is not always the last attempt: later ones may have been rejected). */
@@ -522,15 +624,35 @@ class PipelineService {
 
   /* -------------------------------------------------------------- views */
 
-  _designTexts(p) {
-    if (!p.design) return null;
-    const outDir = path.join(this._attemptDir(p.id, p.design.attempt), 'out');
+  _designTexts(p, n) {
+    if (!p.design && n === undefined) return null;
+    const outDir = path.join(this._attemptDir(p.id, n === undefined ? p.design.attempt : n), 'out');
     const read = name => { try { return fs.readFileSync(path.join(outDir, name), 'utf8').replace(/\s+$/, ''); } catch { return ''; } };
     return { prompt: read('prompt.txt'), guideline: read('guideline.md'), goldenAnswer: read('golden-answer.md') };
   }
 
+  /* The design while its checks run (designer v2, before it is accepted): what the designer delivered, shown as a design with checking: true. Nothing of the pilots'
+     (the packet, the gold, the fingerprints) exists yet. Same fields as an accepted design. */
+  _previewView(p) {
+    const preview = p.preview;
+    const texts = this._designTexts(p, preview.attempt);
+    const attempt = p.attempts.find(item => item.n === preview.attempt);
+    return {
+      attempt: preview.attempt, checking: !isTerminal(p.stage),
+      traps: clone(preview.traps), gold: null, fingerprints: [],
+      newFiles: clone(preview.newFiles), editedFiles: clone(preview.editedFiles),
+      packet: null, audit: attempt && attempt.audit ? clone(attempt.audit) : null, notes: preview.notes.slice(), repaired: preview.repaired === true,
+      calibration: attempt && attempt.calibration ? clone(attempt.calibration) : null, fairness: attempt && attempt.fairness ? clone(attempt.fairness) : null, guidelineDiff: null, rubricChanges: [],
+      unscanned: clone(preview.unscanned || []),
+      taskType: preview.taskType ? clone(preview.taskType) : null, brief: preview.brief ? clone(preview.brief) : null, alternatives: clone(preview.alternatives || []),
+      answerSet: attempt && attempt.answerSet ? clone(attempt.answerSet) : null, freeze: attempt && Array.isArray(attempt.freeze) ? clone(attempt.freeze) : [],
+      prompt: texts.prompt, guideline: texts.guideline, goldenAnswer: texts.goldenAnswer,
+    };
+  }
+
   _view(p) {
     const texts = this._designTexts(p);
+    const designAttempt = p.design ? p.attempts.find(item => item.n === p.design.attempt) : null;
     const design = p.design ? {
       attempt: p.design.attempt,
       traps: clone(p.design.traps),
@@ -548,10 +670,16 @@ class PipelineService {
       rubricChanges: clone(p.design.rubricChanges),
       /* New or edited files whose content could not be read as text, so they were not checked for passages of the withheld material: [{ name, kind: 'new'|'edited' }] */
       unscanned: Array.isArray(p.design.unscanned) ? clone(p.design.unscanned) : [],
+      /* Designer v2 ('new' mode): what the design is built on, the answers that must grade, and the freeze of what was tested. Null / empty for 'harden'. */
+      taskType: p.design.taskType ? clone(p.design.taskType) : null,
+      brief: p.design.brief ? clone(p.design.brief) : null,
+      alternatives: Array.isArray(p.design.alternatives) ? clone(p.design.alternatives) : [],
+      answerSet: designAttempt && designAttempt.answerSet ? clone(designAttempt.answerSet) : null,
+      freeze: designAttempt && Array.isArray(designAttempt.freeze) ? clone(designAttempt.freeze) : [],
       prompt: texts.prompt,
       guideline: texts.guideline,
       goldenAnswer: texts.goldenAnswer,
-    } : null;
+    } : p.preview ? this._previewView(p) : null;
     /* A reference to the prompt, the guideline or the golden answer: names only, {section, number} or {file}. */
     const ref = item => (item ? (item.kind === 'section' ? { kind: 'section', section: item.name, number: item.index + 1 } : { kind: 'file', file: item.name }) : null);
     const c = p.classification;
@@ -562,6 +690,7 @@ class PipelineService {
       config: p.config, capUsd: p.config.capUsd, pilotCapUsd: p.config.pilotCapUsd, model: p.config.model, effort: p.config.effort,
       acknowledgements: p.acknowledgements, spentUsd: p.spentUsd, remainingUsd: round6(Math.max(0, p.config.capUsd - p.spentUsd)), ledger: p.ledger,
       loader: p.loader, import: p.import, classification, attempt: p.attempt, redesigns: p.redesigns, design, attempts: p.attempts, result: p.result,
+      references: p.references ? clone(p.references) : null,
     });
   }
 
@@ -571,6 +700,7 @@ class PipelineService {
     try {
       await this._import(p, ctl);
       await this._classify(p, ctl);
+      await this._prepareReferences(p, ctl);
       for (;;) {
         let rejection = null;
         try {
@@ -592,12 +722,14 @@ class PipelineService {
           this._prepareRejectionFeedback(p, ctl, attempt, rejection);
           continue;
         }
-        const screen = await this._pilotStage(p, ctl, 'screen');
+        const screen = await this._runStage(p, ctl, attempt, 'screen');
         if (screen.passed) {
-          const test = await this._pilotStage(p, ctl, 'test');
+          const test = await this._runStage(p, ctl, attempt, 'test');
           if (test.passed) {
+            /* A pass needs the attempt's mandatory checks to have finished: nothing else can make a design count. */
+            if (p.config.designMode === 'new' && attempt.validation !== 'complete') throw new BudgetStop('The checks of this design had not finished, so nothing here counts as a pass.', { incomplete: true });
             attempt.outcome = 'passed';
-            return this._finish(p, 'done', `The test passed: ${test.belowBar} of ${test.of} pilots scored below ${test.bar.toFixed(2)}${this._stoppedNote(test)} (design attempt ${attempt.n}). Export the private zip to take the design away.`, 'success');
+            return this._finish(p, 'done', `The test passed: ${this._belowText(p, test)}${this._stoppedNote(test)} (design attempt ${attempt.n}). Export the private zip to take the design away.`, 'success');
           }
           attempt.outcome = 'test-failed';
         } else {
@@ -605,7 +737,7 @@ class PipelineService {
         }
         const failed = attempt.outcome === 'screen-failed' ? attempt.screen : attempt.test;
         if (p.redesigns >= P.MAX_REDESIGNS) {
-          return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the ${failed.name} of attempt ${attempt.n} did not pass (${failed.belowBar} of ${failed.of} pilots scored below ${failed.bar.toFixed(2)}; the rule needs ${failed.need}${this._stoppedNote(failed)}). The last design is kept for you to look at.`, 'failed');
+          return this._finish(p, 'failed', `Stopped after ${P.MAX_REDESIGNS} redesigns: the ${failed.name} of attempt ${attempt.n} did not pass (${this._belowText(p, failed)}; the rule needs ${failed.need}${this._stoppedNote(failed)}). The last design is kept for you to look at.`, 'failed');
         }
         p.redesigns++;
         this._setStage(p, 'redesign', `The ${failed.name} did not pass. Preparing feedback for redesign ${p.redesigns} of ${P.MAX_REDESIGNS}.`);
@@ -626,6 +758,13 @@ class PipelineService {
     p.waiting = null;
     p.endedAt = this.now();
     p.result = { verdict, message };
+    if (p.config.designMode === 'new') {
+      /* Designer v2: a result is complete only when the newest attempt's mandatory checks finished (or failed). A budget stop or a Stop in the middle of them,
+         or in a repair of the guideline whose result was not counted, is incomplete. */
+      const last = p.attempts[p.attempts.length - 1];
+      const unfinished = closeAttempt(last);
+      p.result.validation = verdict === 'incomplete' || unfinished ? 'incomplete' : 'complete';
+    }
     this._removeWorkspace(p.id);
     this._setStage(p, stage, message, quotes);
   }
@@ -639,7 +778,8 @@ class PipelineService {
     if (error instanceof BudgetStop) {
       const attempt = p.attempts[p.attempts.length - 1];
       if (attempt && attempt.outcome === 'in-progress') attempt.outcome = 'budget';
-      return this._finish(p, 'budget', error.message, 'budget');
+      const incomplete = error.incomplete === true;
+      return this._finish(p, 'budget', error.message, incomplete ? 'incomplete' : 'budget');
     }
     let message;
     if (error instanceof SafetyError) {
@@ -700,6 +840,12 @@ class PipelineService {
       page: intake.page,
       skipped: intake.skipped,
       notes: Array.isArray(intake.notes) ? intake.notes : [],
+      /* The owner's keepAsWorld list as the Check the files card shows it: each name, whether the task has it, and why its name looks like an answer or a rubric (the warning). */
+      keepAsWorld: (p.config.keepAsWorld || []).map(name => {
+        const file = intake.files.find(item => item.name === name);
+        const found = file ? (withheldReason(name) ? { why: withheldReason(name) } : labelFinding(file)) : null;
+        return { name, present: Boolean(file), warning: !file ? 'the task has no file by this name' : found ? `its name looks like an answer or grading material (${oneLine(found.why, 200)}), and it goes to the designer and the pilots as a world file` : '' };
+      }),
       files: intake.files,
     };
     p.waiting = null;
@@ -770,35 +916,47 @@ class PipelineService {
   async _classify(p, ctl) {
     this._setStage(p, 'classify', 'Classifying what was captured');
     this._checkStop(ctl);
+    /* Designer v2: the reviews are isolated runs and refuse an environment that names a private folder. The environment they would get is looked at once, here,
+       before anything is paid for, so that the refusal does not come at the first review, after the designer was. (A shell's PWD, OLDPWD and INIT_CWD are not
+       given to a run, and a folder whose name only starts like a private folder is not one.) */
+    if (p.config.designMode === 'new') {
+      const named = startEnvironmentProblems(this.rt, null, this._forbiddenText(ctl));
+      if (named.length) {
+        throw new Failure(`The environment this pipeline was started from names a private folder (${named.slice(0, 3).join(', ')}), and the reviews refuse to run with that. Nothing was started. Start the companion again from a shell where ${named.length === 1 ? 'that variable is' : 'those variables are'} not set.`);
+      }
+    }
     this._reserve(p, 'the classifier', P.CAPS.classifyUsd);
     const files = p.import.files;
     const sections = ctl.sections;
     const folder = path.join(this._priv(p.id), 'runs', 'classify');
     fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
     this._checkStop(ctl);
+    const newMode = p.config.designMode === 'new';
     const run = await runToolLess({
-      rt: this.rt, folder, prompt: buildClassifierPrompt({ sections, files }), model: p.config.model, effort: p.config.effort, capUsd: P.CAPS.classifyUsd,
+      rt: this.rt, folder, prompt: buildClassifierPrompt({ sections, files, optionalRefs: newMode }), model: p.config.model, effort: p.config.effort, capUsd: P.CAPS.classifyUsd,
       onRunner: this._track(ctl),
     });
     this._spend(p, 'classify', 'classify', 'classifier', run.costUsd, P.CAPS.classifyUsd, !run.summary.spawnError);
     if (run.summary.state === 'cancelled' || ctl.stop) throw new StopSignal('stopped');
     const usable = run.summary.state === 'completed' && run.toolCalls === 0;
-    const settled = classify({ answer: usable ? run.summary.result.text : null, sections, files });
+    const settled = classify({ answer: usable ? run.summary.result.text : null, sections, files, optionalRefs: newMode, keepAsWorld: p.config.keepAsWorld || [] });
     if (!usable && run.toolCalls > 0) settled.notes.push('The classifier tried to use a tool, so its answer was discarded.');
     if (settled.problems.length) {
       throw new Failure(`Could not tell which part of the page is ${settled.problems.join(' and ')}. Name them in the page text or the file names, or load the task by hand.`);
     }
     delete settled.problems;
-    /* A file that looks like the golden answer, when none was named: stop rather than guess. */
-    if (!settled.goldenAnswer && settled.goldenSuspects.length) {
+    /* A file that looks like the golden answer, when none was named: stop rather than guess. (A new task has no golden answer to name: such a file is withheld, and
+       the owner's keepAsWorld is the only way to hand it on.) */
+    if (!newMode && !settled.goldenAnswer && settled.goldenSuspects.length) {
       p.classification = settled;
       this._save(p);
       throw new Failure(`The page has a file that looks like the golden answer (${settled.goldenSuspects.slice(0, 3).map(name => oneLine(name, 80)).join(', ')}) but none was identified as the golden answer. Nothing was started. Check the page text and the file labels, then start again.`);
     }
     const byName = new Map(files.map(file => [file.name, file]));
-    const withhold = (name, why) => {
+    /* soft: the file is withheld and the owner is told, but the start does not stop for it (see the scan below) */
+    const withhold = (name, why, soft = false) => {
       if (!settled.withheld.some(item => item.name === name)) settled.withheld.push({ name, why });
-      if (!settled.warnings.some(item => item.name === name)) settled.warnings.push({ name, why });
+      if (!settled.warnings.some(item => item.name === name)) settled.warnings.push(soft ? { name, why, soft: true } : { name, why });
     };
     /* A packet file that is byte for byte a withheld file is withheld too, whatever its name. */
     const withheldHashes = new Set(settled.withheld.map(item => byName.get(item.name)).filter(Boolean).map(file => file.sha256));
@@ -809,11 +967,43 @@ class PipelineService {
     });
     settled.worldFiles = identical(settled.worldFiles);
     settled.taskFiles = identical(settled.taskFiles);
+    /* Designer v2: a reference document is for the designer alone, so a world or task file that is byte for byte one of them is withheld too, with a warning, before
+       anything is paid for (a copy of a reference is refused as a pilot file later, and a late stop would be the result of a file the owner chose). A file the owner
+       kept by name stays a world file: its hash is then left out of the reference hashes (see _withheldSets). */
+    ctl.keptRefHashes = new Set();
+    if (newMode && ctl.referencesDir) {
+      const refScan = scanReferences(ctl.referencesDir);
+      const refHashes = new Set();
+      for (const file of refScan.problems.length ? [] : refScan.files) { try { if (file.bytes > 0) refHashes.add(hashFile(file.abs)); } catch { /* a file that cannot be read is found again when the references are copied */ } }
+      const keptNames = new Set(p.config.keepAsWorld || []);
+      const sameAsReference = list => list.filter(name => {
+        const file = byName.get(name);
+        if (!file || !(file.bytes > 0) || !refHashes.has(file.sha256)) return true;
+        if (keptNames.has(name)) { ctl.keptRefHashes.add(file.sha256); return true; }
+        withhold(name, 'it is byte for byte the same as a reference document');
+        return false;
+      });
+      settled.worldFiles = sameAsReference(settled.worldFiles);
+      settled.taskFiles = sameAsReference(settled.taskFiles);
+    }
     ctl.texts = await this._loadOriginalTexts(p, ctl, settled);
+    /* A new task: every file that was withheld (answer-like, rubric-like, guideline-like) is evaluator material whatever its role, so a long passage of its
+       text is a leak too. */
+    ctl.withheldWindows = [];
+    if (newMode) {
+      for (const item of settled.withheld) {
+        this._checkStop(ctl);
+        /* whatever kind of file it is, if it has text (RTF, a notice saved as .eml, a file with no extension, as well as plain text and Office files) */
+        const text = await extractText(this._originalFile(p, item.name), { maxChars: 1024 * 1024 });
+        if (text) ctl.withheldWindows.push(...leakWindows(text));
+      }
+    }
     /* ...and so is a file that holds a passage of the guideline or the golden answer, found in the file itself: plain text, and the text of a
        word-processing, spreadsheet or slide file. What the other files say is kept to tell, later, what the original task already states. */
-    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || '')];
-    const original = { numbers: new Set(), corpus: '', guidelineLength: ctl.texts.guideline ? ctl.texts.guideline.length : null, guidelineText: ctl.texts.guideline || null };
+    const windows = new WindowSet([...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...ctl.withheldWindows]);
+    ctl.leakSet = windows;
+    /* A new task is not held to the length of an old guideline, and is not shown a diff against it. */
+    const original = { numbers: new Set(), corpus: '', guidelineLength: !newMode && ctl.texts.guideline ? ctl.texts.guideline.length : null, guidelineText: !newMode ? ctl.texts.guideline || null : null };
     const addText = text => {
       for (const number of numbersIn(text)) if (number.replace(/[^0-9]/g, '').length >= 3) original.numbers.add(number);
       if (original.corpus.length < MAX_CORPUS_CHARS) original.corpus += ' ' + squash(text);
@@ -829,14 +1019,29 @@ class PipelineService {
         let leak = null;
         let text = null;
         if (TEXT_EXTENSIONS.has(ext)) {
+          /* streamed, whatever its size and encoding (UTF-8, UTF-16 with a mark); a file with a NUL byte that is no UTF-16 text is never said to be clean */
           leak = await textHoldsWindows(abs, windows, () => ctl.stop);
           text = await extractText(abs, { maxChars: 1024 * 1024 });
-        } else if (ZIP_EXTENSIONS.has(ext)) {
+        } else {
+          /* Word, Excel and slide files, RTF, a notice saved as .eml or .text, a file with no extension: by their text. A PDF, a picture or an old binary file has none. */
           text = await extractText(abs, { maxChars: 4 * 1024 * 1024 });
           leak = text === null ? null : containsLeak(text, windows);
         }
         if (leak === null && text === null) settled.unscanned.push(name);
-        if (leak === true) { withhold(name, 'it holds a long passage of the guideline or the golden answer'); continue; }
+        if (leak === true) {
+          /* A new task: its packet is built from the world files of a task that has its own guideline and golden answer, and a governing document often quotes the
+             very sentence that the old guideline asks for. The new task has its own, so such a file is withheld with a warning and the start goes on (the owner can
+             hand the file on by naming it in keepAsWorld). The old mode stops, as before. */
+          const why = 'it holds a long passage of the guideline or the golden answer';
+          if (newMode && new Set(p.config.keepAsWorld || []).has(name)) {
+            if (!settled.keptAsWorld.some(item => item.name === name)) settled.keptAsWorld.push({ name, why });
+            if (text !== null) addText(text);
+            survivors[kind].push(name);
+            continue;
+          }
+          withhold(name, why, newMode);
+          continue;
+        }
         if (text !== null) addText(text);
         survivors[kind].push(name);
       }
@@ -845,7 +1050,18 @@ class PipelineService {
     settled.worldFiles = survivors.worldFiles;
     settled.taskFiles = survivors.taskFiles;
     ctl.original = original;
+    ctl.keptNames = new Set((settled.keptAsWorld || []).map(item => item.name));
     const packetNames = [...settled.worldFiles, ...settled.taskFiles];
+    /* Designer v2: the reviewers have to be able to read the packet. The blind reviewer opens text, PDFs and pictures, and is given a text rendering of Word, Excel,
+       slide and RTF files; the other reviews read the text the harness extracts. A file nobody can read (an old binary Office file, an archive, an unknown
+       binary) would make the reviews blind to it, so the start stops, before anything is paid for, unless the owner accepts that (acceptMissing). */
+    settled.unreadable = [];
+    if (newMode) {
+      for (const name of packetNames) {
+        this._checkStop(ctl);
+        if (await readerKindOfFile(this._originalFile(p, name), name) === 'unreadable') settled.unreadable.push(name);
+      }
+    }
     p.classification = settled;
     p.import.facts = { world: settled.worldFiles.length, task: settled.taskFiles.length, withheld: settled.withheld.length, other: settled.other.length };
     this._save(p);
@@ -857,10 +1073,15 @@ class PipelineService {
     if (ctl.packet.size > C.LIMITS.files) throw new Failure(`The pilot packet would hold ${ctl.packet.size} files; the limit is ${C.LIMITS.files}. Take files out of the task, then start again.`);
     if (bytes > C.LIMITS.bytes) throw new Failure(`The pilot packet would be ${Math.ceil(bytes / 1048576)} MB; the limit is ${Math.round(C.LIMITS.bytes / 1048576)} MB. Take files out of the task, then start again.`);
     if (deepest > C.LIMITS.depth) throw new Failure(`A file of the pilot packet is nested ${deepest} levels deep; the limit is ${C.LIMITS.depth}. Flatten the task, then start again.`);
+    if (settled.unreadable.length && !p.config.acceptMissing) {
+      const names = settled.unreadable.slice(0, 5).map(name => oneLine(name, 80)).join(', ');
+      throw new Failure(`${settled.unreadable.length} file${settled.unreadable.length === 1 ? '' : 's'} of the pilot packet cannot be read by the reviewers (no text can be taken from ${settled.unreadable.length === 1 ? 'it' : 'them'}): ${names}${settled.unreadable.length > 5 ? `, and ${settled.unreadable.length - 5} more` : ''}. Convert ${settled.unreadable.length === 1 ? 'it' : 'them'} to text, CSV, Word, Excel, slides, RTF, PDF or a picture, or take ${settled.unreadable.length === 1 ? 'it' : 'them'} out of the task, then start again; or start with "Start even if a world or task file has to be withheld" ticked, and the blind review will say which files it could not read.`);
+    }
     /* A file the classifier called a world or task file that the pilots would not get: stop unless the owner said that is fine. */
-    if (settled.warnings.length && !p.config.acceptMissing) {
-      const names = settled.warnings.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
-      throw new Failure(`${settled.warnings.length} file${settled.warnings.length === 1 ? '' : 's'} the classifier called world or task files ${settled.warnings.length === 1 ? 'is' : 'are'} withheld, so the pilots would not get ${settled.warnings.length === 1 ? 'it' : 'them'}: ${names}${settled.warnings.length > 5 ? `, and ${settled.warnings.length - 5} more` : ''}. If the pilots can do without ${settled.warnings.length === 1 ? 'it' : 'them'}, start again with acceptMissing.`);
+    const hard = settled.warnings.filter(item => !item.soft);
+    if (hard.length && !p.config.acceptMissing) {
+      const names = hard.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
+      throw new Failure(`${hard.length} file${hard.length === 1 ? '' : 's'} the classifier called world or task files ${hard.length === 1 ? 'is' : 'are'} withheld, so the pilots would not get ${hard.length === 1 ? 'it' : 'them'}: ${names}${hard.length > 5 ? `, and ${hard.length - 5} more` : ''}. If the pilots can do without ${hard.length === 1 ? 'it' : 'them'}, start again with acceptMissing.${newMode ? ' If a file is real evidence although its name looks like an answer, list it in keepAsWorld.' : ''}`);
     }
   }
 
@@ -873,6 +1094,7 @@ class PipelineService {
       if (ref.kind === 'section') { out[role] = ctl.sections[ref.index].text; continue; }
       const text = readTextFile(this._originalFile(p, ref.name), P.INTAKE.textBytes);
       if (text === null) {
+        if (role === 'prompt' && p.config.designMode === 'new') continue; /* a new task needs no prompt of the old one */
         if (role === 'prompt') throw new Failure('The business prompt is a file that is not text, so it cannot be used. Put the prompt on the page or in a text file.');
         out.binary[role] = ref.name;
         out[`${role === 'goldenAnswer' ? 'golden' : role}Extracted`] = await extractText(this._originalFile(p, ref.name), { maxChars: 1024 * 1024 });
@@ -880,7 +1102,7 @@ class PipelineService {
         out[role] = text;
       }
     }
-    if (!out.prompt.trim()) throw new Failure('The business prompt is empty.');
+    if (!out.prompt.trim() && p.config.designMode !== 'new') throw new Failure('The business prompt is empty.');
     return out;
   }
 
@@ -897,10 +1119,17 @@ class PipelineService {
     for (const text of [ctl.texts.guideline, ctl.texts.goldenAnswer]) {
       if (text) { hashes.add(sha256Hex(text)); hashes.add(sha256Hex(text + '\n')); }
     }
+    /* Designer v2: a reference document is for the designer alone, so a byte for byte copy of one (a PDF has no text to look for) is refused as a pilot file. */
+    for (const file of (p.references && Array.isArray(p.references.files) ? p.references.files : [])) if (file && file.sha256 && file.bytes > 0 && !(ctl.keptRefHashes && ctl.keptRefHashes.has(file.sha256))) hashes.add(file.sha256);
     for (const attempt of p.attempts) {
-      for (const name of ['guideline.md', 'golden-answer.md', 'traps.json']) {
+      for (const name of ['guideline.md', 'golden-answer.md', 'traps.json', 'brief.json', 'answers.json']) {
         try { hashes.add(hashFile(path.join(this._attemptDir(p.id, attempt.n), 'out', name))); } catch { /* the attempt wrote no such file */ }
       }
+      /* the answers of the permitted alternatives and the diagnostic answers (designer v2) */
+      try {
+        const answers = path.join(this._attemptDir(p.id, attempt.n), 'out', 'answers');
+        for (const file of fs.readdirSync(answers)) { try { hashes.add(hashFile(path.join(answers, file))); } catch { /* not a file */ } }
+      } catch { /* the attempt wrote no answers */ }
     }
     return { hashes, names };
   }
@@ -910,6 +1139,7 @@ class PipelineService {
   /* One attempt at a design. Resolves when the design is accepted (p.design is the new design and the pilot packet is built) and throws
      AttemptRejected when it is not: a designer that could not deliver even after a repair turn, or a design that failed a check. */
   async _design(p, ctl) {
+    if (p.config.designMode === 'new') return this._designNew(p, ctl);
     const n = p.attempt + 1;
     const total = P.MAX_REDESIGNS + 1;
     this._setStage(p, 'design', `Designing the traps (attempt ${n} of ${total})`);
@@ -1102,14 +1332,23 @@ class PipelineService {
       if (ctl.stop) throw new StopSignal('stopped');
       await copyHashed(this._originalFile(p, name), path.join(designer, 'task', ...name.split('/')), { shouldStop: stop });
     }
-    put('prompt.txt', ctl.texts.prompt);
-    for (const [role, rel, label] of [['guideline', 'guideline.md', 'grader guideline'], ['goldenAnswer', 'golden-answer.md', 'golden answer']]) {
-      const binary = ctl.texts.binary[role];
-      if (binary) {
-        await copyHashed(this._originalFile(p, binary), path.join(designer, `${role}-original`, ...binary.split('/')), { shouldStop: stop });
-        put(rel, `The ${label} is the file ${role}-original/${binary}. It is not plain text: open it with a tool (for example a script) to read it.\n`);
-      } else {
-        put(rel, ctl.texts[role] || `(The page has no ${label}.)\n`);
+    /* A new task starts from the world files: the designer gets no prompt, guideline or golden answer of a task that was made before. */
+    if (p.config.designMode !== 'new') {
+      put('prompt.txt', ctl.texts.prompt);
+      for (const [role, rel, label] of [['guideline', 'guideline.md', 'grader guideline'], ['goldenAnswer', 'golden-answer.md', 'golden answer']]) {
+        const binary = ctl.texts.binary[role];
+        if (binary) {
+          await copyHashed(this._originalFile(p, binary), path.join(designer, `${role}-original`, ...binary.split('/')), { shouldStop: stop });
+          put(rel, `The ${label} is the file ${role}-original/${binary}. It is not plain text: open it with a tool (for example a script) to read it.\n`);
+        } else {
+          put(rel, ctl.texts[role] || `(The page has no ${label}.)\n`);
+        }
+      }
+    } else if (p.references && p.references.copied && ctl.referenceDir) {
+      /* The reference documents, copied from the pipeline's private copy and checked against the hash taken when it was made. */
+      for (const file of p.references.files) {
+        if (ctl.stop) throw new StopSignal('stopped');
+        await copyHashed(path.join(ctl.referenceDir, ...file.name.split('/')), path.join(designer, 'reference', ...file.name.split('/')), { expected: file.sha256, shouldStop: stop });
       }
     }
     put('ideas.txt', catalogText());
@@ -1133,11 +1372,29 @@ class PipelineService {
     const history = p.attempts.filter(item => item.n !== attempt.n).map(item => ({ n: item.n, outcome: this._outcomeLine(item) }));
     ctl.feedback = feedbackText({
       attempt: attempt.n,
-      stage: { name: failed.name, rule: failed.rule, bar: failed.bar, belowBar: failed.belowBar, pilotsWanted: failed.of, pilots, stoppedEarly: failed.stoppedEarly },
+      stage: { name: failed.name, rule: failed.rule, bar: failed.bar, belowBar: failed.belowBar, pilotsWanted: failed.of, pilots, stoppedEarly: failed.stoppedEarly, unexplained: failed.unexplained || [] },
       history,
       traps: p.design.traps,
     });
     try { writeTextAtomic(path.join(this._attemptDir(p.id, attempt.n), 'feedback.md'), ctl.feedback); } catch { /* the copy in memory is what the designer gets */ }
+  }
+
+  /* One stage: the pilots, and for a new task the guideline-only repair when evaluator material was at fault. */
+  async _runStage(p, ctl, attempt, kind) {
+    const newMode = p.config.designMode === 'new';
+    if (newMode) { attempt.difficulty[kind] = { status: 'running' }; this._save(p); }
+    let stage = await this._pilotStage(p, ctl, kind);
+    if (newMode && !stage.passed) stage = await this._evaluatorRepair(p, ctl, attempt, stage, kind);
+    if (newMode) this._setDifficulty(attempt, kind, stage);
+    return stage;
+  }
+
+  /* "4 of 5 pilots scored below 0.45", and for a new task how many of those had the low score explained. */
+  _belowText(p, stage) {
+    const base = `${stage.belowBar} of ${stage.of} pilots scored below ${stage.bar.toFixed(2)}`;
+    if (p.config.designMode !== 'new') return base;
+    if (stage.explained === stage.belowBar) return stage.belowBar === 0 ? base : `${base}, every low score explained`;
+    return `${base}, ${stage.explained} of them with the low score explained`;
   }
 
   /* "; 1 pilot stopped early: the result was decided after pilot 1 scored 0.52", or nothing when every pilot ran to the end. */
@@ -1167,21 +1424,21 @@ class PipelineService {
     const result = {
       name: kind,
       rule: screen ? `both of the ${wanted} pilots score below ${bar.toFixed(2)}` : `at least ${need} of the ${wanted} pilots score below ${bar.toFixed(2)}`,
-      bar, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, passed: null, stoppedEarly: null, replacementRound: false, replacementSkipped: false, startedAt: this.now(), endedAt: null,
+      bar, need, of: wanted, roundIds: [], pilots: [], counted: 0, belowBar: 0, explained: 0, passed: null, stoppedEarly: null, replacementRound: false, replacementSkipped: false, startedAt: this.now(), endedAt: null,
     };
     await this._pilotsAndGrades(p, ctl, kind, result, wanted, false);
     /* A pilot that was stopped because the result was decided is not missing. */
     const missing = result.pilots.filter(pilot => !pilot.valid && !pilot.stoppedEarly).length;
     if (missing > 0 && !result.stoppedEarly) {
       /* A replacement round runs once per stage, and only when it could change the decision. */
-      if (result.belowBar >= need || result.belowBar + missing < need) {
+      if (result.explained >= need || result.explained + missing < need) {
         result.replacementSkipped = true;
       } else {
         result.replacementRound = true;
         await this._pilotsAndGrades(p, ctl, kind, result, missing, true);
       }
     }
-    result.passed = result.belowBar >= need;
+    result.passed = result.explained >= need;
     result.endedAt = this.now();
     this._save(p);
     return result;
@@ -1201,7 +1458,9 @@ class PipelineService {
     const band = this.bands[kind];
     const what = `the ${replacement ? 'replacement round of the ' : ''}${kind}`;
     this._checkStop(ctl);
-    this._reserve(p, what, count * (p.config.pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd));
+    const newMode = p.config.designMode === 'new';
+    /* A pilot costs its cap, its grader calls and, in a new task, one adjudication call (every pilot below its bar gets one). */
+    this._reserve(p, what, count * (p.config.pilotCapUsd + P.GRADE_CALLS_PER_PILOT * P.CAPS.graderUsd + (newMode ? P.CAPS.adjudicationUsd : 0)));
     const attempt = p.attempts[p.attempts.length - 1];
     if (!attempt[kind]) attempt[kind] = result;
     this._setStage(p, kind, replacement ? `Running ${count} replacement pilot${count === 1 ? '' : 's'} for the ${kind}` : `Running ${count} pilot${count === 1 ? '' : 's'} for the ${kind}`);
@@ -1214,6 +1473,7 @@ class PipelineService {
       const record = {
         n: startIndex + k, id: `p${startIndex + k}`, round: roundId, run: k, replacement, state: 'queued', audit: null, costUsd: 0, estimated: false,
         outputs: { count: 0, readable: 0 }, score: null, regrade: null, verdict: null, reason: '', valid: false, belowBar: null, stoppedEarly: false, stoppedReason: '',
+        adjudication: null, countsTowardPass: null, toolFailure: false,
       };
       records.push(record);
       result.pilots.push(record);
@@ -1221,19 +1481,9 @@ class PipelineService {
     result.roundIds.push(roundId);
     this._save(p);
 
-    const tally = () => {
-      const valid = result.pilots.filter(pilot => pilot.valid);
-      const below = valid.filter(pilot => pilot.score < bar).length;
-      result.counted = valid.length;
-      result.belowBar = below;
-      return { below, atOrAbove: valid.length - below };
-    };
-    const decide = () => {
-      const { below, atOrAbove } = tally();
-      if (below >= result.need) return 'passed';
-      if (atOrAbove > result.of - result.need) return 'failed';
-      return null;
-    };
+    /* A low score counts toward the pass when it is explained (a new task: see _adjudicatePilot); in the 'harden' mode every low score counts. A guideline-only
+       repair is still open for the attempt when none was made: a low score whose fault lies with the evaluator material is then not yet a certain loss. */
+    const decide = () => this._tallyStage(result, newMode && !attempt.guidelineRepair).decision;
     const settled = this.agents.whenSettled(roundId);
     let over = false;
     settled.then(() => { over = true; }, () => { over = true; });
@@ -1264,8 +1514,10 @@ class PipelineService {
       if (row.state === 'completed' && row.audit && row.audit.status === 'CLEAN') {
         const collected = await this._collectAnswer(roundId, row.n);
         ctl.answers.set(`${roundId}#${row.n}`, collected.text);
+        ctl.finals.set(`${roundId}#${row.n}`, collected.final || '');
         record.outputs = collected.outputs;
         if (collected.gradable) await this._scorePilot(p, ctl, { stage: gradeStage, record, ref: `${roundId}#${row.n}`, band, bar, grading });
+        if (newMode && record.valid && record.belowBar === true) await this._adjudicatePilot(p, ctl, { stage: gradeStage, record, ref: `${roundId}#${row.n}`, bar });
       }
       decision = decide();
       if (decision && taken.size < records.length) {
@@ -1321,7 +1573,7 @@ class PipelineService {
       delete record.gradable;
       if (decision && !record.valid && !record.stoppedEarly && record.state === 'cancelled') markStopped({ state: record.state }, record);
     }
-    tally();
+    this._tallyStage(result, newMode && !attempt.guidelineRepair);
     this._save(p);
     if (failure) throw failure;
     this._checkStop(ctl);
@@ -1335,9 +1587,9 @@ class PipelineService {
     const texts = this._designTexts(p);
     if (sha256Hex(texts.prompt) !== attempt.promptSha256) throw new SafetyError('The prompt changed after it was checked');
     const sets = this._withheldSets(p, ctl);
-    verifyPacket({ dir: this._packetDir(p.id), manifest: ctl.manifest, withheldHashes: sets.hashes, withheldNames: sets.names });
-    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer)];
-    if (windows.length && windows.some(window => window && this._squashIncludes(texts.prompt, window))) throw new SafetyError('The prompt holds a long passage of the guideline or the golden answer');
+    verifyPacket({ dir: this._packetDir(p.id), manifest: ctl.manifest, withheldHashes: sets.hashes, withheldNames: sets.names, allowNames: ctl.keptNames });
+    const windows = new WindowSet([...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer), ...(ctl.withheldWindows || [])]);
+    if (containsLeak(texts.prompt, windows)) throw new SafetyError('The prompt holds a long passage of the guideline or the golden answer');
 
     let roundId = null;
     try {
@@ -1346,6 +1598,8 @@ class PipelineService {
         task: `Pipeline ${p.id}`,
         sourceDir: this._packetDir(p.id),
         include: ctl.manifest.map(file => file.name),
+        /* the files the owner kept by name (keepAsWorld): the agent service refuses a name that looks like grading material unless it is overridden by name */
+        overrides: ctl.manifest.map(file => file.name).filter(name => ctl.keptNames && ctl.keptNames.has(name)),
         promptText: texts.prompt,
         gafVisible: true, /* the production solver sees the gaf folder, so the pilots do too: the packet is delivered whole */
         config: { model: p.config.model, effort: p.config.effort, count, maxBudgetUsd: p.config.pilotCapUsd },
@@ -1366,10 +1620,6 @@ class PipelineService {
       throw error;
     }
     return roundId;
-  }
-
-  _squashIncludes(text, window) {
-    return String(text).replace(/\s+/gu, ' ').trim().toLowerCase().includes(window);
   }
 
   /* What the simulated grader reads for one clean pilot: its final message and the files it wrote as text (plain text files, and the text
@@ -1394,7 +1644,7 @@ class PipelineService {
     }
     const outputs = { count: listed.length, readable: readable.length };
     const gradable = Boolean(final.trim()) && !(listed.length > 0 && final.length < UNREADABLE_FINAL_CHARS && readable.length === 0);
-    return { text: composeGraderInput({ final, outputs: readable, cap: MAX_ANSWER_FOR_GRADER }), gradable, outputs };
+    return { text: composeGraderInput({ final, outputs: readable, cap: MAX_ANSWER_FOR_GRADER }), final, gradable, outputs };
   }
 
   /* One call of the simulated grader. A call the service refuses or cannot take (400, 409, 413) gives no score and no failure of the
@@ -1422,12 +1672,12 @@ class PipelineService {
      the stage's bar (the two are averaged and both recorded). Sets the record's score, regrade, verdict and reason. A call that could not
      be made leaves the pilot without a score; grading counts the calls and the refused ones, so that a stage in which no call at all
      could be made fails (that is the grader, not one answer). */
-  async _scorePilot(p, ctl, { stage, record, ref, band, bar, grading }) {
+  async _scorePilot(p, ctl, { stage, record, ref, band, bar, grading, gradeRef = ref }) {
     const guideline = this._designTexts(p).guideline + GRADER_FOOTER;
     const answer = capText(ctl.answers.get(ref) || '', MAX_ANSWER_FOR_GRADER);
     const [low, high] = band;
     grading.calls++;
-    const first = await this._pilotGrade(p, ctl, { stage, ref, guideline, answer, call: 1 });
+    const first = await this._pilotGrade(p, ctl, { stage, ref: gradeRef, guideline, answer, call: 1 });
     if (!first.ok) {
       grading.refused++;
       grading.firstError = grading.firstError || first.error;
@@ -1439,7 +1689,7 @@ class PipelineService {
     let score = first.score;
     if (score !== null && score >= low && score <= high) {
       this._checkStop(ctl);
-      const second = await this._pilotGrade(p, ctl, { stage, ref, guideline, answer, call: 2 });
+      const second = await this._pilotGrade(p, ctl, { stage, ref: gradeRef, guideline, answer, call: 2 });
       if (second.ok && second.score !== null) {
         score = round6((first.score + second.score) / 2);
         record.regrade = { first: first.score, second: second.score, average: score };
@@ -1449,6 +1699,8 @@ class PipelineService {
       record.score = score;
       record.valid = true;
       record.belowBar = score < bar;
+      /* A new task counts a low score only once it is explained (the adjudication that follows sets this); a score at or above the bar never counts. */
+      record.countsTowardPass = p.config.designMode === 'new' ? (record.belowBar ? null : false) : record.belowBar;
     }
   }
 
@@ -1479,6 +1731,9 @@ class PipelineService {
     return { ok: true, score: typeof parsed.score === 'number' && Number.isFinite(parsed.score) ? parsed.score : null, verdict: parsed.verdict, reason: capText(parsed.reason || '', MAX_REASON) };
   }
 }
+
+/* Designer v2 ('new' mode): the methods of new-design.cjs are the service's own. */
+Object.assign(PipelineService.prototype, require('./new-design.cjs'));
 
 function createPipelineService(options = {}) {
   return new PipelineService(options);

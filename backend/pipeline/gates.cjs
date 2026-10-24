@@ -111,10 +111,68 @@ function regradeBand(stage, options = {}) {
   return (bandHolds(own, bar) ? own : fallback).slice();
 }
 
+/* ------------------------------------------------------------------ the answer-set test */
+
+/* One fixed answer, graded twice. Both grades at or above the threshold passes, both below fails, and two that straddle it need a third, which
+   the majority follows (the answer is then marked unstable). grades: the numbers so far. Resolves { done, passed, unstable, needThird }. */
+function decideGrades(grades, threshold) {
+  const scores = grades.filter(value => typeof value === 'number' && Number.isFinite(value));
+  if (scores.length < 2) return { done: false, passed: null, unstable: false, needThird: false };
+  const passes = scores.slice(0, 3).map(value => value >= threshold);
+  const straddle = passes.some(value => value !== passes[0]);
+  if (!straddle) return { done: true, passed: passes[0], unstable: false, needThird: false };
+  if (scores.length < 3) return { done: false, passed: null, unstable: true, needThird: true };
+  return { done: true, passed: passes.filter(Boolean).length >= 2, unstable: true, needThird: false };
+}
+
+/* The grades of an answer for the page and the record: the mean of the grades that decided, rounded. */
+function meanScore(grades) {
+  const scores = grades.filter(value => typeof value === 'number' && Number.isFinite(value));
+  return scores.length ? Math.round((scores.reduce((sum, value) => sum + value, 0) / scores.length) * 1e6) / 1e6 : null;
+}
+
+
+/* ------------------------------------------------------------------ explained low scores */
+
+const CLASS_KEY = { intended: 'intended', other_valid_error: 'otherValid', permitted_alternative: 'permittedAlternative', grader_defect: 'graderDefect', ambiguous: 'ambiguous', tool_failure: 'toolFailure', unsupported: 'unsupported' };
+/* The classes that put the fault in the evaluator material (the guideline or the golden answer), not in the packet. */
+const EVALUATOR_FAULT = new Set(['permitted_alternative', 'grader_defect']);
+
+/* The counts by class of the pilots of one stage: every pilot with a usable score below the bar is a low scorer, and the ones whose low score
+   was explained count toward the pass. A pilot without an adjudication (a score at or above the bar, or a design of the 'harden' mode) is in
+   none of the classes. */
+function lowCounts(pilots) {
+  const out = { lowScorers: 0, intended: 0, otherValid: 0, permittedAlternative: 0, graderDefect: 0, ambiguous: 0, toolFailure: 0, unsupported: 0, counted: 0 };
+  for (const pilot of pilots) {
+    if (pilot.belowBar === true) out.lowScorers++;
+    if (pilot.adjudication && CLASS_KEY[pilot.adjudication.class]) out[CLASS_KEY[pilot.adjudication.class]]++;
+    if (pilot.countsTowardPass === true) out.counted++;
+  }
+  return out;
+}
+
+/* Where a stage stands. need / of: the stage's rule. repairOpen: a guideline-only repair is still allowed for this attempt, so a low score
+   whose fault lies with the evaluator material may yet be set right and is not yet a certain loss. Resolves { counted, hard, decision }:
+   passed when `need` pilots count; failed when so many pilots cannot count that `need` is out of reach; else null. A pilot that is missing
+   (no usable score, or a tool failure) is neither. */
+function stageStanding(pilots, { need, of, repairOpen = false }) {
+  const usable = pilots.filter(pilot => pilot.valid);
+  const counted = usable.filter(pilot => pilot.countsTowardPass === true).length;
+  const hard = usable.filter(pilot => pilot.countsTowardPass !== true && !(repairOpen && pilot.adjudication && EVALUATOR_FAULT.has(pilot.adjudication.class))).length;
+  let decision = null;
+  if (counted >= need) decision = 'passed';
+  else if (hard > of - need) decision = 'failed';
+  return { counted, hard, decision };
+}
+
+/* What the simulated grader is told after the guideline, and the longest answer it is given (the agent service's own limit). */
+const GRADER_FOOTER = '\n\nScoring scale for this rehearsal: report "score" as a number from 0 to 1, the share of the points the guidance names that the answer earns (1 means every point is met, 0 means none), and list each point in "items".';
+const MAX_ANSWER_FOR_GRADER = 59000;
+
 /* The grader's effort: the pilots' effort, but at least `medium`. */
 function graderEffort(effort) {
   const order = C.EFFORTS;
   return order.indexOf(effort) >= order.indexOf(P.MIN_GRADER_EFFORT) ? effort : P.MIN_GRADER_EFFORT;
 }
 
-module.exports = { FAIRNESS_PREAMBLE, buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, isBand };
+module.exports = { FAIRNESS_PREAMBLE, buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, isBand, decideGrades, meanScore, lowCounts, stageStanding, EVALUATOR_FAULT, CLASS_KEY, GRADER_FOOTER, MAX_ANSWER_FOR_GRADER };
