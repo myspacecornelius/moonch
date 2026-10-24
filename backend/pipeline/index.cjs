@@ -12,7 +12,8 @@
        tmpRoot  where finance-studio-pipelines/ is created (default os.tmpdir())
        pollMs   how often the loader is asked for its state while a page loads (default 500)
        linkCloseMs   how long, after a cancel, the end of a pipeline waits for the loader to close its browser (default 10000)
-       minCapCheck   false: start() accepts a total cap below the cost of one full attempt (for the tests of the budget stop; default true)
+       minCapCheck   true: start() refuses a total cap below the cost of one full attempt (default false: the cap is the owner's, and a run that
+                     cannot afford its next step ends in 'budget')
        confirmFiles  false: a link import goes straight on to the classifier. Default true: it waits first (stage import, waiting kind
                      'confirm-files') until the owner has checked the file list against the task page and pressed Continue (continue(id)
                      ends this wait itself; the loader is not asked). A folder import never waits.

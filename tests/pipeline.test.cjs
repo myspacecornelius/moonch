@@ -3110,8 +3110,13 @@ test('the least total cap: the parts are exposed, the formula is the sum of the 
   assert.ok(page(C.BUDGET_USD.maxUsd) <= P.MAX_CAP_USD);
 });
 
-test('start refuses a total cap below the cost of one full attempt, says what the least is, and creates nothing; the least itself is accepted', async t => {
-  const w = await makeWorld(t);
+test('by default start accepts a total cap below one full attempt (the run ends at the cap); with minCapCheck it refuses, says what the least is, and creates nothing', async t => {
+  const open = await makeWorld(t);
+  const low = await open.pipeline.start({ sourceDir: open.source, acknowledgements: ACKS, capUsd: 10 });
+  const lowView = await open.pipeline.whenDone(low.id);
+  assert.equal(lowView.config.capUsd, 10, 'accepted as typed');
+  assert.equal(lowView.stage, 'budget', 'the run ends at the cap instead of being refused');
+  const w = await makeWorld(t, { minCapCheck: true });
   const refused = async (extra, least) => {
     await assert.rejects(w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, ...extra }), error => {
       assert.ok(error instanceof AgentError);
@@ -3136,7 +3141,7 @@ test('start refuses a total cap below the cost of one full attempt, says what th
   const c = await w.pipeline.start({ sourceDir: w.source, acknowledgements: ACKS, capUsd: 20.13, pilotCapUsd: 1, designCapUsd: 0.5 });
   assert.equal((await w.pipeline.whenDone(c.id)).config.designCapUsd, 0.5);
   /* the HTTP route answers 400 with the same words */
-  const server = await makeWorld(t, { server: true });
+  const server = await makeWorld(t, { server: true, minCapCheck: true });
   const response = await server.post('/api/pipeline/start', server.body({ capUsd: 10 }));
   assert.equal(response.status, 400);
   assert.match(response.json.error, /^A full attempt \(design, the 2-pilot screen and the 5-pilot test\) can cost up to USD 25\.30 with these caps; set the total cap to at least USD 25\.30$/);
