@@ -1,12 +1,16 @@
 'use strict';
 /* What one full attempt can cost at most, so that a total cap which cannot pay for it is refused before anything starts.
 
-   A full attempt is the classifier, the designer (and its one repair turn), the check of the golden answer (two grader calls at most),
-   the fairness review (two calls at most), and then the 2-pilot screen and the 5-pilot test, each pilot with its own cap and two grader
-   calls at most. Every step is reserved with the headroom on top (service.cjs _reserve), so the minimum is the headroom times the sum.
+   A full attempt of the 'harden' mode is the classifier, the designer (and its one repair turn), the check of the golden answer (two grader calls at
+   most), the fairness review (two calls at most), and then the 2-pilot screen and the 5-pilot test, each pilot with its own cap and two grader calls at most.
+   A full attempt of the 'new' mode (the default) is the classifier, the designer and its repair turn, the blind review and the reveal (each twice at worst),
+   the application checks of the reveal's clause and of every clause of the brief, two repairs for what the reviews find, the answer set (three grades of
+   each fixed answer at worst), and the same pilots with one adjudication call for each. Every step is reserved with the headroom on top (service.cjs
+   _reserve), so the minimum is the headroom times the sum.
 
    minCap (GET /api/pipeline, config.minCap) hands the parts to the page: ceil to the cent of
-     headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)). */
+     headroom x (fixedUsd + pilots x (pilotCapUsd + perPilotUsd)).
+   At the default caps: 'new' 59.80 (63.25 with the optional diagnostic suite), 'harden' 41.40. */
 
 const P = require('./constants.cjs');
 

@@ -46,12 +46,14 @@ function runtimeOf(agents, options) {
 
 /* An isolated run (designer v2: a reviewer, an adjudicator, the blind reader) is checked, before its process exists, against the exclusions of
    isolation.cjs: the options and environment it would get and its working folder. A run that fails one is not started. `isolated` is true or
-   { forbiddenText: [strings that no environment value may hold] }. */
-function requireIsolation(rt, isolated, { args, env, folder }) {
+   { forbiddenText: [strings that no environment value or argument may hold] }. */
+function requireIsolation(rt, isolated, { args, env, folder, tools }) {
   if (!isolated) return;
   const problems = isolationProblems({
     args, env, cwd: folder, tmpRoot: rt.tmpRoot, projectRoot: rt.root, homeDir: require('node:os').homedir(),
     forbiddenText: isolated && Array.isArray(isolated.forbiddenText) ? isolated.forbiddenText : [],
+    /* the tools this kind of run may have, fixed by the kind of run and not by its caller: none for a tool-less review, the reader's three for an audited one */
+    tools,
   });
   if (problems.length) throw new AgentError(409, `A review run was not started because it would not be isolated (${problems.slice(0, 3).join('; ')}). Nothing was started`);
 }
@@ -83,7 +85,7 @@ async function runToolLess({ rt, folder, prompt, model, effort, capUsd, onRunner
   const scratch = path.join(folder, '.tmp');
   fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
   const env = rt.preparedEnv(scratch, token);
-  requireIsolation(rt, isolated, { args, env, folder });
+  requireIsolation(rt, isolated, { args, env, folder, tools: [] });
   const runner = new ClaudeRun({
     bin: runtime.path,
     args,
@@ -110,7 +112,8 @@ async function runAudited({ rt, folder, prompt, model, effort, capUsd, tools, tr
   const { runtime, token } = await prepare(rt, args);
   const scratch = path.join(folder, '.tmp');
   const env = rt.preparedEnv(scratch, token);
-  requireIsolation(rt, isolated, { args, env, folder });
+  /* an isolated run with tools is a reader: it never has more than the reader's three, whatever the caller asked for */
+  requireIsolation(rt, isolated, { args, env, folder, tools: REVIEWER_TOOLS });
   const runner = new ClaudeRun({
     bin: runtime.path,
     args,

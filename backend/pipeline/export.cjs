@@ -6,7 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { writeZip } = require('../../package-engine.js');
-const { sha256Hex, walkFiles } = require('./util.cjs');
+const { sha256Hex, walkFiles, usdText } = require('./util.cjs');
 
 /* A bar as text; an older state has only passBar (the test's). */
 const fixed = (bar, fallback) => (typeof bar === 'number' ? bar : typeof fallback === 'number' ? fallback : 0).toFixed(2);
@@ -63,7 +63,7 @@ function buildExport({ outDir, state, note }) {
     'This folder holds the grader guideline and the golden answer of the final design. Never put it in a pilot packet or upload it where a solver can read it.',
     '',
     `Result: ${state.stage}. ${state.message || ''}`.trim(),
-    `Design attempts: ${state.attempts.length} (redesigns used: ${state.redesigns}). Spent: USD ${state.spentUsd.toFixed(2)} of a cap of USD ${state.config.capUsd.toFixed(2)}.`,
+    `Design attempts: ${state.attempts.length} (redesigns used: ${state.redesigns}). Spent: USD ${usdText(state.spentUsd)} of a cap of USD ${usdText(state.config.capUsd)}.`,
     `Bars: a pilot beats the design with a simulated-grader score below the bar of the stage. Screen: both of ${state.config.screenPilots} below ${fixed(state.config.screenBar, state.config.passBar)}. Test: at least ${state.config.testNeed} of ${state.config.testPilots} below ${fixed(state.config.testBar, state.config.passBar)}. A stage stops as soon as its result is decided.`,
     /* The design in this zip is the one that was accepted (designAttempt), which is not always the last attempt: later ones may have been rejected. */
     note ? `Design of attempt ${state.designAttempt === undefined || state.designAttempt === null ? '?' : state.designAttempt}: ${note}` : '',

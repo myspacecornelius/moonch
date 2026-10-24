@@ -33,15 +33,27 @@ function need(value, what, max = DESIGN.textChars) {
   return out;
 }
 
+/* A figure of the brief as a number: a number, or a string that is one: digits with a decimal point, thousands groups written with commas or spaces (1,250 and
+   1 250 are 1250), an optional sign and an optional currency sign in front. An empty string, a lone currency sign, a list, a word, and a comma that is no
+   thousands group (1,5 and 1.234,50 are European forms that would be misread) are not numbers: null. */
+function figureNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const t = value.trim().replace(/^(-?)\s*[$\u20ac\u00a3]\s*/, '$1');
+  if (/^-?\d{1,3}(?:[, ]\d{3})+(?:\.\d+)?$/.test(t) || /^-?\d+(?:\.\d+)?$/.test(t)) return Number(t.replace(/[, ]/g, ''));
+  return null;
+}
+
 /* [{ label, value, tolerance }] */
 function figures(list, where) {
   if (list === undefined || list === null) return [];
   if (!Array.isArray(list) || list.length > 20) throw fault('A figure list in the brief is not a list of at most 20', `${where} figures must be a list of at most 20.`);
   return list.map((item, index) => {
-    const number = isObject(item) ? Number(typeof item.value === 'string' ? item.value.replace(/[,$\s]/g, '') : item.value) : NaN;
-    if (!isObject(item) || typeof item.value === 'boolean' || item.value === null || !Number.isFinite(number)) throw fault('A figure in the brief needs a numeric value', `${where} figure ${index + 1} needs a numeric value.`);
-    const tolerance = item.tolerance === undefined || item.tolerance === null || item.tolerance === '' ? 0 : Number(item.tolerance);
-    if (!Number.isFinite(tolerance) || tolerance < 0) throw fault('A figure in the brief needs a tolerance of zero or more', `${where} figure ${index + 1} needs a tolerance of zero or more.`);
+    const number = isObject(item) ? figureNumber(item.value) : null;
+    if (number === null) throw fault('A figure in the brief needs a numeric value', `${where} figure ${index + 1} needs a numeric value (digits, with a decimal point and commas for thousands: 1,250.50; not a word, a blank or a list).`);
+    const blank = item.tolerance === undefined || item.tolerance === null || (typeof item.tolerance === 'string' && !item.tolerance.trim());
+    const tolerance = blank ? 0 : figureNumber(item.tolerance);
+    if (tolerance === null || tolerance < 0) throw fault('A figure in the brief needs a tolerance of zero or more', `${where} figure ${index + 1} needs a tolerance of zero or more.`);
     return { label: text(item.label, 200), value: number, tolerance };
   });
 }
@@ -215,4 +227,4 @@ function briefEvaluatorText(brief) {
   return parts.filter(Boolean).join('\n');
 }
 
-module.exports = { ROLES, WHY_KINDS, CHANGES, SCENARIOS, EVALUATOR_FILE_RE, parseBrief, verifyBriefSources, briefEvaluatorText, actionsDiffer, figuresDiffer, changesRequirement };
+module.exports = { ROLES, WHY_KINDS, CHANGES, SCENARIOS, EVALUATOR_FILE_RE, parseBrief, verifyBriefSources, briefEvaluatorText, actionsDiffer, figuresDiffer, changesRequirement, normalAction };

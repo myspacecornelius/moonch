@@ -21,15 +21,15 @@ const C = require('../agents/constants.cjs');
 const { budgetText } = require('../agents/claude-runner.cjs');
 const { checkPilotsRoot, resolveSourceDir } = require('../agents/pilot-folder.cjs');
 const P = require('./constants.cjs');
-const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, nameProblem, TEXT_EXTENSIONS } = require('./util.cjs');
+const { isObject, sha256Hex, clone, capText, oneLine, writeJsonAtomic, writeTextAtomic, readJson, within, delay, readTextFile, hashFile, squash, Stopped, copyHashed, isJunkName, nameProblem, TEXT_EXTENSIONS, usdText } = require('./util.cjs');
 const { IntakeError, intakeFromLoader, intakeFromFolder } = require('./intake.cjs');
 const { buildClassifierPrompt, classify, withheldReason, labelFinding } = require('./classify.cjs');
 const { DesignError, StopSignal, BudgetStop, Failure, AttemptRejected } = require('./errors.cjs');
 const { catalogText, designerPrompt, repairPrompt, rejectionFeedback, feedbackText, readDesign, scanDesignFiles, buildWork, numbersIn, canonNumber } = require('./design.cjs');
 const { minCapParts, minCapUsd, attemptReserveUsd } = require('./budget.cjs');
-const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak } = require('./safety.cjs');
+const { SafetyError, verifyPacket, verifyRoundPacket, leakWindows, containsLeak, WindowSet } = require('./safety.cjs');
 const { scanReferences, referenceSummary } = require('./references.cjs');
-const { extractText, textHoldsWindows, ZIP_EXTENSIONS } = require('./extract.cjs');
+const { extractText, textHoldsWindows, readerKindOfFile, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { buildFairnessPrompt, parseFairness, composeGraderInput, graderEffort, regradeBand, GRADER_FOOTER, MAX_ANSWER_FOR_GRADER } = require('./gates.cjs');
 const { runtimeOf, runToolLess, runDesigner, NOT_FOUND } = require('./models.cjs');
 const { buildExport } = require('./export.cjs');
@@ -45,8 +45,31 @@ const UNREADABLE_FINAL_CHARS = 600; /* a final message shorter than this, with f
 
 const bad = message => new AgentError(400, message);
 const round6 = value => Math.round(value * 1e6) / 1e6;
-const money = value => `USD ${value.toFixed(2)}`;
+const money = value => `USD ${usdText(value)}`;
 const isTerminal = stage => P.TERMINAL.includes(stage);
+
+/* Is a guideline repair of this attempt under way, or applied and not yet counted? Then the evaluator material has changed and nothing has judged the result. */
+const repairOpen = attempt => Boolean(attempt && isObject(attempt.guidelineRepair) && (attempt.guidelineRepair.outcome === 'pending' || (attempt.guidelineRepair.outcome === 'applied' && !attempt.guidelineRepair.recounted)));
+
+/* Closes what an ended run leaves open in an attempt of the 'new' mode: nothing is left 'pending', 'running' or under repair. Resolves true when the attempt's
+   mandatory checks did not finish (they were still under way, or a repair of the guideline had changed the evaluator material and its result had not been
+   counted): the attempt is then 'incomplete' in its validation, and nothing that follows counts as a pass. An attempt whose checks finished, or that was
+   rejected by them, keeps its validation. */
+function closeAttempt(attempt) {
+  if (!isObject(attempt)) return false;
+  const open = repairOpen(attempt);
+  const unfinished = attempt.validation === 'pending' || attempt.validation === 'incomplete' || open;
+  if (unfinished) {
+    attempt.validation = 'incomplete';
+    if (isObject(attempt.fairness) && attempt.fairness.status === 'pending') attempt.fairness.status = 'incomplete';
+  }
+  if (isObject(attempt.fairness) && isObject(attempt.fairness.stage1) && attempt.fairness.stage1.state === 'running') attempt.fairness.stage1.state = 'incomplete';
+  if (isObject(attempt.guidelineRepair)) {
+    if (attempt.guidelineRepair.outcome === 'pending') { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended during the repair'; }
+    else if (open) { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the run ended before the saved answers were counted again'; }
+  }
+  return unfinished;
+}
 const LOADER_MESSAGE_CHARS = 1000;
 const CONFIRM_FILES_MESSAGE = 'Check the file list against the task page. Press Continue if every file is there, or Stop and use Import from folder.';
 const HEADROOM_TEXT = `${Math.round((P.HEADROOM - 1) * 100)}% headroom`;
@@ -152,17 +175,11 @@ class PipelineService {
       try {
         const state = readJson(this._stateFile(name));
         if (!isObject(state) || state.id !== name || state.schema !== SCHEMA || !isObject(state.config) || !Array.isArray(state.attempts)) continue;
+        const unfinished = [];
         for (const attempt of state.attempts) {
           if (isObject(attempt) && attempt.outcome === 'in-progress') { attempt.outcome = 'failed'; attempt.note = 'The companion stopped while this attempt was running.'; }
-          if (isObject(attempt) && attempt.validation === 'pending') {
-            /* the mandatory checks of this attempt did not finish: nothing in them is left pending */
-            attempt.validation = 'incomplete';
-            if (isObject(attempt.fairness)) {
-              if (attempt.fairness.status === 'pending') attempt.fairness.status = 'incomplete';
-              if (isObject(attempt.fairness.stage1) && attempt.fairness.stage1.state === 'running') attempt.fairness.stage1.state = 'incomplete';
-            }
-            if (isObject(attempt.guidelineRepair) && attempt.guidelineRepair.outcome === 'pending') attempt.guidelineRepair.outcome = 'failed';
-          }
+          /* the mandatory checks of an attempt that did not finish: nothing in them is left pending */
+          unfinished.push(isObject(attempt) && (attempt.mode === 'new' || attempt.validation !== undefined) ? closeAttempt(attempt) : false);
           if (isObject(attempt) && isObject(attempt.guidelineRepair) && attempt.guidelineRepair.outcome === 'pending') { attempt.guidelineRepair.outcome = 'failed'; attempt.guidelineRepair.reason = 'the companion stopped during the repair'; }
         }
         if (!isTerminal(state.stage)) {
@@ -172,7 +189,8 @@ class PipelineService {
           state.error = 'interrupted';
           state.endedAt = this.now();
           state.updatedAt = state.endedAt;
-          state.result = { verdict: 'failed', message: state.message, ...(state.config.designMode === 'new' ? { validation: 'incomplete' } : {}) };
+          /* a run cut off while its checks were under way is incomplete; one cut off in the pilots, after the checks finished, is not */
+          state.result = { verdict: 'failed', message: state.message, ...(state.config.designMode === 'new' ? { validation: !state.attempts.length || unfinished[unfinished.length - 1] ? 'incomplete' : 'complete' } : {}) };
         }
         writeJsonAtomic(this._stateFile(name), state);
         this._removeWorkspace(name); /* a working folder left by an earlier start (or by a version that kept more there) */
@@ -226,7 +244,7 @@ class PipelineService {
   /* Is the newest attempt still in its mandatory checks (designer v2)? A budget stop then ends the run as incomplete, never as a pass or a fail. */
   _validating(p) {
     const attempt = p.attempts[p.attempts.length - 1];
-    return Boolean(attempt && attempt.validation === 'pending');
+    return Boolean(attempt && (attempt.validation === 'pending' || repairOpen(attempt)));
   }
 
   /* cost: the number the run reported, or null. A run that started and reported none is counted at its cap (estimated). */
@@ -720,16 +738,11 @@ class PipelineService {
     p.endedAt = this.now();
     p.result = { verdict, message };
     if (p.config.designMode === 'new') {
-      /* Designer v2: a result is complete only when the newest attempt's mandatory checks finished (or failed). A budget stop or a Stop in the middle of them is incomplete. */
+      /* Designer v2: a result is complete only when the newest attempt's mandatory checks finished (or failed). A budget stop or a Stop in the middle of them,
+         or in a repair of the guideline whose result was not counted, is incomplete. */
       const last = p.attempts[p.attempts.length - 1];
-      p.result.validation = verdict === 'incomplete' || (last && (last.validation === 'pending' || last.validation === 'incomplete')) ? 'incomplete' : 'complete';
-      if (last && last.validation === 'pending') {
-        last.validation = 'incomplete';
-        if (last.fairness && last.fairness.status === 'pending') last.fairness.status = 'incomplete';
-      }
-      /* whatever was under way when the run ended is closed: no review is left 'running' and no repair 'pending' */
-      if (last && last.fairness && last.fairness.stage1 && last.fairness.stage1.state === 'running') last.fairness.stage1.state = 'incomplete';
-      if (last && last.guidelineRepair && last.guidelineRepair.outcome === 'pending') { last.guidelineRepair.outcome = 'failed'; last.guidelineRepair.reason = 'the run ended during the repair'; }
+      const unfinished = closeAttempt(last);
+      p.result.validation = verdict === 'incomplete' || unfinished ? 'incomplete' : 'complete';
     }
     this._removeWorkspace(p.id);
     this._setStage(p, stage, message, quotes);
@@ -745,10 +758,6 @@ class PipelineService {
       const attempt = p.attempts[p.attempts.length - 1];
       if (attempt && attempt.outcome === 'in-progress') attempt.outcome = 'budget';
       const incomplete = error.incomplete === true;
-      if (incomplete && attempt && attempt.validation === 'pending') {
-        attempt.validation = 'incomplete';
-        if (attempt.fairness && attempt.fairness.status === 'pending') attempt.fairness.status = 'incomplete';
-      }
       return this._finish(p, 'budget', error.message, incomplete ? 'incomplete' : 'budget');
     }
     let message;
@@ -927,6 +936,25 @@ class PipelineService {
     });
     settled.worldFiles = identical(settled.worldFiles);
     settled.taskFiles = identical(settled.taskFiles);
+    /* Designer v2: a reference document is for the designer alone, so a world or task file that is byte for byte one of them is withheld too, with a warning, before
+       anything is paid for (a copy of a reference is refused as a pilot file later, and a late stop would be the result of a file the owner chose). A file the owner
+       kept by name stays a world file: its hash is then left out of the reference hashes (see _withheldSets). */
+    ctl.keptRefHashes = new Set();
+    if (newMode && ctl.referencesDir) {
+      const refScan = scanReferences(ctl.referencesDir);
+      const refHashes = new Set();
+      for (const file of refScan.problems.length ? [] : refScan.files) { try { if (file.bytes > 0) refHashes.add(hashFile(file.abs)); } catch { /* a file that cannot be read is found again when the references are copied */ } }
+      const keptNames = new Set(p.config.keepAsWorld || []);
+      const sameAsReference = list => list.filter(name => {
+        const file = byName.get(name);
+        if (!file || !(file.bytes > 0) || !refHashes.has(file.sha256)) return true;
+        if (keptNames.has(name)) { ctl.keptRefHashes.add(file.sha256); return true; }
+        withhold(name, 'it is byte for byte the same as a reference document');
+        return false;
+      });
+      settled.worldFiles = sameAsReference(settled.worldFiles);
+      settled.taskFiles = sameAsReference(settled.taskFiles);
+    }
     ctl.texts = await this._loadOriginalTexts(p, ctl, settled);
     /* A new task: every file that was withheld (answer-like, rubric-like, guideline-like) is evaluator material whatever its role, so a long passage of its
        text is a leak too. */
@@ -943,7 +971,8 @@ class PipelineService {
     }
     /* ...and so is a file that holds a passage of the guideline or the golden answer, found in the file itself: plain text, and the text of a
        word-processing, spreadsheet or slide file. What the other files say is kept to tell, later, what the original task already states. */
-    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...ctl.withheldWindows];
+    const windows = new WindowSet([...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...ctl.withheldWindows]);
+    ctl.leakSet = windows;
     /* A new task is not held to the length of an old guideline, and is not shown a diff against it. */
     const original = { numbers: new Set(), corpus: '', guidelineLength: !newMode && ctl.texts.guideline ? ctl.texts.guideline.length : null, guidelineText: !newMode ? ctl.texts.guideline || null : null };
     const addText = text => {
@@ -979,6 +1008,16 @@ class PipelineService {
     ctl.original = original;
     ctl.keptNames = new Set((settled.keptAsWorld || []).map(item => item.name));
     const packetNames = [...settled.worldFiles, ...settled.taskFiles];
+    /* Designer v2: the reviewers have to be able to read the packet. The blind reviewer opens text, PDFs and pictures, and is given a text rendering of Word, Excel,
+       slide and RTF files; the other reviews read the text the harness extracts. A file nobody can read (an old binary Office file, an archive, an unknown
+       binary) would make the reviews blind to it, so the start stops, before anything is paid for, unless the owner accepts that (acceptMissing). */
+    settled.unreadable = [];
+    if (newMode) {
+      for (const name of packetNames) {
+        this._checkStop(ctl);
+        if (await readerKindOfFile(this._originalFile(p, name), name) === 'unreadable') settled.unreadable.push(name);
+      }
+    }
     p.classification = settled;
     p.import.facts = { world: settled.worldFiles.length, task: settled.taskFiles.length, withheld: settled.withheld.length, other: settled.other.length };
     this._save(p);
@@ -990,6 +1029,10 @@ class PipelineService {
     if (ctl.packet.size > C.LIMITS.files) throw new Failure(`The pilot packet would hold ${ctl.packet.size} files; the limit is ${C.LIMITS.files}. Take files out of the task, then start again.`);
     if (bytes > C.LIMITS.bytes) throw new Failure(`The pilot packet would be ${Math.ceil(bytes / 1048576)} MB; the limit is ${Math.round(C.LIMITS.bytes / 1048576)} MB. Take files out of the task, then start again.`);
     if (deepest > C.LIMITS.depth) throw new Failure(`A file of the pilot packet is nested ${deepest} levels deep; the limit is ${C.LIMITS.depth}. Flatten the task, then start again.`);
+    if (settled.unreadable.length && !p.config.acceptMissing) {
+      const names = settled.unreadable.slice(0, 5).map(name => oneLine(name, 80)).join(', ');
+      throw new Failure(`${settled.unreadable.length} file${settled.unreadable.length === 1 ? '' : 's'} of the pilot packet cannot be read by the reviewers (no text can be taken from ${settled.unreadable.length === 1 ? 'it' : 'them'}): ${names}${settled.unreadable.length > 5 ? `, and ${settled.unreadable.length - 5} more` : ''}. Convert ${settled.unreadable.length === 1 ? 'it' : 'them'} to text, CSV, Word, Excel, slides, RTF, PDF or a picture, or take ${settled.unreadable.length === 1 ? 'it' : 'them'} out of the task, then start again; or start with "Start even if a world or task file has to be withheld" ticked, and the blind review will say which files it could not read.`);
+    }
     /* A file the classifier called a world or task file that the pilots would not get: stop unless the owner said that is fine. */
     if (settled.warnings.length && !p.config.acceptMissing) {
       const names = settled.warnings.slice(0, 5).map(item => oneLine(item.name, 80)).join(', ');
@@ -1032,7 +1075,7 @@ class PipelineService {
       if (text) { hashes.add(sha256Hex(text)); hashes.add(sha256Hex(text + '\n')); }
     }
     /* Designer v2: a reference document is for the designer alone, so a byte for byte copy of one (a PDF has no text to look for) is refused as a pilot file. */
-    for (const file of (p.references && Array.isArray(p.references.files) ? p.references.files : [])) if (file && file.sha256 && file.bytes > 0) hashes.add(file.sha256);
+    for (const file of (p.references && Array.isArray(p.references.files) ? p.references.files : [])) if (file && file.sha256 && file.bytes > 0 && !(ctl.keptRefHashes && ctl.keptRefHashes.has(file.sha256))) hashes.add(file.sha256);
     for (const attempt of p.attempts) {
       for (const name of ['guideline.md', 'golden-answer.md', 'traps.json', 'brief.json', 'answers.json']) {
         try { hashes.add(hashFile(path.join(this._attemptDir(p.id, attempt.n), 'out', name))); } catch { /* the attempt wrote no such file */ }
@@ -1499,8 +1542,8 @@ class PipelineService {
     if (sha256Hex(texts.prompt) !== attempt.promptSha256) throw new SafetyError('The prompt changed after it was checked');
     const sets = this._withheldSets(p, ctl);
     verifyPacket({ dir: this._packetDir(p.id), manifest: ctl.manifest, withheldHashes: sets.hashes, withheldNames: sets.names, allowNames: ctl.keptNames });
-    const windows = [...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer), ...(ctl.withheldWindows || [])];
-    if (windows.length && windows.some(window => window && this._squashIncludes(texts.prompt, window))) throw new SafetyError('The prompt holds a long passage of the guideline or the golden answer');
+    const windows = new WindowSet([...leakWindows(ctl.texts.guideline || ctl.texts.guidelineExtracted || ''), ...leakWindows(ctl.texts.goldenAnswer || ctl.texts.goldenExtracted || ''), ...leakWindows(texts.guideline), ...leakWindows(texts.goldenAnswer), ...(ctl.withheldWindows || [])]);
+    if (containsLeak(texts.prompt, windows)) throw new SafetyError('The prompt holds a long passage of the guideline or the golden answer');
 
     let roundId = null;
     try {
@@ -1531,10 +1574,6 @@ class PipelineService {
       throw error;
     }
     return roundId;
-  }
-
-  _squashIncludes(text, window) {
-    return String(text).replace(/\s+/gu, ' ').trim().toLowerCase().includes(window);
   }
 
   /* What the simulated grader reads for one clean pilot: its final message and the files it wrote as text (plain text files, and the text

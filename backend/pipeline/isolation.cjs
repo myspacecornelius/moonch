@@ -12,6 +12,7 @@
    audit of its tool calls after the fact and not by a sandbox, and a process of the same account can read another process's open files under
    /proc: that last case is found by the audit when the run does it, not prevented. */
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { isObject, within } = require('./util.cjs');
 
@@ -23,8 +24,9 @@ const REQUIRED_OPTIONS = ['--strict-mcp-config', '--disable-slash-commands', '--
 
 /* args: the argument list (the prompt is not in it when it goes on stdin). env: the environment the process gets. cwd: its working folder.
    tmpRoot / projectRoot / homeDir: absolute paths. forbiddenText: strings that must not occur in any environment value (a reference folder, a
-   private folder). Returns [text] of what does not hold; [] when everything does. */
-function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = null, forbiddenText = [] }) {
+   private folder). tools: the tools this run may have (an array; [] for a run with none); when it is given, the run's --tools and --allowedTools must be exactly
+   that list. Returns [text] of what does not hold; [] when everything does. */
+function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = null, forbiddenText = [], tools = undefined }) {
   const problems = [];
   const list = Array.isArray(args) ? args.map(String) : [];
   for (const option of REQUIRED_OPTIONS) if (!list.includes(option)) problems.push(`the run does not carry ${option}`);
@@ -32,6 +34,22 @@ function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = nul
   if (at < 0 || list[at + 1] !== '') problems.push('the run may load settings from the user, the project or a local file (--setting-sources is not empty)');
   for (const option of FORBIDDEN_OPTIONS) {
     if (list.some(item => item === option || item.startsWith(`${option}=`))) problems.push(`the run is given ${option}`);
+  }
+  if (Array.isArray(tools)) {
+    const want = [...tools].sort().join(',');
+    /* every place an option stands counts (a second --allowedTools is not ignored), and so does the spelling with a dash */
+    const listOf = (...options) => {
+      const given = new Set();
+      list.forEach((item, index) => {
+        const named = options.find(option => item === option || item.startsWith(`${option}=`));
+        if (!named) return;
+        const value = item === named ? (list[index + 1] === undefined ? '' : list[index + 1]) : item.slice(named.length + 1);
+        for (const tool of String(value).split(/[,\s]+/).filter(Boolean)) given.add(tool);
+      });
+      return [...given].sort().join(',');
+    };
+    if (listOf('--tools') !== want) problems.push(`the run's tools are not exactly the ones this review may use (${want || 'none'})`);
+    if (listOf('--allowedTools', '--allowed-tools') !== want) problems.push('the run allows tools beyond the ones this review may use');
   }
   const variables = isObject(env) ? env : {};
   if (variables.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== '1') problems.push('auto-memory is not turned off');
@@ -49,7 +67,16 @@ function isolationProblems({ args, env, cwd, tmpRoot, projectRoot, homeDir = nul
   if (typeof projectRoot === 'string' && projectRoot && within(cwd, path.resolve(projectRoot))) problems.push('the working folder is inside the project');
   if (typeof homeDir === 'string' && homeDir && within(cwd, path.resolve(homeDir)) && !(typeof tmpRoot === 'string' && within(path.resolve(tmpRoot), path.resolve(homeDir)))) problems.push('the working folder is inside the home folder');
   if (variables.FINANCE_STUDIO_PILOT_TOKEN) problems.push('the companion\'s own pilot token source is in the environment');
+  /* where the working folder really is: a link there must not lead into the project or the home folder, or out of the temporary root */
+  try {
+    const real = fs.realpathSync(cwd);
+    if (real !== cwd) {
+      if (typeof tmpRoot === 'string' && tmpRoot && !within(real, fs.realpathSync(tmpRoot))) problems.push('the working folder is, through a link, not under the temporary root');
+      if (typeof projectRoot === 'string' && projectRoot && within(real, fs.realpathSync(projectRoot))) problems.push('the working folder is, through a link, inside the project');
+    }
+  } catch { /* a folder that does not exist yet has no real path to compare */ }
   const named = forbiddenText.filter(item => typeof item === 'string' && item.length >= 4);
+  for (const item of list) if (named.some(text => item.includes(text))) problems.push('an argument of the run names a private folder');
   for (const [name, value] of Object.entries(variables)) {
     if (typeof value !== 'string') continue;
     if (named.some(item => value.includes(item))) problems.push(`the environment variable ${name} names a private folder`);

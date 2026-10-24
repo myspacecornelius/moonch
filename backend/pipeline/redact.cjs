@@ -10,7 +10,9 @@
        design.unscanned (it can name an edited file),
        the calibration and the fairness review of a design, the guideline diff and the rubric changes,
        designer v2: the brief and the task type, the answer set, the alternatives, every review (stage1, stage2), every adjudication, the counts by class
-       (lows) and the unexplained list, the guideline repair and the recount, the diagnostic answers, and the names of the reference files,
+       (lows) and the unexplained list, the guideline repair and the recount, the diagnostic answers, the names of the reference files and the problems found
+       in them (references.names, files, unscanned, partial and config.references.default.problemList), the answer names of the freeze records, and the
+       reference of a ledger entry that belongs to a review,
        every pilot's grader reason,
        the reasons a design was rejected (attempts[].rejection.reasons) and, when the view says it quotes them (quotesRejection: true),
        the stage message, the summary, the error and result.message.
@@ -28,7 +30,12 @@ const ANYWHERE = new Set(['gold', 'fingerprints', 'mechanism', 'decoy', 'correct
 /* Withheld only directly inside the design object: classification.prompt and classification.guideline are names, not texts. */
 const IN_DESIGN = new Set(['prompt', 'guideline', 'goldenAnswer', 'notes', 'unscanned', 'alternatives']);
 /* The reference documents: how many there are shows, their names and sizes do not while a round runs. */
-const IN_REFERENCES = new Set(['names', 'files', 'unscanned']);
+const IN_REFERENCES = new Set(['names', 'files', 'unscanned', 'partial', 'problemList']);
+/* A freeze record lists the fixed answers by name ('golden', 'alt-1'): the names show that the designer declared a permitted alternative. Its hashes stay visible. */
+const IN_FREEZE = new Set(['answers']);
+/* The ledger lists every call that was paid for. The reference of a call that belongs to the reviews of the design names what it was about (an alternative
+   answer, a regraded golden answer, a trap's clause), so it is withheld; the kind, the stage and the cost stay. */
+const LEDGER_REF_KINDS = new Set(['blind-review', 'reveal', 'application', 'adjudication', 'review-repair', 'guideline-repair']);
 /* Withheld only inside the list of traps (design.traps, attempts[].traps) and the list of edited files. */
 const IN_TRAPS = new Set(['title', 'files']);
 /* An edited file: its name, and everything that would give the name away by comparison with the task's own file list (its hash and sizes). */
@@ -44,9 +51,10 @@ function walk(value, key, parentKey, depth) {
   if (!isObject(value)) return value;
   const out = {};
   for (const [name, child] of Object.entries(value)) {
-    if (ANYWHERE.has(name) || (key === 'design' && IN_DESIGN.has(name)) || (key === 'traps' && IN_TRAPS.has(name)) || (key === 'editedFiles' && IN_EDITED.has(name)) || (key === 'files' && IN_FILE_LISTS.has(name)) || ((key === 'references' || key === 'default') && IN_REFERENCES.has(name))) out[name] = { ...MARK };
+    if (ANYWHERE.has(name) || (key === 'design' && IN_DESIGN.has(name)) || (key === 'traps' && IN_TRAPS.has(name)) || (key === 'freeze' && IN_FREEZE.has(name)) || (key === 'editedFiles' && IN_EDITED.has(name)) || (key === 'files' && IN_FILE_LISTS.has(name)) || ((key === 'references' || key === 'default') && IN_REFERENCES.has(name))) out[name] = { ...MARK };
     else out[name] = walk(child, name, key, depth + 1);
   }
+  if (key === 'ledger' && typeof value.ref === 'string' && 'ref' in out && (/^(?:as|diag)-/.test(value.ref) || LEDGER_REF_KINDS.has(value.kind))) out.ref = { ...MARK };
   /* A message that quotes the reasons a design was rejected: the reasons are withheld above, so the line that repeats them is too. */
   if (value.quotesRejection === true) {
     for (const name of ['message', 'summary', 'error']) if (name in out) out[name] = { ...MARK };

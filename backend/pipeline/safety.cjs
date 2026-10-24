@@ -106,6 +106,32 @@ class WindowSet {
 
   get length() { return this.set.size; }
 
+  /* The windows as an array (a copy). */
+  toArray() { return [...this.set]; }
+
+  /* A new set holding these windows and the others (a WindowSet or an array). */
+  with(other) { return new WindowSet([...this.set, ...(other instanceof WindowSet ? other.set : other || [])]); }
+
+  /* The windows of this set that appear in none of the texts: the set without whatever the texts already hold. Each text is slid over once, and the windows
+     found in it are collected. */
+  without(texts) {
+    if (!this.sizes.length) return this;
+    const seen = new Set();
+    for (const text of texts) {
+      const squashed = squash(text);
+      const last = squashed.length - this.sizes[0];
+      for (let at = 0; at <= last; at++) {
+        if (!this.keys.has(squashed.slice(at, at + KEY))) continue;
+        for (const size of this.sizes) {
+          if (at + size > squashed.length) continue;
+          const piece = squashed.slice(at, at + size);
+          if (this.set.has(piece)) seen.add(piece);
+        }
+      }
+    }
+    return seen.size ? new WindowSet([...this.set].filter(window => !seen.has(window))) : this;
+  }
+
   holds(squashed) {
     if (!this.sizes.length) return false;
     const last = squashed.length - this.sizes[0];

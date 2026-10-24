@@ -19,9 +19,9 @@ const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile
 const { extractText, scanFile, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { lineDiff } = require('./diff.cjs');
 const { withheldReason } = require('./classify.cjs');
-const { containsLeak, leakWindows, EMPTY_SHA } = require('./safety.cjs');
+const { containsLeak, leakWindows, WindowSet, EMPTY_SHA } = require('./safety.cjs');
 const { parseBrief, briefEvaluatorText, verifyBriefSources } = require('./brief.cjs');
-const { extractText: extractFileText } = require('./extract.cjs');
+const { extractText: extractFileText, readerKind } = require('./extract.cjs');
 const { sha256Hex } = require('./util.cjs');
 
 const { DesignError } = require('./errors.cjs');
@@ -122,7 +122,7 @@ const NEW_TASK = [
   ' "rubricChanges": []}',
   '9. Write out/brief.json, valid JSON in exactly this shape (one primary trap, at most three in all):',
   '{"taskType": {"workflow": "...", "why": "...", "referenceEntries": ["..."]},',
-  ' "decision": {"ask": "...", "mandate": "...", "authorityFile": "name of the authority file", "effectiveDate": "...", "decisionDate": "YYYY-MM-DD, the day the decision of the task is taken"},',
+  ' "decision": {"ask": "...", "mandate": "...", "authorityFile": "name of the authority file", "effectiveDate": "...", "decisionDate": "YYYY-MM-DD, the day the decision of the task is taken; optional, but when you give it the day must also stand in prompt.txt or in a file the pilots get, so that the checks can quote it"},',
   ' "files": [{"name": "file name", "role": "authority" or "evidence" or "decoy" or "baseline"}],',
   ' "traps": [{"id": "t1 (the id of traps.json)", "primary": true, "rule": {"file": "name", "clause": "the exact words of the governing rule"},',
   '   "correctPath": {"reasoning": "...", "action": "...", "figures": [{"label": "...", "value": 0, "tolerance": 0}]},',
@@ -146,6 +146,8 @@ const NEW_TASK = [
   '- Every figure in gold.figures must appear in out/golden-answer.md and in out/guideline.md, written as digits (1,250 or 1250). Your golden answer and each alternative answer will be graded against your guideline: the golden answer must score at least ' + GOLDEN_MIN.toFixed(2) + ' and each alternative at least ' + ALTERNATIVE_MIN.toFixed(2) + '.',
   '- Do not state any figure of the golden answer, and do not state the decision, in out/prompt.txt or in the name of a new file.',
   '- Evaluator material (guideline, golden answer, brief, answers) is never placed in out/new or out/edited, and no text of it is copied into a file the pilots get.',
+  '- Dates that matter (the day a document takes effect, the day of the decision) are written in the files as 2025-03-01, 1 March 2025, March 1, 2025 or the 1st day of March, 2025. The checks read no other form (03/01/2025, 20250301 and "March 2025" fail the in-force check). When a sentence holds more than one date, say which one takes effect ("takes effect on ...").',
+  '- A new file is a kind that the reviewers can read: plain text, csv, json, md, docx, xlsx, pptx, rtf, a pdf or a picture. Do not add old binary Office files (doc, xls, ppt), archives or other binaries.',
   '- An edited file must not be much smaller than the original (at most 20 percent).',
   '- The names of new and edited files must read like ordinary documents. Do not use words such as guideline, rubric, answer, golden, reference, solution, key, memo, grader, evaluation, review, audit or gaf in a name.',
   '- Reference documents are for you alone: no passage of them goes into any file the pilots get.',
@@ -436,7 +438,7 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
   for (const name of ['guideline.md', 'golden-answer.md', 'traps.json']) {
     try { withheldHashes.add(hashFile(path.join(outDir, name))); } catch { /* read above */ }
   }
-  windows = [...windows, ...leakWindows(guideline), ...leakWindows(goldenAnswer)];
+  windows = (windows instanceof WindowSet ? windows : new WindowSet(windows)).with([...leakWindows(guideline), ...leakWindows(goldenAnswer)]);
 
   const lowerPacket = new Map([...packet.keys()].map(name => [name.toLowerCase(), name]));
   /* out/ and its two folders must be plain folders in the designer's own folder. A link there would lead the copy to files anywhere
@@ -550,7 +552,7 @@ function readDesign({ outDir, packet, withheldHashes, windows, original = null, 
       if (!text.trim()) throw new DesignError('The answer of a permitted alternative is empty', `out/${item.file} is empty.`);
       alternatives.push({ name: item.file.replace(/^answers\//, '').replace(/\.md$/, ''), file: item.file, text, sha256: sha256Hex(text), answer: item.answer });
     }
-    windows = [...windows, ...leakWindows(briefEvaluatorText(brief)), ...alternatives.flatMap(item => leakWindows(item.text))];
+    windows = windows.with([...leakWindows(briefEvaluatorText(brief)), ...alternatives.flatMap(item => leakWindows(item.text))]);
     for (const item of alternatives) withheldHashes = new Set([...withheldHashes, item.sha256, sha256Hex(item.text + '\n')]);
   }
 
@@ -713,6 +715,13 @@ async function packetDocuments({ packet, design, originalDir, outDir, maxChars =
 /* The brief's quotes against the packet as it will be (see brief.cjs verifyBriefSources). Resolves { warnings, documents }. */
 async function verifyDesignBrief({ packet, design, originalDir, outDir, referenceTexts = [] }) {
   const documents = await packetDocuments({ packet, design, originalDir, outDir });
+  /* A file the designer adds must be one the reviewers can read: the blind reviewer opens text, PDFs and pictures and gets a text rendering of Word, Excel, slide
+     and RTF files; the other reviews read the text the harness extracts. Nobody can read an old binary Office file, an archive or an unknown binary. */
+  const unreadable = design.newFiles.filter(file => readerKind(file.name, (documents.find(item => item.name === file.name) || {}).text) === 'unreadable');
+  if (unreadable.length) {
+    throw new DesignError('A new file is of a kind that the reviewers cannot read',
+      `The new file${unreadable.length === 1 ? '' : 's'} ${unreadable.slice(0, 5).map(file => oneLine(file.name, 120)).join(', ')} cannot be read by the reviewers (no text could be taken from ${unreadable.length === 1 ? 'it' : 'them'}). Add files of a kind that has text: plain text, csv, json, md, docx, xlsx, pptx, rtf, a pdf or a picture.`);
+  }
   const checked = verifyBriefSources(design.brief, documents, design.prompt, referenceTexts);
   return { warnings: checked.warnings, documents };
 }
