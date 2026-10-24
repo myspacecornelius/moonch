@@ -467,12 +467,25 @@ Files: `backend/pipeline/` (`service.cjs` the stage machine, `intake.cjs`, `clas
 2. **Sign-in** (`signIn: 'window'`, the default). When the page asks for a sign-in, the loader closes its Chrome and opens a plain Chrome on the same profile with only the site's origin. The owner signs in there and presses *Continue*, or closes that window. The loader stops the window (SIGINT, then SIGTERM, then the process group, because only SIGINT makes Chrome write its session cookies), relaunches on the pipe and opens the full link. If the page still asks, it repeats once, then fails with the folder-import hint. `signIn: 'piped'` keeps one controlled window instead.
 3. **All files.** The loader finds the platform's show-all-files switch by label, role or a learned key, and turns it on. The label or key is stored per host in `private/link-mappings.json`. If no switch is found, the state is `needs-person`, with the message "Turn on the option that shows all files in the Chrome window, then press Continue."
 4. **Expansion.** Before the final snapshot, it opens details and aria-expanded expanders, up to 4 passes until nothing new opens. It repeats this after the switch, after the person step, after a reload and in every tab. It also presses *Load more*, *Show more* or *View more* in every tab, scrolls long lists, and covers open shadow roots and same-origin frames. A step cut off by its time budget is reported in `notes`. Snapshots are unioned and re-taken until two in a row agree. A page that kept changing is reported as `settled: false`.
-5. **Downloads.** Files are saved to `private/links/<id>/files/` with mode 0600, and the page text to `page.json`.
-   - Each file is identified by its file name (or row text), its group, the control's text and its address, so identical *Download* buttons stay distinct. Every snapshot records its view (open tab, *Load more* presses, scroll steps), and before each click the page is put back in that view and the row text is checked.
-   - Signed addresses are deduplicated on origin and path with the signature parameters removed. A name with no extension falls back to the label or text that has one, then to the content type. Downloads are paced 250 ms apart and a click that started nothing is tried once more.
-   - A file that cannot be downloaded goes to `skipped: [{label, group, reason}]`, and the state becomes `needs-person`. The owner either downloads it by hand and imports a folder, or presses *Continue* to go on without it.
-   - Five failures in a row stop early, and the files not tried are listed too.
-   - A real file link (an extension or a download attribute) is never refused for the words in its name. A control that looks like an action, would submit a form or is disabled is never pressed. It is listed in `skipped` when it names a file, or when it would submit a form or is disabled.
+5. **Downloads, by allowlist.** Files are saved to `private/links/<id>/files/` with mode 0600, and the page text to `page.json`. The loader requests or presses only these:
+   - an `<a>` whose path ends in a known file extension, or whose last segment is exactly `download`, with no action word in any directory of the path and none in a query parameter;
+   - an `<a download>` whose address passes the same test;
+   - a control named as a download ("Download", "Download all (12)", "Download Q3.pdf", an icon titled Download) that is not in a form and cannot submit;
+   - for exposing content only: tabs, `<details>`, aria-expanded expanders and tree items, *Load more*, *Show more*, *View all*, pagers, and the show-all-files toggle. The toggle's label must say show or view all (or every, or world) files, attachments or documents, and must contain none of clear, delete, remove, reset, archive, move, apply, bulk, select all, share, send, upload and the like.
+
+   Every press re-checks the live element against its kind's rule. While a download control is pressed, any request other than GET, HEAD or OPTIONS is failed in the browser before it leaves, and the control is listed as blocked.
+
+   Anything else that names a file is listed in `skipped: [{label, group, reason}]`, with the reason "not clearly a download: download it yourself", "looks like an action", "would submit a form" or "the button is disabled". This covers a file name used as link text with an address such as `/documents/42`.
+   - Each file is identified by its name cell, its group, its tab and its address, so identical *Download* buttons stay distinct. Before each click, the page is put back in the view the file was seen in.
+   - A click that started no download is listed and not pressed again. A failed download moves the state to `needs-person`.
+   - Every place the loader could not fully cover becomes a sentence in `notes`, which the pipeline shows on its *Check the files* card. That includes:
+     - a cap hit (50 tabs, 50 *Load more* controls, 2000 buttons or links);
+     - pagination it did not follow;
+     - a scroller it could not bring to its end;
+     - a *Load more* still on the page;
+     - a closed dialog that names files;
+     - a frame from another site;
+     - a request that never answered.
 6. **States.** `starting`, `loading`, `needs-sign-in`, `needs-person`, `downloading`, then `done`, `failed` or `cancelled`. A cancel shows "Cancelling..." until Chrome is closed and the profile's history scrubbed. Closing the task window ends the load with "You closed the Chrome window before the load finished. Start again." When the profile is already in use, the message is "Quit the loader's Chrome (Cmd+Q) and try again."
 
 Not verified: real macOS Chrome behaviour (the Dock, Cmd+Q, finding the `.app` bundle, the synced-folder warning) and a human signing in to the real platform. The browser suite drives a real headless Chromium against local fixture pages, including a sign-in with a two-step check, and plays the person with a second headless Chromium.
