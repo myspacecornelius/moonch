@@ -95,7 +95,7 @@ Run on macOS with Node 24 and headless Chrome, on branch `task-writing-lint` (se
 
 Run in the Linux container with Node 22 and the headless Chromium at `/opt/pw-browsers` (sections 20 and 21 of `docs/local-agents.md`). **No model was called.** The classifier, designer, pilots and grader in the pipeline suites were all `backend/agents/stub-claude.cjs`. The link loader ran only against local fixture pages.
 
-- **Unit suites.** `npm test`: 1,501 tests, 1,499 pass, 0 fail, 2 skipped (the same two skips as above). `tests/pipeline.test.cjs` runs the orchestrator end to end against the stub and a fake link loader. One of its tests runs a default-caps pipeline in which every run spends its whole cap; it reaches the 5-pilot test.
+- **Unit suites.** `npm test`: 1,543 tests, 1,541 pass, 0 fail, 2 skipped (the same two skips as above). `tests/pipeline.test.cjs` runs the orchestrator end to end against the stub and a fake link loader. One of its tests runs a default-caps pipeline in which every run spends its whole cap; it reaches the 5-pilot test.
 - **Browser suites.** All seven pass: `test:agents`, `test:dashboard`, `test:ideas`, `test:candidates`, `test:browser`, `test:pipeline` and `test:links`. `test:links` drives a real headless Chromium through fixture pages. They cover:
   - a sign-in redirect, a sign-in with a two-step check, and the separate sign-in window, with a second headless Chromium playing the person;
   - every kind of all-files switch the loader handles;
@@ -104,7 +104,8 @@ Run in the Linux container with Node 22 and the headless Chromium at `/opt/pw-br
   - cancel and a closed window.
   Every run also checks that the link and its query reach no command line, stored state or file.
 - **Privacy scan.** Clean.
-- **Reviews.** Independent reviewers on Sonnet read each part, and a second agent tried to refute every finding before it was fixed. The builders mutation-checked their fixes: they removed each fix in a scratch copy and confirmed that a test fails.
+- **Reviews.** Independent reviewers on Sonnet read each part, and a second agent tried to refute every finding before it was fixed. Each round of fixes was re-checked by a fresh agent. For the link loader, this led to the allowlist and the write guard on every press. The builders mutation-checked their fixes: they removed each fix in a scratch copy and confirmed that a test fails.
+- **Link loader safety.** Nine pages from the last safety review were run against the final loader. Each page offered a way to change state: pager buttons that save an estimate, status arrows, a wizard Next button, a vote button, status tabs, tab links to trash, share or archive, a permission menu option, and a form that submits on change. In every case the fixture server saw no write request. Each page is also a fixture in `test:links`.
 - **Not run.** A live pipeline against the real platform, real macOS Chrome (the Dock, Cmd+Q, the `.app` bundle, the synced-folder warning) and a human sign-in. The first live run on the Mac is the next step.
 
 ## Privacy restructure
