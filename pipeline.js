@@ -15,7 +15,7 @@
   const OFFLINE_MESSAGE='The Pipeline needs the companion: run npm start.';
   const POLL_MS=2000;
   /* Display copies of backend/pipeline/constants.cjs (tests/pipeline-page.test.cjs checks that the two agree). The companion enforces its own. */
-  const RULES=Object.freeze({passBar:0.45,screenPilots:2,testPilots:5,testNeed:4,maxRedesigns:3,defaultCapUsd:50,maxCapUsd:200});
+  const RULES=Object.freeze({screenBar:0.40,testBar:0.45,screenPilots:2,testPilots:5,testNeed:4,maxRedesigns:3,defaultCapUsd:50,maxCapUsd:200});
   const CAP_MIN_USD=1;
   /* The total cap the form starts with: the companion's (GET /api/pipeline config.defaultCapUsd) once it has reported one, else RULES.defaultCapUsd. */
   let defaultCap=RULES.defaultCapUsd;
@@ -37,7 +37,8 @@
     {id:'isolation-by-audit',label:'Isolation by audit only',text:'There is no operating system sandbox. Pilots are told to stay inside their own folder and every tool call is checked afterwards. A call outside the folder discards that run. It is detected, not blocked.'},
     {id:'model-reads-task',label:'Model reads the task',text:'The classifier, the trap designer and the simulated grader are Claude Code runs that send the task text, the grader guideline and the golden answer to Anthropic. The trap designer is an agent with the same tools as a pilot (Bash, Read, Write, Edit, Glob and Grep) in its own working folder, held to that folder by the same after-the-fact audit and not by a sandbox.'}
   ]);
-  const HAPPENS='What will happen: the task is imported and its files classified, a model designs the hardest traps in a working copy, two blind pilots run a screen that both must score below '+RULES.passBar.toFixed(2)+', then five pilots run a test in which at least '+RULES.testNeed+' of '+RULES.testPilots+' must score below '+RULES.passBar.toFixed(2)+'. A failed screen or test sends the designer back, up to '+RULES.maxRedesigns+' redesigns, and the run stops when the total cap would be exceeded or when you press Stop.';
+  const barText=x=>x.toFixed(2);
+  const HAPPENS=()=>'What will happen: the task is imported and its files classified, a model designs the hardest traps in a working copy, two blind pilots run a screen that both must score below '+barText(barOf('screen'))+', then, only if the screen passes, five pilots run a test in which at least '+RULES.testNeed+' of '+RULES.testPilots+' must score below '+barText(barOf('test'))+'. Each round stops as soon as its result is decided, and the pilots that are no longer needed are stopped. A failed screen or test sends the designer back, up to '+RULES.maxRedesigns+' redesigns, and the run stops when the total cap would be exceeded or when you press Stop.';
 
   /* ---------- Escaping and markup. Interpolated values are escaped unless they are the result of html. ---------- */
   const ESC={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'};
@@ -90,20 +91,27 @@
                  a diff (guidelineDiff, editedFiles[].diff): { available, kind ('text' | 'binary'), added, removed, before, after, truncated, lines: [{ op, text }] } or text
        attempts: every design attempt, the last one the current one: [{ n, outcome, repaired, note, traps: [{ id, title }], calibration, fairness: { status, count },
                  rejection: { kind ('design' | 'checks'), reasons } | null, screen, test }] where
-                 screen, test: { passed, replacementRound, replacementSkipped, pilots: [{ n, replacement, state, valid, score (the average when regraded),
+                 screen, test: { passed, replacementRound, replacementSkipped, stoppedEarly: { afterPilot, score } | null,
+                 pilots: [{ n, replacement, state, valid, score (the average when regraded), stoppedEarly: true | { reason } | a reason (a pilot stopped because it was not needed), stoppedReason,
                  regrade: { first, second, average } | null, outputs: { count, readable }, audit: { status } }] }
-       GET /api/pipeline: config: { defaultCapUsd, classifyCapUsd, designCapUsd, repairCapUsd, fairnessCapUsd, graderCapUsd, goldenMin, regradeBand, headroom,
+       config (GET /api/pipeline, and the config of each pipeline): { screenBar, testBar } (the bars a screen pilot and a test pilot must score below)
+       GET /api/pipeline: config: { defaultCapUsd, classifyCapUsd, designCapUsd, repairCapUsd, fairnessCapUsd, graderCapUsd, goldenMin, regradeBand, screenRegradeBand, testRegradeBand, headroom,
                  minCap: { fixedUsd, perPilotUsd, pilots, headroom } }
      Any private value may be { withheld: true } instead of its content (redact.cjs): trap titles and files, edited file names, reasons, diffs, calibration, fairness,
      rubric changes, the designer's notes. The page also copes with a marker in any other field named above. The view model keeps the marker (WITHHELD) wherever a
      text may be withheld; plain() turns it into the page's words. */
   function adaptStage(v){
     if(!isObj(v))return null;
-    return {passed:typeof v.passed==='boolean'?v.passed:null,replacementRound:v.replacementRound===true,replacementSkipped:v.replacementSkipped===true,pilots:arr(v.pilots).map((p,i)=>{
+    const se=v.stoppedEarly;
+    /* { afterPilot, score } of a round that was stopped as soon as its result was decided (null: it was not) */
+    const stoppedEarly=isWithheld(se)?WITHHELD:isObj(se)?{afterPilot:num(se.afterPilot),score:isWithheld(se.score)?WITHHELD:num(se.score)}:null;
+    return {passed:typeof v.passed==='boolean'?v.passed:null,replacementRound:v.replacementRound===true,replacementSkipped:v.replacementSkipped===true,stoppedEarly,pilots:arr(v.pilots).map((p,i)=>{
       const q=isObj(p)?p:{},audit=isObj(q.audit)?text(q.audit.status):'',rg=q.regrade,o=q.outputs;
+      /* a pilot stopped because the round no longer needed it: true, or { reason }, or the reason itself; the reason may also be stoppedReason, or reason on a pilot that has no score */
+      const pe=q.stoppedEarly,stopped=isWithheld(pe)?WITHHELD:pe===true||isObj(pe)||(typeof pe==='string'&&pe!=='')?{reason:isObj(pe)?cell(pe.reason):typeof pe==='string'?pe:cell(q.stoppedReason!==undefined?q.stoppedReason:q.stopReason!==undefined?q.stopReason:num(q.score)===null?q.reason:'')}:null;
       const regrade=isWithheld(rg)?WITHHELD:isObj(rg)&&num(rg.first)!==null&&num(rg.second)!==null?{first:num(rg.first),second:num(rg.second),average:num(rg.average)}:null;
       /* the score that counts is score, which the companion sets to the average of a regraded pilot's two */
-      return {n:num(q.n)||i+1,replacement:q.replacement===true,state:text(q.state),score:q.valid===false?null:num(q.score)??(isObj(regrade)&&!isWithheld(regrade)?regrade.average:null),regrade,audit:audit.toUpperCase(),
+      return {n:num(q.n)||i+1,replacement:q.replacement===true,state:text(q.state),score:q.valid===false?null:num(q.score)??(isObj(regrade)&&!isWithheld(regrade)?regrade.average:null),regrade,stoppedEarly:stopped,audit:audit.toUpperCase(),
         outputs:isWithheld(o)?WITHHELD:isObj(o)&&num(o.count)!==null?{count:num(o.count),readable:num(o.readable)||0}:null};
     })};
   }
@@ -150,6 +158,7 @@
     const withheld=arr(cls.withheld).map(x=>isObj(x)?{name:text(x.name),why:text(x.why)}:{name:text(x),why:''}).filter(x=>x.name);
     const count=(k,key)=>num(facts[k])??(cls[key]?(k==='withheld'?withheld:lists[k]).length:null);
     const w=raw.waiting,waiting=isObj(w)?{kind:text(w.kind),message:cell(w.message)}:null;
+    const cfg=isObj(raw.config)?adaptConfig(raw.config):null;
     const design=adaptDesign(des),stage=typeof raw.stage==='string'&&raw.stage?raw.stage:'import';
     const reasonList=r=>isWithheld(r)?[WITHHELD]:arr(r).map(cell).filter(x=>x!=='');
     const attempts=arr(raw.attempts).filter(isObj).map((a,i,all)=>({n:num(a.n)||i+1,traps:nameCells(a.traps),outcome:text(a.outcome),repaired:isWithheld(a.repaired)?WITHHELD:a.repaired===true,note:cell(a.note),
@@ -161,7 +170,7 @@
     return {id:text(raw.id)||fallbackId||'',label:text(raw.label),stage,ended:['done','failed','stopped','budget'].includes(stage),redacted:raw.redacted===true,message:text(raw.message),
       createdAt:text(raw.createdAt),capUsd:num(raw.capUsd),spentUsd:num(raw.spentUsd)||0,pilotCapUsd:num(raw.pilotCapUsd),
       model:text(raw.model),effort:text(raw.effort),redesigns:num(raw.redesigns)||0,summary:text(raw.summary),
-      error:isObj(raw.error)?text(raw.error.message):text(raw.error),waiting,acceptMissing:isObj(raw.config)&&raw.config.acceptMissing===true,
+      error:isObj(raw.error)?text(raw.error.message):text(raw.error),waiting,acceptMissing:isObj(raw.config)&&raw.config.acceptMissing===true,bars:{screen:cfg?cfg.screenBar:null,test:cfg?cfg.testBar:null},
       hasImport:isObj(raw.import),hasClassification:isObj(raw.classification),hasDesign:isObj(raw.design),
       source:{folder,origin:folder?'':text(src.origin)||text(page.origin),path:folder?'':text(src.origin)?text(src.path):text(page.path),name:text(src.name),pageOrigin:folder?text(page.origin):'',pagePath:folder?text(page.path):''},
       files:{total:num(imp.fileCount)??(Array.isArray(imp.files)?imp.files.length:null),world:count('world','worldFiles'),task:count('task','taskFiles'),withheld:count('withheld','withheld'),other:count('other','other')},
@@ -183,12 +192,13 @@
   /* The rules GET /api/pipeline reports: the caps of the calls that are not pilots, the golden answer's minimum score, the band of scores that is graded again and the
      headroom a reservation includes. */
   function adaptConfig(c){
-    const o=isObj(c)?c:{},band=Array.isArray(o.regradeBand)&&o.regradeBand.length===2&&o.regradeBand.every(x=>num(x)!==null)?o.regradeBand.map(num):null;
+    const o=isObj(c)?c:{},bandOf=b=>Array.isArray(b)&&b.length===2&&b.every(x=>num(x)!==null)?b.map(num):null,band=bandOf(o.regradeBand);
     const m=isObj(o.minCap)?o.minCap:{},parts=[num(m.fixedUsd),num(m.perPilotUsd),num(m.pilots),num(m.headroom)];
     /* the minimum cap of one full attempt: every part a number, none negative, at least one pilot, a headroom of at least 1 */
     const minCap=parts.every(x=>x!==null&&x>=0)&&parts[2]>=1&&parts[3]>=1?{fixedUsd:parts[0],perPilotUsd:parts[1],pilots:parts[2],headroom:parts[3]}:null;
+    const pass=x=>{const n=num(x);return n!==null&&n>0&&n<=1?n:null;};
     const dflt=num(o.defaultCapUsd),defaultCapUsd=dflt!==null&&money(String(dflt),CAP_MIN_USD,RULES.maxCapUsd)!==null?dflt:null;
-    return {defaultCapUsd,classifyCapUsd:num(o.classifyCapUsd),designCapUsd:num(o.designCapUsd),repairCapUsd:num(o.repairCapUsd),fairnessCapUsd:num(o.fairnessCapUsd),graderCapUsd:num(o.graderCapUsd),goldenMin:num(o.goldenMin),regradeBand:band,headroom:num(o.headroom),minCap};
+    return {screenBar:pass(o.screenBar),testBar:pass(o.testBar),screenRegradeBand:bandOf(o.screenRegradeBand),testRegradeBand:bandOf(o.testRegradeBand),defaultCapUsd,classifyCapUsd:num(o.classifyCapUsd),designCapUsd:num(o.designCapUsd),repairCapUsd:num(o.repairCapUsd),fairnessCapUsd:num(o.fairnessCapUsd),graderCapUsd:num(o.graderCapUsd),goldenMin:num(o.goldenMin),regradeBand:band,headroom:num(o.headroom),minCap};
   }
   const adaptList=d=>(Array.isArray(d)?d:arr(isObj(d)?d.pipelines:null)).map(x=>adapt(x)).filter(v=>v&&ID_RE.test(v.id));
 
@@ -207,6 +217,11 @@
     timer:null,mounted:false,
     ctx:{download:null}
   };
+  /* The bar a pilot of a stage must score below: the pipeline's own config (config.screenBar, config.testBar), else the companion's, else the spec's (0.40, 0.45). */
+  function barOf(kind,v){
+    const own=v&&v.bars?v.bars[kind]:null,listed=S.rules[kind+'Bar'];
+    return own!==null&&own!==undefined?own:listed!==null&&listed!==undefined?listed:RULES[kind+'Bar'];
+  }
   function blankForm(){return {acceptMissing:false,capTouched:false,source:'url',url:'',dir:'',cap:String(defaultCap),pilotCap:PILOT_CAP.defaultUsd.toFixed(2),model:'',effort:'',acks:{}};}
 
   /* ---------- Small helpers ---------- */
@@ -299,7 +314,11 @@
       return 'Waiting for you: '+(!m?'the task page needs your help in the Chrome window.':m.length<=STAGE_MESSAGE_MAX?m:waitTitle(v.waiting.kind)+'. The whole message is in the card below.');
     }
     if(v.stage==='budget')return 'Stopped at the cap, in the '+STEPS[stepOf(v)][1]+' step: the next call would pass the total cap, so it was not started.';
-    const known=STAGES[v.stage],line=known?known[1]:'Working ('+v.stage+').';
+    const known=STAGES[v.stage];
+    let line=known?known[1]:'Working ('+v.stage+').';
+    /* a pilot stage says what its pilots must score */
+    if(known&&known[0]===3)line=line.replace(/\.$/,' (both must score below '+barText(barOf('screen',v))+').');
+    if(known&&known[0]===4)line=line.replace(/\.$/,' ('+RULES.testNeed+' of '+RULES.testPilots+' must score below '+barText(barOf('test',v))+').');
     return line+(v.redesigns>0&&!v.ended?' Redesign '+v.redesigns+' of '+RULES.maxRedesigns+'.':'');
   }
   function stepStates(v){
@@ -325,10 +344,10 @@
   const endedWithoutScore=p=>p.audit==='DISCARDED'||['failed','cancelled'].includes(p.state);
   function stageVerdict(res,kind){
     const need=kind==='test'?RULES.testNeed:RULES.screenPilots,of=kind==='test'?RULES.testPilots:RULES.screenPilots;
-    const below=res.pilots.filter(p=>p.score!==null&&p.score<RULES.passBar).length;
+    const below=res.pilots.filter(p=>p.score!==null&&p.score<barOf(kind,S.run)).length;
     return {status:res.passed===true?'passed':res.passed===false?'failed':'running',below,need,of};
   }
-  const scoresText=res=>res&&res.pilots.length?res.pilots.map(p=>p.score===null?'no score':p.score.toFixed(2)).join(', '):'';
+  const scoresText=res=>res&&res.pilots.length?res.pilots.map(p=>p.score===null?(p.stoppedEarly?'not needed':'no score'):p.score.toFixed(2)).join(', '):'';
   const STATUS_LABEL={passed:'passed',failed:'failed',running:'in progress',stopped:'stopped'};
   const STATUS_KIND={passed:'green',failed:'red',running:'violet',stopped:'amber'};
 
@@ -380,7 +399,7 @@
     if(cap===null||pilot===null)return 'Set the caps to see the worst case of the pilot stages.';
     const others=[r.classifyCapUsd!==null?'the classifier '+usd(r.classifyCapUsd):'',r.designCapUsd!==null?'the designer '+usd(r.designCapUsd)+(r.repairCapUsd!==null?' and one repair turn '+usd(r.repairCapUsd):''):'',r.fairnessCapUsd!==null?'the fairness review '+usd(r.fairnessCapUsd):'',r.graderCapUsd!==null?'each grader call '+usd(r.graderCapUsd):''].filter(Boolean);
     const head=r.headroom!==null&&r.headroom>1?' Before each step the run reserves its worst case with '+Math.round((r.headroom-1)*100)+'% headroom on top, and stops when that would pass the total cap.':'';
-    return 'Each pilot is capped at '+usd(pilot)+', so a '+RULES.screenPilots+'-pilot screen can cost up to '+usd(pilot*RULES.screenPilots)+' and a '+RULES.testPilots+'-pilot test up to '+usd(pilot*RULES.testPilots)+(others.length?'. The other calls are capped too: '+others.join(', ')+'.':', before the classifier, designer and grader runs.')+' The total cap of '+usd(cap)+' covers everything.'+head;
+    return 'Each pilot is capped at '+usd(pilot)+', so a '+RULES.screenPilots+'-pilot screen can cost up to '+usd(pilot*RULES.screenPilots)+' and a '+RULES.testPilots+'-pilot test up to '+usd(pilot*RULES.testPilots)+'. The '+RULES.testPilots+' test pilots run only when both screen pilots score below '+barText(barOf('screen'))+', and a round stops as soon as its result is decided.'+(others.length?' The other calls are capped too: '+others.join(', ')+'.':' The classifier, designer and grader runs cost extra.')+' The total cap of '+usd(cap)+' covers everything.'+head;
   }
   /* The least total cap that lets one full attempt start: the companion's formula (config.minCap) with the pilot cap typed in the form, rounded up to the cent.
      Null when the companion reported no minCap or the pilot cap is not a valid amount. */
@@ -390,7 +409,7 @@
     const cents=m.headroom*(m.fixedUsd+m.pilots*(pilot+m.perPilotUsd))*100;
     return Math.ceil(Math.round(cents*1e6)/1e6)/100;
   }
-  const capMinText=()=>{const m=minTotalCap(),cap=capValue();return m===null?'':'A full attempt with these caps can cost up to '+usd(m)+'.'+(cap!==null&&cap<m?' With this total cap the run may stop at the cap before the '+RULES.testPilots+'-pilot test.':'');};
+  const capMinText=()=>{const m=minTotalCap(),cap=capValue();return m===null?'':'If the screen passes, one full attempt (screen and test) can cost up to '+usd(m)+'.'+(cap!==null&&cap<m?' With this total cap the run may stop at the cap before the '+RULES.testPilots+'-pilot test.':'');};
   function paintCapMin(){
     const el=$('#pl-cap-min'),t=capMinText();
     if(el&&el.textContent!==t)el.textContent=t;
@@ -442,7 +461,7 @@
     if(!S.formOpen)return '';
     const why=startWhy();
     return html`<div class="pl-start-row"><button type="button" class="primary" data-pl="start" data-pl-key="start" aria-describedby="pl-why" ${why||S.working?'disabled':''}>Approve and start</button><p id="pl-why" class="pl-why">${why}</p></div>
-      <p class="pl-happens">${HAPPENS}</p>
+      <p class="pl-happens">${HAPPENS()}</p>
       <p class="footnote pl-limits">${limitsText()}</p>`;
   }
 
@@ -569,7 +588,7 @@
   const valueText=x=>isWithheld(x)?html`<span class="pl-withheld">${WITHHELD_TEXT}</span>`:x?html`<span>${x}</span>`:html`<span class="muted">Not given</span>`;
   const blockText=x=>isWithheld(x)?html`<p class="pl-withheld">${WITHHELD_TEXT}</p>`:x?html`<pre class="pl-text">${x.length>8000?x.slice(0,8000)+'\n[shortened for this page]':x}</pre>`:html`<p class="muted">Not given</p>`;
   /* A score to two decimals; one that rounds onto the bar shows its extra digits so the yes or no (or the pass or fail) is never a surprise. */
-  function scoreFmt(x,bar=RULES.passBar){
+  function scoreFmt(x,bar=RULES.testBar){
     const two=x.toFixed(2);
     return two===bar.toFixed(2)&&x!==bar?two+' ('+x.toFixed(4)+')':two;
   }
@@ -656,7 +675,10 @@
       <details><summary>Revised prompt, grader guideline and golden answer</summary><h3>Prompt</h3>${blockText(d.prompt)}<h3>Grader guideline</h3>${blockText(d.guideline)}<h3>Golden answer</h3>${blockText(d.golden)}</details>
       ${goldHtml(d)}`;
   }
+  /* A pilot stopped because the round no longer needed it, and has no score: not a failure. (An early stop that is withheld says nothing about this pilot.) */
+  const notNeeded=p=>p.score===null&&p.stoppedEarly!==null&&!isWithheld(p.stoppedEarly);
   function auditPill(p){
+    if(notNeeded(p)&&p.audit!=='CLEAN'&&p.audit!=='DISCARDED')return pill('Not needed');
     if(p.audit==='CLEAN')return pill('CLEAN','green');
     if(p.audit==='DISCARDED')return pill('DISCARDED','red');
     return ['failed','cancelled'].includes(p.state)?pill('Not audited','amber'):pill('Pending');
@@ -667,25 +689,44 @@
     if(isWithheld(o))return html`<small class="pl-outputs">${inline(o)}</small>`;
     return o&&o.count>0?html`<small class="pl-outputs">${plural(o.count,'file')}, ${o.readable===0?'none':o.readable} read</small>`:'';
   }
-  function scoreCell(p,decided,cut){
+  function scoreCell(p,decided,cut,bar){
     let main;
+    if(notNeeded(p)){
+      const why=p.stoppedEarly.reason;
+      return html`Stopped: not needed${why!==''&&why!==undefined?html`<small class="pl-stopped-reason">${inline(why)}</small>`:''}`;
+    }
     if(p.score===null){
       main=p.audit==='DISCARDED'?'No score (discarded)':['failed','cancelled'].includes(p.state)?'No score ('+p.state+')':cut?'No score (the run ended)':decided?'No usable score':p.state==='completed'?'Waiting for the grader':p.state==='queued'?'Queued':'Running';
-    }else main=scoreFmt(p.score);
-    if(isWithheld(p.regrade))return html`${main}<small class="pl-regraded">Graded twice: ${inline(p.regrade)}</small>`;
-    return p.regrade?html`${main}<small class="pl-regraded">Graded twice: ${scoreFmt(p.regrade.first)}, ${scoreFmt(p.regrade.second)}</small>`:main;
+    }else main=scoreFmt(p.score,bar);
+    const early=isWithheld(p.stoppedEarly)?html`<small class="pl-stopped-reason">Early stop: ${inline(p.stoppedEarly)}</small>`:'';
+    if(isWithheld(p.regrade))return html`${main}<small class="pl-regraded">Graded twice: ${inline(p.regrade)}</small>${early}`;
+    return p.regrade?html`${main}<small class="pl-regraded">Graded twice: ${scoreFmt(p.regrade.first,bar)}, ${scoreFmt(p.regrade.second,bar)}</small>${early}`:html`${main}${early}`;
   }
-  function belowHtml(p,decided,cut){
+  function belowHtml(p,decided,cut,bar){
+    if(notNeeded(p))return html`<span class="muted">Not needed</span>`;
     if(p.score===null&&cut)return html`<span class="muted">Not counted</span>`;
-    if(p.score!==null)return p.score<RULES.passBar?html`<span class="pl-yes"><span aria-hidden="true">✓</span> Yes</span>`:html`<span class="pl-no"><span aria-hidden="true">✕</span> No</span>`;
+    if(p.score!==null)return p.score<bar?html`<span class="pl-yes"><span aria-hidden="true">✓</span> Yes</span>`:html`<span class="pl-no"><span aria-hidden="true">✕</span> No</span>`;
     if(decided)return html`<span class="pl-no"><span aria-hidden="true">✕</span> No, a pilot without a score counts against the design</span>`;
     return endedWithoutScore(p)?html`<span class="muted">Replacement pending</span>`:html`<span class="muted">Pending</span>`;
+  }
+  /* The band of scores that is graded a second time in a stage: its own (screenRegradeBand, testRegradeBand), else the one regradeBand the companion reports. */
+  const regradeBandOf=kind=>S.rules[kind+'RegradeBand']||S.rules.regradeBand;
+  /* A round that was stopped as soon as its result was decided: after which pilot, with what score, and what that meant. */
+  function earlyStopHtml(res,kind,bar){
+    const e=res.stoppedEarly;
+    if(e===null)return '';
+    if(isWithheld(e))return html`<p class="pl-early-stop">Early stop: ${inline(e)}</p>`;
+    const who=e.afterPilot!==null?'pilot '+e.afterPilot:'a pilot';
+    const score=e.score===null?'':isWithheld(e.score)?html` scored ${inline(e.score)}`:' scored '+scoreFmt(e.score,bar);
+    const why=res.passed===false?': the '+kind+' cannot pass':res.passed===true&&kind==='test'?': '+RULES.testNeed+' pilots are below '+barText(bar)+', so the test has passed':'';
+    return html`<p class="pl-early-stop">Stopped after ${who}${score}${why}.</p>`;
   }
   function stageHtml(kind){
     const v=S.run;
     if(!v)return '';
     const res=v[kind],isTest=kind==='test',title=isTest?RULES.testPilots+'-pilot test':RULES.screenPilots+'-pilot screen',label=isTest?'Test':'Screen';
-    const rule=isTest?'The test succeeds when at least '+RULES.testNeed+' of '+RULES.testPilots+' pilots score below '+RULES.passBar.toFixed(2)+'.':'The screen passes when both pilots score below '+RULES.passBar.toFixed(2)+'.';
+    const bar=barOf(kind,v),barS=barText(bar);
+    const rule=isTest?'The test succeeds when at least '+RULES.testNeed+' of '+RULES.testPilots+' pilots score below '+barS+'. It runs only when the screen has passed, and it stops as soon as '+(RULES.testPilots-RULES.testNeed+1)+' pilots score '+barS+' or more (it cannot pass) or '+RULES.testNeed+' are below (it has passed).':'The screen passes when both pilots score below '+barS+'. If the first pilot to finish scores '+barS+' or more, the other is stopped and the designer starts again.';
     const active=STAGES[v.stage]&&STAGES[v.stage][0]===(isTest?4:3)&&!v.ended;
     /* a run that ended in this step before its round started has no result to show: say that it did not start, and why */
     const here=v.ended&&v.stage!=='done'&&stepOf(v)===(isTest?4:3);
@@ -695,10 +736,11 @@
     const sv=stageVerdict(res,kind),cut=v.ended&&res.passed===null,status=cut?'stopped':sv.status;
     return html`<div class="card-title"><div><div class="eyebrow">${label}</div><h2>${title}</h2></div>${pill(label+' '+STATUS_LABEL[status],STATUS_KIND[status])}</div>
       <p class="muted">${rule} Scores come from the simulated grader, run against the revised grader guideline.</p>
-      ${res.pilots.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">${title}: score of each pilot against the bar of ${RULES.passBar.toFixed(2)}</caption><thead><tr><th scope="col">Pilot</th><th scope="col">Score</th><th scope="col">Below ${RULES.passBar.toFixed(2)}</th><th scope="col">Audit</th></tr></thead><tbody>${res.pilots.map(p=>html`<tr><th scope="row">Pilot ${p.n}${p.replacement?' (replacement)':''}${outputsNote(p)}</th><td data-label="Score">${scoreCell(p,res.passed!==null,cut)}</td><td data-label="Below ${RULES.passBar.toFixed(2)}">${belowHtml(p,res.passed!==null,cut)}</td><td data-label="Audit">${auditPill(p)}</td></tr>`)}</tbody></table></div>
-        <p class="pl-tally">${sv.below} of ${sv.of} below ${RULES.passBar.toFixed(2)}${isTest?'; '+sv.need+' needed':'; both needed'}.</p>
+      ${res.pilots.length?html`<div class="table-wrap"><table class="pl-table"><caption class="sr-only">${title}: score of each pilot against the bar of ${barS}</caption><thead><tr><th scope="col">Pilot</th><th scope="col">Score</th><th scope="col">Below ${barS}</th><th scope="col">Audit</th></tr></thead><tbody>${res.pilots.map(p=>html`<tr><th scope="row">Pilot ${p.n}${p.replacement?' (replacement)':''}${outputsNote(p)}</th><td data-label="Score">${scoreCell(p,res.passed!==null,cut,bar)}</td><td data-label="Below ${barS}">${belowHtml(p,res.passed!==null,cut,bar)}</td><td data-label="Audit">${auditPill(p)}</td></tr>`)}</tbody></table></div>
+        <p class="pl-tally">${sv.below} of ${sv.of} below ${barS}${isTest?'; '+sv.need+' needed':'; both needed'}.</p>
+        ${earlyStopHtml(res,kind,bar)}
         ${res.replacementRound?html`<p class="muted pl-stage-note">A replacement round ran for the pilots without a usable score.</p>`:''}${res.replacementSkipped?html`<p class="muted pl-stage-note">No replacement round was run because it could not change the result.</p>`:''}
-        ${S.rules.regradeBand!==null&&res.pilots.some(p=>p.regrade!==null)?html`<p class="muted pl-stage-note">A score from ${S.rules.regradeBand[0].toFixed(2)} to ${S.rules.regradeBand[1].toFixed(2)} is graded a second time and the two scores are averaged.</p>`:''}${cut?html`<p class="muted pl-stage-note">The ${kind} ended before it was decided, so it has no result.</p>`:''}`:cut?html`<p class="pl-not-started">The ${kind} ended before any pilot finished, so it has no result.</p>`:html`<p>The pilots are starting.</p>`}`;
+        ${regradeBandOf(kind)&&res.pilots.some(p=>p.regrade!==null)?html`<p class="muted pl-stage-note">A score from ${regradeBandOf(kind)[0].toFixed(2)} to ${regradeBandOf(kind)[1].toFixed(2)} is graded a second time and the two scores are averaged.</p>`:''}${cut?html`<p class="muted pl-stage-note">The ${kind} ended before it was decided, so it has no result.</p>`:''}`:cut?html`<p class="pl-not-started">The ${kind} ended before any pilot finished, so it has no result.</p>`:html`<p>The pilots are starting.</p>`}`;
   }
   /* Every outcome service.cjs records; one it does not know is shown as sent. */
   const OUTCOMES={'in-progress':'In progress',passed:'Passed','screen-failed':'Screen failed','test-failed':'Test failed',rejected:'Rejected before any pilot',stopped:'Stopped',budget:'Stopped at the cap',failed:'Failed'};
@@ -730,7 +772,7 @@
     if(!v||!v.ended)return '';
     const below=v.test?stageVerdict(v.test,'test').below:null;
     const data={
-      done:['The test passed','Passed','green',below!==null?below+' of '+RULES.testPilots+' test pilots scored below '+RULES.passBar.toFixed(2)+'. The new files, the revised task text and the score table are ready to export.':'The '+RULES.testPilots+'-pilot test passed. The new files, the revised task text and the score table are ready to export.'],
+      done:['The test passed','Passed','green',below!==null?below+' of '+RULES.testPilots+' test pilots scored below '+barText(barOf('test',v))+'. The new files, the revised task text and the score table are ready to export.':'The '+RULES.testPilots+'-pilot test passed. The new files, the revised task text and the score table are ready to export.'],
       failed:['No passing design','Failed','red','The screen or the test did not pass within '+RULES.maxRedesigns+' redesigns, or the run could not continue.'],
       stopped:['Stopped by you','Stopped','amber','You pressed Stop. What was spent so far is shown above.'],
       budget:['Stopped at the cap','Cap reached','amber','The worst case of the next step would have passed the total cap'+(v.capUsd?' of '+usd(v.capUsd):'')+', so it was not started.']

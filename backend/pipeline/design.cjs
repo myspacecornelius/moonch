@@ -14,7 +14,7 @@ const path = require('node:path');
 const { GAF_PATTERN } = require('../../package-engine.js');
 const C = require('../agents/constants.cjs');
 const { parseFigure } = require('../agents/classify.cjs');
-const { DESIGN, INTAKE } = require('./constants.cjs');
+const { DESIGN, INTAKE, SCREEN_BAR } = require('./constants.cjs');
 const { isObject, oneLine, capText, nameProblem, walkFiles, copyHashed, hashFile, isJunkName, squash, TEXT_EXTENSIONS, Stopped } = require('./util.cjs');
 const { extractText, scanFile, ZIP_EXTENSIONS } = require('./extract.cjs');
 const { lineDiff } = require('./diff.cjs');
@@ -68,7 +68,8 @@ const DESIGNER_RULES = [
 
 const DESIGNER_TASK = [
   '',
-  'Goal: build the 1 to 3 hardest traps for this task, using ideas from the catalog, so that a careful blind pilot gives a wrong final answer and a simulated grader scores that answer below 0.45 against the guideline. A trap has one correct reading and one tempting wrong reading, and the supplied files must settle which is which.',
+  /* The screen comes first and its bar is the stricter one, so the design is aimed at it: a design that clears the screen clears the test's bar too. */
+  `Goal: build the 1 to 3 hardest traps for this task, using ideas from the catalog, so that a careful blind pilot gives a wrong final answer and a simulated grader scores that answer below ${SCREEN_BAR.toFixed(2)} against the guideline. A trap has one correct reading and one tempting wrong reading, and the supplied files must settle which is which.`,
   '',
   'How to build it:',
   '1. Prefer NEW files. Write each under out/new/ (sub folders allowed, at most three levels in all). A new file is an ordinary source document of the task and must read like one.',
@@ -137,7 +138,8 @@ function feedbackText({ attempt, stage, history, traps }) {
   const lines = [
     `# Feedback on design attempt ${attempt}`,
     '',
-    `The ${stage.name} did not pass. Rule: ${stage.rule}. The bar is a score below ${stage.bar}; ${stage.belowBar} of ${stage.pilotsWanted} counted pilots were below it.`,
+    `The ${stage.name} did not pass. Rule: ${stage.rule}. The bar is a score below ${stage.bar.toFixed(2)}; ${stage.belowBar} of ${stage.pilotsWanted} counted pilots were below it.`,
+    ...(stage.stoppedEarly ? [`The ${stage.name} was stopped as soon as the result was decided: after pilot ${stage.stoppedEarly.afterPilot} scored ${typeof stage.stoppedEarly.score === 'number' ? stage.stoppedEarly.score.toFixed(2) : 'no score'}, the pilots that had not finished were cancelled and have no score.`] : []),
     '',
     '## The traps of this attempt',
     ...traps.map(trap => `- ${trap.id}: ${trap.title}`),
@@ -146,7 +148,7 @@ function feedbackText({ attempt, stage, history, traps }) {
   ];
   for (const pilot of stage.pilots) {
     lines.push('', `### ${pilot.id}${pilot.replacement ? ' (replacement)' : ''}`);
-    lines.push(`- state: ${pilot.state}; audit: ${pilot.audit ? pilot.audit.status : 'none'}`);
+    lines.push(`- state: ${pilot.state}${pilot.stoppedEarly ? ' (stopped early: the result was already decided)' : ''}; audit: ${pilot.audit ? pilot.audit.status : 'none'}`);
     lines.push(`- score: ${typeof pilot.score === 'number' ? pilot.score.toFixed(2) : 'none'}${pilot.score !== null && pilot.score !== undefined ? (pilot.score < stage.bar ? ' (below the bar, the design worked)' : ' (at or above the bar, the pilot got through)') : ''}`);
     if (pilot.verdict) lines.push(`- grader verdict: ${pilot.verdict}`);
     if (pilot.reason) lines.push(`- grader reason: ${pilot.reason}`);

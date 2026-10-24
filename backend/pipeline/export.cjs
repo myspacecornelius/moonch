@@ -8,15 +8,17 @@ const path = require('node:path');
 const { writeZip } = require('../../package-engine.js');
 const { sha256Hex, walkFiles } = require('./util.cjs');
 
+/* A bar as text; an older state has only passBar (the test's). */
+const fixed = (bar, fallback) => (typeof bar === 'number' ? bar : typeof fallback === 'number' ? fallback : 0).toFixed(2);
 const safeLabel = text => (String(text || '').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'pipeline');
 
 function scoreRows(attempts) {
-  const rows = [['attempt', 'stage', 'pilot', 'round', 'run', 'score', 'below_bar', 'counted', 'audit']];
+  const rows = [['attempt', 'stage', 'pilot', 'round', 'run', 'score', 'below_bar', 'counted', 'audit', 'stopped_early']];
   for (const attempt of attempts) {
     for (const stage of [attempt.screen, attempt.test]) {
       if (!stage) continue;
       for (const pilot of stage.pilots) {
-        rows.push([attempt.n, stage.name, pilot.id, pilot.round, pilot.run, typeof pilot.score === 'number' ? pilot.score.toFixed(2) : '', pilot.belowBar === null || pilot.belowBar === undefined ? '' : pilot.belowBar ? 'yes' : 'no', pilot.valid ? 'yes' : 'no', pilot.audit ? pilot.audit.status : '']);
+        rows.push([attempt.n, stage.name, pilot.id, pilot.round, pilot.run, typeof pilot.score === 'number' ? pilot.score.toFixed(2) : '', pilot.belowBar === null || pilot.belowBar === undefined ? '' : pilot.belowBar ? 'yes' : 'no', pilot.valid ? 'yes' : 'no', pilot.audit ? pilot.audit.status : '', pilot.stoppedEarly ? 'yes' : 'no']);
       }
     }
   }
@@ -41,7 +43,7 @@ function buildExport({ outDir, state, note }) {
     '',
     `Result: ${state.stage}. ${state.message || ''}`.trim(),
     `Design attempts: ${state.attempts.length} (redesigns used: ${state.redesigns}). Spent: USD ${state.spentUsd.toFixed(2)} of a cap of USD ${state.config.capUsd.toFixed(2)}.`,
-    `Bar: a pilot beats the design with a simulated-grader score below ${state.config.passBar}. Screen: both of ${state.config.screenPilots}. Test: at least ${state.config.testNeed} of ${state.config.testPilots}.`,
+    `Bars: a pilot beats the design with a simulated-grader score below the bar of the stage. Screen: both of ${state.config.screenPilots} below ${fixed(state.config.screenBar, state.config.passBar)}. Test: at least ${state.config.testNeed} of ${state.config.testPilots} below ${fixed(state.config.testBar, state.config.passBar)}. A stage stops as soon as its result is decided.`,
     /* The design in this zip is the one that was accepted (designAttempt), which is not always the last attempt: later ones may have been rejected. */
     note ? `Design of attempt ${state.designAttempt === undefined || state.designAttempt === null ? '?' : state.designAttempt}: ${note}` : '',
     '',

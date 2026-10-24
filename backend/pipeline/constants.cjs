@@ -2,7 +2,11 @@
 /* Shared limits, rules and wording of the pipeline (link -> traps -> 2-pilot screen -> 5-pilot test).
    The server enforces every value here. The browser only displays them (GET /api/pipeline carries them as `config`). */
 
-const PASS_BAR = 0.45; /* a pilot "beats" the design when the simulated grader scores its answer below this */
+/* A pilot "beats" the design when the simulated grader scores its answer below the bar of the stage. The screen is the stricter: it passes
+   only when both of its pilots score below SCREEN_BAR; the test needs at least TEST_NEED of its pilots below TEST_BAR. */
+const SCREEN_BAR = 0.40;
+const TEST_BAR = 0.45;
+const PASS_BAR = TEST_BAR; /* the name the first version used for the test's bar; config.passBar is still sent, with this value */
 const SCREEN_PILOTS = 2; /* the screen passes when BOTH score below the bar */
 const TEST_PILOTS = 5;
 const TEST_NEED = 4; /* the test succeeds when at least this many of the pilots score below the bar */
@@ -29,9 +33,12 @@ const CAPS = { classifyUsd: 0.5, designUsd: 5, graderUsd: 0.5, repairUsd: 1, fai
 const HEADROOM = 1.15;
 
 /* The golden answer of a design must score at least this against the design's own guideline, or the design is rejected before any pilot
-   runs. A pilot score in REGRADE_BAND (both ends included) is graded a second time and the two are averaged. */
+   runs. A pilot score within a regrade band (both ends included; one around each bar) is graded a second time and the two are averaged,
+   before the score counts toward a decision. */
 const GOLDEN_MIN = 0.9;
-const REGRADE_BAND = [0.4, 0.5];
+const SCREEN_REGRADE_BAND = [0.35, 0.45];
+const TEST_REGRADE_BAND = [0.4, 0.5];
+const REGRADE_BAND = TEST_REGRADE_BAND; /* the first version's name for the test's band */
 /* The simulated grader runs at least at this effort, whatever the pilots use. */
 const MIN_GRADER_EFFORT = 'medium';
 /* A grader call at most twice per pilot (the second only in the regrade band). */
@@ -55,7 +62,7 @@ function deepFreeze(value) {
 }
 
 module.exports = deepFreeze({
-  PASS_BAR, SCREEN_PILOTS, TEST_PILOTS, TEST_NEED, MAX_REDESIGNS, DEFAULT_CAP_USD, MAX_CAP_USD,
+  SCREEN_BAR, TEST_BAR, PASS_BAR, SCREEN_PILOTS, TEST_PILOTS, TEST_NEED, MAX_REDESIGNS, DEFAULT_CAP_USD, MAX_CAP_USD,
   AGENT_ACKNOWLEDGEMENTS, MODEL_READS_TASK, ACKNOWLEDGEMENTS, MODEL_READS_TASK_TEXT,
-  STAGES, TERMINAL, CAPS, HEADROOM, GOLDEN_MIN, REGRADE_BAND, MIN_GRADER_EFFORT, GRADE_CALLS_PER_PILOT, INTAKE, DESIGN, ID_RE, WORKSPACE_DIRNAME,
+  STAGES, TERMINAL, CAPS, HEADROOM, GOLDEN_MIN, SCREEN_REGRADE_BAND, TEST_REGRADE_BAND, REGRADE_BAND, MIN_GRADER_EFFORT, GRADE_CALLS_PER_PILOT, INTAKE, DESIGN, ID_RE, WORKSPACE_DIRNAME,
 });

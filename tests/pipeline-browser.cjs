@@ -25,8 +25,8 @@ const NONCE = 'nonce-browser-1';
 const pipelines = new Map(), posts = [], gets = [];
 const ENDED = ['done', 'failed', 'stopped', 'budget'];
 /* the states are in the shape of backend/pipeline/service.cjs (_view): pilots inside attempts[].screen and .test, the last attempt current */
-const pilots = (scores, extra = {}) => scores.map((score, i) => ({ n: i + 1, id: 'p' + (i + 1), replacement: false, state: 'completed', audit: { status: 'CLEAN', violationCount: 0 }, score, valid: typeof score === 'number', belowBar: typeof score === 'number' ? score < 0.45 : null, reason: '', ...(extra[i] || {}) }));
-const stageOf = (name, scores, passed, extra) => ({ name, bar: 0.45, need: name === 'test' ? 4 : 2, of: name === 'test' ? 5 : 2, pilots: pilots(scores, extra), passed });
+const pilots = (scores, extra = {}) => scores.map((score, i) => ({ n: i + 1, id: 'p' + (i + 1), replacement: false, state: 'completed', audit: { status: 'CLEAN', violationCount: 0 }, score, valid: typeof score === 'number', belowBar: typeof score === 'number' ? score < 0.4 : null, reason: '', ...(extra[i] || {}) }));
+const stageOf = (name, scores, passed, extra) => ({ name, bar: name === 'test' ? 0.45 : 0.4, need: name === 'test' ? 4 : 2, of: name === 'test' ? 5 : 2, pilots: pilots(scores, extra), passed });
 const attempt = (over = {}) => ({ n: 1, traps: ['Superseded facility schedule'], newFiles: 2, editedFiles: 1, screen: null, test: null, outcome: 'in-progress', ...over });
 const W = { withheld: true };
 /* diffs in the companion's own shape: { available, kind, added, removed, before, after, truncated, lines: [{ op, text }] } */
@@ -49,7 +49,7 @@ const design = (withheld = false) => ({
 });
 const ZIP = Buffer.from('PK synthetic zip bytes');
 /* the rules GET /api/pipeline reports: the default total cap and the least total cap of one full attempt (1.15 x (6.25 + 7 x (3 + 1.5)) = 43.42 with the pilot cap of 3) */
-const CONFIG = { defaultCapUsd: 50, headroom: 1.15, minCap: { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 } };
+const CONFIG = { defaultCapUsd: 50, screenBar: 0.4, testBar: 0.45, headroom: 1.15, minCap: { fixedUsd: 6.25, perPilotUsd: 1.5, pilots: 7, headroom: 1.15 } };
 function handleApi(req, res, url, body) {
   const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
   if (req.method === 'POST') {
@@ -60,7 +60,7 @@ function handleApi(req, res, url, body) {
   if (req.method === 'GET' && url === '/api/pipeline') return send(200, { pipelines: [...pipelines.values()].map(p => ({ id: p.id, label: p.label, createdAt: p.createdAt, stage: p.stage, running: !ENDED.includes(p.stage), message: p.message, spentUsd: p.spentUsd, capUsd: p.capUsd, attempt: p.attempts.length, redesigns: p.redesigns })), running: null, config: CONFIG });
   if (req.method === 'POST' && url === '/api/pipeline/start') {
     if ([...pipelines.values()].some(p => !ENDED.includes(p.stage))) return send(409, { error: 'A pipeline is already running.' });
-    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
+    const state = { id: 'pl-browser-0001', label: 'Atlas review', stage: 'import', running: true, message: 'Opening the task page', createdAt: new Date().toISOString(), source: { kind: 'url', origin: 'https://tasks.example', path: '/review/atlas-4821' }, capUsd: body.capUsd, config: { acceptMissing: false, screenBar: 0.4, testBar: 0.45 }, spentUsd: 0, pilotCapUsd: body.pilotCapUsd, model: body.model, effort: body.effort, redesigns: 0, waiting: null, import: null, classification: null, design: null, attempts: [], result: null, summary: '', error: null };
     pipelines.set(state.id, state);
     return send(200, { id: state.id });
   }
@@ -130,6 +130,8 @@ async function waitFor(expression, label, timeout = 9000) {
 }
 const q = selector => JSON.stringify(selector);
 const exists = selector => evaluate(`!!document.querySelector(${q(selector)})`);
+/* One row of the redesign table: the text of each cell under its own column (attempt, Traps, Screen, Test, Outcome, Design checks), so a result in the wrong column fails. */
+const redesignRow = n => evaluate(`(()=>{const tr=document.querySelectorAll("#pl-redesigns tbody tr")[${n}];return tr?Object.fromEntries([...tr.children].map(c=>[c.getAttribute("data-label")||"attempt",c.innerText.replace(/\\s+/g," ").trim()])):null})()`);
 const text = selector => evaluate(`(document.querySelector(${q(selector)})||{}).innerText||''`);
 const count = selector => evaluate(`document.querySelectorAll(${q(selector)}).length`);
 const click = async selector => { assert.equal(await evaluate(`(()=>{const el=document.querySelector(${q(selector)});if(!el)return false;el.click();return true;})()`), true, 'missing ' + selector); await delay(80); };
@@ -213,7 +215,7 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-why'), /Enter the task link/);
     assert.equal(await count('#pl-root button.primary'), 1, 'one yellow primary');
     assert.equal(await evaluate('document.querySelector("#pl-cap").value'), '50', 'the companion\'s default total cap');
-    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 43.42.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
     assert.equal(await count('#pl-start-form input[data-pl-in=ack]'), 4);
     assert.equal(await count('#pl-start-form input[type=checkbox]'), 5, 'the four acknowledgements and the withheld-files choice');
     assert.equal(await evaluate('document.querySelectorAll("#pl-root [role=status][aria-live=polite]").length >= 3'), true, 'live regions for the message, the stage and the wait');
@@ -235,20 +237,20 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await evaluate('document.querySelector("#pl-cap").focus();document.querySelector("#pl-cap").select()');
     await call('Input.insertText', { text: '40' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
     assert.doesNotMatch(await text('#pl-why'), /at least USD/, 'a low total cap warns and does not block');
     await evaluate('document.querySelector("#pl-cap").select()');
     await call('Input.insertText', { text: '50' });
     await evaluate('document.querySelector("#pl-pilot-cap").focus();document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '5' });
     await delay(80);
-    assert.match(await text('#pl-cap-min'), /^A full attempt with these caps can cost up to USD 59\.52\./, 'the figure follows the pilot cap as it is typed');
-    assert.match(await text('#pl-cap-min'), /^A full attempt with these caps can cost up to USD 59\.52\. With this total cap the run may stop/, 'and warns while the total cap is below it');
+    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\./, 'the figure follows the pilot cap as it is typed');
+    assert.match(await text('#pl-cap-min'), /^If the screen passes, one full attempt \(screen and test\) can cost up to USD 59\.52\. With this total cap the run may stop/, 'and warns while the total cap is below it');
     assert.equal(await evaluate('document.querySelector("#pl-cap").getAttribute("aria-describedby")'), 'pl-cap-hint pl-cap-min');
     await evaluate('document.querySelector("#pl-pilot-cap").select()');
     await call('Input.insertText', { text: '3' });
     await delay(80);
-    assert.equal(await text('#pl-cap-min'), 'A full attempt with these caps can cost up to USD 43.42.');
+    assert.equal(await text('#pl-cap-min'), 'If the screen passes, one full attempt (screen and test) can cost up to USD 43.42.');
     assert.match(await text('#pl-why'), /Tick all four acknowledgements/, 'a cap that covers it: the next reason is the acknowledgements');
     await shot('01b-min-cap-1440', 1440, 1000);
     await evaluate('document.querySelector("#pl-url").focus()');
@@ -432,7 +434,10 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     await waitFor(stageIs('^Test: five blind'), 'the test', POLL_WAIT);
     assert.equal(await count('#pl-screen tbody tr'), 2);
     assert.equal(await text('#pl-screen tbody tr:first-child td:nth-child(2)'), '0.31');
-    assert.match(await text('#pl-screen'), /The screen passes when both pilots score below 0\.45\./);
+    assert.match(await text('#pl-screen'), /The screen passes when both pilots score below 0\.40\./);
+    assert.equal(await text('#pl-screen thead th:nth-child(3)'), 'Below 0.40', 'the screen\'s column is its own bar');
+    assert.equal(await text('#pl-test thead th:nth-child(3)'), 'Below 0.45', 'and the test\'s column is the test\'s');
+    assert.equal(await text('#pl-stage'), 'Test: five blind pilots are working (4 of 5 must score below 0.45).');
     assert.match(await text('#pl-screen tbody tr:first-child td:nth-child(3)'), /Yes/);
     assert.match(await text('#pl-test'), /The test succeeds when at least 4 of 5 pilots score below 0\.45\./);
     assert.match(await text('#pl-test'), /Test in progress/);
@@ -452,6 +457,58 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.ok(await evaluate('document.querySelector("#pl-bar").getBoundingClientRect().height') < 160, 'and it stays compact on a phone');
     await viewport(1440, 1000);
 
+    /* ---------- a round stops as soon as its result is decided: the pilots that are no longer needed are not failures ---------- */
+    const notNeeded = (kind, after) => ({ state: 'cancelled', score: null, valid: false, belowBar: null, audit: null, stoppedEarly: true, stoppedReason: `Not graded: the ${kind} was already decided after pilot ${after}.` });
+    /* the screen: pilot 1 scored 0.62, so pilot 2 was stopped and the designer starts again */
+    setAttempt({ outcome: 'screen-failed', screen: { ...stageOf('screen', [0.62, null], false, { 1: notNeeded('screen', 1) }), stoppedEarly: { afterPilot: 1, score: 0.62 } }, test: null });
+    set({ stage: 'redesign', redesigns: 1 });
+    await waitFor('/Stopped after pilot 1/.test((document.querySelector("#pl-screen")||{}).innerText||"")', 'the screen that stopped early', POLL_WAIT);
+    assert.equal(await text('#pl-screen .pl-early-stop'), 'Stopped after pilot 1 scored 0.62: the screen cannot pass.');
+    assert.match(await text('#pl-screen .card-title'), /Screen failed/);
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(2)'), 'Stopped: not needed\nNot graded: the screen was already decided after pilot 1.');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(3)'), 'Not needed');
+    assert.equal(await text('#pl-screen tbody tr:nth-child(2) td:nth-child(4)'), 'Not needed');
+    assert.match(await text('#pl-screen tbody tr:nth-child(1) td:nth-child(3)'), /No/);
+    assert.equal(await evaluate('document.querySelector("#pl-screen tbody tr:nth-child(2) .pill").className'), 'pill ', 'the audit badge is plain: neither amber nor red');
+    assert.equal(await evaluate('document.querySelectorAll("#pl-screen .pill.amber, #pl-screen .pill.red").length'), 1, 'only the Screen failed pill is red, and it comes with its words');
+    const screenRow = await redesignRow(0);
+    assert.equal(screenRow.attempt, 'Attempt 1 (latest)');
+    assert.equal(screenRow.Screen, 'Failed (0.62, not needed)', 'the screen column holds the screen result');
+    assert.equal(screenRow.Test, 'Not run', 'the test column holds none');
+    assert.equal(screenRow.Outcome, 'Screen failed');
+    assert.ok(!/not needed|0\.62/.test(screenRow.Test + '|' + screenRow.Outcome), 'the screen result is in no other column');
+    await noHorizontalOverflow('screen stopped early');
+    await shot('04c-screen-stopped-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-screen").scrollIntoView()');
+    await shot('04c-screen-stopped-390', 390, 844);
+    assert.equal(await evaluate('document.querySelector("#pl-screen .pl-stopped-reason").getBoundingClientRect().right <= window.innerWidth'), true, 'the reason fits a phone');
+    await viewport(1440, 1000);
+    /* the test: pilots 1 and 3 scored 0.45 or more, so 4 and 5 were stopped (the test cannot reach 4 of 5) */
+    setAttempt({ outcome: 'test-failed', screen: stageOf('screen', [0.31, 0.12], true), test: { ...stageOf('test', [0.2, 0.71, 0.45, null, null], false, { 3: notNeeded('test', 3), 4: notNeeded('test', 3) }), stoppedEarly: { afterPilot: 3, score: 0.45 } } });
+    await waitFor('/Stopped after pilot 3/.test((document.querySelector("#pl-test")||{}).innerText||"")', 'the test that stopped early', POLL_WAIT);
+    assert.equal(await text('#pl-test .pl-early-stop'), 'Stopped after pilot 3 scored 0.45: the test cannot pass.');
+    assert.match(await text('#pl-test .card-title'), /Test failed/);
+    assert.equal(await count('#pl-test tbody tr'), 5);
+    assert.equal(await evaluate('[...document.querySelectorAll("#pl-test tbody tr")].map(r=>r.children[2].innerText.trim()).join("|")'), '✓ Yes|✕ No|✕ No|Not needed|Not needed', 'the column of the test bar: 0.45 itself is not below it');
+    assert.equal(await count('#pl-test .pl-stopped-reason'), 2);
+    assert.match(await text('#pl-test .pl-stopped-reason'), /^Not graded: the test was already decided after pilot 3\./);
+    assert.equal(await text('#pl-test thead th:nth-child(3)'), 'Below 0.45');
+    assert.equal(await text('#pl-screen thead th:nth-child(3)'), 'Below 0.40', 'both bars at once');
+    const testRow = await redesignRow(0);
+    assert.equal(testRow.Screen, 'Passed (0.31, 0.12)', 'the screen column holds the screen result');
+    assert.equal(testRow.Test, 'Failed (0.20, 0.71, 0.45, not needed, not needed)', 'the test column holds the test result');
+    assert.equal(testRow.Outcome, 'Test failed');
+    assert.ok(!/not needed|0\.71|0\.45/.test(testRow.Screen + '|' + testRow.Outcome), 'the test result is in no other column');
+    assert.ok(!/Passed|0\.31/.test(testRow.Test + '|' + testRow.Outcome), 'the screen result is in no other column');
+    await noHorizontalOverflow('test stopped early');
+    await shot('04d-test-stopped-1440', 1440, 1000);
+    await viewport(390, 844);
+    await evaluate('document.querySelector("#pl-test").scrollIntoView()');
+    await shot('04d-test-stopped-390', 390, 844);
+    await viewport(1440, 1000);
+    pass('the two bars show in their own stage (below 0.40 for the screen, below 0.45 for the test); a screen stopped after pilot 1 and a test stopped after 2 pilots at or above the bar show the pilots that were not needed as "Stopped: not needed" with their reason, and the stage says why it stopped');
+
     /* ---------- done: result and export ---------- */
     set({ stage: 'done', running: false, spentUsd: 17.4, redesigns: 2, summary: 'The test passed: 4 of 5 pilots scored below 0.45 (design attempt 3). Export the private zip to take the design away.', attempts: [
       attempt({ n: 1, traps: [{ id: 't1', title: 'Rounded inputs rebuilt into a total' }], outcome: 'rejected', rejection: { kind: 'checks', reasons: ['The golden answer scored 0.62 against its own guideline; at least 0.90 is needed'] }, calibration: { score: 0.62, verdict: 'does-not-meet-guidance', reason: 'Missing the date.' }, fairness: { status: 'ok', count: 0 }, repaired: true }),
@@ -461,9 +518,14 @@ const stageIs = pattern => `/${pattern}/.test((document.querySelector("#pl-stage
     assert.match(await text('#pl-verdict'), /The test passed/);
     assert.match(await text('#pl-verdict'), /The test passed: 4 of 5 pilots scored below 0\.45 \(design attempt 3\)\./);
     assert.match(await text('#pl-redesigns'), /2 of 3 used/);
-    assert.match(await text('#pl-redesigns'), /Rejected before any pilot[\s\S]*The design did not pass the calibration or the fairness check\.[\s\S]*The golden answer scored 0\.62 against its own guideline; at least 0\.90 is needed/);
-    assert.match(await text('#pl-redesigns'), /Calibration: 0\.62, failed[\s\S]*A repair turn was used/);
     assert.equal(await count('#pl-redesigns tbody tr'), 3);
+    const [rej, failedScreen, passedRow] = [await redesignRow(0), await redesignRow(1), await redesignRow(2)];
+    assert.deepEqual([rej.Screen, rej.Test], ['Not run', 'Not run'], 'a rejected design ran no pilot');
+    assert.match(rej.Outcome, /^Rejected before any pilot[\s\S]*The design did not pass the calibration or the fairness check\.[\s\S]*The golden answer scored 0\.62 against its own guideline; at least 0\.90 is needed/, 'the rejection is in the outcome column');
+    assert.match(rej['Design checks'], /Calibration: 0\.62, failed[\s\S]*A repair turn was used/, 'and the checks in their own');
+    assert.ok(!/Rejected|golden answer|Calibration/.test(rej.Screen + '|' + rej.Test), 'neither is in a result column');
+    assert.deepEqual([failedScreen.Screen, failedScreen.Test, failedScreen.Outcome], ['Failed (0.70, 0.30)', 'Not run', 'Screen failed']);
+    assert.deepEqual([passedRow.Screen, passedRow.Test, passedRow.Outcome], ['Passed (0.31, 0.12)', 'Passed (0.10, 0.20, 0.90, 0.30, 0.44)', 'Passed'], 'the screen scores are in the screen column and the test scores in the test column');
     assert.ok(!(await text('#pl-verdict')).includes('%') && !(await text('#pl-spend')).includes('%'), 'no percentage in the result or the spend');
     assert.equal(await exists('[data-pl=stop]'), false);
     assert.equal(await exists('[data-pl=export]'), true, 'Export is offered when done');
