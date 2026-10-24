@@ -125,7 +125,7 @@
   const REVIEW_STATUSES=['pending','passed','rejected','incomplete','not-reached'];
   /* The fairness record of the new mode ({ status, stage1, stage2, repairs }), told from the old fairness review ({ status: ok | unfair | unusable }) by its shape. */
   const isReview=f=>isObj(f)&&!isWithheld(f)&&(f.stage1!==undefined||f.stage2!==undefined||typeof f.repairs==='number'||REVIEW_STATUSES.includes(f.status));
-  const HIT_KINDS=['passage','notice','unreadable','more'];
+  const HIT_KINDS=['passage','notice','summary','unreadable','more'];
   /* The supersession hits of an application check: how many (a count in an older companion), or the list { id, kind ('passage' | 'notice' | 'unreadable' | 'more'), document, snippet }.
      The snippet is not kept; a 'more' entry carries how many more there were (its count, or the number its snippet opens with). */
   function adaptHits(h,hitList){
@@ -158,7 +158,7 @@
     if(!isReview(f))return null;
     const s1=f.stage1,s2=f.stage2;
     return {status:text(f.status),repairs:num(f.repairs)||0,
-      stage1:isWithheld(s1)?WITHHELD:isObj(s1)?{state:text(s1.state),tries:num(s1.tries)||0,runs:num(s1.runs)||0,discarded:num(s1.discarded)||0,rendered:nameList2(s1.rendered),unreadable:nameList2(s1.unreadable)}:null,
+      stage1:isWithheld(s1)?WITHHELD:isObj(s1)?{state:text(s1.state),tries:num(s1.tries)||0,runs:num(s1.runs)||0,discarded:num(s1.discarded)||0,rendered:nameList2(s1.rendered),unreadable:nameList2(s1.unreadable),unopened:nameList2(s1.unopened),read:typeof s1.read==='boolean'?s1.read:null,governingFound:typeof s1.governingFound==='boolean'?s1.governingFound:null}:null,
       stage2:isWithheld(s2)?WITHHELD:isObj(s2)?{disposition:text(s2.disposition),objectionClass:text(s2.objectionClass),evaluations:num(s2.evaluations)||0,application:adaptCheck(s2.application),briefApplication:adaptBriefCheck(s2.briefApplication),cut:nameList2(s2.cut)}:null};
   }
   function adaptAnswerSet(s){
@@ -216,7 +216,7 @@
       controls:arr(b.controls).filter(isObj).map(c=>({scenario:text(c.scenario),trap:text(c.trap),action:text(c.action),changesDecision:c.changesDecision===true,figures:figureList(c.figures)}))};
   }
   /* design.alternatives: the permitted alternatives the design keeps, [{ name, file, answer }] */
-  const adaptAlternatives=l=>isWithheld(l)?WITHHELD:arr(l).filter(isObj).map(a=>({name:text(a.name),file:text(a.file),answer:cell(a.answer)}));
+  const adaptAlternatives=l=>isWithheld(l)?WITHHELD:arr(l).filter(isObj).map(a=>({id:text(a.id)||text(a.name),name:text(a.name),file:text(a.file),answer:cell(a.answer)}));
   /* The names of the reference files: names, or else the name of each entry of files (a record { name, bytes, sha256 }); the marker when either is withheld. */
   function refNames(r){
     if(isWithheld(r.names)||(!Array.isArray(r.names)&&isWithheld(r.files)))return WITHHELD;
@@ -285,7 +285,7 @@
     const prints=isWithheld(d.fingerprints)?WITHHELD:arr(d.fingerprints).filter(isObj).map(f=>({id:text(f.id),label:text(f.label),tokens:arr(f.tokens).map(text).filter(Boolean),figures:arr(f.figures).map(x=>isObj(x)?[text(x.label),text(x.value)].filter(Boolean).join(' '):text(x)).filter(Boolean)}));
     const rub=d.rubricChanges;
     const edited=isWithheld(d.editedFiles)?WITHHELD:arr(d.editedFiles).map(e=>isObj(e)?{name:isWithheld(e.name)?WITHHELD:text(e.name),reason:cell(e.reason),diff:diffCell(e.diff),size:sizeCell(e.sizeChange!==undefined?e.sizeChange:num(e.bytes)!==null&&num(e.beforeBytes)!==null?e.bytes-e.beforeBytes:isObj(e.diff)&&num(e.diff.before)!==null&&num(e.diff.after)!==null?e.diff.after-e.diff.before:undefined)}:{name:typeof e==='string'?e:'',reason:'',diff:null,size:null}).filter(e=>e.name!=='');
-    return {attempt:num(d.attempt),traps:traps||[],trapsWithheld:traps===null,newFiles:nameCells(d.newFiles),notes:isWithheld(d.notes)?WITHHELD:arr(d.notes).map(text).filter(Boolean),edited,
+    return {attempt:num(d.attempt),checking:d.checking===true?true:d.checking===false?false:null,traps:traps||[],trapsWithheld:traps===null,newFiles:nameCells(d.newFiles),notes:isWithheld(d.notes)?WITHHELD:arr(d.notes).map(text).filter(Boolean),edited,
       prompt:cell(d.prompt),guideline:cell(d.guideline),golden:cell(d.goldenAnswer),gold,fingerprints:prints,
       repaired:isWithheld(d.repaired)?WITHHELD:d.repaired===true,calibration:adaptCalibration(d.calibration),fairness:newDesign?null:adaptFairness(d.fairness),review:newDesign||isReview(d.fairness)?adaptReview(d.fairness):null,
       taskType:adaptTaskType(d.taskType),brief:adaptBrief(d.brief),alternatives:adaptAlternatives(d.alternatives),answerSet:adaptAnswerSet(d.answerSet),freeze:adaptFreeze(d.freeze),
@@ -325,7 +325,7 @@
       importNotes:isWithheld(imp.notes)?WITHHELD:arr(imp.notes).map(cell).filter(x=>isWithheld(x)||x!==''),
       toggle:isWithheld(imp.toggle)?WITHHELD:tog?{found:tog.found===true,label:text(tog.label),flipped:tog.flipped===true,learned:tog.learned===true,before:num(tog.filesBefore),after:num(tog.filesAfter)}:null,
       cls:{any:!!(cls.prompt||cls.guideline||cls.goldenAnswer||cls.worldFiles||cls.taskFiles||arr(cls.keptAsWorld).length||arr(cls.warnings).length||arr(cls.goldenSuspects).length||arr(cls.unscanned).length||nameCells(cls.unreadable).length),prompt:ref(cls.prompt),guideline:ref(cls.guideline),golden:ref(cls.goldenAnswer),...lists,withheld,notes:arr(cls.notes).map(text).filter(Boolean),
-        warnings:isWithheld(cls.warnings)?[{name:WITHHELD,why:''}]:arr(cls.warnings).map(x=>isObj(x)?{name:cell(x.name),why:cell(x.why)}:{name:typeof x==='string'?x:'',why:''}).filter(x=>isWithheld(x.name)||x.name),
+        warnings:isWithheld(cls.warnings)?[{name:WITHHELD,why:'',soft:false}]:arr(cls.warnings).map(x=>isObj(x)?{name:cell(x.name),why:cell(x.why),soft:x.soft===true}:{name:typeof x==='string'?x:'',why:'',soft:false}).filter(x=>isWithheld(x.name)||x.name),
         goldenSuspects:nameCells(cls.goldenSuspects),unscanned:nameCells(cls.unscanned),unreadable:nameCells(cls.unreadable),kept:isWithheld(cls.keptAsWorld)?WITHHELD:arr(cls.keptAsWorld).map(x=>isObj(x)?{name:text(x.name),why:cell(x.why)}:{name:text(x),why:''}).filter(x=>x.name!=='')},
       design,screen:last?last.screen:null,test:last?last.test:null,attempts};
   }
@@ -446,7 +446,7 @@
       if(v.redesigns>=n)return 2;                                  // between attempts: the feedback for the next design
       if(v.test)return 4;                                          // the test round started (even if no pilot is in yet)
       if(v.screen)return v.screen.passed===true?4:3;               // a passed screen has the test next; a screen that is open or failed is the screen
-      return v.design.attempt!==null&&v.design.attempt===last.n?3:2; // an accepted design has the screen next; else the design itself
+      return v.design.attempt!==null&&v.design.attempt===last.n&&v.design.checking===null?3:2; // an accepted design has the screen next (a design still being checked does not); else the design itself
     }
     if(v.design.traps.length||v.design.attempt!==null||v.design.newFiles.length)return 2;
     if(v.hasClassification||v.cls.any)return v.stage==='failed'?1:2; // a failed run with a classification failed in a classify check; Stop and the cap come after it
@@ -457,6 +457,11 @@
   function repairing(v){
     const a=v.attempts.length?v.attempts[v.attempts.length-1]:null,r=a&&a.guidelineRepair;
     return !v.ended&&!!r&&!isWithheld(r)&&r.outcome==='pending';
+  }
+  /* The new mode's checks of a design (the answer set, the blind review, the reveal) are running: the designer has delivered, and no pilot has started. */
+  function checkingDesign(v){
+    const a=v.attempts.length?v.attempts[v.attempts.length-1]:null;
+    return !v.ended&&v.designMode==='new'&&!!a&&a.mode==='new'&&a.validation==='pending'&&stepOf(v)===2&&(a.review!==null||a.answerSet!==null||a.calibration!==null);
   }
   function stageLine(v){
     if(!v)return '';
@@ -470,6 +475,7 @@
     if(v.stage==='budget')return 'Stopped at the cap, in the '+STEPS[stepOf(v)][1]+' step: the next call would pass the total cap, so it was not started.';
     const known=STAGES[v.stage];
     let line=known?known[1]:'Working ('+v.stage+').';
+    if(known&&known[0]===2&&checkingDesign(v))line='Design: checking the design before any pilot runs.';
     /* the companion's own sentence says what is happening; the stage name alone would say pilots are working */
     if(known&&(known[0]===3||known[0]===4)&&repairing(v)){
       const m=v.message.trim().replace(/[.!\s]+$/,'');
@@ -694,7 +700,7 @@
       <p class="pl-meta muted">Pipeline <code>${v.id}</code>${v.model?' · '+v.model:''}${v.effort?' · '+v.effort:''}${v.pilotCapUsd?' · '+usd(v.pilotCapUsd)+' per pilot':''}${v.acceptMissing?' · withheld files accepted':''}${v.createdAt?' · started '+timeText(v.createdAt):''}</p>`;
   }
   /* The companion exports any ended pipeline that made a design, and refuses while a round runs (then the answer is redacted). */
-  const canExport=v=>!!v&&v.ended&&!v.redacted&&v.hasDesign;
+  const canExport=v=>!!v&&v.ended&&!v.redacted&&v.hasDesign&&v.design.checking===null;
   function actionsHtml(){
     const v=S.run;
     if(!v)return '';
@@ -807,9 +813,11 @@
   function classHtml(){
     const v=S.run;
     if(!v||!v.cls.any)return '';
-    const c=v.cls;
-    return html`<div class="card-title"><div><div class="eyebrow">Classify</div><h2>What each part of the task is</h2></div>${c.warnings.length?pill(plural(c.warnings.length,'warning'),'amber'):''}</div>
-      ${c.warnings.length?html`<div class="notice pl-warning" role="note"><strong>Warning: check this before you trust the classification</strong><p class="pl-warning-lead">The classifier called each of these a world or task file, but the pilots will not get it.</p><ul class="pl-names">${c.warnings.map(w=>html`<li>${isWithheld(w.name)?inline(w.name):w.name}${w.why===''?'':html`: ${inline(w.why)}`}</li>`)}</ul></div>`:''}
+    const c=v.cls,hard=c.warnings.filter(w=>!w.soft),soft=c.warnings.filter(w=>w.soft);
+    const item=w=>html`<li>${isWithheld(w.name)?inline(w.name):w.name}${w.why===''?'':html`: ${inline(w.why)}`}</li>`;
+    return html`<div class="card-title"><div><div class="eyebrow">Classify</div><h2>What each part of the task is</h2></div>${hard.length?pill(plural(hard.length,'warning'),'amber'):''}</div>
+      ${hard.length?html`<div class="notice pl-warning" role="note"><strong>Warning: check this before you trust the classification</strong><p class="pl-warning-lead">The classifier called each of these a world or task file, but the pilots will not get it.</p><ul class="pl-names">${hard.map(item)}</ul></div>`:''}
+      ${soft.length?html`<div class="notice neutral pl-soft-warning" role="note"><strong>Withheld with a note: the start goes on</strong><p class="pl-warning-lead">${soft.length===1?'This file shares':'These files share'} text with the grader guideline or the golden answer of the old task, so the pilots will not get ${soft.length===1?'it':'them'}. Nothing stops the start.</p><ul class="pl-names">${soft.map(item)}</ul></div>`:''}
       ${unreadableFilesHtml(v)}
       <dl class="history-details"><dt>Business prompt</dt><dd>${refText(c.prompt,v.designMode)}</dd><dt>Grader guideline</dt><dd>${refText(c.guideline,v.designMode)}</dd><dt>Golden answer</dt><dd>${refText(c.golden,v.designMode)}</dd></dl>
       ${isWithheld(c.kept)?'':c.kept.length?html`<p class="pl-class-note pl-kept-note">Kept as world files because you asked, although the name looks like an answer or grading material: ${c.kept.map(x=>plain(x.name)+(x.why!==''?' ('+plain(x.why)+')':'')).join(', ')}.</p>`:''}
@@ -881,6 +889,9 @@
   function guidelineChangesHtml(d){
     const diff=d.guidelineDiff,rub=d.rubricChanges;
     if(diff===null&&rub===null)return '';
+    /* a new task has no original guideline to change: the designer wrote the first one, so there is no comparison and no change to list */
+    const none=x=>x===null||isWithheld(x)||(Array.isArray(x)&&!x.length);
+    if((d.brief!==null||d.taskType!==null)&&(diff===null||isWithheld(diff)||diff.available===false)&&none(rub))return '';
     const rubric=rub===null?'':isWithheld(rub)?html`<h3>Rubric changes</h3><p class="pl-withheld">${WITHHELD_TEXT}</p>`
       :html`<h3>Rubric changes (${rub.length})</h3>${rub.length?html`<ul class="pl-names">${rub.map(r=>html`<li>${isWithheld(r.change)?inline(r.change):r.change||'A change'}${r.reason!==''?html` <span class="muted">Why: ${inline(r.reason)}</span>`:''}</li>`)}</ul>`:html`<p class="muted">The designer listed no rubric change.</p>`}`;
     return html`<details class="pl-changes"><summary>What the designer changed in the grader guideline</summary>${rubric}${diff===null?'':html`<h3>Line changes</h3>${diffBlock(diff)}`}</details>`;
@@ -932,7 +943,7 @@
     if(!v)return '';
     const b=v.design.brief;
     if(b===null)return '';
-    const head=html`<div class="card-title"><div><div class="eyebrow">Brief</div><h2>What the traps rest on</h2></div>${v.design.attempt?pill('Attempt '+v.design.attempt,'violet'):''}</div>`;
+    const head=html`<div class="card-title"><div><div class="eyebrow">Brief</div><h2>What the traps rest on</h2></div>${v.design.attempt?pill('Attempt '+v.design.attempt,'violet'):''}${v.design.checking===true?pill('Being checked','violet'):v.design.checking===false?pill('Not accepted','amber'):''}</div>`;
     if(isWithheld(b))return html`${head}<p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     const set=v.design.answerSet,score=file=>{const x=set&&!isWithheld(set)?set.answers.find(a=>a.file===file):null;return x&&x.score!==null?x:null;};
     const alts=v.design.alternatives;
@@ -960,6 +971,7 @@
     h.list.forEach(x=>{
       if(x.kind==='unreadable')out.push(html`<li class="pl-hit-unreadable"><strong>${inline(x.document)}</strong>: This file could not be read as text, so it could not be checked for a later document that replaces it.</li>`);
       else if(x.kind==='notice')out.push(html`<li class="pl-hit-notice">A reviewer quoted this from a file that only the blind reader could open: <strong>${inline(x.document)}</strong> (the quote itself is not shown here).</li>`);
+      else if(x.kind==='summary')out.push(html`<li class="pl-hit-summary">More passages of supersession wording were found in <strong>${inline(x.document)}</strong> than are listed.</li>`);
       else if(x.kind==='more')out.push(html`<li class="pl-hit-more">More passages were found than are shown here${x.count!==null?' ('+x.count+' more)':''}.</li>`);
     });
     const left=isWithheld(c.unscanned)?null:c.unscanned.filter(n=>!covered.has(n));
@@ -1015,9 +1027,9 @@
     if(isWithheld(r))return html`${lead}<p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     const s1=r.stage1,s2=r.stage2;
     const one=isWithheld(s1)?html`<li>Blind review: ${inline(s1)}</li>`:s1===null?html`<li>Blind review: not run.</li>`
-      :html`${blindLine(s1)}${filesLine('pl-rendered','These files were turned into text for the blind reviewer:',s1.rendered)}${filesLine('pl-unreadable-files','Nobody could read these files, so the blind review is partial for them:',s1.unreadable)}`;
+      :html`${blindLine(s1)}${filesLine('pl-rendered','These files were turned into text for the blind reviewer:',s1.rendered)}${filesLine('pl-unreadable-files','Nobody could read these files, so the blind review is partial for them:',s1.unreadable)}${filesLine('pl-unopened','The blind reviewer did not open these files:',s1.unopened)}${s1.read===false?html`<li class="pl-blind-unread">The blind reviewer did not open any file of the packet, so its answer is not counted as a complete review.</li>`:''}${s1.governingFound===false?html`<li class="pl-blind-governing">The document the blind reviewer named is not a file of the packet.</li>`:''}`;
     const two=isWithheld(s2)?html`<li>Second review: ${inline(s2)}</li>`:s2===null?html`<li>Second review: not run.</li>`
-      :html`<li>Second review: ${DISPOSITION_WORDS[s2.disposition]||s2.disposition||'no decision'}${s2.objectionClass!==''?' (objection: '+(OBJECTION_WORDS[s2.objectionClass]||s2.objectionClass)+')':''}${s2.evaluations>1?'; it ran '+s2.evaluations+' times':''}.</li>`;
+      :html`<li>Second review: ${DISPOSITION_WORDS[s2.disposition]||s2.disposition||'no decision'}${s2.objectionClass!==''&&s2.objectionClass!=='none'?' (objection: '+(OBJECTION_WORDS[s2.objectionClass]||s2.objectionClass)+')':''}${s2.evaluations>1?'; it ran '+s2.evaluations+' times':''}.</li>`;
     /* a design refused before the reviews ran: no review ran, so there is nothing to list */
     const none=r.status==='not-reached',unrun=none&&s1===null&&s2===null;
     const body=unrun?'':html`<ul class="pl-names pl-review">${one}${two}${isWithheld(s2)||s2===null?'':html`${checkLineHtml(s2.application,'Application check of the clause that rules the other answer out')}${briefCheckHtml(s2.briefApplication,'Application check of the clauses the brief rests on')}`}</ul>${cutHtml(s2)}`;
@@ -1036,9 +1048,9 @@
     const lead=html`<h3>Difficulty: do the pilots fail for the intended reason?</h3><p class="muted">Decided by the pilots. A low score counts only when the harness can explain why the answer is wrong under the supplied files.</p>`;
     if(isWithheld(d))return html`${lead}<p class="pl-withheld">${WITHHELD_TEXT}</p>`;
     const line=(label,x,kind)=>{
-      if(x===null||(!isWithheld(x)&&(x.status==='running'||x.status==='queued'||x.status==='waiting'))){
+      if(x===null||(!isWithheld(x)&&(x.status==='running'||x.status==='queued'||x.status==='waiting'||x.status==='incomplete'))){
         const ended=!!(S.run&&S.run.ended),phase=x===null?stagePhase(a,kind):ended?'none':x.status==='running'?'running':'waiting';
-        return html`<li>${label}: ${x!==null&&ended?'did not finish.':phase==='running'?'running.':phase==='waiting'?'not reached yet.':'not run.'}</li>`;
+        return html`<li>${label}: ${x!==null&&(ended||x.status==='incomplete')?'did not finish.':phase==='running'?'running.':phase==='waiting'?'not reached yet.':'not run.'}</li>`;
       }
       if(isWithheld(x))return html`<li>${label}: ${inline(x)}</li>`;
       const lows=isWithheld(x.lows)?html` Counts by class: ${inline(x.lows)}`:x.lows!==null?' Low scores: '+x.lows.lowScorers+'; by diagnosis: '+LOW_WORDS.map(([k,w])=>x.lows[k]+' '+w).join(', ')+'.':'';
@@ -1097,6 +1109,9 @@
       ${incomplete?incompleteHtml():''}
       ${reviewHtml(a)}${difficultyHtml(a)}${answerSetHtml(a)}${repairHtml(a)}${diagnosticHtml(a)}${freezeHtml(a)}`;
   }
+  /* A design that is still being checked (checking true) or whose checks did not finish (false) is shown for what it is: what the designer wrote, not accepted. */
+  const previewNoteHtml=d=>d.checking===true?html`<div class="notice pl-preview" role="note"><strong>Checking this design: the reviews are running.</strong> This is what the designer wrote. It is not accepted until every check has passed.</div>`
+    :d.checking===false?html`<div class="notice pl-preview pl-preview-stopped" role="note"><strong>These checks did not finish.</strong> This is what the designer wrote. It was not accepted.</div>`:'';
   function designHtml(){
     const v=S.run;
     if(!v)return '';
@@ -1112,7 +1127,9 @@
     }
     if(!d.traps.length&&!d.trapsWithheld&&!d.newFiles.length&&!d.edited.length&&d.calibration===null&&d.fairness===null&&!isWithheld(d.unscanned)&&!d.unscanned.length&&d.taskType===null&&!(v.references&&v.references.source!=='none'))return '';
     const repaired=d.repaired===true?html`<p class="muted pl-repaired">The designer needed one repair turn to fix its files.</p>`:isWithheld(d.repaired)?html`<p class="muted pl-repaired">Whether a repair turn was needed: ${inline(d.repaired)}</p>`:'';
-    return html`<div class="card-title"><div><div class="eyebrow">Design</div><h2>The traps</h2></div>${d.attempt?pill('Attempt '+d.attempt,'violet'):v.redesigns>0?pill('Attempt '+(v.redesigns+1),'violet'):''}</div>
+    const preview=d.checking!==null;
+    return html`<div class="card-title"><div><div class="eyebrow">Design</div><h2>${preview?'The design being checked':'The traps'}</h2></div>${d.attempt?pill('Attempt '+d.attempt,'violet'):v.redesigns>0?pill('Attempt '+(v.redesigns+1),'violet'):''}</div>
+      ${previewNoteHtml(d)}
       ${taskTypeHtml(d)}
       ${refsSummaryHtml(v)}
       ${d.trapsWithheld?html`<p class="pl-withheld">${WITHHELD_TEXT}</p>`:d.traps.length?html`<ol class="pl-traps">${d.traps.map(trapHtml)}</ol>`:html`<p class="muted">No trap has been recorded yet.</p>`}
@@ -1123,9 +1140,9 @@
       ${repaired}
       ${unscannedHtml(d)}
       ${isWithheld(d.notes)?html`<h3>Checks on the designer’s files</h3><p class="pl-withheld">${WITHHELD_TEXT}</p>`:d.notes.length?html`<h3>Checks on the designer’s files</h3><ul class="pl-names">${d.notes.map(n=>html`<li>${n}</li>`)}</ul>`:''}
-      ${guidelineChangesHtml(d)}
+      ${preview?'':guidelineChangesHtml(d)}
       <details><summary>Revised prompt, grader guideline and golden answer</summary><h3>Prompt</h3>${blockText(d.prompt)}<h3>Grader guideline</h3>${blockText(d.guideline)}<h3>Golden answer</h3>${blockText(d.golden)}</details>
-      ${goldHtml(d)}`;
+      ${preview?'':goldHtml(d)}`;
   }
   /* A pilot stopped because the round no longer needed it, and has no score: not a failure. (An early stop that is withheld says nothing about this pilot.) */
   const notNeeded=p=>p.score===null&&p.stoppedEarly!==null&&!isWithheld(p.stoppedEarly);
@@ -1239,10 +1256,15 @@
   }
   /* Every outcome service.cjs records; one it does not know is shown as sent. */
   const OUTCOMES={'in-progress':'In progress',passed:'Passed','screen-failed':'Screen failed','test-failed':'Test failed',rejected:'Rejected before any pilot',stopped:'Stopped',budget:'Stopped at the cap',failed:'Failed'};
-  const REJECTION_KIND={design:'The designer\u2019s files did not pass the design checks.',checks:'The design did not pass the calibration or the fairness check.',review:'The reviews found an answer the files support better, or could not settle which answer they support.','answer-set':'The guideline did not grade the fixed answers (the golden answer or a permitted alternative) as required.',diagnostic:'The guideline did not grade the diagnostic answers as the design says.'};
+  const REJECTION_KIND={design:'The designer\u2019s files did not pass the design checks.',checks:'The design did not pass the calibration or the fairness check.',review:'The reviews found an answer the files support better, or could not settle which answer they support.','answer-set':'The guideline did not grade the fixed answers (the golden answer or a permitted alternative) as required.',diagnostic:'The guideline did not grade the diagnostic answers as the design says.',check:'The design was not judged: a check of it could not be carried out.'};
+  /* An attempt whose check could not be carried out was not judged: it is not called rejected. */
+  const notJudged=a=>isObj(a.rejection)&&!isWithheld(a.rejection)&&(a.rejection.kind==='check'||a.validation==='incomplete');
+  const outcomeLabel=a=>notJudged(a)?'A check could not be carried out':OUTCOMES[a.outcome]||a.outcome||'Not recorded';
+  /* what kind of rejection it was, in words; a check that could not be carried out (whatever it was) did not judge the design */
+  const rejectionKindText=a=>notJudged(a)?REJECTION_KIND.check:REJECTION_KIND[a.rejection.kind]||'';
   function outcomeCell(a){
     const rej=a.rejection;
-    return html`${OUTCOMES[a.outcome]||a.outcome||'Not recorded'}${isWithheld(rej)?html`<small class="pl-rejection">${inline(rej)}</small>`:rej?html`<small class="pl-rejection">${REJECTION_KIND[rej.kind]||''}</small>${rej.reasons.length?html`<ul class="pl-cell-list">${rej.reasons.map(r=>html`<li>${inline(r)}</li>`)}</ul>`:''}`:''}${a.note!==''?html`<small class="pl-rejection">${inline(a.note)}</small>`:''}`;
+    return html`${outcomeLabel(a)}${isWithheld(rej)?html`<small class="pl-rejection">${inline(rej)}</small>`:rej?html`<small class="pl-rejection">${rejectionKindText(a)}</small>${rej.reasons.length?html`<ul class="pl-cell-list">${rej.reasons.map(r=>html`<li>${inline(r)}</li>`)}</ul>`:''}`:''}${a.note!==''?html`<small class="pl-rejection">${inline(a.note)}</small>`:''}`;
   }
   /* What an attempt's design checks found: the calibration, the fairness review, and whether a repair turn was used. */
   function checksCell(a){
@@ -1266,8 +1288,8 @@
   /* An attempt that is not the latest has no card of its own: here is why it ended (the kind of rejection and its reasons), what its pilots counted, and everything its checks found. */
   function attemptDetailsHtml(a){
     const rej=a.rejection;
-    const why=isWithheld(rej)?html`<p class="pl-withheld">${inline(rej)}</p>`:rej?html`<p class="pl-attempt-why">${REJECTION_KIND[rej.kind]||'The design was rejected.'}</p>${rej.reasons.length?html`<ul class="pl-names pl-attempt-reasons">${rej.reasons.map(r=>html`<li>${inline(r)}</li>`)}</ul>`:''}`:'';
-    return html`<details class="pl-attempt" id="pl-attempt-${a.n}"><summary>Attempt ${a.n}: ${OUTCOMES[a.outcome]||a.outcome||'not recorded'}</summary>
+    const why=isWithheld(rej)?html`<p class="pl-withheld">${inline(rej)}</p>`:rej?html`<p class="pl-attempt-why">${rejectionKindText(a)||'The design was rejected.'}</p>${rej.reasons.length?html`<ul class="pl-names pl-attempt-reasons">${rej.reasons.map(r=>html`<li>${inline(r)}</li>`)}</ul>`:''}`:'';
+    return html`<details class="pl-attempt" id="pl-attempt-${a.n}"><summary>Attempt ${a.n}: ${outcomeLabel(a)}</summary>
       ${why}${stageCountsHtml(a.screen,'screen',a.guidelineRepair)}${stageCountsHtml(a.test,'test',a.guidelineRepair)}${reviewHtml(a)}${difficultyHtml(a)}${answerSetHtml(a)}${repairHtml(a)}${diagnosticHtml(a)}${freezeHtml(a)}</details>`;
   }
   function redesignsHtml(){
