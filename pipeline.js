@@ -390,7 +390,7 @@
     const cents=m.headroom*(m.fixedUsd+m.pilots*(pilot+m.perPilotUsd))*100;
     return Math.ceil(Math.round(cents*1e6)/1e6)/100;
   }
-  const capMinText=()=>{const m=minTotalCap();return m===null?'':'A full attempt with these caps can cost up to '+usd(m)+'.';};
+  const capMinText=()=>{const m=minTotalCap(),cap=capValue();return m===null?'':'A full attempt with these caps can cost up to '+usd(m)+'.'+(cap!==null&&cap<m?' With this total cap the run may stop at the cap before the '+RULES.testPilots+'-pilot test.':'');};
   function paintCapMin(){
     const el=$('#pl-cap-min'),t=capMinText();
     if(el&&el.textContent!==t)el.textContent=t;
@@ -408,8 +408,6 @@
     if(capValue()===null)return 'The total cap must be from '+usd(CAP_MIN_USD)+' to '+usd(RULES.maxCapUsd)+', in whole cents.';
     if(pilotCapValue()===null)return 'The cap per pilot must be from '+usd(PILOT_CAP.minUsd)+' to '+usd(PILOT_CAP.maxUsd)+', in whole cents.';
     if(capValue()<pilotCapValue())return 'The total cap must be at least the cap of one pilot.';
-    const least=minTotalCap();
-    if(least!==null&&capValue()<least)return least>RULES.maxCapUsd?'One full attempt with these caps can cost up to '+usd(least)+', more than the largest total cap of '+usd(RULES.maxCapUsd)+'. Lower the cap per pilot.':'The total cap must be at least '+usd(least)+' for one full attempt with these caps.';
     if(!f.model||!f.effort)return 'Choose a model and an effort.';
     if(!ACKNOWLEDGEMENTS.every(a=>f.acks[a.id]))return 'Tick all four acknowledgements to enable the button.';
     return '';

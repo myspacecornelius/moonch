@@ -384,7 +384,7 @@ test('config.minCap: the least total cap of one full attempt is shown by the cap
   assert.equal(capMinInForm(page), 'A full attempt with these caps can cost up to USD 43.42.');
   assert.match(page.region('start-form'), /id="pl-cap"[^>]*aria-describedby="pl-cap-hint pl-cap-min"/, 'the cap field is described by the figure');
   await page.type('pilotCap', { value: '5' });   // 1.15 x (6.25 + 7 x 6.5) = 59.5125
-  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 59.52.');
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 59.52. With this total cap the run may stop at the cap before the 5-pilot test.', 'the default total cap of 50 is below it, so it warns');
   await page.type('pilotCap', { value: '0.05' });   // 1.15 x (6.25 + 7 x 1.55) = 19.665
   assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 19.67.');
   await page.type('pilotCap', { value: 'x' });
@@ -397,61 +397,55 @@ test('config.minCap: the least total cap of one full attempt is shown by the cap
   assert.equal(exact.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 4.40.');
 });
 
-test('config.minCap: Start is blocked below the least cap, with the reason in startWhy, and allowed at it', async t => {
+test('config.minCap: below the least cap Start stays enabled and the cap hint warns that the run may stop before the test', async t => {
   const { companion, page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
   await ready(page);
   assert.equal(page.enabled('start'), true, 'the default of 50 covers 43.42');
+  assert.equal(capMinInForm(page), 'A full attempt with these caps can cost up to USD 43.42.');
   await page.type('cap', { value: '43.41' });
-  assert.equal(page.enabled('start'), false);
-  assert.equal(whyOf(page), 'The total cap must be at least USD 43.42 for one full attempt with these caps.');
-  await page.click('start');
-  assert.equal(companion.calls.filter(c => c.method === 'POST').length, 0, 'a click on the blocked button starts nothing');
-  await page.type('cap', { value: '43.42' });
-  assert.equal(page.enabled('start'), true);
+  assert.equal(page.enabled('start'), true, 'a cap below one full attempt is the owner\'s choice');
   assert.equal(whyOf(page), '');
-  /* a larger pilot cap raises the least cap, and the same total cap is no longer enough */
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42. With this total cap the run may stop at the cap before the 5-pilot test.');
+  await page.type('cap', { value: '43.42' });
+  assert.equal(page.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 43.42.', 'exactly the least cap: no warning');
+  /* a larger pilot cap raises the least cap, and the warning follows it */
   await page.type('pilotCap', { value: '4' });   // 1.15 x (6.25 + 7 x 5.5) = 51.4625
-  assert.equal(page.enabled('start'), false);
-  assert.equal(whyOf(page), 'The total cap must be at least USD 51.47 for one full attempt with these caps.');
-  await page.type('cap', { value: '51.47' });
+  assert.match(page.element('pl-cap-min').textContent, /USD 51\.47\. With this total cap the run may stop/);
+  await page.type('cap', { value: '20' });
   assert.equal(page.enabled('start'), true);
   await page.click('start');
   const post = companion.calls.find(c => c.method === 'POST' && c.url === '/api/pipeline/start');
-  assert.equal(post.body.capUsd, 51.47);
+  assert.equal(post.body.capUsd, 20, 'the low cap is sent as typed');
   assert.equal(post.body.pilotCapUsd, 4);
-  /* the cent edge */
+  /* the cent edge of the figure */
   const { page: exact } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 0, perPilotUsd: 0.5, pilots: 5, headroom: 1.1 } } });
   await ready(exact);
   await exact.type('pilotCap', { value: '0.30' });
   await exact.type('cap', { value: '4.39' });
-  assert.equal(whyOf(exact), 'The total cap must be at least USD 4.40 for one full attempt with these caps.');
+  assert.match(exact.element('pl-cap-min').textContent, /^A full attempt with these caps can cost up to USD 4\.40\. With this total cap/);
   await exact.type('cap', { value: '4.4' });
-  assert.equal(exact.enabled('start'), true, 'exactly the least cap is enough');
+  assert.equal(exact.element('pl-cap-min').textContent, 'A full attempt with these caps can cost up to USD 4.40.');
 });
 
-test('config.minCap: the range of the fields is checked first, and a least cap above the largest total cap says to lower the pilot cap', async t => {
+test('config.minCap: the range checks still block, and a least cap above the largest total cap only warns', async t => {
   const { page } = await bootWith(t, [], { config: { ...CFG, minCap: MIN_CAP } });
   await ready(page);
   await page.type('cap', { value: '10' });
-  assert.equal(whyOf(page), 'The total cap must be at least USD 43.42 for one full attempt with these caps.');
+  assert.equal(whyOf(page), '', 'below the least cap is not a reason to block');
   await page.type('cap', { value: '2' });
-  assert.equal(whyOf(page), 'The total cap must be at least the cap of one pilot.', 'the older checks come first');
+  assert.equal(whyOf(page), 'The total cap must be at least the cap of one pilot.');
   await page.type('cap', { value: '0' });
   assert.match(whyOf(page), /The total cap must be from USD 1\.00 to USD 200\.00/);
   await page.type('cap', { value: '50' });
   await page.type('pilotCap', { value: '0.04' });
-  assert.match(whyOf(page), /The cap per pilot must be from USD 0\.05 to USD 20\.00/, 'no minimum can be worked out from a pilot cap that is not valid');
-  /* 1.15 x (6.25 + 7 x 21.5) = 177.6 stays under 200; a heavier fixed cost goes over */
+  assert.match(whyOf(page), /The cap per pilot must be from USD 0\.05 to USD 20\.00/);
+  assert.equal(page.element('pl-cap-min').textContent, '', 'no figure from a pilot cap that is not valid');
   const { page: heavy } = await bootWith(t, [], { config: { ...CFG, minCap: { fixedUsd: 150, perPilotUsd: 5, pilots: 7, headroom: 1.15 } } });
   await ready(heavy);
   await heavy.type('cap', { value: '200' });
   await heavy.type('pilotCap', { value: '20' });   // 1.15 x (150 + 7 x 25) = 373.75
-  assert.equal(heavy.enabled('start'), false);
-  assert.equal(whyOf(heavy), 'One full attempt with these caps can cost up to USD 373.75, more than the largest total cap of USD 200.00. Lower the cap per pilot.');
-  await heavy.type('pilotCap', { value: '1' });   // 1.15 x (150 + 7 x 6) = 220.8
-  assert.match(whyOf(heavy), /Lower the cap per pilot/);
-  await heavy.type('pilotCap', { value: '0.05' });   // 1.15 x (150 + 7 x 5.05) = 213.1525
-  assert.match(whyOf(heavy), /Lower the cap per pilot/);
+  assert.equal(heavy.enabled('start'), true);
+  assert.match(heavy.element('pl-cap-min').textContent, /USD 373\.75\. With this total cap the run may stop at the cap before the 5-pilot test\./);
 });
 
 test('config.minCap missing or unusable: the page says nothing about it and does not block', async t => {

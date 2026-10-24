@@ -113,7 +113,7 @@ class PipelineService {
     /* How long the pipeline waits, after it has cancelled the link load, for the loader to close its browser and scrub its profile. */
     this.linkCloseMs = Number.isFinite(options.linkCloseMs) && options.linkCloseMs >= 0 ? options.linkCloseMs : 10000;
     /* start() refuses a total cap that cannot pay for one full attempt. The tests of the budget stop turn that off to use tiny caps. */
-    this.minCapCheck = options.minCapCheck !== false;
+    this.minCapCheck = options.minCapCheck === true; /* off by default: the owner sets the cap, and a run that cannot afford the next step ends in 'budget' */
     /* After a link import the pipeline waits for the owner to check the file list against the task page (the loader cannot be perfect on
        an unknown page). The tests that are not about the gate turn it off. */
     this.confirmFiles = options.confirmFiles !== false;
