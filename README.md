@@ -77,22 +77,17 @@ To use a specific `claude` binary: `CLAUDE_BIN=/path/to/claude npm start`. Detec
 
 ### Pilot sign-in
 
-Pilots load no settings (`--setting-sources ""`), so a sign-in that lives in your `~/.claude/settings.json` (for example a gateway reached through `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`) never reaches them, and the companion refuses to send a pilot through a gateway it cannot see through. Give pilots a token of your own Claude subscription instead. On macOS, store it in the Keychain from the clipboard, so that nothing is typed or pasted into the terminal. Run the commands one at a time:
+Pilots load no settings (`--setting-sources ""`), so a sign-in that lives in your `~/.claude/settings.json` (for example a gateway reached through `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`) never reaches them, and the companion refuses to send a pilot through a gateway it cannot see through. Give pilots a token of your own Claude subscription instead. On macOS, store it in the Keychain from the clipboard, so that the token is never typed or pasted into the terminal. Use two Terminal windows, because copying a command would replace the token on the clipboard.
+
+In the first window, paste this and press Enter. It empties the clipboard, waits until a whole token is copied, stores it, and empties the clipboard again:
 
 ```sh
-claude setup-token
+pbcopy < /dev/null; echo "Clipboard cleared. Now copy the token in the other window..."; until pbpaste | tr -d ' \n\r\t' | grep -Eq 'sk-ant-oat01-[A-Za-z0-9_-]{80,}'; do sleep 1; done; T="$(pbpaste | tr -d ' \n\r\t' | grep -Eo 'sk-ant-oat01-[A-Za-z0-9_-]{80,}' | head -1)"; security add-generic-password -U -a "$USER" -s finance-studio-pilot-token -w "$T" && echo "Stored, length ${#T}"; unset T; pbcopy < /dev/null
 ```
 
-It prints the token on your screen once. Select only the `sk-ant-oat01-…` line and copy it. Then:
+In the second window, run `claude setup-token`. It may open a browser and ask you to paste a code back; copying that code does not trigger the first window. When it prints the token, select the whole token (all of its lines if it wraps) and press Cmd-C. The first window prints `Stored, length 108` (108 for the tokens made in testing). Then run `clear` in the second window.
 
-```sh
-security add-generic-password -U -a "$USER" -s finance-studio-pilot-token -w "$(pbpaste | grep -o 'sk-ant-oat01-[A-Za-z0-9_-]*' | head -1)"
-security find-generic-password -s finance-studio-pilot-token -w | tr -d '\n' | wc -c
-pbcopy < /dev/null
-clear
-```
-
-The second command prints a number only. It was 108 for the tokens made in testing; a very different number (0, or a few characters) means the copy did not take, so repeat from `claude setup-token`. Do not use the bare `-w` password prompt: pasted text reached it with the wrong content twice in testing, and the pre-flight cannot tell, because `claude auth status` accepts any value of the right shape (only a model call, smoke S1, proves the token). The last two commands empty the clipboard and the screen. The `-U` replaces an existing Keychain item in place.
+To check what is stored, `security find-generic-password -s finance-studio-pilot-token -w | tr -d '\n' | wc -c` prints the length only. Thirteen means only the `sk-ant-oat01-` prefix was stored: that happens when the clipboard holds a command that contains the prefix instead of the token, so store it again with the two windows. The companion also refuses a token that short when it starts. Do not use the bare `-w` password prompt: pasted text reached it with the wrong content twice in testing, and the pre-flight cannot tell, because `claude auth status` accepts any value of the right shape (only a model call, smoke S1, proves the token). The `-U` replaces an existing Keychain item in place.
 
 On other systems, or to override the Keychain, start the companion with `FINANCE_STUDIO_PILOT_TOKEN` set in its environment. `FINANCE_STUDIO_KEYCHAIN=off` makes the companion ignore the Keychain altogether (the tests set it). The companion prints `Pilot sign-in: …` when it starts, and the pre-flight notice in the page says where pilots sign in from. Without a token, pilots use whatever sign-in `claude` finds on its own, as before.
 
