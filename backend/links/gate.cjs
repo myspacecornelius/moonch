@@ -9,8 +9,9 @@
        Content-Length was refused after the server had sent a few MiB of kernel buffer);
      - Fetch.continueResponse can ADD "content-disposition: attachment", so that Chrome's download manager takes a file type it would
        otherwise show in the tab (text, pdf, png, json, html).
-   The Fetch domain also hands over the body of a form that is posted, so it is never enabled on the task tab: only on a tab opened for
-   one file, never while the person signs in. Exports: gateTab, attachmentHeader. */
+   The Fetch domain also hands over the body of a form that is posted, so it is switched on only on a tab opened for one file (gateTab) or,
+   for the length of ONE download click, on the task tab (guardWrites, which looks at the method and nothing else); never while the person
+   signs in. Exports: gateTab, guardWrites, attachmentHeader. */
 
 const REDIRECT = new Set([301, 302, 303, 307, 308]);
 
@@ -51,4 +52,21 @@ async function gateTab(tab, { isAllowed, onBlocked = () => {}, file }) {
   return { async stop() { off(); await s.send('Fetch.disable').catch(() => {}); } };
 }
 
-module.exports = { gateTab, attachmentHeader };
+/* A guard for the task tab while ONE download control is pressed. Pressing it runs the page's own script, which can do anything; a request
+   that is not a read (POST, PUT, PATCH, DELETE ...) is failed before it leaves the browser, reads go on. Only the method is looked at: the
+   body of the request is never read or kept. onBlocked({ method }) says what was stopped. */
+async function guardWrites(tab, { onBlocked = () => {} } = {}) {
+  const s = tab.s;
+  const answer = (method, params) => s.send(method, params, { timeout: 10000 }).catch(() => { /* the tab closed or the request ended */ });
+  const handler = (p) => {
+    const method = String((p.request && p.request.method) || 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return answer('Fetch.continueRequest', { requestId: p.requestId });
+    try { onBlocked({ method }); } catch (e) { /* a callback must not leave the request paused */ }
+    return answer('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' });
+  };
+  const off = s.on('Fetch.requestPaused', handler);
+  await s.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  return { async stop() { off(); await s.send('Fetch.disable').catch(() => {}); } };
+}
+
+module.exports = { gateTab, guardWrites, attachmentHeader };

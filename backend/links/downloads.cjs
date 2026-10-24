@@ -20,7 +20,9 @@
                                         -> Chrome would show it in the tab and no download event would ever fire. The gate adds
                                            "content-disposition: attachment" so the download manager takes it.
    Clicking an element in the task page is the other way in (buttons that build a blob: URL, a download attribute): same tracking,
-   no response stage. A download nobody asked for (a page that starts one by itself) is cancelled the moment it begins.
+   no response stage. A click that begins no download is NEVER repeated (it is listed in skipped); while it runs, every request of the
+   task tab that is not a read is failed before it leaves the browser (guardWrites). A download nobody asked for (a page that starts
+   one by itself) is cancelled the moment it begins.
 
    Exports: DownloadManager, DEFAULT_LIMITS, pickName, sha256File. */
 
@@ -28,10 +30,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Tab, safeUrl, safeText } = require('./tab.cjs');
-const { gateTab } = require('./gate.cjs');
+const { gateTab, guardWrites } = require('./gate.cjs');
 const { sanitizeFileName, uniqueName, insideDir } = require('./names.cjs');
 const { LOGIN_PATH_RE } = require('./auth-wall.cjs');
-const { pageOp } = require('./page.cjs');
+const { pageOp, EXT_SRC } = require('./page.cjs');
 const { sleep } = require('./cdp.cjs');
 
 const DEFAULT_LIMITS = {
@@ -44,7 +46,6 @@ const DEFAULT_LIMITS = {
   beginTimeoutMs: 15000,  /* the click or navigation produced no download */
   navTimeoutMs: 30000,
   pollMs: 40,
-  reclickMs: 1500,        /* the pause before a click that began nothing is tried once more */
   gapMs: 250,             /* Chrome drops a download that starts within a few milliseconds of the end of ten others (measured: the 11th); one every 250 ms is never dropped */
 };
 
@@ -58,7 +59,7 @@ const EXT_BY_TYPE = { 'application/pdf': '.pdf', 'application/zip': '.zip', 'tex
 const HAS_EXT = /\.[A-Za-z0-9]{1,8}$/;
 /* An extension counts as one only when it is a known file extension or the one the content type stands for: "Policy 3.2" and
    "Budget v2.1" do not end in an extension, "Q3.pdf" does. */
-const KNOWN_EXT = /^(pdf|docx?|xlsx?|xlsm|xlsb|csv|tsv|txt|md|json|zip|7z|tar|gz|tgz|rar|rtf|pptx?|odt|ods|odp|png|jpe?g|gif|svg|eml|msg|xml|parquet|html?|bin|dat|log|ya?ml|ics|vcf)$/i;
+const KNOWN_EXT = new RegExp(`^(?:${EXT_SRC}|html?)$`, 'i');
 function realExt(name, contentType = '') {
   const m = HAS_EXT.exec(String(name || ''));
   if (!m) return false;
@@ -83,6 +84,8 @@ function pickName(suggested, candidate, contentType) {
   if (generic || !HAS_EXT.test(name)) {
     const hint = bestName(candidate, contentType);
     if (realExt(hint, contentType) && !GENERIC_BASE.test(hint.replace(HAS_EXT, ''))) name = hint;
+    /* the page called it "Q3 Variance Bridge" and Chrome "download.xlsx": the page's name, with the extension Chrome (or the type) chose */
+    else if (generic && hint && !GENERIC_BASE.test(hint.replace(HAS_EXT, ''))) { const chosen = name ? HAS_EXT.exec(name) : null; name = hint + (chosen ? chosen[0] : (EXT_BY_TYPE[contentType] || '')); }
     else if (!name) name = hint || 'download';
   }
   const picked = sanitizeFileName(name);
@@ -101,7 +104,7 @@ class DownloadManager {
      options: { limits, isAllowed(URL) -> boolean, newWindow, ensurePage(), locate(candidate) } ensurePage runs before every click in the
      task tab and brings the tab back to the task page if it left it. locate (when given, it replaces ensurePage) also puts the page
      into the state the candidate was seen in and answers { ok: true, path } with the element's path NOW, or { ok: false, why }. */
-  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false, ensurePage = null, locate = null } = {}) {
+  constructor(cdp, { stageDir, destDir, limits = {}, isAllowed = () => true, newWindow = false, ensurePage = null, locate = null, guardClicks = true } = {}) {
     this.cdp = cdp;
     this.stageDir = stageDir;
     this.destDir = destDir;
@@ -110,6 +113,7 @@ class DownloadManager {
     this.newWindow = newWindow;
     this.ensurePage = ensurePage;
     this.locate = locate;
+    this.guardClicks = guardClicks;   /* fail the writes of the task tab during a click (tests with a double tab can turn it off) */
     this.clickJob = null;        /* the click job in progress: a window it opens is adopted, not closed */
     this.popups = new Set();
     this.jobs = new Map();       /* guid -> job */
@@ -219,7 +223,7 @@ class DownloadManager {
       terminal: null, completed: null, browserCancelled: false, httpStatus: null, contentType: null, declared: null, tab: null,
     };
     const result = { id: job.id, href: safeUrl(candidate.href || ''), mode: candidate.mode, state: 'failed' };
-    let tab = null; let gate = null; let ownTab = false; let frames = [];
+    let tab = null; let gate = null; let guard = null; let ownTab = false; let frames = [];
     try {
       if (signal && signal.aborted) throw Object.assign(new Error('Cancelled.'), { code: 'CANCELLED' });
       if (candidate.mode === 'navigate') {
@@ -247,8 +251,13 @@ class DownloadManager {
           frames = typeof tab.frameIds === 'function' ? await tab.frameIds() : [tab.frameId];
           for (const f of frames) this.byFrame.set(f, job);
           this.clickJob = job;
+          /* whatever the page's script does on this click, a request that is not a read never leaves the browser */
+          if (tab.s && typeof tab.s.on === 'function' && this.guardClicks) {
+            guard = await guardWrites(tab, { onBlocked: (b) => { if (!job.terminal) job.terminal = { state: 'blocked-write', detail: `the control sent a ${safeText(b.method, 10)} request instead of downloading; it was blocked and not pressed again` }; } });
+          }
           /* the element must still be the one that was listed: its own text, and for a bare "Download" the text of its row */
-          const clicked = await pageOp(tab, 'activate', { path: where.path, label: candidate.text, row: candidate.label, name: candidate.nameHint !== candidate.text ? candidate.nameHint : '', parts: candidate.rowParts || [], ...(candidate.kind === 'link' ? { never: '' } : {}) });
+          const link = candidate.kind === 'link';
+          const clicked = await pageOp(tab, 'activate', { path: where.path, kind: link ? 'link' : 'download', label: candidate.text, row: candidate.label, name: candidate.nameHint !== candidate.text ? candidate.nameHint : '', parts: candidate.rowParts || [], ...(link && candidate.href ? { href: candidate.href } : {}) });
           if (!clicked.ok) job.terminal = { state: 'failed', detail: clicked.why };
         }
       }
@@ -263,6 +272,7 @@ class DownloadManager {
       this.byFrame.delete(tab ? tab.frameId : '');
       for (const f of frames) this.byFrame.delete(f);
       if (gate) await gate.stop().catch(() => {});
+      if (guard) await guard.stop().catch(() => {});
       if (ownTab && tab) await tab.close();
       if (job.guid) for (const name of [`${job.guid}.crdownload`, job.guid]) fs.rmSync(path.join(this.stageDir, name), { force: true });
     }
@@ -276,11 +286,8 @@ class DownloadManager {
     if (result.state === 'http-denied' && candidate.mode === 'navigate' && candidate.download && candidate.path && candidate.pageTab && !candidate.retried) {
       return this.fetchOne({ ...candidate, mode: 'click', retried: true }, { signal });
     }
-    /* A click that started nothing (Chrome sometimes drops a download that starts too soon after others): once more, a little later. */
-    if (result.state === 'no-download' && candidate.mode === 'click' && !candidate.reclicked && !(signal && signal.aborted)) {
-      await sleep(this.limits.reclickMs);
-      return this.fetchOne({ ...candidate, reclicked: true }, { signal });
-    }
+    /* A click that started no download is not pressed again: pressing a control twice can do a thing twice. It is listed in skipped. */
+    if (result.state === 'no-download') result.detail = 'no download began; the control was pressed once and not again';
     return result;
   }
 

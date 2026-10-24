@@ -20,7 +20,7 @@
 
    State (also what GET /api/links/:id returns; every value is plain JSON):
      { id, state, message, page: { origin, path }, toggle: { found, label, flipped, filesBefore, filesAfter, learned },
-       files: [{ name, size, sha256, group, label }], skipped: [{ label, group, reason }], sections: [{ heading, chars }], folder, error }
+       files: [{ name, size, sha256, group, label }], skipped: [{ label, group, reason }], notes: [string], sections: [{ heading, chars }], folder, error }
      state: starting -> [needs-sign-in -> loading] -> loading -> [needs-person -> loading] -> downloading -> [needs-person -> loading]
             -> done | failed | cancelled.
             needs-sign-in: the person signs in, then presses Continue (window mode: a separate Chrome window is open; the loader's own
@@ -32,16 +32,23 @@
             sentence as message when failed. skipped: every file that was NOT kept, with the reason (also in page.json).
    Files land in <folder>/files/<sanitised unique name>; <folder>/page.json holds { sections: [{ heading, text }], fileList, skipped, notes,
    page, loadedAt } (text capped at 20,000 characters per section, 200 sections). Caps: 300 files, 200 MB per file, 2 GB in all.
+   WHAT IS REQUESTED OR PRESSED is an allowlist (see page.cjs): a link whose address path ends in a file extension (or is exactly
+   /download) with no action word in it, a link with a download attribute, a control named as a download that is not in a form, and
+   controls that only show more (tabs, expanders, "Load more", pagers, the "show all files" switch). Nothing else is requested or pressed.
    Every file the page offers is downloaded or listed in skipped with the reason, never dropped without a word: a file that cannot be
-   fetched, a control that looks like a file but would submit a form or starts with a destructive verb ("looks like an action"), a row
-   that is gone when its turn comes. notes (also at the end of the done message) says when a step was cut off while the page still
-   had more to show: "Load more" or scrolling at its time limit, a tab that could not be opened, an API request of the page that had not
-   answered when a step ended, rows that look different but were taken for one another, a file that was listed twice and kept once.
+   fetched, a control or link that names a file but is not clearly a download ("not clearly a download: download it yourself"), one that
+   would submit a form or whose address is an action ("looks like an action"), a click that began no download (pressed once, never again),
+   a row that is gone when its turn comes. notes (in the state, in page.json and at the end of the done message) says in plain
+   sentences every place the loader could not cover completely: "Load more" or scrolling or a pager at its limit, a "Load more" that
+   stayed on the page, a pager it did not follow, tabs or controls past the caps, a scroller that did not reach its bottom, an API request
+   of the page that had not answered, a closed dialog or drawer that holds file links, a frame of another site, a page read only in part,
+   rows that look different but were taken for one another, a file that was listed twice and kept once.
    How the files are found: look again after the page settled; open <details> and expanders (repeated until nothing new opens); turn on
    the "show all files" switch (also when it is learned, or already on) and open what it revealed; in the open tab and in every other
-   tab press "Load more" and scroll until nothing new comes. A file that is a button is identified by the name or the text of its row, its
-   heading and its text, remembered together with the view it was seen in (tab, presses, scroll steps); before each press the page is
-   put back into that view and the element is found again, and activate refuses a row that is not the one that was listed.
+   tab press "Load more", scroll until every scroller is at its bottom and nothing new comes, and follow the pager (Next, page numbers,
+   or links that change only a page parameter). A file that is a button is identified by the name or the text of its row, its heading and
+   its text, remembered together with the view it was seen in (tab, page, presses, scroll steps); before each press the page is put back
+   into that view and the element is found again, and activate refuses a row that is not the one that was listed.
 
    The link (it can carry a signature) lives in this module's memory for the length of the load: not on Chrome's command line (the
    sign-in window gets the platform's ORIGIN only), not in a log, an error, the state or a file; only origin and path are ever shown. */
@@ -51,7 +58,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { findChrome, checkBinary, resolveBinary, missingChromeMessage, launchBrowser, launchWindow, syncWarning, protectStorage, holdsProfile, scrubProfile, PROFILE_IN_USE_MESSAGE } = require('./chrome.cjs');
 const { Tab, safeText, cleanLabel, waitForSettled } = require('./tab.cjs');
-const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, TOGGLE_LABEL_RE } = require('./page.cjs');
+const { takePage, pageOp, fileCandidates, droppedCandidates, findAllFilesToggle, findAllFilesState, linkVerdict, nameIsDownload, navigateKey, TOGGLE_LABEL_RE, LIMITS: PAGE_LIMITS } = require('./page.cjs');
 const { classifyPage, LOGIN_PATH_RE, CHALLENGE_RE, REFUSED_RE } = require('./auth-wall.cjs');
 const { DownloadManager } = require('./downloads.cjs');
 const { stabilize, expandAll, gather, replay, candidateKey, tabKey, LOST, unionCandidates, unionWithCheck, unionDropped, mergeSections } = require('./discover.cjs');
@@ -85,7 +92,7 @@ class LinkError extends Error {
 
 /* page-side constant function (see tab.evalFn) */
 const probePage = () => ({
-  href: location.href, ready: document.readyState === 'complete',
+  href: location.href, ready: document.readyState === 'complete', doc: String(globalThis.__fstDoc || ''),
   pw: Boolean(document.querySelector('input[type=password],input[autocomplete=one-time-code],.g-recaptcha,.h-captcha,.cf-turnstile,[data-sitekey]')),
   text: (document.title + ' ' + (document.body ? document.body.innerText : '')).slice(0, 600),
 });
@@ -115,6 +122,7 @@ function withinPage(current, original) {
   } catch (e) { return false; }
 }
 
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const listLabels = (items, max = 5) => `${items.slice(0, max).map((i) => i.label || '(no name)').join(', ')}${items.length > max ? ` and ${items.length - max} more` : ''}`;
 
 function createLinkLoader(options = {}) {
@@ -138,7 +146,7 @@ function createLinkLoader(options = {}) {
   const blank = (id, v, folder) => ({
     id, state: 'starting', message: 'Starting Chrome.', page: { origin: v.origin, path: v.path },
     toggle: { found: false, label: '', flipped: false, filesBefore: 0, filesAfter: 0, learned: false },
-    files: [], skipped: [], sections: [], folder, error: null,
+    files: [], skipped: [], notes: [], sections: [], folder, error: null,
   });
   const need = (id) => { const job = typeof id === 'string' && ID_RE.test(id) ? jobs.get(id) : null; if (!job) throw new LinkError('There is no such load.', 404, 'unknown'); return job; };
   const view = (job) => structuredClone(job.st);
@@ -155,7 +163,18 @@ function createLinkLoader(options = {}) {
       if (signal.aborted) throw new CdpError('Cancelled.', { code: 'CANCELLED' });
       if (job.browser && job.browser.cdp.closed) throw new CdpError('The browser closed the pipe.', { code: 'PIPE_CLOSED' });   /* Chrome died */
     };
-    const settle = async (since = 0) => { const r = await waitForSettled(job.tab, { maxMs: timeouts.settle, since, graceMs: since ? 350 : 0, signal }); if (!r.settled) job.unsettled = true; return r; };
+    /* what the loader could not do completely, told in the state, in page.json and at the end of the done message */
+    const capNotes = [];
+    const note = (text) => { if (!capNotes.includes(text)) { capNotes.push(text); st.notes = capNotes.slice(); } };
+    /* API requests of the page that had not answered when a settle ended: looked at again when the files are listed (told only if they
+       never answered by then; an answer that came in the meantime has been seen by a later look) */
+    const suspects = new Set();
+    const settle = async (since = 0) => {
+      const r = await waitForSettled(job.tab, { maxMs: timeouts.settle, since, graceMs: since ? 350 : 0, signal });
+      if (!r.settled) job.unsettled = true;
+      for (const id of r.lostIds || []) suspects.add(id);
+      return r;
+    };
     const stageDir = path.join(st.folder, '.incoming');
     const destDir = path.join(st.folder, 'files');
     const href = job.href;
@@ -221,18 +240,21 @@ function createLinkLoader(options = {}) {
 
       /* One load: navigate, settle, read the page, classify it. */
       let loads = 0;   /* how many times the task link has been opened: a plain button that turns the files on is pressed once per load */
-      const loadOnce = async () => {
+      const pos = { pages: 0, url: null };   /* where the pager is: pages pressed since the load, or the address of the page of a pager made of links */
+      const loadOnce = async (target = href) => {
         loads += 1;
+        pos.pages = 0; pos.url = null;
         const tab = job.tab;
         let nav;
-        try { nav = await tab.navigate(href, { timeout: timeouts.navigation }); }
+        try { nav = await tab.navigate(target, { timeout: timeouts.navigation }); }
         catch (e) { if (e.code !== 'TIMEOUT') throw e; nav = { errorText: `no answer within ${timeouts.navigation} ms`, isDownload: false }; }
         if (!nav.errorText) { try { await tab.waitForLoad({ timeout: 20000 }); } catch (e) { /* settle reports it */ } }
         const failed = Boolean(nav.errorText) && !nav.isDownload;
         if (!failed) await settle();
         let snap = null;
         if (!nav.errorText) { try { snap = await takePage(tab); } catch (e) { check(); } }
-        const cls = classifyPage({ ignoreChallengeWords: job.said, requestedUrl: href, finalUrl: snap ? snap.url : null, hops: tab.net.hops, mainResponse: tab.net.mainResponse, api: tab.net.apiErrors, snapshot: snap, navError: failed ? safeText(nav.errorText, 80) : null });
+        try { const there = await job.tab.evalFn(probePage, null, { timeout: 3000, retries: 0 }); job.doc = there && there.doc ? there.doc : ''; } catch (e) { job.doc = ''; }
+        const cls = classifyPage({ ignoreChallengeWords: job.said, requestedUrl: target, finalUrl: snap ? snap.url : null, hops: tab.net.hops, mainResponse: tab.net.mainResponse, api: tab.net.apiErrors, snapshot: snap, navError: failed ? safeText(nav.errorText, 80) : null });
         return { snap, cls };
       };
 
@@ -322,8 +344,6 @@ function createLinkLoader(options = {}) {
       };
       const expandNow = async () => { const total = await expandAll(job.tab, snaps, { signal, view: BASE }); if (total.lost) note(LOST('after something was opened')); };
       const stamp = (list, view) => { for (const x of list) x.view = { tab: view.tab ? { ...view.tab } : null, more: 0, scroll: 0 }; };
-      const capNotes = [];   /* what the loader could not do completely, told at the end of the done message and in page.json */
-      const note = (text) => { if (!capNotes.includes(text)) capNotes.push(text); };
       const snaps = await stabilize(job.tab, page.snap, { signal, waits: timeouts.stable });
       let BASE = await viewNow();
       stamp(snaps, BASE);
@@ -351,10 +371,10 @@ function createLinkLoader(options = {}) {
       const alreadyOn = Boolean(found && found.on);
       let list = before;
       Object.assign(st.toggle, { filesBefore: before.length, filesAfter: before.length, found: Boolean(pick), label: pick ? pick.label : '', learned: usedLearned, flipped: alreadyOn });
-      if (pick) recipe.toggle = { key: pick.key, label: pick.label, path: pick.path, option: pick.option, kind: pick.kind };
+      if (pick) recipe.toggle = { key: pick.key, label: pick.label, path: pick.path, option: pick.option, kind: pick.kind, learned: usedLearned };
       if (pick && !alreadyOn && pick.path) {
         const clickedAt = Date.now() - 50;
-        const clicked = await pageOp(job.tab, 'activate', { path: pick.path, option: pick.option });
+        const clicked = await pageOp(job.tab, 'activate', { path: pick.path, kind: 'toggle', tkind: pick.kind || 'switch', label: pick.label, option: pick.option, learned: usedLearned });
         if (clicked.ok) {
           await settle(clickedAt);
           snap = await growWait(before.length);
@@ -396,25 +416,30 @@ function createLinkLoader(options = {}) {
           if (fileCandidates(current).length >= recipe.afterClick) { recipe.appliedAt = loads; return current; }
         } else if (t.checked) return current;
         const pressedAt = Date.now() - 50;
-        const r = await pageOp(job.tab, 'activate', { path: t.path, option: t.option });
+        const r = await pageOp(job.tab, 'activate', { path: t.path, kind: 'toggle', tkind: t.kind || 'switch', label: t.label, option: t.option, learned: Boolean(want.learned) });
         if (!r.ok) return current;
         recipe.appliedAt = loads;
         await settle(pressedAt);
         return growWait(Math.max(0, recipe.afterClick - 1));
       };
-      /* Where the page is, after the person has used the window or a download left it: back on the task page (or below it), or the
-         loader goes back once, looks again and puts the switch and the open folders back. */
-      let pageHref = href;   /* the task page: the link, or the page the person left it on */
-      const backToPage = async ({ accept = false } = {}) => {
-        const probe = await where();
-        if (probe && withinPage(probe.href, pageHref)) return;
-        /* after the person has used the window, the page they left is the task page (a router may have moved to a sibling path): not reloaded */
-        if (accept && probe && probe.ready && !probe.pw && (() => { try { const x = new URL(probe.href); return x.origin === new URL(href).origin && !LOGIN_PATH_RE.test(x.pathname); } catch (e) { return false; } })()) { pageHref = probe.href; return; }
-        const again = await loadOnce();
+      /* Load an address of the task (the link itself, or a page of a pager made of links), then put the switch and the open folders back. */
+      const goto = async (target) => {
+        const again = await loadOnce(target);
         if (again.cls.state === 'needs-sign-in' || again.cls.state === 'needs-person') throw new LinkError(`The platform asks you to sign in again. ${IMPORT_HINT}`, 502, 'sign-in-loop');
         if (again.cls.state !== 'ready') throw new LinkError(again.cls.reason, 502, again.cls.state);
         await ensureToggle(await takePage(job.tab));
         await expandAll(job.tab, [], { signal, snapshots: false });
+      };
+      /* Where the page is, after the person has used the window or a download left it: back on the task page (or below it), or the
+         loader goes back once, looks again and puts the switch and the open folders back. After the person has used the window the page
+         they left is accepted only when it is the SAME DOCUMENT as before (the marker the loader set at its start survives a router change
+         and does not survive a real navigation) or the task path or below; a page they wandered to is not the task. */
+      let pageHref = href;   /* the task page: the link, or the page the person left it on */
+      const backToPage = async ({ accept = false } = {}) => {
+        const probe = await where();
+        if (probe && withinPage(probe.href, pageHref)) return;
+        if (accept && probe && probe.ready && !probe.pw && job.doc && probe.doc === job.doc && (() => { try { const x = new URL(probe.href); return x.origin === new URL(href).origin && !LOGIN_PATH_RE.test(x.pathname); } catch (e) { return false; } })()) { pageHref = probe.href; return; }
+        await goto(href);
       };
       /* A click candidate again: the page is made the way it was when the candidate was seen (the switch, its tab, its "Load more"
          presses, its scroll steps), and the element is found by what it is, not where it was. */
@@ -436,14 +461,14 @@ function createLinkLoader(options = {}) {
         const open = ((await pageOp(job.tab, 'controls')).tabs || []).find((t) => t.selected);
         let hit = !wantTab || (open && tabKey(open.label) === tabKey(wantTab)) ? findOn(current, c) : null;
         if (!hit) {
-          const r = await replay(job.tab, c.view || BASE, recipe.home, { signal });
+          const r = await replay(job.tab, c.view || BASE, recipe.home, { signal, pos, goto, homeUrl: href });
           if (!r.ok) return { ok: false, why: r.why };
           current = await takePage(job.tab);
           hit = findOn(current, c);
           /* a candidate with no tab on record (the page has none, or the view was not exact): every tab, one after the other */
           if (!hit && !wantTab) {
             for (const t of (await pageOp(job.tab, 'controls')).tabs) {
-              const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal });
+              const r2 = await replay(job.tab, { tab: { label: t.label, path: t.path }, more: 0, scroll: 0 }, recipe.home, { signal, pos, goto, homeUrl: href });
               if (!r2.ok) continue;
               hit = findOn(await takePage(job.tab), c);
               if (hit) break;
@@ -471,7 +496,7 @@ function createLinkLoader(options = {}) {
         const changed = changedToggle(baseline, snap.toggles);
         if (changed) {
           Object.assign(st.toggle, { found: true, label: changed.label, flipped: true });
-          recipe.toggle = { key: changed.key, label: changed.label, path: changed.path, option: changed.option, kind: changed.kind };
+          recipe.toggle = { key: changed.key, label: changed.label, path: changed.path, option: changed.option, kind: changed.kind, learned: true };   /* the person chose it: its label need not say "all files", but the rules about actions still hold */
           recipe.afterClick = Math.max(0, list.length - 1);
           recipe.appliedAt = loads;
           if (list.length > before.length && store.learnToggle(mappingsFile, job.host, changed.label, new Date(now()).toISOString(), changed.key)) st.toggle.learned = true;
@@ -480,8 +505,17 @@ function createLinkLoader(options = {}) {
 
       /* Tabs, "Load more", scrolling; then the files of every snapshot as one list. A limit that ended a step is told in a note. */
       set(job, 'loading', `Looking for every file.${KEEP_OPEN}`);
-      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand }); recipe.home = info.home; for (const text of info.capped) note(text); };
+      const explore = async () => { const info = await gather(job.tab, snaps, { signal, budgetMs: timeouts.expand, pos, goto, homeUrl: href }); recipe.home = info.home; for (const text of info.capped) note(text); };
+      /* a request that was still waiting at a settle: it answered since (take one more look, its files may be new) or it never did (say so) */
+      const lateLook = async () => {
+        let answered = 0; let pending = 0;
+        for (const id of suspects) { const e = job.tab.net.inflight.get(id); if (e && !e.responded) pending += 1; else answered += 1; }
+        suspects.clear();
+        if (answered) { const late = await takePage(job.tab); stamp([late], BASE); snaps.push(late); }
+        if (pending) note(LOST('when the files were listed'));
+      };
       await explore();
+      await lateLook();
       let { list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates));
       if (!candidatesAll.length && !snaps.some((s) => droppedCandidates(s).length)) {
         set(job, 'needs-person', NO_FILES_MESSAGE);
@@ -495,10 +529,33 @@ function createLinkLoader(options = {}) {
         snaps.push(...again);
         await expandNow();
         await explore();
+        await lateLook();
         ({ list: candidatesAll, merged: mergedRows } = unionWithCheck(snaps.map(fileCandidates)));
         st.toggle.filesAfter = Math.max(st.toggle.filesAfter, candidatesAll.length);
       }
       const droppedAll = unionDropped(snaps.map(droppedCandidates));
+      /* what the looks saw but the loader could not use or read: hidden file links (a closed dialog, a drawer), frames of another site,
+         a page read only in part */
+      const cut = {}; let blockedFrames = 0; const hiddenByKey = new Map();
+      for (const sn of snaps) {
+        for (const k of Object.keys(sn.truncated || {})) if (sn.truncated[k]) cut[k] = true;
+        blockedFrames = Math.max(blockedFrames, (sn.frames && sn.frames.blocked) || 0);
+        for (const h of sn.hidden || []) hiddenByKey.set(h.button ? `b|${h.text}` : navigateKey(h.href), h);
+      }
+      const haveKeys = new Set(candidatesAll.filter((c) => c.mode === 'navigate').map((c) => navigateKey(c.href)));
+      const haveTexts = new Set(candidatesAll.map((c) => c.text));
+      let hiddenFiles = 0;
+      for (const h of hiddenByKey.values()) {
+        const usable = h.button ? nameIsDownload(h.names || [h.text]) : Boolean(linkVerdict(h).allow);
+        if (usable && !(h.button ? haveTexts.has(h.text) : haveKeys.has(navigateKey(h.href)))) hiddenFiles += 1;
+      }
+      if (hiddenFiles) note(`${plural(hiddenFiles, 'file link', 'file links')} on the page ${hiddenFiles === 1 ? 'is' : 'are'} hidden (a closed dialog, drawer or panel) and ${hiddenFiles === 1 ? 'was' : 'were'} not downloaded`);
+      if (blockedFrames) note(`${plural(blockedFrames, 'embedded frame', 'embedded frames')} from another site (or sandboxed) could not be read, so any files in ${blockedFrames === 1 ? 'it' : 'them'} were not seen`);
+      if (cut.elements || cut.time || cut.roots) note('the page is very large or slow to read; reading stopped early, so some files or text may be missing');
+      if (cut.links) note(`the page has more than ${PAGE_LIMITS.linksMax} file-like links; the rest were not read`);
+      if (cut.buttons) note(`the page has more than ${PAGE_LIMITS.buttonsMax} file-like buttons; the rest were not read`);
+      if (cut.toggles) note(`the page has more than ${PAGE_LIMITS.togglesMax} switches, tabs and choices; the rest were not read`);
+      if (cut.sections || cut.text) note(`some of the page text was cut at the limits (${limits.sections} sections, ${limits.sectionChars} characters each)`);
       /* the backstop: more distinct rows were seen than files kept, so some rows that look different were taken for one file */
       if (mergedRows > 0) note(`${mergedRows} row${mergedRows === 1 ? '' : 's'} that look different on the page were taken for another file's row, so ${mergedRows === 1 ? 'a file' : 'files'} may be missing`);
       const merged = mergeSections(snaps.map((s) => s.sections), limits);

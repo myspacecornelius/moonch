@@ -1,28 +1,32 @@
 'use strict';
 /* Finding every file a page offers takes more than one look. A single-page app fills in after the load, a list may be virtualised (only
-   the rows on screen exist), files may sit in a closed <details>, behind a tab, or after "Load more". So the loader takes several
-   snapshots and works with the UNION of what they hold:
+   the rows on screen exist), files may sit in a closed <details>, behind a tab, after "Load more", on page 2 of a pager. So the loader
+   takes several snapshots and works with the UNION of what they hold:
 
      stabilize   a second snapshot 1 s and a third 3 s after the page settled; it stops as soon as two in a row are identical
-     expand      open <details>, click expanders (aria-expanded=false, no popup menu, nothing destructive); expandAll repeats it until
-                 nothing new opens (a folder that appears when another one is opened), at most 4 passes
-     gather      the open tab, then each other tab one at a time: expand, press "Load more" while it adds files, scroll the scrollable
-                 boxes in steps until two steps in a row add nothing; every step is a snapshot
-     replay      put the page back into the state a snapshot was taken in (its tab, the number of "Load more" presses, its scroll
-                 steps), so a button that only exists there can be found and pressed later
+     expand      open <details>, click expanders (aria-expanded=false, no popup menu, nothing that would submit a form), looking again after
+                 every click; expandAll repeats it until nothing new opens, at most 6 passes
+     gather      the open tab, then each other tab one at a time: expand, press every "Load more" while it adds files, scroll the scrollable
+                 boxes until each one is at its bottom and the list stopped growing, follow the pager (Next, page numbers, or links that
+                 change only a page parameter); every step is a snapshot
+     replay      put the page back into the state a snapshot was taken in (its address, its tab, its page of the pager, the number of "Load
+                 more" presses, its scroll steps), so a button that only exists there can be found and pressed later
 
-   Every snapshot gather takes is stamped with its view { tab, more, scroll } (snap.view); fileCandidates copies it into each
-   candidate. A click candidate is identified by what it IS (the whole file-name phrase or the text of its row, its group, the tab it
-   was seen in, its text), not by where it sat, so the same row seen twice is one candidate and two rows with the same words are two
+   Every snapshot gather takes is stamped with its view { tab, pages, pageUrl, more, scroll } (snap.view); fileCandidates copies it into
+   each candidate. A click candidate is identified by what it IS (the whole file-name phrase or the name cell of its row, its group, the
+   tab it was seen in, its text), not by where it sat, so the same row seen twice is one candidate and two rows with the same words are two
    (the k-th occurrence in a snapshot is the k-th). As a backstop the set also counts the distinct rows it has seen (tab, text and
-   name phrase of the row text); more rows than candidates means rows were taken for one another, and the loader says so in a note. Nothing is capped without saying so: gather returns capped: [text] for a limit that ended a step while files were still
-   appearing, or a tab it could not open.
+   name phrase of the row text); more rows than candidates means rows were taken for one another, and the loader says so in a note.
 
-   Every click goes through pageOps' activate (which refuses a destructive or a changed element), and the person's page is put back
-   (scrolled to the top, the first tab selected). Exports: stabilize, expand, expandAll, gather, replay, signature, CandidateSet,
-   unionCandidates, unionDropped, mergeSections, candidateKey, nap. */
+   NOTHING IS CUT WITHOUT A WORD. gather returns capped: [text], a plain sentence for every place it could not cover: a limit that ended a
+   step while files were still appearing, a tab it could not open, tabs or "Load more" controls past the caps, a persistent "Load more", a
+   pager it could not follow, a control that opens a menu or dialog that may hold files, a request that had not answered.
 
-const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey, namePhrase } = require('./page.cjs');
+   Every click goes through pageOps' activate (which refuses an element that is not of the kind it was listed as, or that changed), and
+   the person's page is put back (scrolled to the top, the first tab selected). Exports: stabilize, expand, expandAll, gather, replay,
+   signature, CandidateSet, unionCandidates, unionDropped, mergeSections, candidateKey, nap. */
+
+const { takePage, pageOp, fileCandidates, droppedCandidates, navigateKey, namePhrase, pagerSteps, pageLinkOk, LIMITS } = require('./page.cjs');
 const { waitForSettled } = require('./tab.cjs');
 const { CdpError, sleep } = require('./cdp.cjs');
 
@@ -57,7 +61,7 @@ const GENERIC_TEXT = /^(download|export)\b/i;
    nothing, so its position counts. withGroup:false and withTab:false leave out the heading above it (it can change when a switch adds
    a section above the file) and the tab (the live page shows only one). */
 function candidateKey(c, { withGroup = true, withTab = true } = {}) {
-  if (c.mode === 'navigate') return navigateKey(c.href || '', c.label || '');
+  if (c.mode === 'navigate') return navigateKey(c.href || '', c.label || '', withTab && c.view && c.view.tab ? tabKey(c.view.tab.label) : '');
   const stable = Array.isArray(c.rowParts) && c.rowParts.length ? c.rowParts.join(' ') : '';   /* the row without what changes every minute */
   const name = hasExtension(c.nameHint) ? c.nameHint : (stable || c.label || '');
   const generic = (c.label || '') === (c.text || '') && GENERIC_TEXT.test(c.text || '');
@@ -154,10 +158,12 @@ async function stabilize(tab, first, { signal, waits = [1000, 2000] } = {}) {
 
 /* The short settle after a click, a press or a scroll step. A DOM that keeps changing ends it at 2.5 s, but an API request that was started
    by the step and has not answered yet is waited for (up to 22 s): a tab or a "Load more" served by a slow API. lost: how many such
-   requests were still waiting when it ended. */
+   requests had not answered when it ended (those given up on at 20 s included). */
 const quick = (tab, signal, since = 0, patientMs = 22000) => waitForSettled(tab, { idleMs: 250, quietMs: 250, maxMs: 2500, patientMs, since, graceMs: 350, signal });
 const LOST = (where) => `a request of the page was still waiting for its answer ${where}, so some files may be missing`;
-const stamp = (snap, view) => { if (view) snap.view = { tab: view.tab ? { ...view.tab } : null, more: view.more, scroll: view.scroll }; return snap; };
+const stamp = (snap, view) => { if (view) snap.view = { tab: view.tab ? { ...view.tab } : null, pages: view.pages || 0, pageUrl: view.pageUrl || null, more: view.more, scroll: view.scroll }; return snap; };
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const urlKey = (href) => { try { const u = new URL(href); u.hash = ''; return u.href; } catch (e) { return String(href); } };
 
 /* The cheap part, one pass: details and expanders. Pushes a snapshot into `snaps` when it did anything. Returns what it did. */
 async function expand(tab, snaps, { signal, view } = {}) {
@@ -168,25 +174,36 @@ async function expand(tab, snaps, { signal, view } = {}) {
 }
 
 /* Repeat it until nothing new opens, at most `passes` times: a folder opened in one pass can show another closed folder. With
-   snapshots:false the page is only put into the state (no look is taken). Returns the totals. */
-async function expandAll(tab, snaps, { signal, view, passes = 4, snapshots = true, patientMs } = {}) {
-  const total = { opened: 0, expanded: 0, passes: 0, lost: 0 };
+   snapshots:false the page is only put into the state (no look is taken). Returns the totals; capped: the last pass still opened
+   something (or the page-side loop was cut); blocked: expanders that would submit a form (not pressed); popups: openers of a menu or
+   dialog whose name says files (not pressed). */
+async function expandAll(tab, snaps, { signal, view, passes = 6, snapshots = true, patientMs } = {}) {
+  const total = { opened: 0, expanded: 0, passes: 0, lost: 0, blocked: 0, popups: [], capped: false };
   for (let i = 0; i < passes; i += 1) {
     checker(signal)();
     const since = Date.now() - 50;
     const did = await pageOp(tab, 'expand');
+    total.blocked = Math.max(total.blocked, did.blocked || 0);
+    for (const p of did.popups || []) if (!total.popups.includes(p)) total.popups.push(p);
     if (!did.opened && !did.expanded) break;
     total.opened += did.opened; total.expanded += did.expanded; total.passes += 1;
+    if (did.cut) total.capped = true;
     total.lost += (await quick(tab, signal, since, patientMs)).lost || 0;
     if (snapshots) snaps.push(stamp(await takePage(tab), view));
+    if (i === passes - 1) total.capped = true;
   }
   return total;
 }
 
-/* Put the page back into the state a snapshot was taken in: the tab (or the home tab), the "Load more" presses, the scroll steps.
-   Returns { ok } or { ok: false, why }. */
-async function replay(tab, view, home, { signal } = {}) {
+/* Put the page back into the state a snapshot was taken in: its address (a page of a pager that is made of links), the tab (or the home
+   tab), the page of the pager, the "Load more" presses, the scroll steps. pos is the loader's idea of where the pager is now
+   ({ pages, url }); goto(url) loads an address. Returns { ok } or { ok: false, why }. */
+async function replay(tab, view, home, { signal, pos = null, goto = null, homeUrl = null } = {}) {
   const check = checker(signal);
+  const at = pos || { pages: 0, url: null };
+  const wantUrl = (view && view.pageUrl) || null;
+  const wantPages = (view && view.pages) || 0;
+  if (goto && ((wantUrl || null) !== (at.url || null) || wantPages < at.pages)) { await goto(wantUrl || homeUrl); at.url = wantUrl; at.pages = 0; }
   const want = (view && view.tab) || home || null;
   const controls = await pageOp(tab, 'controls');
   if (want && controls.tabs.length) {
@@ -195,18 +212,29 @@ async function replay(tab, view, home, { signal } = {}) {
     if (!fresh) return { ok: false, why: `the tab "${want.label}" is no longer on the page` };
     if (!fresh.selected) {
       const since = Date.now() - 50;
-      const r = await pageOp(tab, 'activate', { path: fresh.path, label: fresh.label });
+      const r = await pageOp(tab, 'activate', { path: fresh.path, kind: 'tab', label: fresh.label });
       if (!r.ok) return { ok: false, why: `the tab "${want.label}" could not be opened again (${r.why})` };
+      at.pages = 0;
       await quick(tab, signal, since);
     }
+  }
+  while (at.pages < wantPages) {
+    check();
+    const step = pagerSteps((await pageOp(tab, 'controls')).pager)[0];
+    if (!step || step.href) return { ok: false, why: 'the page of the list it was on could not be reached again' };
+    const since = Date.now() - 50;
+    const r = await pageOp(tab, 'activate', { path: step.path, kind: 'pager', label: step.label });
+    if (!r.ok) return { ok: false, why: `the page of the list could not be reached again (${r.why})` };
+    at.pages += 1;
+    await quick(tab, signal, since);
   }
   await expandAll(tab, [], { signal, snapshots: false });
   for (let round = 0; round < ((view && view.more) || 0); round += 1) {   /* a round presses every "Load more" the page shows, as gather did */
     check();
     const since = Date.now() - 50;
-    const buttons = (await pageOp(tab, 'controls')).more;
+    const buttons = (await pageOp(tab, 'controls')).more || [];
     let pressed = 0;
-    for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, label: more.label }); if (r.ok) pressed += 1; }
+    for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, kind: 'more', label: more.label }); if (r.ok) pressed += 1; }
     if (!pressed) break;
     await quick(tab, signal, since);
     await expandAll(tab, [], { signal, snapshots: false });
@@ -223,16 +251,19 @@ async function replay(tab, view, home, { signal } = {}) {
   return { ok: true };
 }
 
-/* The slow part: for the open tab and then for each other tab, expand, press every "Load more" while the presses add files, scroll in
-   steps until two steps in a row add nothing. Pushes a snapshot after every step. Every step waits for the answer of an API request that
-   it started (a slow tab, a slow page of the list) and says so in capped when one is still pending at the end. budgetMs is the time for
-   the whole page; every tab gets at least minPerTabMs. Returns { tabs, more, scrolls, home, capped: [text] }. */
-async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, minPerTabMs = 8000, patientMs } = {}) {
+/* The slow part: for the open tab and then for each other tab, expand, press every "Load more" while the presses add files, scroll until
+   every scrollable box is at its bottom and the list stopped growing, follow the pager. Pushes a snapshot after every step. Every step waits
+   for the answer of an API request that it started (a slow tab, a slow page of the list). budgetMs is the time for the whole page; every
+   tab gets at least minPerTabMs. pos: where the pager is ({ pages, url }, kept by the caller); goto(url): load an address (pager links);
+   homeUrl: the address of the task page. Returns { tabs, more, scrolls, pages, home, capped: [sentence] }: capped is the list of
+   things it could not cover completely. */
+async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, maxMore = 200, maxPages = 100, minPerTabMs = 8000, patientMs, pos = null, goto = null, homeUrl = null } = {}) {
   const check = checker(signal);
   const started = Date.now();
+  const at = pos || { pages: 0, url: null };
   const known = new CandidateSet();
   for (const s of snaps) known.add(fileCandidates(s));
-  const did = { tabs: 0, more: 0, scrolls: 0, home: null, capped: [] };
+  const did = { tabs: 0, more: 0, scrolls: 0, pages: 0, home: null, capped: [] };
   const say = (text) => { if (!did.capped.includes(text)) did.capped.push(text); };
   const grab = async (view, since, where) => {
     check();
@@ -246,70 +277,166 @@ async function gather(tab, snaps, { signal, budgetMs = 60000, maxScroll = 300, m
     const before = snaps.length;
     const total = await expandAll(tab, snaps, { signal, view, patientMs });
     if (total.lost) say(LOST(where));
+    if (total.capped) say(`folders or sections were still opening when the loader stopped (${plural(total.expanded, 'press', 'presses')} in ${plural(total.passes, 'pass', 'passes')})${where}, so some files may be missing`);
+    if (total.blocked) say(`${plural(total.blocked, 'section', 'sections')} that would submit a form if opened ${total.blocked === 1 ? 'was' : 'were'} not opened`);
+    for (const p of total.popups) say(`"${p}" opens a menu or dialog that may hold files; it was not opened`);
     let fresh = 0;
     for (let i = before; i < snaps.length; i += 1) fresh += known.add(fileCandidates(snaps[i]));
     return fresh;
   };
+  const reportControls = (c) => {
+    if (c.cut && c.cut.tabs) say(`${plural(c.cut.tabs, 'tab', 'tabs')} past the ${LIMITS.tabsMax} the loader opens ${c.cut.tabs === 1 ? 'was' : 'were'} not opened`);
+    if (c.cut && c.cut.more) say(`${plural(c.cut.more, 'control', 'controls')} like "Load more" past the ${LIMITS.moreMax} the loader presses ${c.cut.more === 1 ? 'was' : 'were'} not pressed`);
+    if (c.blocked) say(`${plural(c.blocked, 'control', 'controls')} like "Load more" that would submit a form ${c.blocked === 1 ? 'was' : 'were'} not pressed`);
+    for (const l of c.popups || []) say(`"${l}" opens a menu or dialog that may hold files; it was not opened`);
+  };
 
   const controls = await pageOp(tab, 'controls');
+  reportControls(controls);
   const tabs = controls.tabs;
   const homeTab = tabs.find((t) => t.selected) || null;
   did.home = homeTab ? { label: homeTab.label, path: homeTab.path } : null;
 
-  const explore = async (tabInfo, deadline, opened, since0) => {
-    const where = tabInfo ? ` in the tab "${tabInfo.label}"` : '';
-    const view = { tab: tabInfo, more: 0, scroll: 0 };
-    const over = () => Date.now() > deadline;
-    if (opened) await grab(view, since0, `after the tab "${tabInfo.label}" was opened`);   /* the tab as it opens */
-    await grabAfter(view, `after something was opened${where}`);
-
+  /* "Load more": every button the page shows is pressed, round after round, while the rounds add files */
+  const moreLoop = async (view, where, over) => {
     let flat = 0; let ended = 'done';
     for (let i = 0; ; i += 1) {
       check();
       if (i >= maxMore) { ended = 'steps'; break; }
       if (over()) { ended = 'time'; break; }
-      const buttons = (await pageOp(tab, 'controls')).more;
-      if (!buttons.length) break;
+      const c = await pageOp(tab, 'controls');
+      reportControls(c);
+      if (!c.more || !c.more.length) break;
       const since = Date.now() - 50;
-      let pressed = 0;
-      for (const more of buttons) { const r = await pageOp(tab, 'activate', { path: more.path, label: more.label }); if (r.ok) pressed += 1; }
-      if (!pressed) break;
+      let pressed = 0; let why = '';
+      for (const more of c.more) { const r = await pageOp(tab, 'activate', { path: more.path, kind: 'more', label: more.label }); if (r.ok) pressed += 1; else why = r.why; }
+      if (!pressed) { say(`"${c.more[0].label}"${where} could not be pressed (${why}), so the list may have more files`); break; }
       did.more += pressed; view.more += 1;
       const fresh = (await grab(view, since, `after "Load more"${where}`)) + (await grabAfter(view, `after "Load more"${where}`));
       flat = fresh ? 0 : flat + 1;
-      if (flat >= 2) break;
+      if (flat >= 2) { ended = 'flat'; break; }
     }
-    if (ended !== 'done') say(`"Load more"${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxMore} presses`} and may have more files`);
+    if (ended === 'steps' || ended === 'time') say(`"Load more"${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxMore} presses`} and may have more files`);
+    else if (ended === 'flat') {
+      const left = (await pageOp(tab, 'controls')).more || [];
+      if (left.length) say(`"${left[0].label}"${where} was still on the page after ${plural(view.more, 'press', 'presses')}; the last 2 added no files`);
+    }
+  };
 
-    let idle = 0; ended = 'done';
+  /* scrolling: until every scrollable box is at its bottom and the page stopped growing (an infinite scroller adds a chunk when its end is reached) */
+  const scrollLoop = async (view, where, over) => {
+    let idle = 0; let ended = 'done'; let stuck = 0; let lastHeight = -1;
     for (let step = 0; ; step += 1) {
       check();
       if (step >= maxScroll) { ended = 'steps'; break; }
       if (over()) { ended = 'time'; break; }
       const since = Date.now() - 50;
       const r = await pageOp(tab, 'scroll');
-      if (!r.moved) break;
-      did.scrolls += 1; view.scroll += 1;
+      if (!r.moved && r.atBottom && step === 0) break;   /* nothing to scroll */
+      if (r.moved) { did.scrolls += 1; view.scroll += 1; }
       await sleep(120);
       const fresh = await grab(view, since, `after scrolling${where}`);
-      idle = fresh ? 0 : idle + 1;
+      const probe = await pageOp(tab, 'scroll', { probe: true });
+      if (!probe.atBottom) {
+        idle = 0;
+        stuck = r.moved ? 0 : stuck + 1;
+        if (stuck >= 3) { ended = 'stuck'; break; }
+        continue;
+      }
+      stuck = 0;
+      const grew = probe.height > Math.max(lastHeight, r.height || 0);
+      lastHeight = Math.max(lastHeight, probe.height, r.height || 0);
+      idle = fresh || grew ? 0 : idle + 1;
       if (idle >= 2) break;
     }
-    if (ended !== 'done') say(`scrolling${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxScroll} steps`} while the page may still have more files`);
+    if (ended === 'steps' || ended === 'time') say(`scrolling${where} stopped at ${ended === 'time' ? 'the time limit' : `${maxScroll} steps`} before the end of the page, which may still have more files`);
+    else if (ended === 'stuck') say(`a scrollable part of the page${where} could not be scrolled to its end, so it may have more files`);
     if (view.scroll) await pageOp(tab, 'scroll', { reset: true });
   };
 
-  await explore(did.home, started + budgetMs, false, 0);
+  const explorePage = async (view, where, over) => {
+    await grabAfter(view, `after something was opened${where}`);
+    await moreLoop(view, where, over);
+    await scrollLoop(view, where, over);
+  };
+
+  /* the pager: press Next (or the next number), or follow a link that changes only a page parameter, page after page */
+  const pageLoop = async (tabInfo, view0, where, over, linksOk) => {
+    let flat = 0;
+    const visited = new Set();
+    let here = (await pageOp(tab, 'where')).href;
+    visited.add(urlKey(here));
+    for (let k = 0; ; k += 1) {
+      check();
+      const c = await pageOp(tab, 'controls');
+      reportControls(c);
+      const pager = c.pager || { found: false, hinted: false };
+      if (!pager.found) { if (pager.hinted && k === 0) say(`the page${where} has pagination that the loader did not recognise, so only its first page was read`); break; }
+      if (k >= maxPages) { say(`pagination${where} stopped at ${maxPages} pages and may have more files`); break; }
+      if (over()) { say(`pagination${where} stopped at the time limit and may have more files`); break; }
+      let step = null;
+      for (const s of pagerSteps(pager)) {
+        if (s.href) {
+          if (visited.has(urlKey(s.href))) continue;
+          if (!linksOk || !goto) { say(`the page${where} has pagination links ("${s.label}") that the loader does not follow here, so its other pages were not read`); continue; }
+          if (!pageLinkOk(s.href, here)) { say(`the pagination link "${s.label}"${where} goes to another address than the page, so its other pages were not read`); continue; }
+        }
+        step = s; break;
+      }
+      if (!step) {
+        if (!pager.next && pager.nums.length && pager.current === null) say(`the page${where} has numbered pages but does not show which one is open, so only the first page was read`);
+        break;
+      }
+      const before = known.size;
+      const since = Date.now() - 50;
+      const baseline = signature(await takePage(tab));   /* the page as it is, to see whether the press moved it */
+      let view;
+      if (step.href) {
+        await goto(step.href);
+        here = (await pageOp(tab, 'where')).href;
+        visited.add(urlKey(step.href)); visited.add(urlKey(here));
+        at.url = step.href; at.pages = 0;
+        view = { tab: tabInfo, pages: 0, pageUrl: step.href, more: 0, scroll: 0 };
+        const s = stamp(await takePage(tab), view);
+        snaps.push(s);
+        known.add(fileCandidates(s));
+      } else {
+        const r = await pageOp(tab, 'activate', { path: step.path, kind: 'pager', label: step.label });
+        if (!r.ok) { say(`the page control "${step.label}"${where} could not be pressed (${r.why}), so later pages were not read`); break; }
+        at.pages += 1;
+        view = { tab: tabInfo, pages: at.pages, pageUrl: at.url, more: 0, scroll: 0 };
+        await grab(view, since, `after page ${at.pages + 1}${where}`);
+        if (signature(snaps[snaps.length - 1]) === baseline) { at.pages -= 1; break; }   /* nothing moved: the pager is at its end (a Next that never turns off) */
+      }
+      did.pages += 1;
+      await explorePage(view, where, over);
+      flat = known.size > before ? 0 : flat + 1;
+      if (flat >= 2) { say(`pagination${where} stopped after 2 pages that added no files`); break; }
+    }
+  };
+
+  const explore = async (tabInfo, deadline, opened, since0, linksOk) => {
+    const where = tabInfo ? ` in the tab "${tabInfo.label}"` : '';
+    const view = { tab: tabInfo, pages: 0, pageUrl: at.url, more: 0, scroll: 0 };
+    const over = () => Date.now() > deadline;
+    if (opened) await grab(view, since0, `after the tab "${tabInfo.label}" was opened`);   /* the tab as it opens */
+    await explorePage(view, where, over);
+    await pageLoop(tabInfo, view, where, over, linksOk);
+  };
+
+  await explore(did.home, started + budgetMs, false, 0, true);
   for (const t of tabs) {
     if (t.selected) continue;
     check();
     const since = Date.now() - 50;
-    const r = await pageOp(tab, 'activate', { path: t.path, label: t.label });
+    const r = await pageOp(tab, 'activate', { path: t.path, kind: 'tab', label: t.label });
     if (!r.ok) { say(`the tab "${t.label}" could not be opened (${r.why}), so its files were not looked at`); continue; }
     did.tabs += 1;
-    await explore({ label: t.label, path: t.path }, Math.max(started + budgetMs, Date.now() + minPerTabMs), true, since);
+    at.pages = 0;
+    await explore({ label: t.label, path: t.path }, Math.max(started + budgetMs, Date.now() + minPerTabMs), true, since, false);
   }
-  if (did.tabs && homeTab) { await pageOp(tab, 'activate', { path: homeTab.path, label: homeTab.label }); await quick(tab, signal); }
+  if (did.tabs && homeTab) { await pageOp(tab, 'activate', { path: homeTab.path, kind: 'tab', label: homeTab.label }); at.pages = 0; await quick(tab, signal); }
+  if (did.pages && at.url && goto) { await goto(homeUrl); at.url = null; at.pages = 0; }   /* back on the first page of a pager made of links */
   return did;
 }
 

@@ -69,7 +69,7 @@ const FILES = {
   workbook: { name: 'Atlas_Workbook.xlsx', type: XLSX, body: det('workbook', 40000), disp: 'attachment; filename="Atlas_Workbook.xlsx"' },
   report: { name: 'report.csv', type: 'text/csv', body: Buffer.from('party,units\nAtlas,2480\n'), disp: 'attachment; filename="report.csv"' },
   ledger: { name: 'World_Ledger.csv', type: 'text/csv', body: Buffer.from('account,balance\nMeridian,100\n'), disp: 'attachment; filename="World_Ledger.csv"' },
-  hostile: { name: 'hostile', type: 'text/plain', body: Buffer.from('a file whose name tries to leave its folder\n'), disp: 'attachment; filename="../../../tmp/pwned.txt"' },
+  hostile: { name: 'hostile.txt', type: 'text/plain', body: Buffer.from('a file whose name tries to leave its folder\n'), disp: 'attachment; filename="../../../tmp/pwned.txt"' },
   report2: { name: 'Report.CSV', type: 'text/csv', body: Buffer.from('party,units\nMeridian,0\n'), disp: 'attachment; filename="Report.CSV"' },
   adv1: text('Borealis_Rates.txt', 'rates v1\n'),
   adv2: text('Borealis_Curve.txt', 'curve v1\n'),
@@ -122,6 +122,7 @@ async function startPlatform() {
   const files = await listen((req, res) => {
     const u = new URL(req.url, 'http://x');
     requests.push({ origin: 'files', method: req.method, path: u.pathname, cookie: Boolean(req.headers.cookie) });
+    if (u.pathname === '/frame') return send(res, 200, 'text/html; charset=utf-8', '<!doctype html><h3>A frame of another site</h3><ul><li><a href="/blob/Frame_Other.txt">Frame_Other.txt</a></li></ul>');
     const m = /^\/blob\/([^/]+)$/.exec(u.pathname);
     const def = m && Object.values(FILES).find((f) => f.name === decodeURIComponent(m[1]));
     if (!def || u.searchParams.get('X-Signature') !== SECRET_SIG) return send(res, 403, 'text/plain', 'bad signature');
@@ -129,7 +130,7 @@ async function startPlatform() {
   }, '127.0.0.1');
   const filesOrigin = `http://localhost:${files.address().port}`;
 
-  const li = (key, extra = '') => `<li><a href="/files/${key}"${extra}>${FILES[key].name}</a></li>`;
+  const li = (key, extra = '') => `<li><a href="/files/${key}/${FILES[key].name}"${extra}>${FILES[key].name}</a></li>`;
   const TOGGLES = {
     all: '<button role="switch" aria-checked="false" data-main="1" id="t">Show all files</button>',
     on: '<button role="switch" aria-checked="true" data-main="1" id="t">Show all files</button>',
@@ -141,7 +142,7 @@ async function startPlatform() {
   /* A task page. toggle: one of TOGGLES (or none); world files are added when it is switched on (after `delay` ms), or shown at once
      for the switch that starts on. pollers: [[name, javascript]] run when the test says so. */
   const page = ({ slug, title, taskKeys = [], worldKeys = [], toggle = null, delay: wait = 250, extraLinks = '', extraBody = '', pollers = [], head = '' }) => {
-    const world = worldKeys.map((k) => ({ href: `/files/${k}`, text: FILES[k].name }));
+    const world = worldKeys.map((k) => ({ href: `/files/${k}/${FILES[k].name}`, text: FILES[k].name }));
     const polls = pollers.map(([name, js]) => `setInterval(async () => { const j = await (await fetch('/__person/flip?name=${name}')).json(); if (j.go) { ${js} } }, 150);`).join('\n');
     return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>${head}</head><body>
 <h1>${title}</h1>
@@ -189,8 +190,8 @@ ${polls}
     'panels-053': () => page({
       slug: 'panels-053', title: 'Panels task', taskKeys: ['prompt'], toggle: 'on',
       extraBody: `<h2>More</h2><div role="tablist"><button role="tab" aria-selected="true" id="tab-a">Task</button><button role="tab" aria-selected="false" id="tab-b">Reference</button></div>
-<div id="panel-a"><p>Task panel</p></div><div id="panel-b" hidden><h2>Reference files</h2><ul><li><a href="/files/adv1">Borealis_Rates.txt</a></li></ul></div>
-<details><summary>More files</summary><ul><li><a href="/files/adv2">Borealis_Curve.txt</a></li></ul></details>
+<div id="panel-a"><p>Task panel</p></div><div id="panel-b" hidden><h2>Reference files</h2><ul><li><a href="/files/adv1/Borealis_Rates.txt">Borealis_Rates.txt</a></li></ul></div>
+<details><summary>More files</summary><ul><li><a href="/files/adv2/Borealis_Curve.txt">Borealis_Curve.txt</a></li></ul></details>
 ${tableRow}<script>
 for (const [tab, panel, other, otherPanel] of [['tab-a', 'panel-a', 'tab-b', 'panel-b'], ['tab-b', 'panel-b', 'tab-a', 'panel-a']]) document.getElementById(tab).addEventListener('click', () => {
   document.getElementById(tab).setAttribute('aria-selected', 'true'); document.getElementById(other).setAttribute('aria-selected', 'false');
@@ -208,7 +209,7 @@ function render() {
   const first = Math.floor(box.scrollTop / H);
   box.querySelectorAll('.vrow').forEach((r) => r.remove());
   for (let i = first; i < Math.min(N, first + 4); i += 1) {
-    const a = document.createElement('a'); a.className = 'vrow'; a.href = '/files/vf-' + (i + 1); a.textContent = 'Report_' + String(i + 1).padStart(2, '0') + '.txt';
+    const a = document.createElement('a'); a.className = 'vrow'; a.href = '/files/vf-' + (i + 1) + '/Report_' + String(i + 1).padStart(2, '0') + '.txt'; a.textContent = 'Report_' + String(i + 1).padStart(2, '0') + '.txt';
     a.style.cssText = 'position:absolute;left:0;top:' + (i * H) + 'px;height:' + H + 'px;display:block'; box.append(a);
   }
 }
@@ -220,16 +221,16 @@ box.addEventListener('scroll', render); render();
     'late-057': () => page({
       slug: 'late-057', title: 'Late task', taskKeys: ['prompt'], toggle: 'on',
       extraBody: `<script>
-setTimeout(() => { const a = document.createElement('a'); a.href = '/files/late-a'; a.textContent = 'Late_A.txt'; const item = document.createElement('li'); item.append(a); document.querySelector('ul').append(item); }, 1200);
-setTimeout(() => { const a = document.createElement('a'); a.href = '/files/late-b'; a.textContent = 'Late_B.txt'; const item = document.createElement('li'); item.append(a); document.querySelector('ul').append(item); }, 2000);
+setTimeout(() => { const a = document.createElement('a'); a.href = '/files/late-a/Late_A.txt'; a.textContent = 'Late_A.txt'; const item = document.createElement('li'); item.append(a); document.querySelector('ul').append(item); }, 1200);
+setTimeout(() => { const a = document.createElement('a'); a.href = '/files/late-b/Late_B.txt'; a.textContent = 'Late_B.txt'; const item = document.createElement('li'); item.append(a); document.querySelector('ul').append(item); }, 2000);
 </script>`,
     }),
     'slow-058': () => page({ slug: 'slow-058', title: 'Slow task', taskKeys: ['prompt'], worldKeys: ['adv1', 'adv2'], toggle: 'all', delay: 2600 }),
-    'stop-059': () => page({ slug: 'stop-059', title: 'Stop task', toggle: 'on', extraLinks: Array.from({ length: 7 }, (_, i) => `<li><a href="/files/gone-${i + 1}">Missing_${i + 1}.txt</a></li>`).join('') }),
+    'stop-059': () => page({ slug: 'stop-059', title: 'Stop task', toggle: 'on', extraLinks: Array.from({ length: 7 }, (_, i) => `<li><a href="/files/gone-${i + 1}/Missing_${i + 1}.txt">Missing_${i + 1}.txt</a></li>`).join('') }),
     'edge-060': () => page({
       slug: 'edge-060', title: 'Edge task', taskKeys: ['prompt', 'offsite', 'gone', 'htmlfile', 'gated'], worldKeys: ['adv4'], toggle: 'all',
-      pollers: [['stray', `const a = document.createElement('a'); a.href = '/files/prompt'; a.download = 'stray.txt'; document.body.append(a); a.click(); a.remove();`]],
-      extraBody: `<button type="button" id="blob">Atlas_Blob.txt</button><script>
+      pollers: [['stray', `const a = document.createElement('a'); a.href = '/files/prompt/Atlas_Prompt.txt'; a.download = 'stray.txt'; document.body.append(a); a.click(); a.remove();`]],
+      extraBody: `<button type="button" id="blob">Download Atlas_Blob.txt</button><script>
 document.getElementById('blob').addEventListener('click', () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['blob content from the page\\n'], { type: 'text/plain' })); a.download = 'Atlas_Blob.txt'; document.body.append(a); a.click(); a.remove(); });
 </script>`,
       extraLinks: '<li><a href="javascript:alert(1)" download>evil.pdf</a></li><li><a href="file:///etc/passwd" download>passwd.txt</a></li><li><a href="https://127.0.0.2:22/x.pdf">x.pdf</a></li><li><a href="https://10.0.0.5/y.pdf">y.pdf</a></li>',
@@ -248,7 +249,7 @@ function render(k) { document.getElementById('t1').setAttribute('aria-selected',
   const p = document.getElementById('panel'); p.innerHTML = '<table><tbody>' + DATA[k].map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
   p.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
 document.getElementById('t1').onclick = () => render('t1'); document.getElementById('t2').onclick = () => render('t2'); render('t1');</script>`),
-    /* the second tab is called "World files": the loader takes it for the switch and clicks it, which leaves the first tab behind */
+    /* the second tab is called "World files": it is a tab, not the switch (the label has no show or view), so nobody clicks it for the wrong reason; the person is asked, then every tab is looked at */
     'tabs-071': () => doc('World tabs task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task files</button><button role="tab" aria-selected="false" id="t2">World files</button></div><div id="panel"></div><script>${BLOB}
 const DATA = { t1: ['Task_A.txt', 'Task_B.txt'], t2: ['World_A.txt', 'World_B.txt', 'World_C.txt'] };
 function render(k) { document.getElementById('t1').setAttribute('aria-selected', k === 't1'); document.getElementById('t2').setAttribute('aria-selected', k === 't2');
@@ -301,21 +302,22 @@ function render() { const on = document.getElementById('all').checked;
   document.getElementById('list').innerHTML = '<table><tbody>' + rows.map(([n, k]) => '<tr><td>' + n + '</td><td>' + (k === 'link' ? '<a href="/denied/' + n + '">' + n + '</a>' : '<button class="dl" data-n="' + n + '">Download</button>') + '</td></tr>').join('') + '</tbody></table>';
   document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
 document.getElementById('all').onchange = render; render();</script>`),
-    /* file names that start with destructive verbs, or sit in a /publish/ folder, are files; a button that really is an action is not pressed */
+    /* file names that start with destructive verbs are files; a /publish/ folder in the address is an action word and is not requested; a button that really is an action is not pressed */
     'verbs-078': () => doc('Verbs task', `<ul><li><a href="/data/Archive_2025_Q4.zip">Archive 2025 Q4.zip</a></li><li><a href="/data/Reset_policy.pdf">Reset policy.pdf</a></li>
 <li><a href="/data/publish/Plan.txt">Plan.txt</a></li><li><a href="/data/Danger.pdf?action=delete">Danger.pdf</a></li><li><a href="/data/ok.txt">ok.txt</a></li></ul>
 <button type="button" id="dellog">Delete log.txt</button><script>document.getElementById('dellog').onclick = () => fetch('/files/9/delete');</script>`),
-    /* controls the extractor must recognise: a "#" link with role=button, a link with no address, an icon-only button with a title, an aria-label button, a link called Budget_2025.xlsx whose address says nothing */
+    /* controls the extractor must recognise: a "#" link with role=button, a link with no address, an icon-only button with a title, an aria-label button; a link called Budget_2025.xlsx whose address says nothing is NOT clearly a download */
     'controls-079': () => doc('Controls task', `<ul><li><a href="/documents/42">Budget_2025.xlsx</a></li>
-<li><a href="#" role="button" id="b2">Download</a></li><li><button id="b3" title="Download the notes"><svg width="10" height="10"></svg></button></li>
+<li><a href="#" role="button" id="b2">Download</a></li><li><button id="b3" title="Download file"><svg width="10" height="10"></svg></button></li>
 <li><a role="button" id="b4">Download</a></li><li><button id="b5" aria-label="Download Budget5.xlsx"><svg width="10" height="10"></svg></button></li><li><a href="/data/ok.txt">ok.txt</a></li></ul><script>${BLOB}
 document.getElementById('b2').onclick = (e) => { e.preventDefault(); dl('b2.txt'); }; document.getElementById('b3').onclick = () => dl('b3.txt'); document.getElementById('b4').onclick = () => dl('b4.txt'); document.getElementById('b5').onclick = () => dl('b5.txt');</script>`),
-    /* a filter form around the file table: type=button rows are downloads, a submit button called Download would POST the form */
+    /* a filter form around the file table: nothing inside a form is pressed (even a type=button, a submit would POST the form); a table outside it is fine */
     'form-080': () => doc('Form task', `<form id="f" onsubmit="return false"><input type="search" name="q" placeholder="filter"><table><tbody>
 <tr><td>Task_A.txt</td><td><button type="button" class="dl" data-n="Task_A.txt">Download</button></td></tr>
 <tr><td>Task_B.txt</td><td><button type="button" class="dl" data-n="Task_B.txt">Download</button></td></tr>
-<tr><td>Task_C.txt</td><td><button class="sub" data-n="Task_C.txt">Download</button></td></tr></tbody></table></form><script>${BLOB}
-document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });</script>`),
+<tr><td>Task_C.txt</td><td><button class="sub" data-n="Task_C.txt">Download</button></td></tr></tbody></table></form>
+<table><tbody><tr><td>Task_D.txt</td><td><button type="button" class="dl" data-n="Task_D.txt">Download</button></td></tr></tbody></table><script>${BLOB}
+document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => { fetch('/hit/form-' + b.dataset.n); dl(b.dataset.n); }; }); document.querySelector('.sub').onclick = () => fetch('/hit/form-sub');</script>`),
     /* every address is signed anew on each render: the same four files, many different addresses */
     'signed-081': () => doc('Signed task', `${TOGGLE_BOX}<div id="list"></div><script>
 function render() { const on = document.getElementById('all').checked; const names = ['Signed_A.txt', 'Signed_B.txt'].concat(on ? ['Signed_C.txt', 'Signed_D.txt'] : []);
@@ -460,6 +462,149 @@ function draw() { const first = Math.min(N - VIS, Math.floor(box.scrollTop / ROW
 box.addEventListener('scroll', draw); draw();</script>`),
   });
 
+    /* ---- Round 5: pagers, "view all" variants, folders called Archive, tree items, trees that draw themselves anew, many tabs, the same token in
+       two tabs, titles that start with a verb, files in closed dialogs, frames of another site, infinite scroll, persistent "Load more", cells
+       that change, names for types a browser does not show, a person who wanders off, slow requests ---- */
+    const TOGGLE_ON = '<label><input type="checkbox" id="all" checked> Show all files</label>';
+    const dataLink = (n) => `<li><a href="/data/${n}">${n}</a></li>`;
+    /* numbered pager buttons + Next, 4 pages of 3 links and a bare Download row each (a button on page 3 must be found again on page 3) */
+    PAGES['pagenum-110'] = () => doc('Pager task', `${TOGGLE_ON}<table id="t"></table><nav aria-label="Pagination"><button class="pg" data-p="1">1</button><button class="pg" data-p="2">2</button><button class="pg" data-p="3">3</button><button class="pg" data-p="4">4</button><button id="next" aria-label="Next page">Next</button></nav><script>${BLOB}
+let cur = 1;
+function render() { const rows = [1, 2, 3].map((i) => 'P' + cur + '_File_0' + i + '.txt');
+  document.getElementById('t').innerHTML = '<tbody>' + rows.map((n) => '<tr><td>' + n + '</td><td><a href="/data/' + n + '">' + n + '</a></td></tr>').join('') + '<tr><td>Page ' + cur + ' Memo</td><td><button class="dl" data-n="Page_' + cur + '_Memo.txt">Download</button></td></tr></tbody>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });
+  document.querySelectorAll('.pg').forEach((b) => b.setAttribute('aria-current', String(Number(b.dataset.p) === cur))); }
+document.querySelectorAll('.pg').forEach((b) => { b.onclick = () => { cur = Number(b.dataset.p); render(); }; });
+document.getElementById('next').onclick = () => { if (cur < 4) { cur += 1; render(); } };
+render();</script>`);
+    /* server-rendered pages: ?page=N links and rel=next */
+    PAGES['pagelinks-111'] = (u) => { const p = Number((u && u.searchParams.get('page')) || 1); return doc('Linked pages task', `${TOGGLE_ON}<p>Page ${p} of 4</p><ul>${[1, 2, 3].map((i) => dataLink(`S${p}_File_0${i}.txt`)).join('')}</ul>
+<nav class="pagination" aria-label="pagination">${[1, 2, 3, 4].map((n) => `<a href="?page=${n}">${n}</a>`).join(' ')} <a rel="next" href="?page=${Math.min(4, p + 1)}">Next &raquo;</a></nav>`); };
+    /* pager links that also change another parameter: not followed, and said so */
+    PAGES['pageother-112'] = (u) => { const p = Number((u && u.searchParams.get('page')) || 1); return doc('Other pager task', `${TOGGLE_ON}<ul>${[1, 2, 3].map((i) => dataLink(`O${p}_File_0${i}.txt`)).join('')}</ul>
+<nav class="pagination" aria-label="pagination"><a href="?page=1&sort=name">1</a> <a href="?page=2&sort=name">2</a> <a rel="next" href="?page=2&sort=name">Next</a></nav>`); };
+    for (const [slug, label] of [['viewall-120', 'View all (12)'], ['viewall-121', 'Show all'], ['viewall-122', 'See all'], ['viewall-123', 'Next'], ['viewall-124', 'More'], ['viewall-125', 'Load all'], ['viewall-126', 'Show remaining 8']]) {
+      PAGES[slug] = () => doc('View all task', `${TOGGLE_ON}<ul id="l"></ul><button id="more">${label}</button><script>
+const all = Array.from({ length: 12 }, (_, i) => 'All_' + String(i + 1).padStart(2, '0') + '.txt');
+function draw(n) { document.getElementById('l').innerHTML = all.slice(0, n).map((x) => '<li><a href="/data/' + x + '">' + x + '</a></li>').join(''); } draw(4);
+document.getElementById('more').onclick = () => { draw(12); document.getElementById('more').remove(); };</script>`);
+    }
+    /* a file tree whose folders are buttons; one is called Archive, and its files are drawn when it is opened */
+    PAGES['archive-130'] = () => doc('Archive folder task', `${TOGGLE_ON}<div id="tree"></div><script>
+const folders = { 'Docs (2)': ['Docs_A.txt', 'Docs_B.txt'], 'Archive (3)': ['Arch_A.txt', 'Arch_B.txt', 'Arch_C.txt'], 'Misc (1)': ['Misc_A.txt'] };
+const tree = document.getElementById('tree');
+for (const [name, files] of Object.entries(folders)) { const wrap = document.createElement('div'); const b = document.createElement('button'); b.setAttribute('aria-expanded', 'false'); b.textContent = name; const box = document.createElement('ul');
+  b.onclick = () => { b.setAttribute('aria-expanded', 'true'); box.innerHTML = files.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join(''); }; wrap.append(b, box); tree.append(wrap); }</script>`);
+    /* ARIA tree items: the handler sits on the row inside the item, not on the item (131: children hidden; 132: children made on the first open) */
+    for (const [slug, lazy] of [['treeitem-131', false], ['treeitem-132', true]]) {
+      PAGES[slug] = () => doc('Tree item task', `${TOGGLE_ON}<ul role="tree" id="tree"></ul><script>
+const data = { One: ['Tree_One_A.txt', 'Tree_One_B.txt'], Two: ['Tree_Two_A.txt'], Three: ['Tree_Three_A.txt'] }; const LAZY = ${lazy};
+const tree = document.getElementById('tree');
+for (const [name, files] of Object.entries(data)) { const li = document.createElement('li'); li.setAttribute('role', 'treeitem'); li.setAttribute('aria-expanded', 'false'); const row = document.createElement('div'); row.className = 'row'; row.textContent = 'Folder ' + name; const group = document.createElement('ul'); group.setAttribute('role', 'group');
+  const fill = () => { group.innerHTML = files.map((n) => '<li role="treeitem"><a href="/data/' + n + '">' + n + '</a></li>').join(''); }; if (!LAZY) { fill(); group.hidden = true; }
+  row.onclick = () => { const open = li.getAttribute('aria-expanded') === 'true'; li.setAttribute('aria-expanded', String(!open)); if (LAZY && !open && !group.children.length) fill(); group.hidden = open; };
+  li.append(row, group); tree.append(li); }</script>`);
+    }
+    /* a tree that draws itself anew (innerHTML) on every click: wide (20 folders side by side) and deep (each folder holds the next) */
+    PAGES['rerender-133'] = () => doc('Wide tree task', `${TOGGLE_ON}<div id="tree"></div><script>
+const open = new Set(); const N = 20; const tree = document.getElementById('tree');
+function render() { tree.innerHTML = Array.from({ length: N }, (_, i) => '<div><button aria-expanded="' + open.has(i) + '" data-i="' + i + '">Folder ' + i + '</button>' + (open.has(i) ? '<ul><li><a href="/data/Wide_' + String(i).padStart(2, '0') + '.txt">Wide_' + String(i).padStart(2, '0') + '.txt</a></li></ul>' : '') + '</div>').join('');
+  tree.querySelectorAll('button').forEach((b) => { b.onclick = () => { open.add(Number(b.dataset.i)); render(); }; }); }
+render();</script>`);
+    PAGES['rerender-134'] = () => doc('Deep tree task', `${TOGGLE_ON}<div id="tree"></div><script>
+const open = new Set(); const D = 8; const tree = document.getElementById('tree');
+function level(k) { if (k >= D) return ''; return '<div><button aria-expanded="' + open.has(k) + '" data-k="' + k + '">Level ' + k + '</button>' + (open.has(k) ? '<ul><li><a href="/data/Deep_' + k + '.txt">Deep_' + k + '.txt</a></li></ul>' + level(k + 1) : '') + '</div>'; }
+function render() { tree.innerHTML = level(0); tree.querySelectorAll('button').forEach((b) => { b.onclick = () => { open.add(Number(b.dataset.k)); render(); }; }); }
+render();</script>`);
+    /* 16 tabs of 2 files each */
+    PAGES['tabs16-135'] = () => doc('Sixteen tabs task', `${TOGGLE_ON}<div role="tablist" id="tl"></div><div id="panel"></div><script>
+const N = 16; let cur = 0; const tl = document.getElementById('tl');
+function render() { tl.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-selected', String(i === cur)));
+  document.getElementById('panel').innerHTML = '<ul>' + ['A', 'B'].map((x) => { const n = 'Tab_' + String(cur + 1).padStart(2, '0') + '_' + x + '.txt'; return '<li><a href="/data/' + n + '">' + n + '</a></li>'; }).join('') + '</ul>'; }
+for (let i = 0; i < N; i += 1) { const b = document.createElement('button'); b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', 'false'); b.textContent = 'Section ' + (i + 1); b.onclick = () => { cur = i; render(); }; tl.append(b); }
+render();</script>`);
+    /* the same names with opaque tokens in two tabs (the token is a parameter, the file name is in the path), and an address that says nothing */
+    PAGES['sametoken-139'] = () => doc('Same token task', `${TOGGLE_ON}<div role="tablist"><button role="tab" aria-selected="true" id="t1">Inputs</button><button role="tab" aria-selected="false" id="t2">Outputs</button></div><div id="panel"></div><script>
+const data = { t1: [['report.txt', 'aaa1'], ['notes.txt', 'aaa2']], t2: [['report.txt', 'bbb1'], ['notes.txt', 'bbb2']] }; let cur = 't1';
+function render() { for (const k of ['t1', 't2']) document.getElementById(k).setAttribute('aria-selected', String(k === cur));
+  document.getElementById('panel').innerHTML = '<ul>' + data[cur].map(([n, t]) => '<li><a href="/dlx/' + n + '?token=' + t + '">' + n + '</a></li>').join('') + (cur === 't1' ? '<li><a href="/dlq?token=zzz9">opaque.txt</a></li>' : '') + '</ul>'; }
+document.getElementById('t1').onclick = () => { cur = 't1'; render(); }; document.getElementById('t2').onclick = () => { cur = 't2'; render(); }; render();</script>`);
+    /* titles that start with a verb word, and links whose address says nothing or is an action */
+    PAGES['verbnames-140'] = () => doc('Verb names task', `${TOGGLE_ON}<ul>${[[91, 'Archive of 2023 correspondence'], [92, 'Reset procedure'], [93, 'Approved vendor list'], [94, 'Submit guidelines'], [95, 'Revoke and reissue policy'], [96, 'Plain document']].map(([id, t]) => `<li><a href="/files/pdf/${id}/download">${t}</a></li>`).join('')}
+<li><a href="/files/42">Cancel policy</a></li><li><a href="/files/43">Reset instructions</a></li><li><a href="/files/publish/44">Q4 numbers</a></li><li><a href="/files/45/approve">Approval memo</a></li></ul>`);
+    /* file links in a closed dialog (a button opens it), and in a drawer that exists only once it is opened */
+    PAGES['dialog-141'] = () => doc('Dialog task', `${TOGGLE_ON}<ul>${dataLink('Dlg_Main_A.txt')}${dataLink('Dlg_Main_B.txt')}</ul><button id="open">Attachments (4)</button>
+<dialog id="d"><ul>${[1, 2, 3, 4].map((i) => dataLink(`Dlg_${i}.txt`)).join('')}</ul><button id="close">Close</button></dialog><script>document.getElementById('open').onclick = () => document.getElementById('d').showModal(); document.getElementById('close').onclick = () => document.getElementById('d').close();</script>`);
+    PAGES['drawer-142'] = () => doc('Drawer task', `${TOGGLE_ON}<ul>${dataLink('Drw_Main_A.txt')}${dataLink('Drw_Main_B.txt')}</ul><button id="open" aria-haspopup="dialog" aria-expanded="false">Attachments (4)</button><div id="slot"></div><script>
+document.getElementById('open').onclick = () => { fetch('/hit/pressed-drawer'); document.getElementById('open').setAttribute('aria-expanded', 'true'); document.getElementById('slot').innerHTML = '<ul>' + [1, 2, 3, 4].map((i) => '<li><a href="/data/Drw_' + i + '.txt">Drw_' + i + '.txt</a></li>').join('') + '</ul>'; };</script>`);
+    /* a frame of another site (another origin: localhost for 127.0.0.1) holding files, next to two links on the page */
+    PAGES['xframe-143'] = () => doc('Cross frame task', `${TOGGLE_ON}<ul>${dataLink('Xf_Main_A.txt')}${dataLink('Xf_Main_B.txt')}</ul><iframe src="${filesOrigin}/frame" style="width:420px;height:200px"></iframe>`);
+    /* an infinite scroller in a box: 25 rows (36 px) per chunk, the next chunk when the end sentinel is seen, 300 ms latency */
+    PAGES['infscroll-144'] = () => doc('Infinite scroll task', `${TOGGLE_ON}<div id="box" style="height:420px;overflow:auto;border:1px solid #888"><ul id="l"></ul><div id="sentinel" style="height:10px">&nbsp;</div></div><script>
+const N = 110, PER = 25; let shown = 0, busy = false;
+function load() { if (busy || shown >= N) return; busy = true; setTimeout(() => { const end = Math.min(N, shown + PER); let h = ''; for (let i = shown + 1; i <= end; i += 1) { const n = 'Inf_' + String(i).padStart(3, '0') + '.txt'; h += '<li style="height:36px"><a href="/data/' + n + '">' + n + '</a></li>'; } shown = end; document.getElementById('l').insertAdjacentHTML('beforeend', h); busy = false; if (shown >= N) document.getElementById('sentinel').remove(); }, 300); }
+new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) load(); }, { root: document.getElementById('box') }).observe(document.getElementById('sentinel'));
+load();</script>`);
+    /* five sections, each with a "Show more" that stays on the page for ever and adds one file a press (up to 4) */
+    PAGES['persistent-145'] = () => doc('Persistent more task', `${TOGGLE_ON}<div id="s"></div><script>
+const S = 5, MAX = 4; const count = Array(S).fill(1);
+function render() { document.getElementById('s').innerHTML = count.map((c, k) => '<h3>Section ' + k + '</h3><ul>' + Array.from({ length: c }, (_, i) => '<li><a href="/data/Sec' + k + '_' + (i + 1) + '.txt">Sec' + k + '_' + (i + 1) + '.txt</a></li>').join('') + '</ul><button class="m" data-k="' + k + '">Show more</button>').join('');
+  document.querySelectorAll('.m').forEach((b) => { b.onclick = () => { const k = Number(b.dataset.k); if (count[k] < MAX) { count[k] += 1; render(); } }; }); }
+render();</script>`);
+    /* extension-less rows with five cells that change while the page is open */
+    PAGES['volatile-146'] = () => doc('Volatile cells task', `<div id="t"></div><script>
+const names = ['Variance Bridge', 'Board Memo', 'Sales Ledger']; let tick = 0;
+function draw() { tick += 1; document.getElementById('t').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td>Processing ' + (tick % 100) + '%</td><td>' + tick + ' downloads</td><td>Viewed by ' + (tick % 7) + ' people</td><td>' + (tick % 2 ? 'Queued' : 'Ready') + '</td><td>' + (tick % 5) + ' comments</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => { const f = b.dataset.n.replace(/ /g, '_') + '.txt'; const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['content of ' + f])); a.download = f; document.body.appendChild(a); a.click(); a.remove(); }; }); }
+draw(); setInterval(draw, 700);</script>`);
+    /* names with no extension for types a browser does not show inline (xlsx) and one it does (csv) */
+    PAGES['nonline-147'] = () => doc('Non inline task', `<ul><li><a href="/xl/51/download">Q3 Variance Bridge</a></li><li><a href="/xl/52/download">Board Memo Final</a></li><li><a href="/xl/53/download">Sales Ledger</a></li></ul>`);
+    /* the person is asked to turn on a switch, goes to another page of the site instead, and presses Continue */
+    PAGES['wander-148'] = () => doc('Wander task', `<a href="/wander-home">Home</a><label><input type="checkbox" id="all"> Everything</label><div id="list"></div><script>${BLOB}
+function render() { const names = ['Wander_A.txt', 'Wander_B.txt'].concat(document.getElementById('all').checked ? ['Wander_World.txt'] : []);
+  document.getElementById('list').innerHTML = '<table><tbody>' + names.map((n) => '<tr><td>' + n + '</td><td><button class="dl" data-n="' + n + '">Download</button></td></tr>').join('') + '</tbody></table>';
+  document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); }); }
+document.getElementById('all').onchange = render; render();
+setInterval(async () => { const j = await (await fetch('/__person/flip?name=wander-148')).json(); if (j.go) location.href = '/wander-home'; }, 150);</script>`);
+    /* the files come from an API that answers after 30 s (longer than the loader waits for one request), after a tab is opened */
+    PAGES['slowtab-150'] = () => doc('Very slow tab task', `<div role="tablist"><button role="tab" aria-selected="true" id="t1">Task</button><button role="tab" aria-selected="false" id="t2">Reference</button></div><div id="panel"></div><script>
+let cur = 't1';
+function render() { document.getElementById('t1').setAttribute('aria-selected', cur === 't1'); document.getElementById('t2').setAttribute('aria-selected', cur === 't2'); const p = document.getElementById('panel');
+  if (cur === 't1') { p.innerHTML = '<ul><li><a href="/data/Task_A.txt">Task_A.txt</a></li></ul>'; return; }
+  p.innerHTML = '<p>Loading...</p>'; fetch('/api/ref?delay=30000').then((r) => r.json()).then((j) => { if (cur === 't2') p.innerHTML = '<ul>' + j.map((n) => '<li><a href="/data/' + n + '">' + n + '</a></li>').join('') + '</ul>'; }); }
+document.getElementById('t1').onclick = () => { cur = 't1'; render(); }; document.getElementById('t2').onclick = () => { cur = 't2'; render(); }; render();</script>`);
+
+    /* ---- UNSAFE controls: none of these may be requested or pressed (each says so on the server when it is) ---- */
+    const UNSAFE = '/api/unsafe';
+    /* a danger button whose label looks like "all files" */
+    PAGES['clear-160'] = () => doc('Clear task', `<ul>${dataLink('Main_A.txt')}</ul><div class="uploader"><button id="clear" class="btn-danger">Clear all files</button></div><script>document.getElementById('clear').onclick = () => { fetch('/hit/pressed-clear'); fetch('${UNSAFE}/clear-160/files', { method: 'DELETE' }); };</script>`);
+    /* a settings switch that says "all attachments", before the real switch */
+    PAGES['settings-161'] = () => doc('Settings task', `<section><h2>My settings</h2><label><input type="checkbox" id="digest"> Include all attachments in my daily digest email</label></section><label><input type="checkbox" id="all"> Show all files</label><ul id="l">${dataLink('Set_Main_A.txt')}</ul><script>
+document.getElementById('digest').onchange = (e) => { fetch('/hit/pressed-digest'); fetch('${UNSAFE}/settings-161/preferences', { method: 'PUT', body: JSON.stringify({ digestAttachments: e.target.checked }) }); };
+document.getElementById('all').onchange = (e) => { document.getElementById('l').innerHTML = '${dataLink('Set_Main_A.txt')}' + (e.target.checked ? '${dataLink('Set_World_A.txt')}' : ''); };</script>`);
+    /* a bulk-actions list whose option says "all files" */
+    PAGES['bulk-162'] = () => doc('Bulk task', `<label for="bulk">Bulk actions</label><select id="bulk"><option>Choose an action</option><option>Mark all files as reviewed</option><option>Delete all files</option></select><ul>${dataLink('Bulk_A.txt')}</ul><script>
+document.getElementById('bulk').onchange = (e) => { fetch('/hit/pressed-bulk'); fetch('${UNSAFE}/bulk-162/review-all', { method: 'POST' }); };</script>`);
+    /* "Download X" controls that submit a POST form through script: inline handlers (seen) and listeners (not seen) */
+    PAGES['scriptform-163'] = () => doc('Script form task', `<form id="f1" method="post" action="${UNSAFE}/scriptform-163/export/1"></form><form id="f2" method="post" action="${UNSAFE}/scriptform-163/export/2"></form><form id="f3" method="post" action="${UNSAFE}/scriptform-163/export/3"></form>
+<ul><li>Q3_Report.txt <a href="#" onclick="fetch('/hit/pressed-f1');document.getElementById('f1').submit();return false">Download Q3_Report.txt</a></li>
+<li>Q4_Report.txt <div role="button" tabindex="0" onclick="fetch('/hit/pressed-f2');document.getElementById('f2').submit()">Download Q4_Report.txt</div></li>
+<li>Q5_Report.txt <button type="button" id="b3">Download Q5_Report.txt</button></li>${dataLink('Script_Ok.txt')}</ul>
+<script>document.getElementById('b3').addEventListener('click', () => { fetch('/hit/pressed-f3'); document.getElementById('f3').submit(); });</script>`);
+    /* export and app buttons that send data somewhere else */
+    PAGES['export-165'] = () => doc('Export task', `<ul>${dataLink('Main_A.txt')}</ul><div class="toolbar"><button id="b1">Export to Google Sheets</button> <button id="b2">Export to Slack</button> <button id="b3">Download app</button></div><script>
+for (const [id, path] of [['b1', 'sheets/export'], ['b2', 'slack/post'], ['b3', 'telemetry/app-download']]) document.getElementById(id).onclick = () => { fetch('/hit/pressed-' + id); fetch('${UNSAFE}/export-165/' + path, { method: 'POST' }); };</script>`);
+    /* icon-only row actions that are plain GET links */
+    PAGES['trash-166'] = () => doc('Trash links task', `<table>${[[11, 'Q1_Budget.txt'], [12, 'Q2_Budget.txt']].map(([id, n]) => `<tr><td><a href="/docs/${id}/${n}">${n}</a></td><td><a href="/docs/${id}/trash" aria-label="Move to trash">x</a></td><td><a href="/docs/${id}/detach" title="Detach from task">y</a></td><td><a href="/docs/${id}/share-publicly" aria-label="Share link">z</a></td></tr>`).join('')}</table>`);
+    /* a switch whose label passes the "show all files" words and also says "mark ... reviewed": the words about actions win */
+    PAGES['togglemix-168'] = () => doc('Toggle mix task', `<ul>${dataLink('Mix_A.txt')}</ul><label><input type="checkbox" id="mix"> Show all attachments and mark them reviewed</label><script>
+document.getElementById('mix').onchange = () => { fetch('/hit/pressed-mix'); fetch('${UNSAFE}/togglemix-168/review', { method: 'POST' }); };</script>`);
+    /* links whose addresses are actions, whatever they are called */
+    PAGES['actions-167'] = () => doc('Action addresses task', `<ul>${dataLink('Act_Ok.txt')}${[
+      ['/api/unsafe/actions-167/remove', ' download', 'Q4 pack'], ['/api/unsafe/actions-167/delete?filename=Q4b.pdf', '', 'Q4b'], ['/docs/15/submit', '', 'Download'], ['/docs/16/actions/run', '', 'Download'], ['/docs/17/cancel', '', 'Download'], ['/docs/18/archive', '', 'Download'],
+      ['/docs/19?action=submit', '', 'Download'], ['/docs/20?method=delete', '', 'Download'], ['/docs/21?_method=DELETE', '', 'Download'], ['/docs/22/delete/now', '', 'Download'], ['/docs/24/destroy', '', 'Download'], ['/docs/25/trash', '', 'Download'], ['/docs/26/actions', '', 'Download'],
+      ['/docs/27/revoke', '', 'Download'], ['/docs/28/publish', '', 'Download'], ['/docs/29/unsubscribe', '', 'Download']].map(([h, a, t], i) => `<li>Row ${i}: <a href="${h}"${a}>${t}</a></li>`).join('')}</ul>`);
+
   const main = await listen((req, res) => {
     const u = new URL(req.url, 'http://x');
     const signedIn = flags.openAccess || sessions.has(cookieOf(req, 'sid'));
@@ -493,6 +638,13 @@ box.addEventListener('scroll', draw); draw();</script>`),
     }
     if (u.pathname === '/mfa/done') { stats.mfaDoneAt = Date.now(); return startSession(res, decodeURIComponent(safeNext(u.searchParams.get('next')))); }
     if (u.pathname === '/frame/files') return send(res, 200, 'text/html; charset=utf-8', `<!doctype html><h3>Inside the frame</h3><ul>${li('frame-a')}${li('frame-b')}</ul>`);
+    if (u.pathname === '/wander-home') return send(res, 200, 'text/html; charset=utf-8', '<!doctype html><title>Home</title><h1>Home</h1><h2>News</h2><p>Home page of the platform, not the task.</p><ul><li><a href="/data/Home_Doc.txt">Home_Doc.txt</a></li></ul>');
+    const dlx = /^\/dlx\/([^/]+)$/.exec(u.pathname);   /* the file name is in the path, the token in the query: the bytes depend on the token */
+    if (dlx) { const name = decodeURIComponent(dlx[1]); const t = u.searchParams.get('token') || ''; return send(res, 200, 'text/plain', `${t.startsWith('aaa') ? 'INPUT' : 'OUTPUT'} ${name}`, { 'content-disposition': `attachment; filename="${name}"` }); }
+    const xl = /^\/xl\/(\d+)\/download$/.exec(u.pathname);   /* no Content-Disposition: Chrome names it download.xlsx, and shows a csv inline */
+    if (xl) return xl[1] === '53' ? send(res, 200, 'text/csv', 'a,b\n1,2\n') : send(res, 200, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', `PK xl${xl[1]}`);
+    const docFile = /^\/docs\/(\d+)\/([^/]+\.txt)$/.exec(u.pathname);
+    if (docFile) return send(res, 200, 'text/plain', `content of ${decodeURIComponent(docFile[2])}`, { 'content-disposition': `attachment; filename="${decodeURIComponent(docFile[2])}"` });
     const dataFile = /^\/data\/(?:publish\/)?([^/]+)$/.exec(u.pathname);
     if (dataFile) {
       const name = decodeURIComponent(dataFile[1]);
@@ -534,9 +686,9 @@ box.addEventListener('scroll', draw); draw();</script>`),
       if (!signedIn) { res.writeHead(302, { location: `/login?next=${encodeURIComponent(u.pathname)}` }); return res.end(); }
       if (task[1] === 'missing-404') return send(res, 404, 'text/html; charset=utf-8', '<h1>Not found</h1>');
       if (!PAGES[task[1]]) return send(res, 404, 'text/html', 'no such task');
-      return send(res, 200, 'text/html; charset=utf-8', PAGES[task[1]]());
+      return send(res, 200, 'text/html; charset=utf-8', PAGES[task[1]](u));
     }
-    const file = /^\/files\/([a-z0-9-]+)$/.exec(u.pathname);
+    const file = /^\/files\/([a-z0-9-]+)(?:\/[^/]+)?$/.exec(u.pathname);
     if (/\/delete$|^\/logout$/.test(u.pathname)) { stats.deleteRequests += 1; return send(res, 200, 'text/plain', 'done'); }
     if (file) {
       if (!signedIn) return send(res, 401, 'text/plain', 'sign in');
@@ -700,12 +852,12 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     const s1 = run1.final;
     assert.equal(s1.state, 'done', JSON.stringify(s1));
     assert.deepEqual(run1.seen.filter((x) => x !== 'starting'), ['needs-sign-in', 'loading', 'downloading', 'done'], run1.seen.join());
-    assert.deepEqual(Object.keys(s1).sort(), ['error', 'files', 'folder', 'id', 'message', 'page', 'sections', 'skipped', 'state', 'toggle']);
+    assert.deepEqual(Object.keys(s1).sort(), ['error', 'files', 'folder', 'id', 'message', 'notes', 'page', 'sections', 'skipped', 'state', 'toggle']);
     assert.deepEqual([s1.error, s1.skipped], [null, []]);
     assert.deepEqual(s1.page, { origin: platform.origin, path: '/tasks/atlas-001' });
     assert.equal(s1.folder, path.join(root, 'private', 'links', id1));
     assert.deepEqual(s1.toggle, toggle(true, 'Show all files', true, 4, 7, false));
-    ok('flow: starting, needs-sign-in, loading, downloading, done; the state has the specified keys plus skipped; the switch "Show all files" was found by its label, clicked, and the file count went from 4 to 7');
+    ok('flow: starting, needs-sign-in, loading, downloading, done; the state has the specified keys plus skipped and notes; the switch "Show all files" was found by its label, clicked, and the file count went from 4 to 7');
     assert.equal(s1.files.length, 7);
     for (const f of s1.files) {
       assert.deepEqual(Object.keys(f).sort(), ['group', 'label', 'name', 'sha256', 'size']);
@@ -905,9 +1057,9 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.match(reasonOf('x.pdf'), /address is not one the loader opens/);
     assert.match(reasonOf('y.pdf'), /address is not one the loader opens/);
     assert.deepEqual(skippedAsked.skipped.map((s) => Object.keys(s).sort()).filter((k) => k.join() !== 'group,label,reason'), []);
-    assert.deepEqual(labels(runF.final), ['Atlas_Blob.txt', 'Atlas_Gated.txt', 'Atlas_Prompt.txt', 'Borealis_Extra.txt']);
+    assert.deepEqual(labels(runF.final), ['Atlas_Gated.txt', 'Atlas_Prompt.txt', 'Borealis_Extra.txt', 'Download Atlas_Blob.txt']);
     assert.deepEqual(runF.final.skipped.map((s) => s.label).sort(), skippedAsked.skipped.map((s) => s.label).sort());
-    const blob = runF.final.files.find((f) => f.label === 'Atlas_Blob.txt');
+    const blob = runF.final.files.find((f) => f.label === 'Download Atlas_Blob.txt');
     assert.equal(fs.readFileSync(path.join(runF.final.folder, 'files', blob.name), 'utf8'), 'blob content from the page\n');
     assert.equal(fs.readFileSync(path.join(runF.final.folder, 'files', runF.final.files.find((f) => f.label === 'Atlas_Gated.txt').name), 'utf8'), 'only with a referrer\n');
     assert.deepEqual(filesOnDisk(runF.final), ['Atlas_Blob.txt', 'Atlas_Gated.txt', 'Atlas_Prompt.txt', 'Borealis_Extra.txt'], 'the download the page started by itself was not kept');
@@ -1076,6 +1228,7 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
       assert.deepEqual(r.final.skipped, [], `${why}: nothing is left out silently`);
       assert.deepEqual(wrongContent(r.final), [], `${why}: every file has the content of its own name`);
     };
+    const notesOf = (r) => JSON.parse(fs.readFileSync(path.join(r.final.folder, 'page.json'), 'utf8')).notes;
     const range = (prefix, n, width = 2, ext = '.txt') => Array.from({ length: n }, (_, i) => `${prefix}${String(i + 1).padStart(width, '0')}${ext}`);
     const third = await batch([
       { slug: 'tabs-070' }, { slug: 'tabs-071' }, { slug: 'vtable-072' }, { slug: 'vlinks-073' }, { slug: 'tabmore-074' }, { slug: 'tree-075' },
@@ -1083,7 +1236,7 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     clean(get(third, 'tabs-070'), ['Task_A.txt', 'Task_B.txt', 'Ref_A.txt', 'Ref_B.txt', 'Ref_C.txt'], 'tabs');
     ok('tabs whose rows only say "Download": the files of the second tab (Ref_A, Ref_B, Ref_C) are not lost into the first tab\'s slots, nothing is "gone from the page", and every file has its own content (the row text is part of the identity and is checked before each click)');
     clean(get(third, 'tabs-071'), ['Task_A.txt', 'Task_B.txt', 'World_A.txt', 'World_B.txt', 'World_C.txt'], 'world tab');
-    ok('a tab called "World files" is taken for the switch and clicked: the files of the tab that was left behind are still found, pressed in their own tab, and saved under their own names');
+    ok('a tab called "World files" is a tab, not the switch: no switch is found (the person is asked and presses Continue), and the files of both tabs are found, pressed in their own tab, and saved under their own names');
     clean(get(third, 'vtable-072'), range('File_', 24), 'virtual table');
     clean(get(third, 'vlinks-073'), range('Link_', 24), 'virtual blob links');
     ok('a virtualised table of 24 rows with "Download" buttons, and the same with blob: links built when a row is drawn: all 24 are saved (the page is scrolled back to each row\'s place before the click; the 11th download is not dropped by Chrome)');
@@ -1114,17 +1267,23 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     ok('a world file whose plain link answers 403: listed in skipped (http-denied) and asked about; it is not retried by clicking it in the task tab, so the other world files are still saved');
     const verbs = get(fourth, 'verbs-078');
     assert.equal(verbs.final.state, 'done', JSON.stringify(verbs.final));
-    assert.deepEqual(fileNames(verbs.final), ['Archive_2025_Q4.zip', 'Plan.txt', 'Reset_policy.pdf', 'ok.txt']);
-    assert.deepEqual(verbs.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Danger.pdf', 'looks like an action'], ['Delete log.txt', 'looks like an action']]);
+    assert.deepEqual(fileNames(verbs.final), ['Archive_2025_Q4.zip', 'Reset_policy.pdf', 'ok.txt']);
+    assert.deepEqual(verbs.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Danger.pdf', 'looks like an action'], ['Delete log.txt', 'looks like an action'], ['Plan.txt', 'looks like an action']]);
     assert.equal(platform.stats.deleteRequests, 0, 'the "Delete log.txt" button was not pressed');
-    ok('"Archive 2025 Q4.zip", "Reset policy.pdf" and a file in a /publish/ folder are files and are saved; a link with ?action=delete and a button called "Delete log.txt" are not pressed, and both are listed in skipped as "looks like an action"');
-    clean(get(fourth, 'controls-079'), ['Budget_2025.xlsx', 'b2.txt', 'b3.txt', 'b4.txt', 'b5.txt', 'ok.txt'], 'controls');
-    ok('more controls are recognised: a link whose text is the file name and whose address says nothing (/documents/42, saved as Budget_2025.xlsx), a "#" link and a link without an address with role=button, an icon-only button with a title, an aria-label button');
+    assert.equal(platform.count('/data/publish/Plan.txt') + platform.count('/data/Danger.pdf'), 0, 'neither the /publish/ address nor the ?action=delete address was requested');
+    ok('"Archive 2025 Q4.zip" and "Reset policy.pdf" are files (an action word in a file NAME is fine) and are saved; an address with a /publish/ folder or ?action=delete and a button called "Delete log.txt" are never requested or pressed, and each is listed in skipped as "looks like an action"');
+    const controlsRun = get(fourth, 'controls-079');
+    assert.equal(controlsRun.final.state, 'done', JSON.stringify(controlsRun.final));
+    assert.deepEqual(fileNames(controlsRun.final), ['b2.txt', 'b3.txt', 'b4.txt', 'b5.txt', 'ok.txt']);
+    assert.deepEqual(controlsRun.final.skipped, [{ label: 'Budget_2025.xlsx', group: 'Files', reason: 'not clearly a download: download it yourself' }]);
+    assert.equal(platform.count('/documents/42'), 0, 'a link that only has a file name for text is not requested');
+    ok('controls are recognised by what they are named: a "#" link and a link without an address with role=button, an icon-only button titled "Download file", an aria-label "Download Budget5.xlsx"; a link whose text is a file name and whose address says nothing (/documents/42) is listed as "not clearly a download" and never requested');
     const form = get(fourth, 'form-080');
     assert.equal(form.final.state, 'done', JSON.stringify(form.final));
-    assert.deepEqual(fileNames(form.final), ['Task_A.txt', 'Task_B.txt']);
-    assert.deepEqual(form.final.skipped, [{ label: 'Task_C.txt', group: 'Files', reason: 'would submit a form' }]);
-    ok('buttons of a type=button in a filter form are downloads; a Download button that would submit the form is not pressed and is listed as "would submit a form"');
+    assert.deepEqual(fileNames(form.final), ['Task_D.txt']);
+    assert.deepEqual(form.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Task_A.txt', 'would submit a form'], ['Task_B.txt', 'would submit a form'], ['Task_C.txt', 'would submit a form']]);
+    assert.deepEqual(['form-Task_A.txt', 'form-Task_B.txt', 'form-sub'].map((n) => platform.count(`/hit/${n}`)), [0, 0, 0], 'no control inside the form was pressed');
+    ok('nothing inside a form is pressed, not even a type=button (a button can submit through script, a type attribute is not a promise): the three rows are listed as "would submit a form", and the table outside the form is downloaded');
     const signed = get(fourth, 'signed-081');
     clean(signed, ['Signed_A.txt', 'Signed_B.txt', 'Signed_C.txt', 'Signed_D.txt'], 'signed');
     for (const n of ['Signed_A.txt', 'Signed_B.txt', 'Signed_C.txt', 'Signed_D.txt']) assert.equal(platform.requests.filter((r) => r.origin === 'main' && r.path === `/data/${n}`).length, 1, `${n} was fetched once`);
@@ -1214,7 +1373,8 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
       const quietRun = (await batch([{ slug, loader: { timeouts: loaderTimeouts } }]))[0];
       clean(quietRun, files, slug);
       assert.doesNotMatch(quietRun.final.message, /settled:false/, `${label} does not make the page unsettled: ${quietRun.final.message}`);
-      if (slug === 'beacon-098') assert.ok(Date.now() - t0 < 14000, `a beacon is not waited for until the 15 s deadline (${Date.now() - t0} ms)`);
+      if (slug === 'beacon-098') { assert.ok(Date.now() - t0 < 14000, `a beacon is not waited for until the 15 s deadline (${Date.now() - t0} ms)`); assert.deepEqual(notesOf(quietRun), [], 'an answered request is nothing to tell'); }
+      if (slug === 'hang-099') assert.match(notesOf(quietRun).join(' | '), /a request of the page was still waiting for its answer when the files were listed, so some files may be missing/, 'a request that never answers is told, not forgotten');
     }
     ok('a beacon that nobody reads, and a long poll that never answers, are idle requests: the load is not held to the 15 s deadline for the beacon, and neither makes the done message say "settled:false"');
 
@@ -1265,6 +1425,165 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.deepEqual(fileNames(named.final), ['Budget v2.1.pdf', 'Policy 3.2.pdf', 'Variance Bridge.pdf']);
     ok('link texts that end in "3.2" or "v2.1" are not extensions: the files keep the words and get the extension of their content type (Policy 3.2.pdf), and a name with no extension gets .pdf too');
     for (const r of ninth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+    /* 11e. Round 5: the allowlist (only a download is requested or pressed) and nothing left out without a word (every place that could not
+       be covered is a note, every file-like thing that was not downloaded is in skipped). */
+    const NOT_CLEAR = 'not clearly a download: download it yourself';
+    const requestsTo = (re) => platform.requests.filter((r) => re.test(r.path));
+    const pressed = (name) => platform.count(`/hit/${name}`);
+    const eleventh = await batch([
+      { slug: 'pagenum-110' }, { slug: 'pagelinks-111' }, { slug: 'pageother-112' }, { slug: 'archive-130' }, { slug: 'treeitem-131' }, { slug: 'treeitem-132' }, { slug: 'rerender-133' }, { slug: 'rerender-134' },
+    ]);
+    const pg = get(eleventh, 'pagenum-110');
+    clean(pg, [...[1, 2, 3, 4].flatMap((p) => [1, 2, 3].map((i) => `P${p}_File_0${i}.txt`)), ...[1, 2, 3, 4].map((p) => `Page_${p}_Memo.txt`)], 'pager buttons');
+    assert.deepEqual(notesOf(pg), [], 'every page was read: nothing to say');
+    ok('a pager of numbered buttons and Next (4 pages): every page is read, Next is pressed page after page, and the "Download" button of page 3 is found again on page 3 (the pager is put back to that page before the press): 16 files, no note');
+    const pl = get(eleventh, 'pagelinks-111');
+    clean(pl, [1, 2, 3, 4].flatMap((p) => [1, 2, 3].map((i) => `S${p}_File_0${i}.txt`)), 'pager links');
+    assert.ok(platform.count('/tasks/pagelinks-111') >= 4, 'each page was loaded');
+    assert.deepEqual(notesOf(pl), []);
+    ok('server-rendered pages (?page=N links and rel=next) that change only the page parameter are followed: 12 files from 4 pages');
+    const po = get(eleventh, 'pageother-112');
+    clean(po, ['O1_File_01.txt', 'O1_File_02.txt', 'O1_File_03.txt'], 'other pager');
+    assert.match(notesOf(po).join(' | '), /pagination link "Next" goes to another address than the page, so its other pages were not read/);
+    ok('pager links that also change another parameter (sort=name) are not followed, and the note says so');
+    clean(get(eleventh, 'archive-130'), ['Docs_A.txt', 'Docs_B.txt', 'Arch_A.txt', 'Arch_B.txt', 'Arch_C.txt', 'Misc_A.txt'], 'archive folder');
+    assert.deepEqual(notesOf(get(eleventh, 'archive-130')), []);
+    ok('a folder called "Archive (3)" is navigation: it is opened like the others and its 3 files are saved (6 of 6)');
+    for (const slug of ['treeitem-131', 'treeitem-132']) { clean(get(eleventh, slug), ['Tree_One_A.txt', 'Tree_One_B.txt', 'Tree_Two_A.txt', 'Tree_Three_A.txt'], slug); assert.deepEqual(notesOf(get(eleventh, slug)), [], slug); }
+    ok('ARIA tree items whose handler sits on the row inside the item (children hidden, or made on the first open) are opened by pressing the row: 4 of 4');
+    clean(get(eleventh, 'rerender-133'), Array.from({ length: 20 }, (_, i) => `Wide_${String(i).padStart(2, '0')}.txt`), 'wide tree');
+    clean(get(eleventh, 'rerender-134'), Array.from({ length: 8 }, (_, i) => `Deep_${i}.txt`), 'deep tree');
+    ok('a tree that draws itself anew on every click (20 folders side by side, 8 levels deep) is opened one element at a time with a fresh look after each press: 20 of 20 and 8 of 8, not one folder per pass');
+    for (const r of eleventh) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const twelfth = await batch([
+      { slug: 'tabs16-135' }, { slug: 'sametoken-139' }, { slug: 'verbnames-140' }, { slug: 'dialog-141' }, { slug: 'drawer-142' }, { slug: 'xframe-143' },
+    ]);
+    const t16 = get(twelfth, 'tabs16-135');
+    clean(t16, Array.from({ length: 16 }, (_, i) => ['A', 'B'].map((x) => `Tab_${String(i + 1).padStart(2, '0')}_${x}.txt`)).flat(), 'sixteen tabs');
+    assert.deepEqual(notesOf(t16), []);
+    ok('16 tabs (more than the old limit of 12): every tab is opened, 32 of 32 files');
+    const st = get(twelfth, 'sametoken-139');
+    assert.equal(st.final.state, 'done', JSON.stringify(st.final));
+    assert.deepEqual(st.final.files.map((f) => fs.readFileSync(path.join(st.final.folder, 'files', f.name), 'utf8')).sort(), ['INPUT notes.txt', 'INPUT report.txt', 'OUTPUT notes.txt', 'OUTPUT report.txt']);
+    assert.deepEqual(st.final.skipped, [{ label: 'opaque.txt', group: 'Files', reason: NOT_CLEAR }]);
+    assert.equal(requestsTo(/^\/dlq$/).length, 0, 'an address that says nothing was not requested');
+    ok('the same names with the same token-less address in two tabs (Inputs and Outputs) are four files, not two; a link whose text is a file name and whose address says nothing (/dlq?token=) is listed as "not clearly a download" and never requested');
+    const vn = get(twelfth, 'verbnames-140');
+    assert.equal(vn.final.state, 'done', JSON.stringify(vn.final));
+    assert.deepEqual(fileNames(vn.final), ['Approved vendor list.pdf', 'Archive of 2023 correspondence.pdf', 'Plain document.pdf', 'Reset procedure.pdf', 'Revoke and reissue policy.pdf', 'Submit guidelines.pdf']);
+    assert.deepEqual(vn.final.skipped.map((x) => [x.label, x.reason]).sort(), [['Approval memo', 'looks like an action'], ['Cancel policy', NOT_CLEAR], ['Q4 numbers', 'looks like an action'], ['Reset instructions', NOT_CLEAR]]);
+    assert.deepEqual(requestsTo(/^\/files\/(42|43|publish|45)/), [], 'none of the four was requested');
+    ok('documents whose titles start with a verb ("Archive of 2023 correspondence", "Reset procedure", "Submit guidelines", "Revoke and reissue policy") are saved when their address says download; links with no clear address or an action in it are listed in skipped and never requested');
+    const dg = get(twelfth, 'dialog-141');
+    clean(dg, ['Dlg_Main_A.txt', 'Dlg_Main_B.txt'], 'dialog');
+    assert.match(notesOf(dg).join(' | '), /4 file links on the page are hidden \(a closed dialog, drawer or panel\) and were not downloaded/);
+    ok('4 file links in a closed <dialog> are counted and told ("hidden ... were not downloaded"), not forgotten');
+    const dr = get(twelfth, 'drawer-142');
+    clean(dr, ['Drw_Main_A.txt', 'Drw_Main_B.txt'], 'drawer');
+    assert.match(notesOf(dr).join(' | '), /"Attachments \(4\)" opens a menu or dialog that may hold files; it was not opened/);
+    ok('a button that opens a dialog or drawer ("Attachments (4)", aria-haspopup) is not pressed, and the note names it');
+    const xf = get(twelfth, 'xframe-143');
+    clean(xf, ['Xf_Main_A.txt', 'Xf_Main_B.txt'], 'cross frame');
+    assert.match(notesOf(xf).join(' | '), /1 embedded frame from another site \(or sandboxed\) could not be read, so any files in it were not seen/);
+    ok('a frame of another site cannot be read: the note says so (and the page\'s own 2 files are saved)');
+    for (const r of twelfth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const thirteenth = await batch(['viewall-120', 'viewall-121', 'viewall-122', 'viewall-123', 'viewall-124', 'viewall-125', 'viewall-126'].map((slug) => ({ slug })));
+    for (const [slug, label] of [['viewall-120', 'View all (12)'], ['viewall-121', 'Show all'], ['viewall-122', 'See all'], ['viewall-123', 'Next'], ['viewall-124', 'More'], ['viewall-125', 'Load all'], ['viewall-126', 'Show remaining 8']]) clean(get(thirteenth, slug), range('All_', 12), label);
+    ok('buttons that show the rest of a list under other names - "View all (12)", "Show all", "See all", "Next", "More", "Load all", "Show remaining 8" - are pressed: 12 of 12 each');
+    for (const r of thirteenth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    const fourteenth = await batch([
+      { slug: 'infscroll-144', loader: { timeouts: { expand: 120000 } } }, { slug: 'persistent-145' }, { slug: 'volatile-146' }, { slug: 'nonline-147' },
+      { slug: 'wander-148', handlers: (l) => ({ 'needs-person': async (state) => { platform.flip('wander-148'); await delay(1500); l.continue(state.id); } }) }, { slug: 'slowtab-150' },
+    ]);
+    const inf = get(fourteenth, 'infscroll-144');
+    clean(inf, range('Inf_', 110, 3), 'infinite scroll');
+    assert.deepEqual(notesOf(inf), []);
+    ok('an infinite scroller whose chunk is taller than two scroll steps (110 files, 25 per chunk, loaded when the end is seen): the loader scrolls until the scroller is at its bottom and the page stopped growing, 110 of 110');
+    const pers = get(fourteenth, 'persistent-145');
+    clean(pers, [0, 1, 2, 3, 4].flatMap((k) => [1, 2, 3, 4].map((i) => `Sec${k}_${i}.txt`)), 'persistent more');
+    assert.match(notesOf(pers).join(' | '), /"Show more" was still on the page after \d+ presses; the last 2 added no files/);
+    ok('five sections whose "Show more" never goes away: all five are pressed every round (not the first three), 20 of 20, and the button that stayed is told');
+    const vol = get(fourteenth, 'volatile-146');
+    clean(vol, ['Variance_Bridge.txt', 'Board_Memo.txt', 'Sales_Ledger.txt'], 'volatile cells');
+    assert.ok(vol.final.message.indexOf('taken for another') < 0);
+    ok('extension-less rows with five cells that change while the page is open (a percentage, a count of downloads, of views, of comments, a status): the name cell is the identity, all 3 files are saved');
+    const nl = get(fourteenth, 'nonline-147');
+    assert.equal(nl.final.state, 'done', JSON.stringify(nl.final));
+    assert.deepEqual(fileNames(nl.final), ['Board Memo Final.xlsx', 'Q3 Variance Bridge.xlsx', 'Sales Ledger.csv']);
+    assert.deepEqual(nl.final.skipped, []);
+    ok('link texts without an extension on a type the browser does not show (xlsx) or does (csv): the files keep the words on the page plus the extension of their type (Q3 Variance Bridge.xlsx, not download.xlsx)');
+    const wd = get(fourteenth, 'wander-148');
+    assert.equal(wd.final.state, 'done', JSON.stringify(wd.final));
+    assert.deepEqual(fileNames(wd.final), ['Wander_A.txt', 'Wander_B.txt']);
+    assert.equal(platform.count('/data/Home_Doc.txt'), 0, 'a file of the page the person wandered to is not a task file');
+    assert.ok(!JSON.parse(fs.readFileSync(path.join(wd.final.folder, 'page.json'), 'utf8')).sections.some((s) => s.heading === 'News'), 'and its text is not the task\'s text');
+    assert.deepEqual(wd.final.skipped, []);
+    ok('the person is asked for a switch, goes to ANOTHER page of the site and presses Continue: that page (another document) is not taken for the task; the task link is loaded again, 2 task files are saved and none of the home page\'s');
+    const verySlow = get(fourteenth, 'slowtab-150');
+    clean(verySlow, ['Task_A.txt'], 'very slow tab');
+    assert.match(notesOf(verySlow).join(' | '), /a request of the page was still waiting for its answer after the tab "Reference" was opened, so some files may be missing/);
+    ok('a tab whose API answers after 30 s (longer than the 20 s the loader waits for a request): the files of that tab are missing, and the note says that a request was still waiting');
+    for (const r of fourteenth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
+
+    /* UNSAFE controls: for each, the server saw nothing and the control was not pressed */
+    const fifteenth = await batch([
+      { slug: 'clear-160' }, { slug: 'settings-161' }, { slug: 'bulk-162' }, { slug: 'scriptform-163' }, { slug: 'export-165' }, { slug: 'trash-166' }, { slug: 'actions-167' }, { slug: 'togglemix-168' },
+    ]);
+    const clear = get(fifteenth, 'clear-160');
+    clean(clear, ['Main_A.txt'], 'clear all files');
+    assert.equal(clear.asked[0].message, PERSON_MESSAGE, 'no switch was found: the person is asked');
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/clear-160/), [], 'the server saw no DELETE');
+    assert.equal(pressed('pressed-clear'), 0, 'and the button was not pressed');
+    ok('a danger button called "Clear all files" is not the switch: it is not pressed (the server saw no DELETE), the person is asked');
+    const sett = get(fifteenth, 'settings-161');
+    clean(sett, ['Set_Main_A.txt', 'Set_World_A.txt'], 'settings');
+    assert.equal(sett.final.toggle.label, 'Show all files');
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/settings-161/), []);
+    assert.equal(pressed('pressed-digest'), 0);
+    ok('a settings switch "Include all attachments in my daily digest email" that comes before the real "Show all files" switch is left alone (no preference was saved); the real switch is flipped and the world file saved');
+    const bulk = get(fifteenth, 'bulk-162');
+    clean(bulk, ['Bulk_A.txt'], 'bulk');
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/bulk-162/), []);
+    assert.equal(pressed('pressed-bulk'), 0);
+    ok('a bulk-actions list whose option says "Mark all files as reviewed" is not chosen (the server saw no POST)');
+    const mix = get(fifteenth, 'togglemix-168');
+    clean(mix, ['Mix_A.txt'], 'toggle mix');
+    assert.equal(mix.asked[0].message, PERSON_MESSAGE, 'no switch was found: the person is asked');
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/togglemix-168/), []);
+    assert.equal(pressed('pressed-mix'), 0);
+    ok('a switch labelled "Show all attachments and mark them reviewed" has the words of the real switch and also an action word: it is not flipped (the server saw no POST), the person is asked');
+    const sf = get(fifteenth, 'scriptform-163');
+    assert.equal(sf.final.state, 'done', JSON.stringify(sf.final));
+    assert.deepEqual(fileNames(sf.final), ['Script_Ok.txt']);
+    const sfReasons = Object.fromEntries(sf.final.skipped.map((x) => [x.label, x.reason]));
+    assert.equal(sfReasons['Download Q3_Report.txt'], 'looks like an action');
+    assert.equal(sfReasons['Download Q4_Report.txt'], 'looks like an action');
+    assert.match(sfReasons['Download Q5_Report.txt'], /^blocked-write: the control sent a POST request instead of downloading; it was blocked and not pressed again$/);
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/scriptform-163/), [], 'no POST reached the server');
+    assert.deepEqual([pressed('pressed-f1'), pressed('pressed-f2'), pressed('pressed-f3')], [0, 0, 1], 'the two controls with a script in their attributes were not pressed; the third (a listener nobody can see) was pressed once and its POST was failed in the browser');
+    ok('"Download X" controls that submit a POST form through script: two with the script in an attribute are never pressed ("looks like an action"); one with a listener is pressed once and its POST is failed before it leaves the browser ("blocked-write"); the server saw no request');
+    const ex = get(fifteenth, 'export-165');
+    assert.equal(ex.final.state, 'done', JSON.stringify(ex.final));
+    assert.deepEqual(fileNames(ex.final), ['Main_A.txt']);
+    assert.deepEqual(ex.final.skipped, [{ label: 'Download app', group: 'Files', reason: NOT_CLEAR }]);
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/export-165/), []);
+    assert.deepEqual(['pressed-b1', 'pressed-b2', 'pressed-b3'].map(pressed), [0, 0, 0]);
+    ok('"Export to Google Sheets", "Export to Slack" and "Download app" are never pressed (no POST, nothing sent to a service); "Download app" is listed as not clearly a download');
+    const tr = get(fifteenth, 'trash-166');
+    clean(tr, ['Q1_Budget.txt', 'Q2_Budget.txt'], 'trash links');
+    assert.deepEqual(requestsTo(/^\/docs\/\d+\/(trash|detach|share-publicly)$/), [], 'no row action was requested');
+    ok('icon links /trash, /detach and /share-publicly next to each file ("Move to trash", "Detach from task", "Share link") are never requested; the two files are saved and the icons are not reported as files');
+    const ac = get(fifteenth, 'actions-167');
+    assert.equal(ac.final.state, 'done', JSON.stringify(ac.final));
+    assert.deepEqual(fileNames(ac.final), ['Act_Ok.txt']);
+    assert.equal(ac.final.skipped.length, 16);
+    assert.ok(ac.final.skipped.every((x) => x.reason === 'looks like an action'), JSON.stringify(ac.final.skipped));
+    assert.deepEqual(requestsTo(/^\/(docs\/(1[5-9]|2[0-9])(\/|$)|api\/unsafe\/actions-167)/), [], 'not one of the 16 addresses was requested');
+    ok('16 links with an action in the address (/remove with a download attribute, /delete?filename=, /submit, /actions/run, /cancel, /archive, ?action=submit, ?method=delete, ?_method=DELETE, /delete/now, /destroy, /trash, /actions, /revoke, /publish, /unsubscribe) are never requested and each is listed as "looks like an action"');
+    for (const r of fifteenth) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
     platform.flags.openAccess = false;
     for (const r of [...first5, ...second5]) assert.deepEqual(leftovers(profileOf(r.dir)), [], r.spec.slug);
 
