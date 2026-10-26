@@ -81,7 +81,7 @@ const SIGNATURE_PARAM_RE = /^(x-amz-.*|x-goog-.*|x-ms-.*|x-sig.*|x-expires|x-tok
 const DL_THING = '(?:files?|attachments?|documents?|docs?|reports?|copy|originals?|everything|zip|archive|bundle|pdf|csv|xlsx?|docx?|txt|json|all)';
 const DOWNLOAD_NAME_SRC = `^[^a-z0-9]*(?:download(?:\\s+(?:the|this|a|your|my))?(?:\\s+(?:all|every|selected|attached|original|full))*(?:\\s+${DL_THING})?|download\\s+\\S.*\\.(?:${EXT_SRC}))(?:\\s*[(\\[][^)\\]]{0,30}[)\\]])?[^a-z0-9]*$`;
 const DOWNLOAD_NAME_RE = new RegExp(DOWNLOAD_NAME_SRC, 'i');
-const ALL_BUTTON_RE = /^[^a-z0-9]*download\s+(all|everything|zip|archive|bundle)\b/i;
+const ALL_BUTTON_RE = /^[^a-z0-9]*download\s+(all|everything|zip|archive|bundle|file\s?system|folder|directory)\b/i;
 /* A control that shows more of a list: "Load more", "Show 20 more", "View all (12)", "See all", "Show remaining 8", "More", "Next". */
 const MORE_SRC = '^[^a-z0-9]*(?:(?:load|show|view|see|display)\\s+(?:(?:\\d+|more|all|remaining|older|earlier|additional|the rest(?: of)?|next)\\s*)+(?:files?|attachments?|documents?|docs?|items?|results?|rows?|entries|comments|messages|activity|records?|versions?)?|more(?:\\s+(?:files?|attachments?|documents?|items?|results?))?|\\+\\s*\\d+\\s+more|\\d+\\s+more|expand\\s+all|next(?:\\s+page)?|older)(?:\\s*[(\\[][^)\\]]{0,20}[)\\]])?[^a-z0-9]*$';
 /* The "next page" control of a pager: Next, Next page, Older, an arrow. */
@@ -127,6 +127,15 @@ function extractPage(opts) {
   const clip = (s, n) => (s.length > n ? s.slice(0, n) : s);
   const over = () => performance.now() - T0 > L.maxMs;
   const visible = (el) => { try { return typeof el.checkVisibility === 'function' ? el.checkVisibility() : true; } catch (e) { return true; } };
+  /* A button with no text, label or title whose only name is an icon drawn with a class such as lucide-download or fa-download (file rows often have
+     one, shown when the row is hovered). Its name is "Download". It still needs everything any button named so needs: no form, no script that sends
+     something, a row that names the file, and every press runs under the write guard. */
+  const ICON_DOWNLOAD = /^(?:[a-z0-9]+-)*download(?:-[a-z0-9]+)*$/i;
+  const iconDownload = (el) => {
+    if (!el || typeof el.querySelectorAll !== 'function' || norm(el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || norm(el.getAttribute('aria-labelledby'))) return false;
+    for (const icon of el.querySelectorAll('svg,i,span')) if (String(icon.getAttribute('class') || '').split(/\s+/).some((c) => ICON_DOWNLOAD.test(c))) return true;
+    return false;
+  };
 
   /* every element of the document, of its open shadow roots and of its same-origin iframes, in document order */
   const all = [];
@@ -244,6 +253,7 @@ function extractPage(opts) {
     add(el.getAttribute('title'));
     const img = el.querySelector ? el.querySelector('img') : null;
     if (img) add(img.alt);
+    if (!out.length && iconDownload(el)) add('Download');
     return out;
   };
 
@@ -254,7 +264,7 @@ function extractPage(opts) {
   const secretControl = (el) => secretish(el.name) || secretish(el.id) || /(current-password|new-password|one-time-code|^cc-)/i.test(el.autocomplete || '');
   const SKIP_TYPES = new Set(['hidden', 'password', 'file', 'submit', 'button', 'reset', 'image', 'checkbox', 'radio']);
   const WEB_EXT = /^(html?|xhtml|shtml|php\d?|aspx?|jsp|cfm|cgi|pl|do|action|js|mjs|css|map|com|org|net|io)$/i;
-  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')), 160);
+  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')) || (iconDownload(c) ? 'Download' : ''), 160);
   /* The row of a control: its table row, list item or row-role ancestor; else the nearest ancestor whose text is more than the control's
      own (a wrapper that holds only the control does not count) and that does not hold a second control with the same text (that would
      be a container of several rows). null when there is none. */
@@ -262,7 +272,8 @@ function extractPage(opts) {
     const hard = el.closest ? el.closest('tr,li,[role=row]') : null;
     if (hard) return hard;
     for (let n = el.parentElement, depth = 0; n && depth < 8 && n.tagName !== 'BODY' && n.tagName !== 'HTML'; n = n.parentElement, depth += 1) {
-      if (norm(n.innerText || n.textContent) === text) continue;
+      const own = norm(n.innerText || n.textContent);
+      if (own === text || (!own && iconDownload(el))) continue;
       let same = 0;
       for (const c of n.querySelectorAll('button,a,[role=button],input')) { if (controlText(c) === text) same += 1; if (same > 1) return null; }
       return n;
@@ -347,7 +358,7 @@ function extractPage(opts) {
         addToggle({ label: clip(labelOf(el, true), 120), checked: pressed === 'true', kind: 'pressed', disabled: Boolean(el.disabled), path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
         continue;
       }
-      const text = clip(norm(tag === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
+      const text = clip(norm(tag === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : '') || (iconDownload(el) ? 'Download' : ''), 160);
       if (!text) continue;
       if (toggleRe.test(text) && !toggleNever.test(text) && !el.disabled && visible(el)) {   /* a plain "Show all files" button */
         addToggle({ label: text, checked: false, kind: 'button', path: cssPath(el), key: keyOf(el), unsafe: toggleRisk(el) });
@@ -468,6 +479,15 @@ function pageOps(opts) {
   const actionSet = new Set(Array.isArray(R.actions) ? R.actions : []);
   const caps = opts.caps || {};
   const visible = (el) => { try { return typeof el.checkVisibility === 'function' ? el.checkVisibility() : true; } catch (e) { return true; } };
+  /* A button with no text, label or title whose only name is an icon drawn with a class such as lucide-download or fa-download (file rows often have
+     one, shown when the row is hovered). Its name is "Download". It still needs everything any button named so needs: no form, no script that sends
+     something, a row that names the file, and every press runs under the write guard. */
+  const ICON_DOWNLOAD = /^(?:[a-z0-9]+-)*download(?:-[a-z0-9]+)*$/i;
+  const iconDownload = (el) => {
+    if (!el || typeof el.querySelectorAll !== 'function' || norm(el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.getAttribute('title')) || norm(el.getAttribute('aria-labelledby'))) return false;
+    for (const icon of el.querySelectorAll('svg,i,span')) if (String(icon.getAttribute('class') || '').split(/\s+/).some((c) => ICON_DOWNLOAD.test(c))) return true;
+    return false;
+  };
   const segmentOf = (n, rootNode) => {
     const parts = [];
     for (let m = n; m && m.nodeType === 1 && parts.length < 40; m = m.parentElement) {
@@ -517,13 +537,14 @@ function pageOps(opts) {
     return found;
   };
   const every = (selector, rs) => (rs || roots()).flatMap((r) => Array.from(r.querySelectorAll(selector)));
-  const textOf = (el) => clip(norm(el.tagName === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.title) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : ''), 160);
-  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')), 160);
+  const textOf = (el) => clip(norm(el.tagName === 'INPUT' ? el.value : el.textContent) || norm(el.getAttribute('aria-label')) || norm(el.title) || (el.querySelector && el.querySelector('img') ? norm(el.querySelector('img').alt) : '') || (iconDownload(el) ? 'Download' : ''), 160);
+  const controlText = (c) => clip(norm(c.tagName === 'INPUT' ? c.value : c.textContent) || norm(c.getAttribute('aria-label')) || norm(c.getAttribute('title')) || (iconDownload(c) ? 'Download' : ''), 160);
   const rowOf = (el, text) => {   /* the same rule as extractPage */
     const hard = el.closest ? el.closest('tr,li,[role=row]') : null;
     if (hard) return hard;
     for (let n = el.parentElement, depth = 0; n && depth < 8 && n.tagName !== 'BODY' && n.tagName !== 'HTML'; n = n.parentElement, depth += 1) {
-      if (norm(n.innerText || n.textContent) === text) continue;
+      const own = norm(n.innerText || n.textContent);
+      if (own === text || (!own && iconDownload(el))) continue;
       let same = 0;
       for (const c of n.querySelectorAll('button,a,[role=button],input')) { if (controlText(c) === text) same += 1; if (same > 1) return null; }
       return n;
@@ -541,6 +562,7 @@ function pageOps(opts) {
     add(el.getAttribute('title'));
     const img = el.querySelector ? el.querySelector('img') : null;
     if (img) add(img.alt);
+    if (!out.length && iconDownload(el)) add('Download');
     return out;
   };
   const tokensOf = (s) => String(s || '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);

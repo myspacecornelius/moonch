@@ -633,6 +633,19 @@ function render() { for (const k of ['t1', 't2', 't3']) document.getElementById(
   p.textContent = 'Loading...'; gql('mutation MarkSeen($id: ID!) { markSeen(id: $id) { ok } }', { id: 7 }).then((j) => { if (cur === 't3') p.innerHTML = '<ul><li><a href="/data/Seen_A.txt">Seen_A.txt</a></li></ul>'; }); }
 for (const k of ['t1', 't2', 't3']) document.getElementById(k).onclick = () => { cur = k; render(); };
 render();</script>`);
+    /* file rows as a modern component library draws them: the name in a span whose title holds the path, and three icon-only buttons (download, rename, delete: no text,
+       label or title, only an icon with a class such as lucide-download) that are drawn at opacity 0 until the row is hovered; an export button in the toolbar sends a POST */
+    PAGES['iconrows-174'] = () => doc('Icon rows task', `${TOGGLE_ON}<style>.group .actions { opacity: 0 } .group:hover .actions { opacity: 1 }</style>
+<div><button type="button" id="export"><svg class="lucide lucide-download h-4 w-4" aria-hidden="true"></svg> Download Filesystem</button></div><div id="rows"></div><script>${BLOB.replace('function dl', 'function dl')}
+const names = ['Icon_Revenue_Detail.xlsx', 'Icon_Reply_20261006.docx', 'Icon_Notes.txt'];
+document.getElementById('rows').innerHTML = names.map((n) => '<div class="group flex" style="height:36px"><span class="text-sm truncate " title="filesystem/' + n + '">' + n + '</span><div class="actions">'
+  + '<button type="button" class="dl" data-n="' + n + '"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" class="lucide lucide-download h-4 w-4" aria-hidden="true"><path d="M12 15V3"></path></svg></button>'
+  + '<button type="button" class="ren" data-n="' + n + '"><svg class="lucide lucide-pencil h-4 w-4" aria-hidden="true"></svg></button>'
+  + '<button type="button" class="del" data-n="' + n + '"><svg class="lucide lucide-trash2 h-4 w-4" aria-hidden="true"></svg></button></div></div>').join('');
+document.querySelectorAll('.dl').forEach((b) => { b.onclick = () => dl(b.dataset.n); });
+document.querySelectorAll('.ren').forEach((b) => { b.onclick = () => { fetch('/hit/pressed-rename'); fetch('${UNSAFE}/iconrows-174/rename', { method: 'POST' }); }; });
+document.querySelectorAll('.del').forEach((b) => { b.onclick = () => { fetch('/hit/pressed-delete'); fetch('${UNSAFE}/iconrows-174/delete', { method: 'DELETE' }); }; });
+document.getElementById('export').onclick = () => { fetch('/hit/pressed-export'); fetch('${UNSAFE}/iconrows-174/export', { method: 'POST' }); };</script>`);
     /* links whose addresses are actions, whatever they are called */
     PAGES['actions-167'] = () => doc('Action addresses task', `<ul>${dataLink('Act_Ok.txt')}${[
       ['/api/unsafe/actions-167/remove', ' download', 'Q4 pack'], ['/api/unsafe/actions-167/delete?filename=Q4b.pdf', '', 'Q4b'], ['/docs/15/submit', '', 'Download'], ['/docs/16/actions/run', '', 'Download'], ['/docs/17/cancel', '', 'Download'], ['/docs/18/archive', '', 'Download'],
@@ -1570,7 +1583,7 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
 
     /* UNSAFE controls: for each, the server saw nothing and the control was not pressed */
     const fifteenth = await batch([
-      { slug: 'clear-160' }, { slug: 'settings-161' }, { slug: 'bulk-162' }, { slug: 'scriptform-163' }, { slug: 'export-165' }, { slug: 'trash-166' }, { slug: 'actions-167' }, { slug: 'togglemix-168' },
+      { slug: 'clear-160' }, { slug: 'settings-161' }, { slug: 'bulk-162' }, { slug: 'scriptform-163' }, { slug: 'export-165' }, { slug: 'trash-166' }, { slug: 'actions-167' }, { slug: 'togglemix-168' }, { slug: 'iconrows-174' },
     ]);
     const clear = get(fifteenth, 'clear-160');
     clean(clear, ['Main_A.txt'], 'clear all files');
@@ -1610,6 +1623,12 @@ const toggle = (found, label, flipped, filesBefore, filesAfter, learned) => ({ f
     assert.deepEqual(fileNames(ex.final), ['Main_A.txt']);
     assert.deepEqual(ex.final.skipped, [{ label: 'Download app', group: 'Files', reason: NOT_CLEAR }]);
     assert.deepEqual(requestsTo(/^\/api\/unsafe\/export-165/), []);
+    const ir = get(fifteenth, 'iconrows-174');
+    clean(ir, ['Icon_Notes.txt', 'Icon_Reply_20261006.docx', 'Icon_Revenue_Detail.xlsx'], 'icon rows');
+    assert.deepEqual(ir.final.skipped.filter((x) => /rename|delete/i.test(x.label)), [], 'the rename and delete icons are not even listed as skipped files');
+    assert.deepEqual([pressed('pressed-rename'), pressed('pressed-delete'), pressed('pressed-export')], [0, 0, 0], 'rename, delete and the export button were never pressed');
+    assert.deepEqual(requestsTo(/^\/api\/unsafe\/iconrows-174/), [], 'no write reached the server');
+    ok('file rows whose download, rename and delete buttons are icons only (no text, label or title; drawn at opacity 0 until the row is hovered) and whose names sit in a span: the download icon is the one named by its icon class, each file is saved under the name of its own row, rename and delete are never pressed, and the toolbar export that sends a POST is left alone because the files themselves are listed');
     assert.deepEqual(['pressed-b1', 'pressed-b2', 'pressed-b3'].map(pressed), [0, 0, 0]);
     ok('"Export to Google Sheets", "Export to Slack" and "Download app" are never pressed (no POST, nothing sent to a service); "Download app" is listed as not clearly a download');
     const tr = get(fifteenth, 'trash-166');
