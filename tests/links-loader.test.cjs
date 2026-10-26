@@ -1629,6 +1629,19 @@ test('chrome binary: FINANCE_STUDIO_CHROME, then CHROME_BIN, absolute and execut
   const list = chrome.defaultCandidates('/Users/owner');
   for (const want of ['/Applications/Google Chrome.app', '/Applications/Chromium.app', '/Users/owner/Applications/Google Chrome.app', '/Users/owner/Applications/Chromium.app', '/usr/bin/google-chrome']) assert.ok(list.includes(want), want);
 });
+test('chrome binary: the group write bit of macOS admin (gid 80, mode 775, owned by root or the current account) is allowed on macOS only; anything else others can write is not', () => {
+  const me = 501;
+  const on = (stat, platform = 'darwin') => chrome.writableByOthers(stat, { platform, uid: me });
+  assert.equal(on({ mode: 0o100775, uid: 0, gid: 80 }), false, 'root:admin 775 on macOS');
+  assert.equal(on({ mode: 0o100775, uid: me, gid: 80 }), false, 'the current account and admin on macOS');
+  assert.equal(on({ mode: 0o100755, uid: 0, gid: 80 }), false, 'no group write bit');
+  assert.equal(on({ mode: 0o100775, uid: 0, gid: 80 }, 'linux'), true, 'the exception is for macOS only');
+  assert.equal(on({ mode: 0o100775, uid: me, gid: 20 }), true, 'another group (staff, gid 20) can write');
+  assert.equal(on({ mode: 0o100775, uid: 502, gid: 80 }), true, 'another account owns it');
+  assert.equal(on({ mode: 0o100777, uid: 0, gid: 80 }), true, 'world-writable is never allowed');
+  assert.equal(on({ mode: 0o100757, uid: me, gid: 80 }), true, 'world-writable with the admin group');
+  assert.equal(on({ mode: 0o100664, uid: me, gid: 80 }), false, 'group write without execute is judged by the same rule');
+});
 test('chrome binary: a .app folder resolves to Contents/MacOS/<CFBundleExecutable>; why a candidate was passed over is reported', () => {
   const dir = fresh('app');
   const app = path.join(dir, 'Fake Browser.app');

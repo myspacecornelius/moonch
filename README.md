@@ -184,7 +184,7 @@ Only the first two count. The screen passes when both pilots count, and the test
 
 ### The link loader
 
-The link loader is part of the companion and calls no model. It drives a dedicated Chrome profile in `private/link-profile/` (Chrome or Chromium must be installed; set `FINANCE_STUDIO_CHROME` to its path if it is not found). Your everyday Chrome profile is never used.
+The link loader is part of the companion and calls no model. It drives a dedicated Chrome profile in `private/link-profile/` (Chrome or Chromium must be installed; set `FINANCE_STUDIO_CHROME` to its path if it is not found). The browser file must not be writable by another account; on a Mac the `admin` group's write bit on an app in `/Applications` is allowed, because its members can already become root. Your everyday Chrome profile is never used.
 
 - **Sign in.** You sign in through a plain Chrome window that the loader does not control, so the platform sees an ordinary browser. Press *Continue* on the Pipeline page once you are signed in. The loader closes that window, reopens the page under its own control and carries on. If the page still asks for a sign-in, it tries once more, then stops and suggests importing from a folder.
 - **All files.** The loader looks for the option that shows all files and turns it on. If it cannot find the option, it asks you to turn it on in the Chrome window and press *Continue*. The option's label is remembered per site in `private/link-mappings.json`, so the next load turns it on by itself.

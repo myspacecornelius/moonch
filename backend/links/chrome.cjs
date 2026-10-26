@@ -43,6 +43,17 @@ function resolveBinary(file) {
   return path.join(app, 'Contents', 'MacOS', exe);
 }
 
+/* Can an account other than the owner replace this file? Anyone's write bit counts, with one macOS exception: an app copied into /Applications by an
+   administrator is owned by root or by that account and by the group admin (gid 80) with mode 775, and the members of admin can become root anyway,
+   so their write bit lets no one in who could not already replace the program. A group write bit for any other group still counts. */
+const MAC_ADMIN_GID = 80;
+function writableByOthers(stat, { platform = process.platform, uid = typeof process.getuid === 'function' ? process.getuid() : -1 } = {}) {
+  if ((stat.mode & 0o002) !== 0) return true;
+  if ((stat.mode & 0o020) === 0) return false;
+  const adminApp = platform === 'darwin' && stat.gid === MAC_ADMIN_GID && (stat.uid === 0 || stat.uid === uid);
+  return !adminApp;
+}
+
 /* { ok: true } or { ok: false, why }: an absolute path to an executable regular file that no other account can write to (a browser
    binary someone else can replace is a program the companion would run for them). */
 function checkBinary(file) {
@@ -50,7 +61,7 @@ function checkBinary(file) {
   let stat;
   try { stat = fs.statSync(file); } catch (e) { return { ok: false, why: 'it does not exist' }; }
   if (!stat.isFile()) return { ok: false, why: 'it is not a file' };
-  if ((stat.mode & 0o022) !== 0) return { ok: false, why: `other accounts can write to it (mode ${(stat.mode & 0o777).toString(8)})` };
+  if (writableByOthers(stat)) return { ok: false, why: `other accounts can write to it (mode ${(stat.mode & 0o777).toString(8)})` };
   try { fs.accessSync(file, fs.constants.X_OK); } catch (e) { return { ok: false, why: 'it is not executable' }; }
   return { ok: true };
 }
@@ -361,6 +372,6 @@ function protectStorage({ privateDir, paths = [], platform = process.platform, r
 }
 
 module.exports = {
-  findChrome, findChromeBinary, defaultCandidates, usableBinary, checkBinary, resolveBinary, missingChromeMessage, chromeArgs, browserEnv, ENV_ALLOW, prepareProfile, removeStaleLocks, holdsProfile, scrubProfile,
+  findChrome, findChromeBinary, defaultCandidates, usableBinary, checkBinary, writableByOthers, resolveBinary, missingChromeMessage, chromeArgs, browserEnv, ENV_ALLOW, prepareProfile, removeStaleLocks, holdsProfile, scrubProfile,
   listProcesses, browserProcesses, killTree, signalTree, launchBrowser, launchWindow, syncWarning, protectStorage, PROFILE_IN_USE_MESSAGE,
 };
