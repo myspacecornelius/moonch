@@ -53,6 +53,7 @@ const PAGES = {
   '/editable': `<h1>Verva</h1><div id="ed" contenteditable="true" style="min-height:80px;border:1px solid #888"></div><p><button id="run" disabled>Humanize text</button></p><div data-testid="humanized-output" aria-busy="false"></div><script src="/editable.js"></script>`,
   '/two': `<textarea id="notes" rows="3">scratch notes the worker must not touch</textarea><textarea id="mine" rows="6" cols="70"></textarea><textarea id="res" rows="6" cols="70"></textarea><button id="go">Go</button><script src="/two.js"></script>`,
   '/login': `<h1>Sign in</h1><form><input type="email"><input type="password"><button>Sign in</button></form>`,
+  '/dashboard-modal': `<nav><button>Humanize</button></nav><div role="dialog"><h2>Welcome back</h2><input type="email" placeholder="Email address"><button>Continue with Google</button><button>Continue with email</button></div>`,
   '/credits': `<textarea id="in" rows="6" cols="60"></textarea><button id="go">Humanize</button><div role="alert" id="alert" hidden></div><div class="output"></div><script src="/credits.js"></script>`,
 };
 const SCRIPTS = { '/textarea.js': SCRIPT_TEXTAREA, '/editable.js': SCRIPT_EDITABLE, '/two.js': SCRIPT_TWO, '/credits.js': SCRIPT_CREDITS };
@@ -143,6 +144,31 @@ async function main() {
     } finally {
       await v.close();
     }
+  });
+
+  await check('a sign-in modal (no password box, no login path, only "Continue with ..." buttons and no editor) is a sign-in wall', async () => {
+    const v = worker('/dashboard-modal');
+    try {
+      await assert.rejects(v.preflight(), e => e.code === 'needs-sign-in');
+    } finally {
+      await v.close();
+    }
+  });
+
+  await check('the sign-in window opens the configured page with no debugging channel, and closes cleanly', async () => {
+    const v = createVervaWeb({ root: tmp, chromePath, spawnFn, allowLoopback: true, signInHeadless: true, config: { url: `${base}/app` } });
+    const opened = await v.signIn();
+    try {
+      assert.equal(opened.signIn, 'open');
+      assert.equal(v.status().signIn, 'open');
+      assert.equal(lastChrome.args[lastChrome.args.length - 1], `${base}/app`, 'the window opens the configured page, which leads to the login');
+      assert.ok(!lastChrome.args.some(a => a.startsWith('--remote-debugging')), 'no debugging pipe or port: nothing in the Studio can read the sign-in');
+      await assert.rejects(v.preflight(), e => e.code === 'needs-sign-in' && /still open/.test(e.message), 'the worker waits while the window is open');
+    } finally {
+      await v.finishSignIn();
+    }
+    assert.equal(v.status().signIn, 'closed');
+    assert.equal(lastChrome.child.exitCode !== null || lastChrome.child.signalCode !== null, true, 'the window process has ended');
   });
 
   await check('the page\'s own "not enough credits" message is reported, not waited out', async () => {

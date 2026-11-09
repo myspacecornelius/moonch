@@ -28,11 +28,7 @@ It runs **on its own**, with no Studio and no companion (`npm run humanize`). It
 
 ## Running it
 
-On its own:
-
-```bash
-npm run humanize -- config --verva-url "https://<the Verva humanizer page>"
-```
+On its own, sign in to Verva once, then run:
 
 ```bash
 npm run humanize -- sign-in
@@ -52,7 +48,7 @@ In the Studio, run `npm start` and open **Humanize**. The page shows whether a G
 ## Setup
 
 - **GPTZero key.** Set `GPTZERO_API_KEY` before `npm start` or the CLI, or on macOS store it in the Keychain: `security add-generic-password -a "$USER" -s finance-studio-gptzero-key -w`. The companion moves the variable out of its own environment before the agent service exists, so a pilot never inherits it. Chrome gets an allow list of variables, so it never sees the key either. The key is never written to disk, logged, or put in an answer or an error.
-- **Verva.** Set the address of Verva's humanizer page on the Humanize page, with `config --verva-url`, or with `FINANCE_STUDIO_VERVA_URL`. It must be `https://`. Then sign in once with *Sign in to Verva* (or `sign-in`). A separate Chrome window opens on the worker's own profile (`private/humanize/verva-profile`, 0700). That window has **no debugging channel**, so nothing in the Studio can read the page or your keystrokes. Closing it with *Done signing in* keeps the sign-in.
+- **Verva.** The worker opens `https://verva.com/dashboard` (Verva, formerly TwainGPT). Another address can be set on the Humanize page, with `config --verva-url`, or with `FINANCE_STUDIO_VERVA_URL`; it must be `https://`. Sign in once with *Sign in to Verva* (or `sign-in`). A separate Chrome window opens the dashboard on the worker's own profile (`private/humanize/verva-profile`, 0700), Verva sends it to its login (Google, Apple or email), and then back to the dashboard. That window has **no debugging channel**, so nothing in the Studio can read the page or your keystrokes, and Google's sign-in does not see an automated browser. Closing it with *Done signing in* keeps the sign-in.
 - **When the page is not found.** Verva has no published interface, so the worker finds the text box, the button and the result on the page itself. If it picks the wrong ones, pin them as CSS selectors (`input`, `button`, `output`) on the page or in `private/humanize/verva.json`. Set `minWords` there if Verva refuses short inputs.
 
 ## The rules
@@ -132,7 +128,7 @@ Tests: `tests/humanize.test.cjs` runs in `npm test`, with no network and no brow
 
 ## Known gaps
 
-- Verva's real page has not been driven yet. The worker was built and tested against fake pages that behave like a humanizer page. The first run against Verva may need the selectors pinned, or `minWords` set.
+- Checked against the live site on 2026-11-09: `https://verva.com/dashboard` redirects to `/login`, and the worker stops with `needs-sign-in` before typing anything. The signed-in dashboard (its text box, Humanize button and result) has not been seen yet, because it needs your sign-in. The worker was tested against fake pages that behave like a humanizer page, so the first signed-in run may need the selectors pinned, or `minWords` set.
 - If Verva returns exactly the text it returned for the same input last time, the worker cannot tell it is new, and waits until `resultTimeoutMs`.
 - The 80 % run bar is the word-weighted mean of the chunk scans, not one scan of the whole document. A whole-document scan with every figure in place reads far more machine-like than its parts.
 - GPTZero's API has a quota per key. The call caps are this tool's own caps and do not know about it.

@@ -14,7 +14,8 @@
    <root>/private/humanize/verva.json:
      { "url": "https://...", "input": "css selector", "button": "css selector", "output": "css selector",
        "minWords": 0, "maxWords": 0, "headless": false, "resultTimeoutMs": 180000 }
-   url is required (or FINANCE_STUDIO_VERVA_URL). Without selectors: the editor is the largest visible empty textarea or contenteditable,
+   url defaults to https://verva.com/dashboard (Verva, formerly TwainGPT; the dashboard redirects to /login until the profile is signed in),
+   and FINANCE_STUDIO_VERVA_URL or the stored url replaces it. Without selectors: the editor is the largest visible empty textarea or contenteditable,
    the button is the visible button whose text starts with Humanize / Rewrite / Paraphrase / Generate / Submit / Run, and the result is the
    visible text box or result-like element (other than the editor) whose text changed after the click, read once it has stopped changing for
    stableMs and nothing on the page is marked busy.
@@ -37,7 +38,8 @@ const { HumanizeError } = require('../errors.cjs');
 const CONFIG_NAME = 'verva.json';
 const URL_ENV = 'FINANCE_STUDIO_VERVA_URL';
 const BUTTON_PATTERN = '^(?:humani[sz]e|rewrite|paraphrase|generate|submit|run)\\b';
-const DEFAULTS = Object.freeze({ url: '', input: '', button: '', output: '', minWords: 0, maxWords: 0, headless: false, resultTimeoutMs: 180000, stableMs: 1500, pollMs: 400 });
+const DEFAULT_URL = 'https://verva.com/dashboard';
+const DEFAULTS = Object.freeze({ url: DEFAULT_URL, input: '', button: '', output: '', minWords: 0, maxWords: 0, headless: false, resultTimeoutMs: 180000, stableMs: 1500, pollMs: 400 });
 const SELECTOR_MAX = 200;
 
 function privateDir(root) { return path.join(root, 'private', 'humanize'); }
@@ -151,7 +153,11 @@ function vervaPage(arg) {
     }
     return '';
   };
-  const signInWall = () => Boolean(Array.from(document.querySelectorAll('input[type="password"]')).find(visible)) || /\/(?:log-?in|sign-?in|auth|register|sign-?up)(?:\/|$)/i.test(location.pathname);
+  /* a password box, a sign-in path, or (with no editor on the page) a button that starts a sign-in, as a modal would show it */
+  const SIGN_IN_RE = /^(?:log ?in|sign ?in|continue with (?:google|apple|email|microsoft))\b/i;
+  const signInWall = () => Boolean(Array.from(document.querySelectorAll('input[type="password"]')).find(visible))
+    || /\/(?:log-?in|sign-?in|auth|register|sign-?up)(?:\/|$)/i.test(location.pathname)
+    || (!findInput() && Array.from(document.querySelectorAll('button, [role="button"]')).some(el => visible(el) && SIGN_IN_RE.test(labelOf(el))));
 
   const op = arg.op;
   if (op === 'probe') {
@@ -373,15 +379,16 @@ function createVervaWeb(options = {}) {
         release(entry, broken);
       }
     },
-    /* The separate sign-in window: no debugging channel, the page's origin only. */
+    /* The separate sign-in window: no debugging channel. It opens the configured page itself (Verva's address carries no secret), which
+       sends the person to Verva's login and, once signed in, back to the dashboard. */
     async signIn() {
       if (windowHandle && !windowHandle.hasExited()) return { signIn: 'open', exited: windowHandle.exited };
-      const origin = new URL(needUrl()).origin;
+      const url = needUrl();
       await self.close();
       fs.mkdirSync(path.join(root, 'private'), { recursive: true, mode: 0o700 });
       ensurePrivateDir(privateDir(root));
       ensurePrivateDir(profileDir);
-      windowHandle = launchWindow({ binary: chrome(), profileDir, headless: options.signInHeadless === true, spawnFn: options.spawnFn, env, url: `${origin}/` });
+      windowHandle = launchWindow({ binary: chrome(), profileDir, headless: options.signInHeadless === true, spawnFn: options.spawnFn, env, url });
       return { signIn: 'open', exited: windowHandle.exited };
     },
     async finishSignIn() {
@@ -415,4 +422,4 @@ function createVervaWeb(options = {}) {
   return self;
 }
 
-module.exports = { createVervaWeb, readConfig, writeConfig, cleanConfig, validateUrl, vervaPage, CONFIG_NAME, URL_ENV, DEFAULTS };
+module.exports = { createVervaWeb, readConfig, writeConfig, cleanConfig, validateUrl, vervaPage, CONFIG_NAME, URL_ENV, DEFAULTS, DEFAULT_URL };

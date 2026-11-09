@@ -35,6 +35,7 @@ const USAGE = [
   '  npm run humanize -- sign-in [--verva-url URL]   the Verva sign-in window',
   '  npm run humanize -- config --verva-url URL [--input SEL] [--button SEL] [--output SEL] [--min-words N] [--headless|--windowed]',
   '',
+  'Verva\'s page defaults to https://verva.com/dashboard; sign in once with sign-in.',
   'A run with Verva or GPTZero needs --yes. GPTZero\'s key: GPTZERO_API_KEY, or the macOS Keychain item finance-studio-gptzero-key.',
 ].join('\n');
 

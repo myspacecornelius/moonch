@@ -367,6 +367,7 @@ test('gptzero: reads the human probability and the per-sentence readings; the ke
   assert.equal(fetch.calls[0].init.headers['x-api-key'], 'secret-key-123');
   assert.deepEqual(JSON.parse(fetch.calls[0].init.body), { document: 'One. Two.' });
   assert.equal(readAnswer({ documents: [{ completely_generated_prob: 0.25 }] }).human, 0.75, 'an older answer shape is read too');
+  assert.equal(readAnswer({ documents: [{ class_probabilities: { human: 0.4 }, document_classification: 'MIXED' }] }).predictedClass, 'MIXED', 'document_classification stands in for predicted_class');
 });
 
 test('gptzero: retries a 429, never puts the key in a message, and refuses to start without a key', async () => {
@@ -397,6 +398,7 @@ test('verva: the page address must be https (loopback only for tests) and select
   assert.equal(validateUrl('http://127.0.0.1:9/', { allowLoopback: true }).ok, true);
   assert.throws(() => cleanConfig({ input: 'x'.repeat(201) }), /CSS selector/);
   assert.equal(cleanConfig({ minWords: 50, headless: true }).minWords, 50);
+  assert.equal(cleanConfig({}).url, 'https://verva.com/dashboard', 'Verva (formerly TwainGPT) is the default page');
 });
 
 /* ------------------------------------------------------------------ the companion's routes */

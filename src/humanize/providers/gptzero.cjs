@@ -31,7 +31,7 @@ function readAnswer(body) {
     human,
     ai: probs && Number.isFinite(probs.ai) ? probs.ai : null,
     mixed: probs && Number.isFinite(probs.mixed) ? probs.mixed : null,
-    predictedClass: typeof doc.predicted_class === 'string' ? doc.predicted_class : null,
+    predictedClass: typeof doc.predicted_class === 'string' ? doc.predicted_class : typeof doc.document_classification === 'string' ? doc.document_classification : null,
     confidence: typeof doc.confidence_category === 'string' ? doc.confidence_category : null,
     sentences,
   };
