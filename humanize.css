@@ -1,0 +1,44 @@
+/* Humanize page: styles for the hz- classes. Palette tokens only (no colour literals), no images, no webfonts, nothing loaded. Status
+   always carries a word and a glyph (the .pill glyphs), never colour alone. Focus rings come from the shared sheet. No motion. */
+.dash-main:has(>.hz-root){max-width:1180px}
+.hz-root{min-width:0}
+.hz-head h1{margin:0 0 4px}
+.hz-head p{margin:0 0 18px}
+.hz-msg{margin:0 0 18px;padding:11px 16px;border:1px solid var(--line);border-left:3px solid var(--control-border);background:var(--surface-2);border-radius:0 8px 8px 0;font-size:.86rem;line-height:1.5;overflow-wrap:anywhere}
+.hz-msg:empty{display:none}
+.hz-msg.error{border-left-color:var(--fail);background:var(--fail-tint);color:var(--fail-ink)}
+.hz-error{color:var(--fail-ink);font-weight:600;overflow-wrap:anywhere}
+.hz-warn{color:var(--warn-ink);font-weight:600}
+.hz-lede{max-width:84ch;font-size:.88rem;line-height:1.55}
+.hz-checks{list-style:none;margin:0 0 16px;padding:0;display:grid;gap:8px;font-size:.88rem;line-height:1.5}
+.hz-checks .pill{margin:0 6px 0 0}
+.hz-inline-actions{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin:0 0 12px}
+.hz-setup .field-row{align-items:end}
+.hz-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px}
+.hz-start-row{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:4px 0 0}
+.hz-run-head{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.hz-run-head h2{margin:0}
+.hz-run-head .pill{margin:0}
+.hz-run h3{margin:22px 0 8px;font-size:.95rem}
+.hz-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 18px;margin:16px 0}
+.hz-facts dt{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.hz-facts dd{margin:2px 0 0;font-size:.92rem;overflow-wrap:anywhere}
+.hz-final{display:block;width:100%;min-height:200px;border:1px solid var(--control-border);border-radius:7px;padding:10px 11px;background:var(--bg);color:var(--text);font:inherit;font-size:.92rem;line-height:1.55;resize:vertical;margin:0 0 10px}
+.hz-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+.hz-table{width:100%;border-collapse:collapse;font-size:.84rem}
+.hz-table th,.hz-table td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+.hz-table tr:last-child td{border-bottom:0}
+.hz-table th{font-weight:650;color:var(--muted-strong);background:var(--surface-2)}
+.hz-pass{display:inline-block;margin:0 6px 4px 0;padding:2px 7px;border:1px solid var(--line);border-radius:12px;white-space:nowrap}
+.hz-pass.rejected{border-color:var(--warn);color:var(--warn-ink)}
+.hz-pass em{font-style:normal;color:var(--muted)}
+.hz-note{color:var(--warn-ink);font-size:.8rem}
+.hz-details{margin:14px 0 0;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.hz-details summary{cursor:pointer;font-weight:600;font-size:.88rem}
+.hz-details h4{margin:14px 0 6px;font-size:.85rem}
+.hz-tags{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.hz-tags li{border:1px solid var(--line);border-radius:12px;padding:2px 8px;font-size:.82rem;overflow-wrap:anywhere}
+.hz-bindings,.hz-log{margin:0;padding-left:20px;font-size:.84rem;line-height:1.55}
+.hz-log{max-height:320px;overflow:auto}
+.hz-runs{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-size:.86rem}
+@media (max-width:640px){.hz-setup .field-row{grid-template-columns:1fr}}

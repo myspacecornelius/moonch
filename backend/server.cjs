@@ -45,8 +45,22 @@
        POST /api/pipeline/:id/stop            the view
        POST /api/pipeline/:id/export          { name, size, sha256, files, zipBase64 }
 
+   The humanize routes (src/humanize; the options.humanize service, docs/humanize.md) follow the same rules: the nonce, the Origin and the
+   JSON type on every POST, the same error mapping. While ANY round runs every answer that carries humanize data is passed through
+   redactHumanizeData (src/humanize/redact.cjs): the source and final text, each chunk's text, the secretary's brief, the log lines and
+   the gate's reasons become { withheld: true }. While any round runs a start, a Verva setting and a Verva sign-in are refused with 409:
+   a pilot that reaches the companion must not be able to make it send text to Verva or GPTZero. The service is built before the agent service and takes GPTZERO_API_KEY out of the
+   environment, so a pilot never inherits it. Starting the companion never starts a humanize run, Chrome or a network call.
+       GET  /api/humanize                     { runs: [row], running, config }
+       POST /api/humanize/start               { text, rewriter, detector, workers?, maxPasses?, maxRounds?, acknowledgements } -> { id }
+       GET  /api/humanize/:id                 the run's view (the final text field once it has ended)
+       POST /api/humanize/:id/stop            the view
+       POST /api/humanize/verva/config        { url?, input?, button?, output?, minWords?, headless? } -> the Verva worker's status
+       POST /api/humanize/verva/sign-in       opens the Verva sign-in window (no debugging channel) -> status
+       POST /api/humanize/verva/sign-in/done  closes it, keeping the sign-in -> status
+
    Module API (used by the tests):
-     createServer({ root, service, pipeline?, port, runner?, state?, log? }) -> { server, nonce, runner, listen(port?), close(), shutdown(), killPilots() }
+     createServer({ root, service, pipeline?, humanize?, port, runner?, state?, log? }) -> { server, nonce, runner, listen(port?), close(), shutdown(), killPilots() }
        listen() resolves { port, url } (listen(0) binds a free port instead of the port given to createServer). close() stops
        the listener and drops connections. shutdown() also cancels the archived adapter and every running round
        (service.shutdown()) before it closes. killPilots() is the synchronous last resort: SIGKILL to every pilot's process group.
@@ -78,10 +92,15 @@ const { createAgentService, AgentError } = require('./agents/index.cjs');
 const { readPilotToken, sourceText, gatewayFindings, describeFindings } = require('./agents/pilot-token.cjs');
 const C = require('./agents/constants.cjs');
 const { redactPipelineData } = require('./pipeline/redact.cjs');
+/* Without src/humanize (an older copy) there is no humanize data, and anything that looks like it is withheld whole. */
+const { redactHumanizeData } = (() => {
+  try { return require('../src/humanize/redact.cjs'); } catch { return { redactHumanizeData: () => ({ redacted: true }) }; }
+})();
+const HUMANIZE_WHILE_RUNNING = 'A round of pilots is running. Humanize runs, Verva settings and the Verva sign-in wait until it has ended, so nothing a pilot sends can leave through the companion. Nothing was started';
 
 const ROOT = path.resolve(__dirname, '..');
 const HOST = '127.0.0.1';
-const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js', 'pipeline.js', 'pipeline.css']);
+const ASSETS = new Set(['index.html', 'styles.css', 'mission.css', 'workbench.css', 'ideas.css', 'core.js', 'catalog.js', 'examples.js', 'playbook.js', 'research-gates.js', 'package-engine.js', 'candidate-engine.js', 'app.js', 'agents.js', 'views-kit.js', 'mission-model.js', 'workbench-model.js', 'mission.js', 'workbench.js', 'idea-archetypes.js', 'ideas-model.js', 'ideas.js', 'dashboard.js', 'pipeline.js', 'pipeline.css', 'humanize.js', 'humanize.css']);
 const RUN_NUMBER_RE = /^[1-9][0-9]{0,2}$/;
 const JSON_TYPE_RE = /^application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
 const PUBLIC_STATUSES = new Set([400, 403, 404, 405, 409, 413, 415, 502]); /* 502: a fault of a part the companion drives (the link loader), message already scrubbed */
@@ -397,6 +416,7 @@ function createServer(options = {}) {
   const service = options.service;
   if (!service || typeof service.status !== 'function') throw new TypeError('createServer needs an agent service');
   const pipeline = options.pipeline && typeof options.pipeline.start === 'function' ? options.pipeline : null;
+  const humanize = options.humanize && typeof options.humanize.start === 'function' ? options.humanize : null;
   const port = options.port === undefined ? 0 : options.port;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError('The port must be a whole number from 0 to 65535');
   const log = typeof options.log === 'function' ? options.log : message => console.error(message);
@@ -431,6 +451,26 @@ function createServer(options = {}) {
   function needPipeline() {
     if (!pipeline) throw new AgentError(404, 'The pipeline is not available in this version of the companion');
     return pipeline;
+  }
+
+  /* A humanize call: its errors (HumanizeError, with a status) become answers; a status the companion does not pass on reads as 502. */
+  async function humanizeCall(work) {
+    if (!humanize) throw new HttpError(404, 'Humanize is not available in this version of the companion');
+    try {
+      return await work(humanize);
+    } catch (error) {
+      if (error && (error.name === 'HumanizeError' || error.name === 'BudgetError')) {
+        throw new HttpError(PUBLIC_STATUSES.has(error.status) ? error.status : 502, String(error.message || 'The humanize run failed'));
+      }
+      if (error && error.name === 'StoreError') throw new HttpError(400, String(error.message));
+      throw error;
+    }
+  }
+
+  /* A humanize call that sends text out or changes where it goes: refused while any round runs. */
+  async function humanizeQuiet(work) {
+    if (await anyRoundRunning()) throw new HttpError(409, HUMANIZE_WHILE_RUNNING);
+    return humanizeCall(work);
   }
 
   /* A frozen or approved round carries the approval summary and its hash, so the page approves exactly what will run. */
@@ -604,6 +644,14 @@ function createServer(options = {}) {
         return needPipeline().export(params.id);
       },
     },
+    /* Humanize (src/humanize). Every answer that carries humanize data is redacted while any round runs. */
+    { method: 'GET', pattern: '/api/humanize', roundData: true, whileRunning: redactHumanizeData, handler: () => humanizeCall(h => h.list()) },
+    { method: 'POST', pattern: '/api/humanize/start', limit: 'packet', handler: ({ body }) => humanizeQuiet(h => h.start(body)) },
+    { method: 'GET', pattern: '/api/humanize/:id', roundData: true, whileRunning: redactHumanizeData, handler: ({ params }) => humanizeCall(h => h.get(params.id)) },
+    { method: 'POST', pattern: '/api/humanize/:id/stop', roundData: true, whileRunning: redactHumanizeData, handler: ({ params }) => humanizeCall(h => h.stop(params.id)) },
+    { method: 'POST', pattern: '/api/humanize/verva/config', handler: ({ body }) => humanizeQuiet(h => h.configureVerva(body)) },
+    { method: 'POST', pattern: '/api/humanize/verva/sign-in', handler: () => humanizeQuiet(h => h.vervaSignIn()) },
+    { method: 'POST', pattern: '/api/humanize/verva/sign-in/done', handler: () => humanizeCall(h => h.vervaSignInDone()) },
     {
       /* The Agents page has an author review button. The service has no such method yet, so the answer says so plainly. */
       method: 'POST',
@@ -760,6 +808,14 @@ function createServer(options = {}) {
   }
 
   async function stopRounds() {
+    /* A humanize run and its Chrome: stopped first, they hold no pilot. */
+    if (humanize && typeof humanize.shutdown === 'function') {
+      try {
+        await humanize.shutdown();
+      } catch (error) {
+        log(`companion: stopping humanize failed: ${error && error.message ? error.message : error}`);
+      }
+    }
     /* The pipeline first: it stops its classifier, designer and link load, and cancels the round it is waiting for. */
     if (pipeline && typeof pipeline.shutdown === 'function') {
       try {
@@ -1164,7 +1220,18 @@ function buildPipeline({ root, env, claudeBin, agents, say }) {
   }
 }
 
-/* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, createPipeline (replaces buildPipeline), usualPort, proc and exit (for
+/* The humanize service (src/humanize), required lazily and inside a try like the pipeline: a companion without src/humanize still runs.
+   It must be built BEFORE the agent service: it takes GPTZERO_API_KEY out of `env`, which pilots inherit. Returns the service, or null. */
+function buildHumanize({ root, env, say }) {
+  try {
+    return require('../src/humanize/service.cjs').createHumanizeService({ root, env });
+  } catch (error) {
+    say(`Humanize is not available (${error && error.message ? error.message : error}).`);
+    return null;
+  }
+}
+
+/* deps is for the tests: root (the project folder), log (console.log), openUrl, createService, createPipeline (replaces buildPipeline), createHumanize (replaces buildHumanize), usualPort, proc and exit (for
    installSignalHandlers), isAlive and probe (findRunningCompanion), statusTimeoutMs and lockWaitMs (claimStart). Resolves
    { app, url }, or { alreadyRunning: true, url } when another companion already serves this folder. Rejects, with what to do
    about it, when a companion may be running but did not say so (claimStart). */
@@ -1186,10 +1253,11 @@ async function runCompanion(argv = process.argv.slice(2), env = process.env, dep
   let listening;
   try {
     audit = loadEvidenceAudit(root);
+    const humanize = (deps.createHumanize || buildHumanize)({ root, env, say });
     const service = (deps.createService || createAgentService)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN) });
     const pipeline = (deps.createPipeline || buildPipeline)({ root, env, claudeBin: usableClaudeBin(env.CLAUDE_BIN), agents: service, say });
     const choice = portChoice(env, deps.usualPort);
-    app = createServer({ root, service, pipeline, port: choice.port, state: loadModelRunState(root) });
+    app = createServer({ root, service, pipeline, humanize, port: choice.port, state: loadModelRunState(root) });
     listening = await listenWithFallback(app, choice);
   } catch (error) {
     claim.release();
