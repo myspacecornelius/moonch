@@ -49,9 +49,9 @@ function makeShell({ location = { protocol: 'file:', hostname: '' } } = {}) {
 
 test('the sidebar lists the working pages only: no Workspace group, no Mission Control, no Evidence Workbench', () => {
   const shell = makeShell();
-  assert.deepEqual(shell.groups(), ['Package analysis', 'Pilots']);
+  assert.deepEqual(shell.groups(), ['Package analysis', 'Pilots', 'Writing']);
   assert.deepEqual(shell.navButtons(), [
-    ['overview', 'Overview'], ['candidates', 'Candidate roots'], ['ideas', 'Mode ideas'], ['results', 'Results'], ['files', 'Source files'], ['history', 'Run history'], ['pipeline', 'Pipeline'], ['agents', 'Agents'],
+    ['overview', 'Overview'], ['candidates', 'Candidate roots'], ['ideas', 'Mode ideas'], ['results', 'Results'], ['files', 'Source files'], ['history', 'Run history'], ['pipeline', 'Pipeline'], ['agents', 'Agents'], ['humanize', 'Humanize'],
   ]);
   for (const gone of ['Workspace', 'Mission Control', 'Evidence Workbench', 'data-dash-tab="mission"', 'data-dash-tab="workbench"']) assert.ok(!shell.markup().includes(gone), `the shell no longer draws: ${gone}`);
   assert.match(shell.markup(), /<p class="nav-group">Package analysis<\/p><button type="button" class="nav-btn active" data-dash-tab="overview"/, 'Package analysis is the first group and Overview its first page');

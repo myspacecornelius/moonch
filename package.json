@@ -20,7 +20,9 @@
     "test:pipeline": "node tests/pipeline-browser.cjs",
     "smoke": "node scripts/live-smoke.cjs",
     "build": "node scripts/build-catalog.cjs && node scripts/build-standalone.cjs",
-    "package": "python3 scripts/package-filebase.py"
+    "package": "python3 scripts/package-filebase.py",
+    "humanize": "node src/humanize/cli.cjs",
+    "test:humanize": "node tests/humanize-browser.cjs"
   },
   "license": "UNLICENSED"
 }
